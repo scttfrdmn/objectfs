@@ -1,0 +1,102 @@
+# ObjectFS Configuration Example
+# This file demonstrates all available configuration options
+
+# Global application settings
+global:
+  log_level: INFO                    # DEBUG, INFO, WARN, ERROR
+  log_file: /var/log/objectfs.log   # Leave empty for stdout
+  metrics_port: 8080                # Prometheus metrics endpoint
+  health_port: 8081                 # Health check endpoint
+  profile_port: 6060                # pprof debugging endpoint
+
+# Performance tuning settings
+performance:
+  cache_size: 2GB                   # Total cache size (e.g., 1GB, 2GB, 4GB)
+  write_buffer_size: 16MB           # Write buffer size (e.g., 8MB, 16MB, 32MB)
+  max_concurrency: 150              # Maximum concurrent operations
+  read_ahead_size: 64MB             # Read-ahead buffer size
+  compression_enabled: true         # Enable transparent compression
+  connection_pool_size: 8           # Number of backend connections
+
+# Cache configuration
+cache:
+  ttl: 5m                          # Cache time-to-live
+  max_entries: 100000              # Maximum number of cached entries
+  eviction_policy: weighted_lru     # lru, lfu, weighted_lru
+  persistent_cache:
+    enabled: false                 # Enable persistent cache to disk
+    directory: /var/cache/objectfs # Cache directory
+    max_size: 10GB                # Maximum persistent cache size
+
+# Write buffer configuration
+write_buffer:
+  flush_interval: 30s              # Automatic flush interval
+  max_buffers: 1000               # Maximum number of write buffers
+  max_memory: 512MB               # Maximum memory for write buffers
+  compression:
+    enabled: true                  # Enable compression for write buffers
+    min_size: 1KB                 # Minimum size to compress
+    algorithm: gzip               # gzip, lz4, zstd
+    level: 6                      # Compression level (1-9)
+
+# Network configuration
+network:
+  timeouts:
+    connect: 10s                   # Connection timeout
+    read: 30s                     # Read timeout
+    write: 300s                   # Write timeout
+  retry:
+    max_attempts: 3               # Maximum retry attempts
+    base_delay: 1s                # Base retry delay
+    max_delay: 30s                # Maximum retry delay
+  circuit_breaker:
+    enabled: true                 # Enable circuit breaker
+    failure_threshold: 5          # Failures before opening circuit
+    timeout: 60s                  # Circuit breaker timeout
+
+# Security configuration
+security:
+  tls:
+    verify_certificates: true     # Verify TLS certificates
+    min_version: "1.2"           # Minimum TLS version
+  encryption:
+    in_transit: true             # Enable encryption in transit
+    at_rest: true                # Enable encryption at rest
+
+# Monitoring and observability
+monitoring:
+  metrics:
+    enabled: true                # Enable metrics collection
+    prometheus: true             # Enable Prometheus format
+    custom_labels:
+      environment: production    # Custom metric labels
+      service: objectfs
+  health_checks:
+    enabled: true               # Enable health checks
+    interval: 30s              # Health check interval
+    timeout: 5s                # Health check timeout
+  logging:
+    structured: true           # Enable structured logging (JSON)
+    format: json              # json, text
+    sampling:
+      enabled: true           # Enable log sampling for high-volume operations
+      rate: 1000             # Log every Nth operation
+
+# Feature flags
+features:
+  prefetching: true              # Enable intelligent prefetching
+  batch_operations: true         # Enable batch operations
+  small_file_optimization: true  # Enable small file optimization
+  metadata_caching: true         # Enable metadata caching
+  offline_mode: false           # Enable offline operation mode
+
+# Backend-specific configurations can be added here
+# backend:
+#   s3:
+#     region: us-west-2
+#     endpoint: https://s3.amazonaws.com
+#     force_path_style: false
+#   gcs:
+#     project_id: my-project
+#   azure:
+#     account_name: myaccount

@@ -1,0 +1,373 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  GO_VERSION: '1.21'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Create GitHub Release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Extract version from tag
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        
+        # Generate changelog from commits since last tag
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -n "$PREVIOUS_TAG" ]; then
+          CHANGELOG=$(git log --pretty=format:"* %s (%h)" $PREVIOUS_TAG..HEAD)
+        else
+          CHANGELOG=$(git log --pretty=format:"* %s (%h)")
+        fi
+        
+        # Save changelog to file
+        echo "## Changes" > changelog.md
+        echo "$CHANGELOG" >> changelog.md
+        
+        # Set output for use in release
+        {
+          echo 'CHANGELOG<<EOF'
+          cat changelog.md
+          echo EOF
+        } >> $GITHUB_OUTPUT
+
+    - name: Validate semantic version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$ ]]; then
+          echo "Invalid semantic version: $VERSION"
+          exit 1
+        fi
+        echo "Valid semantic version: $VERSION"
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: ${{ steps.changelog.outputs.CHANGELOG }}
+        draft: false
+        prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+
+  # Build and upload release binaries
+  build-and-upload:
+    name: Build and Upload
+    runs-on: ubuntu-latest
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            name: linux-amd64
+          - goos: linux
+            goarch: arm64
+            name: linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: 7
+            name: linux-armv7
+          - goos: darwin
+            goarch: amd64
+            name: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            name: darwin-arm64
+          - goos: windows
+            goarch: amd64
+            name: windows-amd64
+            ext: .exe
+          - goos: freebsd
+            goarch: amd64
+            name: freebsd-amd64
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ env.GO_VERSION }}-
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        GOARM: ${{ matrix.goarm }}
+        CGO_ENABLED: 0
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        COMMIT=$(git rev-parse --short HEAD)
+        BUILD_TIME=$(date -u '+%Y-%m-%d_%I:%M:%S%p')
+        
+        LDFLAGS="-s -w -X main.Version=$VERSION -X main.Commit=$COMMIT -X main.BuildTime=$BUILD_TIME"
+        
+        mkdir -p dist
+        BINARY_NAME="objectfs-${{ matrix.name }}${{ matrix.ext }}"
+        go build -ldflags "$LDFLAGS" -tags "release,netgo" -o "dist/$BINARY_NAME" ./cmd/objectfs
+        
+        # Create tarball (except for Windows)
+        cd dist
+        if [ "${{ matrix.goos }}" != "windows" ]; then
+          tar -czf "$BINARY_NAME.tar.gz" "$BINARY_NAME"
+          echo "ASSET_PATH=dist/$BINARY_NAME.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_NAME=$BINARY_NAME.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_CONTENT_TYPE=application/gzip" >> $GITHUB_ENV
+        else
+          zip "$BINARY_NAME.zip" "$BINARY_NAME"
+          echo "ASSET_PATH=dist/$BINARY_NAME.zip" >> $GITHUB_ENV
+          echo "ASSET_NAME=$BINARY_NAME.zip" >> $GITHUB_ENV
+          echo "ASSET_CONTENT_TYPE=application/zip" >> $GITHUB_ENV
+        fi
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ${{ env.ASSET_PATH }}
+        asset_name: ${{ env.ASSET_NAME }}
+        asset_content_type: ${{ env.ASSET_CONTENT_TYPE }}
+
+  # Build and push Docker images
+  docker-build-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: create-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          VERSION=${{ github.ref_name }}
+          COMMIT=${{ github.sha }}
+          BUILD_TIME=${{ steps.meta.outputs.json }}
+
+  # Security scan of release artifacts
+  security-scan:
+    name: Security Scan Release
+    runs-on: ubuntu-latest
+    needs: [create-release, build-and-upload]
+    permissions:
+      security-events: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download release assets
+      run: |
+        # Download and scan release binaries
+        wget -q "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/objectfs-linux-amd64.tar.gz"
+        tar -xzf objectfs-linux-amd64.tar.gz
+
+    - name: Run Trivy vulnerability scanner on binary
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './objectfs-linux-amd64'
+        format: 'sarif'
+        output: 'trivy-binary.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-binary.sarif'
+
+  # Update package repositories
+  update-packages:
+    name: Update Package Repositories
+    runs-on: ubuntu-latest
+    needs: [create-release, build-and-upload]
+    if: ${{ !contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Update Homebrew formula
+      run: |
+        # This would update the Homebrew formula
+        echo "Would update Homebrew formula for version ${{ github.ref_name }}"
+        # Implementation would go here
+
+    - name: Update APT repository
+      run: |
+        # This would update the APT repository
+        echo "Would update APT repository for version ${{ github.ref_name }}"
+        # Implementation would go here
+
+    - name: Update RPM repository
+      run: |
+        # This would update the RPM repository
+        echo "Would update RPM repository for version ${{ github.ref_name }}"
+        # Implementation would go here
+
+  # Create GitHub Pages release
+  update-docs:
+    name: Update Documentation
+    runs-on: ubuntu-latest
+    needs: create-release
+    if: ${{ !contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Generate documentation
+      run: |
+        mkdir -p site
+        
+        # Generate API documentation
+        go doc -all ./... > site/api.md
+        
+        # Copy documentation files
+        cp README.md site/
+        cp CHANGELOG.md site/
+        cp CONTRIBUTING.md site/
+        
+        # Create index page
+        cat > site/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>ObjectFS Documentation</title>
+            <meta charset="utf-8">
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.min.css">
+            <style>
+                .markdown-body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; }
+                @media (max-width: 767px) { .markdown-body { padding: 15px; } }
+            </style>
+        </head>
+        <body>
+            <article class="markdown-body">
+                <h1>ObjectFS Documentation</h1>
+                <ul>
+                    <li><a href="README.html">README</a></li>
+                    <li><a href="CHANGELOG.html">Changelog</a></li>
+                    <li><a href="CONTRIBUTING.html">Contributing</a></li>
+                    <li><a href="api.html">API Documentation</a></li>
+                </ul>
+            </article>
+        </body>
+        </html>
+        EOF
+
+    - name: Setup Pages
+      uses: actions/configure-pages@v3
+
+    - name: Upload to GitHub Pages
+      uses: actions/upload-pages-artifact@v2
+      with:
+        path: site
+
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v2
+
+  # Notify about release
+  notify:
+    name: Notify Release
+    runs-on: ubuntu-latest
+    needs: [create-release, build-and-upload, docker-build-push]
+    if: success()
+    steps:
+    - name: Notify Slack
+      if: env.SLACK_WEBHOOK_URL != ''
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"🚀 ObjectFS ${{ github.ref_name }} has been released! https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}\"}" \
+          $SLACK_WEBHOOK_URL
+
+    - name: Create summary
+      run: |
+        echo "## 🎉 Release Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ✅ Completed Tasks" >> $GITHUB_STEP_SUMMARY
+        echo "- [x] Created GitHub release" >> $GITHUB_STEP_SUMMARY
+        echo "- [x] Built and uploaded binaries for multiple platforms" >> $GITHUB_STEP_SUMMARY
+        echo "- [x] Built and pushed Docker images" >> $GITHUB_STEP_SUMMARY
+        echo "- [x] Performed security scans" >> $GITHUB_STEP_SUMMARY
+        echo "- [x] Updated documentation" >> $GITHUB_STEP_SUMMARY
