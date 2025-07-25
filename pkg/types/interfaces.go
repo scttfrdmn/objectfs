@@ -2,7 +2,6 @@ package types
 
 import (
 	"context"
-	"io"
 	"time"
 )
 

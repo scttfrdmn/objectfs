@@ -101,7 +101,7 @@ func (l *Logger) log(level, format string, args ...interface{}) {
 // SetupLogging configures the global logger
 func SetupLogging(levelStr, logFile string) error {
 	// Parse log level
-	level, err := ParseLogLevel(levelStr)
+	_, err := ParseLogLevel(levelStr)
 	if err != nil {
 		return fmt.Errorf("invalid log level: %w", err)
 	}
