@@ -14,6 +14,8 @@ import (
 
 )
 
+// Function is defined in filesystem.go to avoid duplication
+
 // MountManager manages FUSE mount operations
 type MountManager struct {
 	filesystem *FileSystem
@@ -80,8 +82,8 @@ func NewMountManager(filesystem *FileSystem, config *MountConfig) *MountManager 
 				Subtype:      "s3",
 			},
 			Permissions: &Permissions{
-				UID:      uint32(os.Getuid()),
-				GID:      uint32(os.Getgid()),
+				UID:      safeIntToUint32(os.Getuid()),
+				GID:      safeIntToUint32(os.Getgid()),
 				FileMode: 0644,
 				DirMode:  0755,
 			},

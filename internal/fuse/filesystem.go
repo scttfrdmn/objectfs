@@ -15,6 +15,25 @@ import (
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
+// safeInt64ToUint64 safely converts int64 to uint64, preventing negative values
+func safeInt64ToUint64(i int64) uint64 {
+	if i < 0 {
+		return 0
+	}
+	return uint64(i)
+}
+
+// safeIntToUint32 safely converts int to uint32, preventing overflow
+func safeIntToUint32(i int) uint32 {
+	if i < 0 {
+		return 0
+	}
+	if i > 0xFFFFFFFF {
+		return 0xFFFFFFFF
+	}
+	return uint32(i)
+}
+
 // FileSystem implements the FUSE filesystem interface
 type FileSystem struct {
 	fs.Inode
@@ -323,12 +342,16 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 // Getattr gets file attributes
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = f.fs.config.DefaultMode
-	out.Size = uint64(f.info.Size)
+	// Safely convert int64 to uint64 to prevent integer overflow
+	out.Size = safeInt64ToUint64(f.info.Size)
 	out.Uid = f.fs.config.DefaultUID
 	out.Gid = f.fs.config.DefaultGID
-	out.Mtime = uint64(f.info.LastModified.Unix())
-	out.Atime = uint64(f.info.LastModified.Unix())
-	out.Ctime = uint64(f.info.LastModified.Unix())
+	
+	// Safely convert Unix timestamp to prevent integer overflow
+	unixTime := f.info.LastModified.Unix()
+	out.Mtime = safeInt64ToUint64(unixTime)
+	out.Atime = safeInt64ToUint64(unixTime)
+	out.Ctime = safeInt64ToUint64(unixTime)
 	
 	return 0
 }
@@ -431,7 +454,7 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 		fh.file.size = newSize
 	}
 
-	return uint32(len(data)), 0
+	return safeIntToUint32(len(data)), 0
 }
 
 // Flush flushes any pending writes

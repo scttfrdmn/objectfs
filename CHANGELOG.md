@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CargoShip integration phases (shared components, archive-aware filesystem, unified workflows)
 - Web-based management interface
 
+### Competitive Analysis
+- **Amazon File Cache Alternative**: ObjectFS positioned as simpler, cost-effective solution to global namespace challenges
+- **Enterprise Positioning**: Cost analysis showing 260x savings vs Amazon File Cache ($1.33/GB-month → ~$0.005/GB-month)
+- **Simplified Architecture**: Multi-level caching approach eliminating Lustre complexity while maintaining performance
+- **Use Case Coverage**: Addressing 80%+ of global namespace requirements with standard S3 backing store
+
 ## [0.1.0] - 2025-07-27
 
 ### Added

@@ -397,7 +397,7 @@ func (c *Checker) checkLoop() {
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout*2)
-			c.RunAllChecks(ctx)
+			_, _ = c.RunAllChecks(ctx) // Ignore periodic check errors
 			cancel()
 		}
 	}

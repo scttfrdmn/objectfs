@@ -110,7 +110,7 @@ func SetupLogging(levelStr, logFile string) error {
 	var output io.Writer = os.Stdout
 	
 	if logFile != "" {
-		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %w", err)
 		}

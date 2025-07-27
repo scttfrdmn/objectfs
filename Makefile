@@ -40,10 +40,11 @@ COLOR_RED = \033[31m
 .PHONY: build-all build-linux build-darwin build-windows build-debug build-race
 .PHONY: docker docker-build docker-push package release
 .PHONY: coverage coverage-html coverage-report
+.PHONY: setup-hooks pre-commit-run pre-commit-all
 .PHONY: help version
 
-# Default target
-all: clean fmt vet test build
+# Default target - now includes hook setup
+all: setup-hooks clean fmt vet test build
 
 # Print help information
 help:
@@ -67,6 +68,12 @@ help:
 	@echo "  $(COLOR_GREEN)docker$(COLOR_RESET)         Build Docker image"
 	@echo "  $(COLOR_GREEN)package$(COLOR_RESET)        Create distribution packages"
 	@echo "  $(COLOR_GREEN)version$(COLOR_RESET)        Show version information"
+	@echo ""
+	@echo "$(COLOR_BOLD)Development workflow (solo dev):$(COLOR_RESET)"
+	@echo "  $(COLOR_GREEN)setup-hooks$(COLOR_RESET)    Setup pre-commit hooks for development"
+	@echo "  $(COLOR_GREEN)pre-commit-run$(COLOR_RESET) Run pre-commit hooks on staged files"
+	@echo "  $(COLOR_GREEN)pre-commit-all$(COLOR_RESET) Run pre-commit hooks on all files"
+	@echo "  $(COLOR_GREEN)dev-check$(COLOR_RESET)      Complete development workflow check"
 	@echo ""
 	@echo "$(COLOR_BOLD)Environment variables:$(COLOR_RESET)"
 	@echo "  $(COLOR_YELLOW)VERSION$(COLOR_RESET)        Override version (default: git describe)"
@@ -288,6 +295,29 @@ check-breaking-changes:
 	else \
 		echo "$(COLOR_YELLOW)gorelease not found, skipping API compatibility check$(COLOR_RESET)"; \
 	fi
+
+# Development workflow with pre-commit hooks
+setup-hooks:
+	@echo "$(COLOR_BLUE)Setting up development hooks...$(COLOR_RESET)"
+	@if [ ! -f ".git/hooks/pre-commit" ] || [ ! -f ".pre-commit-config.yaml" ]; then \
+		./scripts/setup-hooks.sh; \
+	else \
+		echo "$(COLOR_GREEN)Hooks already configured$(COLOR_RESET)"; \
+	fi
+
+# Run pre-commit hooks manually
+pre-commit-run:
+	@echo "$(COLOR_BLUE)Running pre-commit hooks on staged files...$(COLOR_RESET)"
+	@pre-commit run
+
+# Run pre-commit hooks on all files
+pre-commit-all:
+	@echo "$(COLOR_BLUE)Running pre-commit hooks on all files...$(COLOR_RESET)"
+	@pre-commit run --all-files
+
+# Solo dev workflow - comprehensive local checks
+dev-check: setup-hooks pre-commit-all
+	@echo "$(COLOR_GREEN)Development checks completed!$(COLOR_RESET)"
 
 # Pre-release validation
 pre-release: validate-version validate-changelog check-breaking-changes check build-all test

@@ -493,7 +493,7 @@ func (am *AlertManager) ProcessAlert(alert *Alert) {
 	for _, channelName := range am.config.Channels {
 		if channel, exists := am.channels[channelName]; exists {
 			go func(ch AlertChannel, a *Alert) {
-				ch.SendAlert(a)
+				_ = ch.SendAlert(a) // Ignore alert sending errors to prevent blocking
 			}(channel, alert)
 		}
 	}

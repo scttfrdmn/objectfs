@@ -118,8 +118,12 @@ func (c *Collector) Start(ctx context.Context) error {
 	mux.HandleFunc("/debug/operations", c.debugOperationsHandler)
 
 	c.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", c.config.Port),
-		Handler: mux,
+		Addr:              fmt.Sprintf(":%d", c.config.Port),
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second, // Prevent Slowloris attacks
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Start server in background
@@ -456,7 +460,7 @@ func (c *Collector) updatePeriodicMetrics() {
 func (c *Collector) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"healthy","service":"objectfs-metrics"}`))
+	_, _ = w.Write([]byte(`{"status":"healthy","service":"objectfs-metrics"}`)) // Ignore write error for health check
 }
 
 func (c *Collector) debugMetricsHandler(w http.ResponseWriter, r *http.Request) {
