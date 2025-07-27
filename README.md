@@ -7,13 +7,13 @@
 
 **Enterprise-Grade High-Performance POSIX Filesystem for Object Storage**
 
-ObjectFS transforms any object storage service (Amazon S3, Google Cloud Storage, Azure Blob Storage) into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows.
+ObjectFS transforms Amazon S3 into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows.
 
 ## 🚀 Key Features
 
 - **High Performance**: 4.6x faster than traditional S3 tools through intelligent caching and write buffering
 - **POSIX Compliance**: Full POSIX compatibility enabling drop-in replacement for traditional filesystems  
-- **Multi-Cloud Support**: Works with AWS S3, Google Cloud Storage, Azure Blob Storage, and MinIO
+- **AWS S3 Integration**: Native integration with Amazon S3 using AWS SDK v2
 - **Enterprise Scale**: Handles petabytes of data with linear performance scaling
 - **Intelligent Caching**: Multi-level cache hierarchy (L1 memory + L2 persistent) with prefetching
 - **High Availability**: Thread-safe design with connection pooling supporting concurrent access
@@ -37,7 +37,7 @@ ObjectFS transforms any object storage service (Amazon S3, Google Cloud Storage,
 - **Content Distribution**: Global content delivery with intelligent caching
 - **Hybrid Cloud**: Bridge on-premises applications with cloud object storage
 - **Remote Operations**: Efficient data access from high-latency locations (satellite, etc.)
-- **Multi-Cloud**: Unified filesystem interface across different cloud providers
+- **AWS Integration**: Seamless integration with AWS ecosystem and services
 
 ## 🏗️ Architecture
 
@@ -58,8 +58,8 @@ ObjectFS transforms any object storage service (Amazon S3, Google Cloud Storage,
 └─────────────────────────────────────────────────────────────┘
                                 │
 ┌─────────────────────────────────────────────────────────────┐
-│               Object Storage Backends                      │
-│    AWS S3 | Google Cloud Storage | Azure Blob | MinIO     │
+│                 AWS S3 Backend                            │
+│              Amazon S3 Object Storage                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -310,7 +310,7 @@ ObjectFS provides comprehensive monitoring capabilities:
 
 ## 🔒 Security
 
-- **IAM Integration**: Native AWS IAM, GCP IAM, and Azure AD support
+- **IAM Integration**: Native AWS IAM integration
 - **Encryption**: Transport and at-rest encryption support
 - **Access Control**: POSIX permissions with cloud IAM integration
 - **Audit Logging**: Comprehensive audit trail for all operations
@@ -369,15 +369,15 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ## 🗺️ Future Roadmap
 
 ### Version 0.2.0 (Q4 2025)
-- [ ] **Google Cloud Storage**: GCS backend implementation
-- [ ] **Azure Blob Storage**: Azure backend implementation
-- [ ] **Enhanced Monitoring**: Grafana dashboards and alerting
-- [ ] **Performance Optimizations**: Further caching improvements
+- [ ] **Enhanced S3 Features**: S3 Transfer Acceleration, Multipart optimization
+- [ ] **Advanced Monitoring**: Grafana dashboards and CloudWatch integration
+- [ ] **Performance Optimizations**: Further caching improvements and S3 optimizations
+- [ ] **S3 Storage Classes**: Intelligent tiering and lifecycle management
 
 ### Version 0.3.0 (Q1 2026)
 - [ ] **Distributed Cache**: Redis-backed cache clustering
 - [ ] **Advanced Compression**: Zstandard and LZ4 support
-- [ ] **Metadata Optimization**: Dedicated metadata storage
+- [ ] **S3 Analytics**: Cost optimization and usage analytics
 - [ ] **API Stability**: Prepare for 1.0.0 release
 
 ### Version 1.0.0 (Q2 2026)
@@ -389,6 +389,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ### Version 1.1.0 (Q3 2026)
 - [ ] **GUI Management**: Web-based management interface
 - [ ] **Kubernetes Operator**: Native Kubernetes integration
+- [ ] **AWS CloudFormation**: Infrastructure as Code templates
 - [ ] **Advanced Security**: Enhanced audit and compliance features
 
 ## 🙏 Acknowledgments

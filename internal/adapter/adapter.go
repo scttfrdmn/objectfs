@@ -52,7 +52,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	log.Printf("Max Concurrency: %d", a.config.Performance.MaxConcurrency)
 
 	// TODO: Initialize components
-	// 1. Initialize backend (S3, GCS, Azure, etc.)
+	// 1. Initialize S3 backend
 	// 2. Initialize cache
 	// 3. Initialize write buffer
 	// 4. Initialize FUSE filesystem
@@ -91,16 +91,8 @@ func validateStorageURI(uri string) error {
 		if parsed.Host == "" {
 			return fmt.Errorf("S3 URI must include bucket name")
 		}
-	case "gs":
-		if parsed.Host == "" {
-			return fmt.Errorf("GCS URI must include bucket name")
-		}
-	case "azure", "az":
-		if parsed.Host == "" {
-			return fmt.Errorf("Azure URI must include container name")
-		}
 	default:
-		return fmt.Errorf("unsupported storage scheme: %s", parsed.Scheme)
+		return fmt.Errorf("unsupported storage scheme: %s (only s3:// supported)", parsed.Scheme)
 	}
 
 	return nil

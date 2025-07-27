@@ -90,13 +90,15 @@ features:
   metadata_caching: true         # Enable metadata caching
   offline_mode: false           # Enable offline operation mode
 
-# Backend-specific configurations can be added here
-# backend:
-#   s3:
-#     region: us-west-2
-#     endpoint: https://s3.amazonaws.com
-#     force_path_style: false
-#   gcs:
-#     project_id: my-project
-#   azure:
-#     account_name: myaccount
+# S3 backend configuration
+backends:
+  s3:
+    region: us-west-2
+    endpoint: https://s3.amazonaws.com
+    force_path_style: false
+    bucket: my-bucket
+    prefix: objectfs/
+    storage_class: STANDARD_IA
+    encryption:
+      enabled: true
+      kms_key_id: ""  # Use default S3 encryption if empty

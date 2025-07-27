@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Multi-cloud backend support (GCS, Azure Blob Storage)
+- Enhanced S3 features (Transfer Acceleration, Multipart optimization)
 - Advanced compression algorithms (Zstandard, LZ4)
 - Distributed cache with Redis backend
 - Web-based management interface
