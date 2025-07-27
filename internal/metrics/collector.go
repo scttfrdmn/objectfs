@@ -176,12 +176,10 @@ func (c *Collector) RecordOperation(operation string, duration time.Duration, si
 	}
 
 	// Update Prometheus metrics
-	labels := c.buildLabels(map[string]string{
+	c.operationCounter.With(prometheus.Labels{
 		"operation": operation,
 		"status":    map[bool]string{true: "success", false: "error"}[success],
-	})
-
-	c.operationCounter.With(labels).Inc()
+	}).Inc()
 	c.operationDuration.With(prometheus.Labels{
 		"operation": operation,
 	}).Observe(duration.Seconds())
@@ -195,6 +193,7 @@ func (c *Collector) RecordOperation(operation string, duration time.Duration, si
 	if !success {
 		c.errorCounter.With(prometheus.Labels{
 			"operation": operation,
+			"type":      "failure",
 		}).Inc()
 	}
 }
@@ -205,12 +204,10 @@ func (c *Collector) RecordCacheHit(key string, size int64) {
 		return
 	}
 
-	labels := c.buildLabels(map[string]string{
+	c.cacheHitCounter.With(prometheus.Labels{
 		"type":   "hit",
 		"source": c.determineCacheSource(key),
-	})
-
-	c.cacheHitCounter.With(labels).Inc()
+	}).Inc()
 }
 
 // RecordCacheMiss records a cache miss
@@ -219,12 +216,10 @@ func (c *Collector) RecordCacheMiss(key string, size int64) {
 		return
 	}
 
-	labels := c.buildLabels(map[string]string{
+	c.cacheHitCounter.With(prometheus.Labels{
 		"type":   "miss",
 		"source": c.determineCacheSource(key),
-	})
-
-	c.cacheHitCounter.With(labels).Inc()
+	}).Inc()
 }
 
 // RecordError records an error

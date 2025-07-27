@@ -393,7 +393,7 @@ func TestConfigUnit(t *testing.T) {
 	// Test valid configuration
 	validConfig := &config.Configuration{
 		Global: config.GlobalConfig{
-			LogLevel:    "debug",
+			LogLevel:    "DEBUG",
 			MetricsPort: 9090,
 		},
 		Performance: config.PerformanceConfig{

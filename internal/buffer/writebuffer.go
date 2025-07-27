@@ -106,6 +106,20 @@ func NewWriteBuffer(config *WriteBufferConfig, flushCallback FlushCallback) (*Wr
 		}
 	}
 
+	// Apply defaults for zero values
+	if config.FlushInterval <= 0 {
+		config.FlushInterval = 30 * time.Second
+	}
+	if config.MaxBuffers <= 0 {
+		config.MaxBuffers = 1000
+	}
+	if config.MaxRetries <= 0 {
+		config.MaxRetries = 3
+	}
+	if config.RetryDelay <= 0 {
+		config.RetryDelay = time.Second
+	}
+
 	wb := &WriteBuffer{
 		config:  config,
 		buffers: make(map[string]*buffer),
