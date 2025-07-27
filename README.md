@@ -7,7 +7,7 @@
 
 **Enterprise-Grade High-Performance POSIX Filesystem for Object Storage**
 
-ObjectFS transforms Amazon S3 into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows.
+ObjectFS transforms Amazon S3 into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows. While currently focused on providing the best possible S3 experience, ObjectFS is architected to support additional object storage backends in future releases.
 
 ## 🚀 Key Features
 
@@ -353,6 +353,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [x] **Metrics Collection**: Comprehensive Prometheus metrics
 - [x] **Configuration**: YAML-based configuration with validation
 - [x] **Health Monitoring**: Built-in health checks and monitoring
+- [x] **Pluggable Architecture**: Foundation for multiple backend support
 
 ### Test Coverage (95%+)
 - [x] **Unit Tests**: Individual component testing
@@ -378,18 +379,23 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [ ] **Distributed Cache**: Redis-backed cache clustering
 - [ ] **Advanced Compression**: Zstandard and LZ4 support
 - [ ] **S3 Analytics**: Cost optimization and usage analytics
-- [ ] **API Stability**: Prepare for 1.0.0 release
+- [ ] **Backend Architecture**: Prepare pluggable backend system for future object stores
 
-### Version 1.0.0 (Q2 2026)
-- [ ] **Stable API**: Guaranteed backward compatibility
+### Version 0.4.0 (Q3 2026)
+- [ ] **Multi-Backend Support**: Add Google Cloud Storage and Azure Blob Storage
+- [ ] **Backend Abstraction**: Unified interface for multiple object storage providers
+- [ ] **Cross-Cloud Features**: Multi-cloud deployment and migration tools
+
+### Version 1.0.0 (Q4 2026)
+- [ ] **Stable API**: Guaranteed backward compatibility across all backends
 - [ ] **Multi-Region**: Cross-region replication and consistency
 - [ ] **Production Hardening**: Enterprise deployment features
 - [ ] **Performance Guarantees**: SLA-backed performance metrics
 
-### Version 1.1.0 (Q3 2026)
+### Version 1.1.0 (Q1 2027)
 - [ ] **GUI Management**: Web-based management interface
 - [ ] **Kubernetes Operator**: Native Kubernetes integration
-- [ ] **AWS CloudFormation**: Infrastructure as Code templates
+- [ ] **Infrastructure as Code**: CloudFormation, Terraform, and Pulumi templates
 - [ ] **Advanced Security**: Enhanced audit and compliance features
 
 ## 🙏 Acknowledgments
