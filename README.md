@@ -395,7 +395,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ### Version 1.1.0 (Q1 2027)
 - [ ] **GUI Management**: Web-based management interface
 - [ ] **Kubernetes Operator**: Native Kubernetes integration
-- [ ] **Infrastructure as Code**: CloudFormation, Terraform, and Pulumi templates
+- [ ] **Infrastructure as Code**: CloudFormation, Terraform, OpenTofu, and Pulumi templates
 - [ ] **Advanced Security**: Enhanced audit and compliance features
 
 ## 🙏 Acknowledgments
