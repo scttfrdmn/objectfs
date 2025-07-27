@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Distributed cache with Redis backend
 - Web-based management interface
 
-## [1.0.0] - 2025-01-15
+## [1.0.0] - 2025-07-27
 
 ### Added
 - **Complete S3 Backend**: Full AWS S3 integration with AWS SDK v2

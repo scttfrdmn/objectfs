@@ -368,17 +368,17 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## 🗺️ Future Roadmap
 
-### Version 1.1 (Q2 2024)
+### Version 1.1 (Q4 2025)
 - [ ] **Google Cloud Storage**: GCS backend implementation
 - [ ] **Azure Blob Storage**: Azure backend implementation
 - [ ] **Enhanced Monitoring**: Grafana dashboards and alerting
 
-### Version 1.2 (Q3 2024)
+### Version 1.2 (Q1 2026)
 - [ ] **Distributed Cache**: Redis-backed cache clustering
 - [ ] **Advanced Compression**: Zstandard and LZ4 support
 - [ ] **Metadata Optimization**: Dedicated metadata storage
 
-### Version 2.0 (Q4 2024)
+### Version 2.0 (Q2 2026)
 - [ ] **Multi-Region**: Cross-region replication and consistency
 - [ ] **GUI Management**: Web-based management interface
 - [ ] **Kubernetes Operator**: Native Kubernetes integration
