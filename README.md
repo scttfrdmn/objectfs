@@ -367,6 +367,51 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [x] **CI/CD Pipeline**: GitHub Actions with security scanning
 - [x] **Documentation**: Complete API and configuration docs
 
+## 🔄 CargoShip Integration Strategy
+
+ObjectFS is designed to complement [CargoShip](https://github.com/scttfrdmn/cargoship), an enterprise data archiving tool, creating a comprehensive data lifecycle management solution.
+
+### 🎯 **Integration Vision**
+- **ObjectFS**: Live filesystem access to S3 data with high-performance caching
+- **CargoShip**: Enterprise archiving with intelligent compression and cost optimization
+- **Combined**: Seamless data lifecycle from active use → staging → long-term archive
+
+### 📋 **Three-Phase Integration Plan**
+
+#### **Phase 1: Shared Performance Stack** (v0.2.0)
+```go
+// Shared components for optimal S3 performance
+- ObjectFS S3 connection pooling → CargoShip uploads
+- CargoShip BBR/CUBIC algorithms → ObjectFS transfers
+- Unified metrics and monitoring infrastructure
+- Common S3 optimization libraries
+```
+
+#### **Phase 2: Archive-Aware Filesystem** (v0.3.0)
+```bash
+# Mount CargoShip archives as live filesystems
+objectfs s3://bucket/project-archive.tar.zst /mnt/archive
+ls /mnt/archive/2024/experiments/  # Browse archived data
+cat /mnt/archive/results.csv       # Read files without full extraction
+```
+
+#### **Phase 3: Unified Workflows** (v0.4.0)
+```bash
+# Seamless data lifecycle management
+objectfs s3://bucket/active /mnt/workspace    # Live workspace
+cargoship ship /mnt/workspace --mount-after   # Archive with auto-mount
+# Data automatically available via ObjectFS after archiving
+```
+
+### 🔧 **Technical Compatibility**
+
+| Aspect | CargoShip Format | ObjectFS Approach | Compatibility |
+|--------|------------------|-------------------|---------------|
+| **Storage** | TAR.ZST archives | Direct S3 objects | ✅ Bridge via archive reader |
+| **Metadata** | inventory.yaml | .objectfs/metadata/ | ✅ Format translation |
+| **Compression** | ZSTD/GZIP/LZ4 | Optional per-object | ✅ Shared algorithms |
+| **Performance** | BBR/CUBIC network | Multi-level caching | ✅ Complementary |
+
 ## 🗺️ Future Roadmap
 
 ### Version 0.2.0 (Q4 2025)
@@ -374,17 +419,20 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [ ] **Advanced Monitoring**: Grafana dashboards and CloudWatch integration
 - [ ] **Performance Optimizations**: Further caching improvements and S3 optimizations
 - [ ] **S3 Storage Classes**: Intelligent tiering and lifecycle management
+- [ ] **CargoShip Integration (Phase 1)**: Shared S3 performance components and network optimization
 
 ### Version 0.3.0 (Q1 2026)
 - [ ] **Distributed Cache**: Redis-backed cache clustering
 - [ ] **Advanced Compression**: Zstandard and LZ4 support
 - [ ] **S3 Analytics**: Cost optimization and usage analytics
 - [ ] **Backend Architecture**: Prepare pluggable backend system for future object stores
+- [ ] **CargoShip Integration (Phase 2)**: Archive-aware filesystem with TAR/ZSTD support
 
 ### Version 0.4.0 (Q3 2026)
 - [ ] **Multi-Backend Support**: Add Google Cloud Storage and Azure Blob Storage
 - [ ] **Backend Abstraction**: Unified interface for multiple object storage providers
 - [ ] **Cross-Cloud Features**: Multi-cloud deployment and migration tools
+- [ ] **CargoShip Integration (Phase 3)**: Unified data lifecycle management and seamless handoff workflows
 
 ### Version 1.0.0 (Q4 2026)
 - [ ] **Stable API**: Guaranteed backward compatibility across all backends
