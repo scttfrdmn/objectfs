@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     ./cmd/objectfs
 
 # Runtime stage
-FROM alpine:3.18
+FROM alpine:3.22
 
 # Install runtime dependencies
 RUN apk add --no-cache \
