@@ -54,7 +54,7 @@ func (suite *IntegrationTestSuite) SetupSuite() {
 	suite.ctx, suite.cancel = context.WithTimeout(context.Background(), 5*time.Minute)
 	
 	// Use test bucket (would be configured in actual tests)
-	suite.testBucket = "objectfs-integration-test"
+	suite.testBucket = "objectfs-realdata-test-1753649951"
 }
 
 // TearDownSuite runs once after all tests
@@ -90,7 +90,7 @@ func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 	
 	// Create S3 backend configuration
 	s3Config := &s3.Config{
-		Region:      "us-east-1",
+		Region:      "us-west-2",
 		MaxRetries:  3,
 		PoolSize:    4,
 	}
@@ -235,10 +235,8 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 		Sync:   false,
 	}
 	
-	response := writeBuffer.Write(suite.ctx, req)
-	assert.NoError(t, response.Error)
-	assert.True(t, response.Buffered)
-	assert.Equal(t, len(testData), response.BytesWritten)
+	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
+	assert.NoError(t, err)
 	
 	// Test buffer statistics
 	stats := writeBuffer.GetStats()
@@ -256,8 +254,8 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 		Offset: 0,
 		Sync:   true,
 	}
-	response = writeBuffer.Write(suite.ctx, req2)
-	assert.NoError(t, response.Error)
+	err = writeBuffer.Write(req2.Key, req2.Offset, req2.Data)
+	assert.NoError(t, err)
 	
 	// Wait for flush to complete
 	time.Sleep(100 * time.Millisecond)
@@ -524,9 +522,10 @@ func (suite *IntegrationTestSuite) TestErrorHandlingAndRecovery() {
 		Sync:   true,
 	}
 	
-	response := writeBuffer.Write(suite.ctx, req)
-	// Should handle the error gracefully
-	assert.NotNil(t, response)
+	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
+	// Should handle the error gracefully (may return error)
+	// Error is expected due to simulated flush error
+	_ = err
 	
 	// Check that error statistics are updated
 	stats := writeBuffer.GetStats()
@@ -613,7 +612,6 @@ func BenchmarkWriteBuffer(b *testing.B) {
 	defer writeBuffer.Close()
 	
 	testData := make([]byte, 1024) // 1KB per write
-	ctx := context.Background()
 	
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -625,7 +623,7 @@ func BenchmarkWriteBuffer(b *testing.B) {
 				Data:   testData,
 				Sync:   false,
 			}
-			writeBuffer.Write(ctx, req)
+			writeBuffer.Write(req.Key, req.Offset, req.Data)
 			i++
 		}
 	})

@@ -136,7 +136,7 @@ func NewWriteBuffer(config *WriteBufferConfig, flushCallback FlushCallback) (*Wr
 }
 
 // Write buffers a write operation
-func (wb *WriteBuffer) Write(ctx context.Context, req *WriteRequest) *WriteResponse {
+func (wb *WriteBuffer) WriteWithRequest(ctx context.Context, req *WriteRequest) *WriteResponse {
 	start := time.Now()
 	response := &WriteResponse{}
 
@@ -194,26 +194,6 @@ func (wb *WriteBuffer) Write(ctx context.Context, req *WriteRequest) *WriteRespo
 	return response
 }
 
-// Flush forces a flush of all or specific buffers
-func (wb *WriteBuffer) Flush(ctx context.Context, key string) error {
-	wb.mu.Lock()
-	defer wb.mu.Unlock()
-
-	if key == "" {
-		// Flush all buffers
-		for bufKey := range wb.buffers {
-			wb.scheduleFlush(bufKey)
-		}
-		return nil
-	}
-
-	// Flush specific buffer
-	if buf, exists := wb.buffers[key]; exists && buf.dirty {
-		wb.scheduleFlush(key)
-	}
-
-	return nil
-}
 
 // Sync ensures all buffered writes are flushed and synced
 func (wb *WriteBuffer) Sync(ctx context.Context) error {
@@ -536,4 +516,74 @@ func (wb *WriteBuffer) OptimizeBuffers() {
 			wb.scheduleFlush(sizes[i].key)
 		}
 	}
+}
+
+// Count returns the number of active buffers (required by types.WriteBuffer interface)
+func (wb *WriteBuffer) Count() int {
+	wb.mu.RLock()
+	defer wb.mu.RUnlock()
+	return len(wb.buffers)
+}
+
+// Size returns the total size of buffered data (required by types.WriteBuffer interface)
+func (wb *WriteBuffer) Size() int64 {
+	wb.mu.RLock()
+	defer wb.mu.RUnlock()
+	return wb.stats.PendingBytes
+}
+
+// Write performs a write operation (required by types.WriteBuffer interface)
+func (wb *WriteBuffer) Write(key string, offset int64, data []byte) error {
+	req := &WriteRequest{
+		Key:    key,
+		Offset: offset,
+		Data:   data,
+		Sync:   false,
+	}
+	resp := wb.WriteWithRequest(context.Background(), req)
+	return resp.Error
+}
+
+// Flush flushes a specific buffer (required by types.WriteBuffer interface)
+func (wb *WriteBuffer) Flush(key string) error {
+	return wb.FlushWithContext(context.Background(), key)
+}
+
+// FlushWithContext flushes a specific buffer with context (original method)
+func (wb *WriteBuffer) FlushWithContext(ctx context.Context, key string) error {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+
+	if key == "" {
+		// Flush all buffers
+		for bufKey := range wb.buffers {
+			wb.scheduleFlush(bufKey)
+		}
+		return nil
+	}
+
+	// Flush specific buffer
+	if buf, exists := wb.buffers[key]; exists && buf.dirty {
+		wb.scheduleFlush(key)
+	}
+
+	return nil
+}
+
+// FlushAll flushes all buffers (required by types.WriteBuffer interface)
+func (wb *WriteBuffer) FlushAll() error {
+	wb.mu.RLock()
+	keys := make([]string, 0, len(wb.buffers))
+	for key := range wb.buffers {
+		keys = append(keys, key)
+	}
+	wb.mu.RUnlock()
+
+	// Flush each buffer
+	for _, key := range keys {
+		if err := wb.Flush(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }

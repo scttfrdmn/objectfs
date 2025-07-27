@@ -128,6 +128,13 @@ build: $(BIN_DIR)
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BINARY_PATH) ./cmd/objectfs
 	@echo "$(COLOR_GREEN)Binary built: $(BINARY_PATH)$(COLOR_RESET)"
 
+# Build cross-platform binary with cgofuse
+build-cgofuse: $(BIN_DIR)
+	@echo "$(COLOR_BLUE)Building cross-platform $(BINARY_NAME) $(VERSION) for $(GOOS)/$(GOARCH)...$(COLOR_RESET)"
+	@CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		go build $(LDFLAGS) -tags cgofuse,$(TAGS) -o $(BIN_DIR)/$(BINARY_NAME)-cgofuse ./cmd/objectfs
+	@echo "$(COLOR_GREEN)Cross-platform binary built: $(BIN_DIR)/$(BINARY_NAME)-cgofuse$(COLOR_RESET)"
+
 # Build debug binary
 build-debug: $(BIN_DIR)
 	@echo "$(COLOR_BLUE)Building debug binary...$(COLOR_RESET)"
@@ -138,8 +145,11 @@ build-race: $(BIN_DIR)
 	@echo "$(COLOR_BLUE)Building race detection binary...$(COLOR_RESET)"
 	@go build $(RACE_FLAGS) -o $(BIN_DIR)/$(BINARY_NAME)-race ./cmd/objectfs
 
-# Build for all platforms
-build-all: build-linux build-darwin build-windows
+# Build for all platforms (standard and cgofuse versions)
+build-all: build-linux build-darwin build-windows build-all-cgofuse
+
+# Build all platforms with cgofuse for research users
+build-all-cgofuse: build-darwin-cgofuse build-windows-cgofuse build-linux-cgofuse
 
 # Build for Linux
 build-linux: $(BUILD_DIR)
@@ -162,6 +172,29 @@ build-windows: $(BUILD_DIR)
 	@echo "$(COLOR_BLUE)Building for Windows...$(COLOR_RESET)"
 	@CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/objectfs
+
+# Build cross-platform cgofuse versions
+build-linux-cgofuse: $(BUILD_DIR)
+	@echo "$(COLOR_BLUE)Building cgofuse for Linux...$(COLOR_RESET)"
+	@CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+		go build $(LDFLAGS) -tags cgofuse,$(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64-cgofuse ./cmd/objectfs
+
+build-darwin-cgofuse: $(BUILD_DIR)
+	@echo "$(COLOR_BLUE)Building cgofuse for macOS (requires macFUSE)...$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)Note: This requires macFUSE to be installed for compilation$(COLOR_RESET)"
+	@CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+		go build $(LDFLAGS) -tags cgofuse,$(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64-cgofuse ./cmd/objectfs || \
+		echo "$(COLOR_RED)Failed to build macOS cgofuse version. Install macFUSE with: brew install --cask macfuse$(COLOR_RESET)"
+	@CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+		go build $(LDFLAGS) -tags cgofuse,$(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64-cgofuse ./cmd/objectfs || \
+		echo "$(COLOR_RED)Failed to build macOS ARM64 cgofuse version. Install macFUSE with: brew install --cask macfuse$(COLOR_RESET)"
+
+build-windows-cgofuse: $(BUILD_DIR)
+	@echo "$(COLOR_BLUE)Building cgofuse for Windows (requires WinFsp)...$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)Note: This requires WinFsp to be installed for compilation$(COLOR_RESET)"
+	@CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+		go build $(LDFLAGS) -tags cgofuse,$(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64-cgofuse.exe ./cmd/objectfs || \
+		echo "$(COLOR_RED)Failed to build Windows cgofuse version. Install WinFsp from: https://winfsp.dev/$(COLOR_RESET)"
 
 # Run tests
 test:

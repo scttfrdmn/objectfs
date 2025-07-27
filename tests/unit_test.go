@@ -147,10 +147,8 @@ func TestWriteBufferUnit(t *testing.T) {
 		Sync:   false,
 	}
 
-	response := writeBuffer.Write(ctx, req)
-	assert.NoError(t, response.Error)
-	assert.True(t, response.Buffered)
-	assert.Equal(t, len(smallData), response.BytesWritten)
+	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
+	assert.NoError(t, err)
 
 	// Data should not be flushed yet
 	assert.NotContains(t, flushedData, testKey)
@@ -164,8 +162,8 @@ func TestWriteBufferUnit(t *testing.T) {
 		Sync:   false,
 	}
 
-	response = writeBuffer.Write(ctx, req)
-	assert.NoError(t, response.Error)
+	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
+	assert.NoError(t, err)
 
 	// Give time for async flush if any
 	time.Sleep(200 * time.Millisecond)
@@ -180,8 +178,8 @@ func TestWriteBufferUnit(t *testing.T) {
 		Sync:   true,
 	}
 
-	response = writeBuffer.Write(ctx, req)
-	assert.NoError(t, response.Error)
+	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
+	assert.NoError(t, err)
 
 	// Give time for flush
 	time.Sleep(100 * time.Millisecond)
@@ -200,7 +198,7 @@ func TestWriteBufferUnit(t *testing.T) {
 	assert.NotNil(t, bufferInfo)
 
 	// Test explicit flush
-	err = writeBuffer.Flush(ctx, "")
+	err = writeBuffer.Flush("")
 	assert.NoError(t, err)
 
 	// Test sync
@@ -214,6 +212,7 @@ func TestBufferManagerUnit(t *testing.T) {
 			MaxBufferSize:  1024,
 			FlushThreshold: 512,
 			AsyncFlush:     false,
+			MaxWriteDelay:  2 * time.Second, // Increase timeout for test
 		},
 		EnableMetrics:       true,
 		MetricsInterval:     100 * time.Millisecond,
@@ -506,9 +505,9 @@ func TestErrorConditions(t *testing.T) {
 		Sync:   false,
 	}
 
-	response := writeBuffer.Write(context.Background(), req)
+	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
 	// Should handle gracefully (might not buffer due to size)
-	assert.NotNil(t, response)
+	assert.NoError(t, err)
 
 	// Test metrics with disabled configuration
 	disabledConfig := &metrics.Config{

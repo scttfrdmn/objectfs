@@ -187,7 +187,7 @@ func (m *Manager) Write(ctx context.Context, key string, offset int64, data []by
 	}
 
 	// Perform the write
-	response := wb.Write(ctx, req)
+	response := wb.WriteWithRequest(ctx, req)
 	
 	// Update stats
 	m.updateStats(start, response.Error)
@@ -205,7 +205,7 @@ func (m *Manager) Flush(ctx context.Context, key string) error {
 	wb := m.writeBuffer
 	m.mu.RUnlock()
 
-	return wb.Flush(ctx, key)
+	return wb.FlushWithContext(ctx, key)
 }
 
 // Sync ensures all buffered writes are flushed and synced

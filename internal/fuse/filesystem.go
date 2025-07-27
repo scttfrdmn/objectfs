@@ -167,8 +167,17 @@ func (fs *FileSystem) GetStats() *Stats {
 	fs.stats.mu.RLock()
 	defer fs.stats.mu.RUnlock()
 	
-	statsCopy := *fs.stats
-	return &statsCopy
+	return &Stats{
+		Lookups:      fs.stats.Lookups,
+		Opens:        fs.stats.Opens,
+		Reads:        fs.stats.Reads,
+		Writes:       fs.stats.Writes,
+		BytesRead:    fs.stats.BytesRead,
+		BytesWritten: fs.stats.BytesWritten,
+		CacheHits:    fs.stats.CacheHits,
+		CacheMisses:  fs.stats.CacheMisses,
+		Errors:       fs.stats.Errors,
+	}
 }
 
 // DirectoryNode represents a directory in the filesystem

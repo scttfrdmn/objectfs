@@ -14,7 +14,18 @@ import (
 
 )
 
-// Function is defined in filesystem.go to avoid duplication
+// FilesystemStats represents filesystem operation statistics
+type FilesystemStats struct {
+	Lookups      int64 `json:"lookups"`
+	Opens        int64 `json:"opens"`
+	Reads        int64 `json:"reads"`
+	Writes       int64 `json:"writes"`
+	BytesRead    int64 `json:"bytes_read"`
+	BytesWritten int64 `json:"bytes_written"`
+	CacheHits    int64 `json:"cache_hits"`
+	CacheMisses  int64 `json:"cache_misses"`
+	Errors       int64 `json:"errors"`
+}
 
 // MountManager manages FUSE mount operations
 type MountManager struct {
@@ -179,11 +190,22 @@ func (m *MountManager) Wait() {
 }
 
 // GetStats returns filesystem statistics
-func (m *MountManager) GetStats() *Stats {
+func (m *MountManager) GetStats() *FilesystemStats {
 	if m.filesystem != nil {
-		return m.filesystem.GetStats()
+		stats := m.filesystem.GetStats()
+		return &FilesystemStats{
+			Lookups:      stats.Lookups,
+			Opens:        stats.Opens,
+			Reads:        stats.Reads,
+			Writes:       stats.Writes,
+			BytesRead:    stats.BytesRead,
+			BytesWritten: stats.BytesWritten,
+			CacheHits:    stats.CacheHits,
+			CacheMisses:  stats.CacheMisses,
+			Errors:       stats.Errors,
+		}
 	}
-	return nil
+	return &FilesystemStats{}
 }
 
 // Remount remounts the filesystem with new options
