@@ -257,6 +257,10 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 	err = writeBuffer.Write(req2.Key, req2.Offset, req2.Data)
 	assert.NoError(t, err)
 	
+	// Force flush before checking
+	err = writeBuffer.FlushAll()
+	assert.NoError(t, err)
+	
 	// Wait for flush to complete
 	time.Sleep(100 * time.Millisecond)
 	

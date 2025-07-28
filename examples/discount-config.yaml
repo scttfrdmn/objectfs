@@ -1,0 +1,73 @@
+# AWS S3 Discount Configuration
+# This file can be distributed by institutions to their users
+# containing enterprise-negotiated AWS pricing and discounts
+#
+# Institution: Example University
+# AWS Account: Enterprise Agreement EA-123456
+# Contract Period: 2024-2026
+# Last Updated: 2025-07-28
+
+# Enable volume-based discount tiers
+enable_volume_discounts: true
+
+# Overall enterprise discount percentage (applied to all storage costs)
+enterprise_discount: 20.0  # 20% enterprise discount
+
+# Reserved capacity discount (for committed usage)
+reserved_capacity_discount: 15.0  # 15% additional discount for reserved capacity
+
+# Spot instance discount (typically not applicable to S3, but included for completeness)
+spot_discount: 0.0
+
+# Volume-based discount tiers
+# These apply additional discounts based on total data size
+volume_tiers:
+  # 0-5TB: Standard enterprise rate (no additional volume discount)
+  - min_size_gb: 0.0
+    max_size_gb: 5120.0          # 5TB
+    discount_percent: 0.0        # No additional discount
+    applies_to: ["ALL"]
+    
+  # 5-50TB: 5% additional volume discount
+  - min_size_gb: 5120.0          # 5TB
+    max_size_gb: 51200.0         # 50TB
+    discount_percent: 5.0        # Additional 5% volume discount
+    applies_to: ["STANDARD", "STANDARD_IA", "ONEZONE_IA"]
+    
+  # 50-500TB: 10% additional volume discount
+  - min_size_gb: 51200.0         # 50TB
+    max_size_gb: 512000.0        # 500TB
+    discount_percent: 10.0       # Additional 10% volume discount
+    applies_to: ["STANDARD", "STANDARD_IA", "ONEZONE_IA", "GLACIER_IR"]
+    
+  # 500+TB: 15% additional volume discount
+  - min_size_gb: 512000.0        # 500TB
+    max_size_gb: -1              # Unlimited
+    discount_percent: 15.0       # Additional 15% volume discount
+    applies_to: ["ALL"]
+
+# Custom per-tier discounts for special institutional rates
+custom_discounts:
+  # Research data archival gets extra discount
+  GLACIER_IR: 25.0               # 25% additional discount on Glacier IR
+  GLACIER: 30.0                  # 30% additional discount on Glacier
+  DEEP_ARCHIVE: 35.0             # 35% additional discount on Deep Archive
+  
+  # Frequently accessed data gets standard rates
+  STANDARD: 0.0                  # No additional custom discount
+  STANDARD_IA: 5.0               # 5% additional discount on Standard-IA
+  ONEZONE_IA: 10.0               # 10% additional discount on One Zone-IA (higher risk tolerance)
+
+# Institution-specific notes and metadata
+metadata:
+  institution: "Example University"
+  contract_id: "EA-123456"
+  contact_email: "aws-admin@example.edu"
+  valid_until: "2026-12-31"
+  notes: |
+    This discount configuration is valid for all university departments
+    and research groups. For questions about pricing or to request
+    updates, contact the IT Service Desk.
+    
+    Important: This file contains confidential pricing information.
+    Do not share outside the institution.

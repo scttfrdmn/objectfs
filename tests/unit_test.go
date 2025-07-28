@@ -181,6 +181,10 @@ func TestWriteBufferUnit(t *testing.T) {
 	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
 	assert.NoError(t, err)
 
+	// Force flush to ensure data is written
+	err = writeBuffer.Flush(syncKey)
+	assert.NoError(t, err)
+
 	// Give time for flush
 	time.Sleep(100 * time.Millisecond)
 
@@ -506,8 +510,8 @@ func TestErrorConditions(t *testing.T) {
 	}
 
 	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
-	// Should handle gracefully (might not buffer due to size)
-	assert.NoError(t, err)
+	// Should return error when data is larger than buffer capacity
+	assert.Error(t, err)
 
 	// Test metrics with disabled configuration
 	disabledConfig := &metrics.Config{

@@ -98,7 +98,139 @@ backends:
     force_path_style: false
     bucket: my-bucket
     prefix: objectfs/
-    storage_class: STANDARD_IA
+    
+    # S3 Storage Tier Configuration
+    # Available tiers: STANDARD, STANDARD_IA, ONEZONE_IA, REDUCED_REDUNDANCY, 
+    #                  GLACIER_IR, GLACIER, DEEP_ARCHIVE, INTELLIGENT_TIERING
+    storage_tier: STANDARD_IA           # Default storage tier for new objects
+    
+    # Tier-specific constraints (optional - uses tier defaults if not specified)
+    tier_constraints:
+      min_object_size: 131072           # Minimum object size in bytes (128KB for IA tiers)
+      deletion_embargo: 720h            # Minimum storage duration (30 days = 720h)
+      transition_delay: 0s              # Delay before applying tier (immediate)
+    
+    # Cost optimization settings
+    cost_optimization:
+      enable_auto_tiering: false        # Automatically transition objects based on access patterns
+      lifecycle_management: false       # Enable S3 lifecycle policies (set via AWS Console/CLI)
+      intelligent_tiering: false        # Use S3 Intelligent Tiering (overrides storage_tier)
+      cost_threshold: 0.023             # Cost threshold for optimization decisions ($/GB/month)
+      monitor_access_patterns: false    # Monitor and log access patterns for optimization
+      
+      # Transition rules for automatic tiering (when enable_auto_tiering: true)
+      transition_rules:
+        - from_tier: STANDARD
+          to_tier: STANDARD_IA
+          after_days: 30                # Transition after 30 days of infrequent access
+          access_pattern: infrequent    # infrequent, archive, cold
+          object_size_filter:
+            min_size: 131072            # Only transition objects >= 128KB
+            max_size: -1                # No upper limit (-1 = unlimited)
+        
+        - from_tier: STANDARD_IA
+          to_tier: GLACIER_IR
+          after_days: 90                # Transition to Glacier IR after 90 days
+          access_pattern: archive
+          object_size_filter:
+            min_size: 131072
+            max_size: -1
+    
+    # Pricing Configuration - Essential for Enterprise Customers with AWS Discounts
+    pricing_config:
+      use_pricing_api: false              # Fetch current AWS pricing via API (requires internet)
+      region: us-west-2                   # Pricing region (may differ from bucket region)
+      currency: USD                       # Currency for cost calculations
+      last_updated: "2025-07-28"         # When custom pricing was last updated
+      
+      # External Discount Configuration File (recommended for institutions)
+      # This allows institutions to distribute standardized discount configs
+      discount_config_file: "discount-config.yaml"  # Path to external discount config file
+      
+      # Custom Pricing Overrides - Specify your actual AWS rates
+      custom_pricing:
+        STANDARD:
+          storage_cost_per_gb_month: 0.023   # Your negotiated Standard rate
+          retrieval_cost_per_gb: 0.0         # No retrieval costs for Standard
+          request_costs:
+            put_request_cost: 0.0000005      # Cost per PUT request
+            get_request_cost: 0.0000004      # Cost per GET request  
+            delete_request_cost: 0.0         # Usually free
+            list_request_cost: 0.000005      # Cost per LIST request
+            head_request_cost: 0.0000004     # Cost per HEAD request
+          minimum_billable_size: 0           # No minimum for Standard
+          minimum_billable_days: 0           # No minimum for Standard
+          
+        STANDARD_IA:
+          storage_cost_per_gb_month: 0.0125  # Your negotiated Standard-IA rate
+          retrieval_cost_per_gb: 0.01        # Retrieval cost
+          request_costs:
+            put_request_cost: 0.000001       # Higher PUT cost for IA
+            get_request_cost: 0.0000004
+            delete_request_cost: 0.0
+            list_request_cost: 0.000005
+            head_request_cost: 0.0000004
+          minimum_billable_size: 131072      # 128KB minimum
+          minimum_billable_days: 30          # 30-day minimum
+          
+      # Discount Configuration - Essential for Enterprise Customers
+      # Note: If discount_config_file is specified above, these inline settings
+      # will be merged with the external file (external file takes precedence)
+      discount_config:
+        enable_volume_discounts: true       # Enable volume-based pricing tiers
+        enterprise_discount: 15.0           # Overall enterprise discount (15%)
+        reserved_capacity_discount: 10.0    # Reserved capacity discount (10%)
+        spot_discount: 0.0                  # Spot instance discount (not applicable to S3)
+        
+        # Volume Discount Tiers - Based on your AWS contract
+        volume_tiers:
+          - min_size_gb: 0.0                # 0-1TB: Standard pricing
+            max_size_gb: 1024.0             # 1TB
+            discount_percent: 0.0           # No discount
+            applies_to: ["ALL"]             # Applies to all storage tiers
+            
+          - min_size_gb: 1024.0             # 1-10TB: 5% discount
+            max_size_gb: 10240.0            # 10TB  
+            discount_percent: 5.0           # 5% discount
+            applies_to: ["STANDARD", "STANDARD_IA", "ONEZONE_IA"]
+            
+          - min_size_gb: 10240.0            # 10-100TB: 10% discount
+            max_size_gb: 102400.0           # 100TB
+            discount_percent: 10.0          # 10% discount
+            applies_to: ["STANDARD", "STANDARD_IA", "ONEZONE_IA"]
+            
+          - min_size_gb: 102400.0           # >100TB: 15% discount
+            max_size_gb: -1                 # Unlimited
+            discount_percent: 15.0          # 15% discount
+            applies_to: ["ALL"]
+            
+        # Custom Per-Tier Discounts - For specific negotiated rates
+        custom_discounts:
+          GLACIER_IR: 20.0                  # 20% discount on Glacier IR (special rate)
+          DEEP_ARCHIVE: 25.0                # 25% discount on Deep Archive (bulk commitment)
+          
+      # Additional Cost Factors - Include in total cost calculations  
+      additional_costs:
+        # Data Transfer Out Costs (first TB is often free with enterprise)
+        data_transfer_out:
+          first_tb_per_gb: 0.0              # First TB free (enterprise)
+          next_9tb_per_gb: 0.07             # 1-10 TB rate
+          next_40tb_per_gb: 0.05            # 10-50 TB rate
+          over_50tb_per_gb: 0.03            # >50 TB rate
+          
+        # Cross-Region Replication (if used)
+        replication_costs:
+          replication_per_gb: 0.015         # Cost per GB replicated
+          destination_put_requests: 0.000001 # PUT cost at destination
+          
+        # Monitoring and Logging Costs
+        cloudwatch_metrics: 0.30           # Cost per custom metric per month
+        inventory_reports: 0.0025          # Cost per million objects inventoried
+        access_logging: 0.0                # Often included in enterprise contracts
+    
+    # Legacy storage_class field (deprecated - use storage_tier instead)  
+    # storage_class: STANDARD_IA
+    
     encryption:
       enabled: true
       kms_key_id: ""  # Use default S3 encryption if empty
