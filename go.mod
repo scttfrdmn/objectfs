@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.70
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.82.0
 	github.com/hanwen/go-fuse/v2 v2.8.0
-	github.com/prometheus/client_golang v1.22.0
+	github.com/prometheus/client_golang v1.23.0
 	github.com/scttfrdmn/cargoship v0.4.1
 	github.com/stretchr/testify v1.10.0
 	github.com/winfsp/cgofuse v1.5.0
