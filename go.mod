@@ -13,7 +13,7 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/scttfrdmn/cargoship v0.4.1
 	github.com/stretchr/testify v1.10.0
-	github.com/winfsp/cgofuse v1.5.0
+	github.com/winfsp/cgofuse v1.6.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
