@@ -531,7 +531,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 			o.UseAccelerate = true
 		}
 		if cfg.UseDualStack {
-			o.UseDualstack = true
+			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
 		}
 	})
 
@@ -639,7 +639,7 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		b.recordError(err)
 		return nil, b.translateError(err, "GetObject", key)
 	}
-	defer result.Body.Close()
+	defer func() { _ = result.Body.Close() }()
 
 	data, err := io.ReadAll(result.Body)
 	if err != nil {

@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,7 +36,7 @@ func (suite *IntegrationTestSuite) SetupSuite() {
 	var err error
 	
 	// Create temporary directories
-	suite.tempDir, err = ioutil.TempDir("", "objectfs-integration-test")
+	suite.tempDir, err = os.MkdirTemp("", "objectfs-integration-test")
 	require.NoError(suite.T(), err)
 	
 	suite.mountPoint = filepath.Join(suite.tempDir, "mount")
@@ -542,7 +541,7 @@ func (suite *IntegrationTestSuite) TestErrorHandlingAndRecovery() {
 func (suite *IntegrationTestSuite) cleanupTestData() {
 	// Clean up any test files in mount point
 	if suite.mountPoint != "" {
-		entries, err := ioutil.ReadDir(suite.mountPoint)
+		entries, err := os.ReadDir(suite.mountPoint)
 		if err == nil {
 			for _, entry := range entries {
 				if !entry.IsDir() {

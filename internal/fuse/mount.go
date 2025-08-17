@@ -292,22 +292,22 @@ func (m *MountManager) buildFUSEOptions() *fs.Options {
 
 	// Add read-only flag if specified
 	if m.config.Options.ReadOnly {
-		opts.MountOptions.Options = append(opts.MountOptions.Options, "ro")
+		opts.Options = append(opts.Options, "ro")
 	}
 
 	// Add allow_root if specified
 	if m.config.Options.AllowRoot {
-		opts.MountOptions.Options = append(opts.MountOptions.Options, "allow_root")
+		opts.Options = append(opts.Options, "allow_root")
 	}
 
 	// Add custom options
 	if m.config.Options.FSName != "" {
-		opts.MountOptions.Options = append(opts.MountOptions.Options, 
+		opts.Options = append(opts.Options, 
 			fmt.Sprintf("fsname=%s", m.config.Options.FSName))
 	}
 
 	if m.config.Options.Subtype != "" {
-		opts.MountOptions.Options = append(opts.MountOptions.Options,
+		opts.Options = append(opts.Options,
 			fmt.Sprintf("subtype=%s", m.config.Options.Subtype))
 	}
 

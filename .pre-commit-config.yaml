@@ -43,7 +43,7 @@ repos:
       - id: go-sec-pkg
         args: [./...]
       - id: golangci-lint
-        args: [run, --timeout=5m]
+        args: [run, --enable=errcheck,staticcheck,govet,ineffassign,unused,bodyclose,unconvert,whitespace, --timeout=5m]
 
   # Additional Go tooling
   - repo: local
@@ -91,7 +91,7 @@ repos:
       # Security-focused dependency check
       - id: security-deps-check
         name: Security Dependencies Check
-        entry: sh -c 'echo "🔒 Checking for vulnerable dependencies..." && go list -json -deps ./... | jq -r "select(.Module != null) | \"\(.Module.Path)@\(.Module.Version)\"" | sort -u > /tmp/deps.txt && echo "Dependencies checked: $(wc -l < /tmp/deps.txt)"'
+        entry: sh -c 'echo "🔒 Checking dependencies..." && go list -m all | wc -l | xargs -I {} echo "Dependencies checked: {}"'
         language: system
         files: (go\.mod|go\.sum)$
         pass_filenames: false

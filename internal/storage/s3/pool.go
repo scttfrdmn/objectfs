@@ -225,13 +225,14 @@ func (p *ConnectionPool) Resize(newSize int) error {
 	// If shrinking, we may need to drain excess connections
 	if newSize < oldSize {
 		excess := len(p.connections) - newSize
+	drainLoop:
 		for i := 0; i < excess; i++ {
 			select {
 			case <-p.connections:
 				p.currentSize--
 				p.stats.Destroyed++
 			default:
-				break
+				break drainLoop
 			}
 		}
 	}
@@ -246,6 +247,7 @@ func (p *ConnectionPool) Warmup(ctx context.Context, count int) error {
 	}
 
 	var errors []error
+warmupLoop:
 	for i := 0; i < count && i < p.maxSize; i++ {
 		conn, err := p.createConnection()
 		if err != nil {
@@ -260,7 +262,7 @@ func (p *ConnectionPool) Warmup(ctx context.Context, count int) error {
 			return ctx.Err()
 		default:
 			// Pool is full
-			break
+			break warmupLoop
 		}
 	}
 

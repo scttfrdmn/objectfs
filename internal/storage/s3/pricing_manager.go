@@ -102,7 +102,7 @@ func (pm *PricingManager) fetchFromPricingAPI(tier string) (TierPricing, error) 
 	if err != nil {
 		return TierPricing{}, fmt.Errorf("failed to fetch pricing data: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return TierPricing{}, fmt.Errorf("pricing API returned status %d", resp.StatusCode)
@@ -142,8 +142,8 @@ func (pm *PricingManager) parsePricingData(tier string, data AWSPricingResponse)
 	storageClass := pm.mapTierToStorageClass(tier)
 	
 	// Look for storage pricing
-	var storageCost float64 = 0.023 // Default fallback
-	var retrievalCost float64 = 0.0
+	var storageCost = 0.023 // Default fallback
+	var retrievalCost = 0.0
 	
 	for _, product := range data.Products {
 		if product.Attributes["storageClass"] == storageClass {

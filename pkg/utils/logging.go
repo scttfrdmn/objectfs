@@ -149,9 +149,7 @@ func ParseBytes(s string) (int64, error) {
 	s = strings.ToUpper(strings.TrimSpace(s))
 	
 	// Handle plain numbers
-	if strings.HasSuffix(s, "B") {
-		s = s[:len(s)-1]
-	}
+	s = strings.TrimSuffix(s, "B")
 	
 	var multiplier int64 = 1
 	var numStr string
