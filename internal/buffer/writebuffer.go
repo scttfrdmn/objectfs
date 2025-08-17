@@ -58,14 +58,11 @@ type buffer struct {
 	key           string
 	data          []byte
 	offset        int64
-	size          int64
 	lastWrite     time.Time
 	lastAccess    time.Time
 	pendingWrites int
 	dirty         bool
 	flushing      bool
-	compressed    bool
-	checksum      string
 }
 
 // WriteRequest represents a write operation request

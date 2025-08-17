@@ -89,10 +89,7 @@ type OpenFile struct {
 	mode     uint32
 	size     int64
 	modified bool
-	
-	// Write buffer for this file
-	writeBuffer []byte
-	dirty       bool
+	dirty    bool
 	
 	// Access tracking
 	lastAccess time.Time
@@ -490,7 +487,7 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
 	// Flush any pending writes
 	if fh.file.dirty {
-		fh.Flush(ctx)
+		_ = fh.Flush(ctx)
 	}
 
 	// Remove from open files map

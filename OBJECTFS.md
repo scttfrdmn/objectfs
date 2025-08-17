@@ -2,6 +2,7 @@
 ## Enterprise-Grade High-Performance POSIX Filesystem for Object Storage
 
 [![Go Version](https://img.shields.io/badge/Go-1.19+-blue.svg)](https://golang.org/dl/)
+[![Go Report Card](https://goreportcard.com/badge/github.com/scttfrdmn/objectfs)](https://goreportcard.com/report/github.com/scttfrdmn/objectfs)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)](#)
 [![Coverage](https://img.shields.io/badge/Coverage-95%25-brightgreen.svg)](#)

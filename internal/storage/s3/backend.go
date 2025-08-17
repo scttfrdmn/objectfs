@@ -33,6 +33,13 @@ const (
 	TierIntelligent       = "INTELLIGENT_TIERING"
 )
 
+// Access Pattern Constants
+const (
+	AccessFrequent    = "frequent"
+	AccessInfrequent  = "infrequent"
+	AccessArchive     = "archive"
+)
+
 // Predefined storage tier information with AWS constraints
 var StorageTiers = map[string]StorageTierInfo{
 	TierStandard: {
@@ -388,15 +395,15 @@ func (tv *TierValidator) GetRecommendations(objectSize int64, accessFrequency st
 	
 	// Access pattern recommendations
 	switch accessFrequency {
-	case "frequent":
+	case AccessFrequent:
 		if tv.tier != TierStandard {
 			recommendations = append(recommendations, "Consider Standard tier for frequently accessed data")
 		}
-	case "infrequent":
+	case AccessInfrequent:
 		if tv.tier == TierStandard {
 			recommendations = append(recommendations, "Consider Standard-IA or One Zone-IA for cost savings")
 		}
-	case "archive":
+	case AccessArchive:
 		if tv.tier != TierGlacierIR && tv.tier != TierGlacier {
 			recommendations = append(recommendations, "Consider Glacier tiers for archive data")
 		}

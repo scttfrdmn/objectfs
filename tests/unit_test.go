@@ -133,7 +133,7 @@ func TestWriteBufferUnit(t *testing.T) {
 	writeBuffer, err := buffer.NewWriteBuffer(config, flushCallback)
 	require.NoError(t, err)
 	require.NotNil(t, writeBuffer)
-	defer writeBuffer.Close()
+	defer func() { _ = writeBuffer.Close() }()
 
 	ctx := context.Background()
 
@@ -243,7 +243,7 @@ func TestBufferManagerUnit(t *testing.T) {
 	// Start manager
 	err = manager.Start(ctx)
 	require.NoError(t, err)
-	defer manager.Stop()
+	defer func() { _ = manager.Stop() }()
 
 	// Test write operations
 	testKey := "manager-test"
@@ -315,7 +315,7 @@ func TestMetricsCollectorUnit(t *testing.T) {
 	// Start collector
 	err = collector.Start(ctx)
 	require.NoError(t, err)
-	defer collector.Stop(ctx)
+	defer func() { _ = collector.Stop(ctx) }()
 
 	// Record operations
 	collector.RecordOperation("read", 100*time.Millisecond, 1024, true)
@@ -499,7 +499,7 @@ func TestErrorConditions(t *testing.T) {
 
 	writeBuffer, err := buffer.NewWriteBuffer(minimalConfig, callback)
 	assert.NoError(t, err)
-	defer writeBuffer.Close()
+	defer func() { _ = writeBuffer.Close() }()
 
 	// Write should handle small buffer size
 	req := &buffer.WriteRequest{

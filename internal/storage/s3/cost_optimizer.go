@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// Access Frequency Constants
+const (
+	AccessNever = "never"
+	AccessCold  = "cold"
+)
+
 // CostOptimizer handles cost optimization decisions and Standard tier overhead management
 type CostOptimizer struct {
 	backend          *Backend
@@ -167,7 +173,7 @@ func (co *CostOptimizer) analyzeObject(pattern *AccessPattern) *TierOptimization
 // categorizeAccessFrequency categorizes access patterns
 func (co *CostOptimizer) categorizeAccessFrequency(pattern *AccessPattern) string {
 	if pattern.AccessCount == 0 {
-		return "never"
+		return AccessNever
 	}
 
 	// Calculate accesses per day
@@ -175,13 +181,13 @@ func (co *CostOptimizer) categorizeAccessFrequency(pattern *AccessPattern) strin
 	accessesPerDay := float64(pattern.AccessCount) / objectAge.Hours() * 24
 
 	if accessesPerDay >= 1.0 {
-		return "frequent"
+		return AccessFrequent
 	} else if accessesPerDay >= 0.1 { // At least once per 10 days
-		return "infrequent"
+		return AccessInfrequent
 	} else if pattern.AccessCount > 0 && objectAge > 90*24*time.Hour && accessesPerDay >= 0.01 {
-		return "archive"
+		return AccessArchive
 	} else {
-		return "cold"
+		return AccessCold
 	}
 }
 
@@ -190,24 +196,24 @@ func (co *CostOptimizer) findOptimalTier(pattern *AccessPattern, accessFreq stri
 	objectSizeGB := float64(pattern.ObjectSize) / (1024 * 1024 * 1024)
 
 	// Handle Standard tier overhead: small objects often stay in Standard
-	if pattern.ObjectSize < 128*1024 && accessFreq != "never" {
+	if pattern.ObjectSize < 128*1024 && accessFreq != AccessNever {
 		return TierStandard // Avoid IA minimum charges for small, accessed objects
 	}
 
 	switch accessFreq {
-	case "frequent":
+	case AccessFrequent:
 		return TierStandard
-	case "infrequent":
+	case AccessInfrequent:
 		if pattern.ObjectSize >= 128*1024 { // Meet IA minimum size
 			return TierStandardIA
 		}
 		return TierStandard
-	case "archive":
+	case AccessArchive:
 		if pattern.ObjectSize >= 128*1024 {
 			return TierGlacierIR
 		}
 		return TierStandardIA
-	case "cold", "never":
+	case AccessCold, AccessNever:
 		if objectSizeGB > 1.0 { // Large objects benefit more from deep archive
 			return TierGlacier
 		}
@@ -253,13 +259,13 @@ func (co *CostOptimizer) calculateObjectCost(objectSize int64, tier string) floa
 // generateOptimizationReason generates a human-readable reason for optimization
 func (co *CostOptimizer) generateOptimizationReason(pattern *AccessPattern, accessFreq string) string {
 	switch accessFreq {
-	case "frequent":
+	case AccessFrequent:
 		return "High access frequency - Standard tier optimal"
-	case "infrequent":
+	case AccessInfrequent:
 		return "Infrequent access pattern - IA tier more cost-effective"
-	case "archive":
+	case AccessArchive:
 		return "Archive access pattern - Glacier tier significant savings"  
-	case "cold", "never":
+	case AccessCold, AccessNever:
 		return "Rarely accessed - Deep archive substantial cost reduction"
 	default:
 		return "Access pattern suggests tier optimization opportunity"

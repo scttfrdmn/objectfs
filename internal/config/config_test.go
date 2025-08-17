@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// Test Constants
+const (
+	TestDebugLevel = "DEBUG"
+	TestCacheSize  = "8GB"
+)
+
 func TestNewDefault(t *testing.T) {
 	cfg := NewDefault()
 
@@ -147,7 +153,7 @@ features:
   offline_mode: true
 `
 
-	err := os.WriteFile(configFile, []byte(configContent), 0644)
+	err := os.WriteFile(configFile, []byte(configContent), 0600)
 	if err != nil {
 		t.Fatalf("Failed to write test config file: %v", err)
 	}
@@ -159,7 +165,7 @@ features:
 	}
 
 	// Verify loaded values
-	if cfg.Global.LogLevel != "DEBUG" {
+	if cfg.Global.LogLevel != TestDebugLevel {
 		t.Errorf("Expected LogLevel to be DEBUG, got %s", cfg.Global.LogLevel)
 	}
 	if cfg.Global.MetricsPort != 9090 {
@@ -195,7 +201,7 @@ func TestLoadFromEnv(t *testing.T) {
 	testEnvVars := map[string]string{
 		"OBJECTFS_LOG_LEVEL":            "ERROR",
 		"OBJECTFS_METRICS_PORT":         "9090",
-		"OBJECTFS_CACHE_SIZE":           "8GB",
+		"OBJECTFS_CACHE_SIZE":           TestCacheSize,
 		"OBJECTFS_MAX_CONCURRENCY":      "300",
 		"OBJECTFS_COMPRESSION_ENABLED":  "false",
 		"OBJECTFS_PREFETCHING":          "false",
@@ -222,7 +228,7 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.Global.MetricsPort != 9090 {
 		t.Errorf("Expected MetricsPort to be 9090, got %d", cfg.Global.MetricsPort)
 	}
-	if cfg.Performance.CacheSize != "8GB" {
+	if cfg.Performance.CacheSize != TestCacheSize {
 		t.Errorf("Expected CacheSize to be 8GB, got %s", cfg.Performance.CacheSize)
 	}
 	if cfg.Performance.MaxConcurrency != 300 {
@@ -250,8 +256,8 @@ func TestSaveToFile(t *testing.T) {
 	configFile := filepath.Join(tmpDir, "saved_config.yaml")
 
 	cfg := NewDefault()
-	cfg.Global.LogLevel = "DEBUG"
-	cfg.Performance.CacheSize = "8GB"
+	cfg.Global.LogLevel = TestDebugLevel
+	cfg.Performance.CacheSize = TestCacheSize
 
 	err := cfg.SaveToFile(configFile)
 	if err != nil {
@@ -270,10 +276,10 @@ func TestSaveToFile(t *testing.T) {
 		t.Fatalf("Failed to load saved config: %v", err)
 	}
 
-	if newCfg.Global.LogLevel != "DEBUG" {
+	if newCfg.Global.LogLevel != TestDebugLevel {
 		t.Errorf("Expected LogLevel to be DEBUG, got %s", newCfg.Global.LogLevel)
 	}
-	if newCfg.Performance.CacheSize != "8GB" {
+	if newCfg.Performance.CacheSize != TestCacheSize {
 		t.Errorf("Expected CacheSize to be 8GB, got %s", newCfg.Performance.CacheSize)
 	}
 }

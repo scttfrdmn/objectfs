@@ -11,6 +11,11 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// Boolean Constants
+const (
+	TrueValue = "true"
+)
+
 // Configuration represents the complete application configuration
 type Configuration struct {
 	Global      GlobalConfig      `yaml:"global"`
@@ -262,7 +267,13 @@ func NewDefault() *Configuration {
 
 // LoadFromFile loads configuration from a YAML file
 func (c *Configuration) LoadFromFile(filename string) error {
-	data, err := os.ReadFile(filename)
+	// Validate file path to prevent directory traversal
+	cleanPath := filepath.Clean(filename)
+	if strings.Contains(cleanPath, "..") {
+		return fmt.Errorf("invalid config file path: %s", filename)
+	}
+	
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -305,7 +316,7 @@ func (c *Configuration) LoadFromEnv() error {
 		c.Performance.ReadAheadSize = val
 	}
 	if val := os.Getenv("OBJECTFS_COMPRESSION_ENABLED"); val != "" {
-		c.Performance.CompressionEnabled = strings.ToLower(val) == "true"
+		c.Performance.CompressionEnabled = strings.ToLower(val) == TrueValue
 	}
 	if val := os.Getenv("OBJECTFS_CONNECTION_POOL_SIZE"); val != "" {
 		if poolSize, err := strconv.Atoi(val); err == nil {
@@ -322,13 +333,13 @@ func (c *Configuration) LoadFromEnv() error {
 
 	// Feature flags
 	if val := os.Getenv("OBJECTFS_PREFETCHING"); val != "" {
-		c.Features.Prefetching = strings.ToLower(val) == "true"
+		c.Features.Prefetching = strings.ToLower(val) == TrueValue
 	}
 	if val := os.Getenv("OBJECTFS_BATCH_OPERATIONS"); val != "" {
-		c.Features.BatchOperations = strings.ToLower(val) == "true"
+		c.Features.BatchOperations = strings.ToLower(val) == TrueValue
 	}
 	if val := os.Getenv("OBJECTFS_OFFLINE_MODE"); val != "" {
-		c.Features.OfflineMode = strings.ToLower(val) == "true"
+		c.Features.OfflineMode = strings.ToLower(val) == TrueValue
 	}
 
 	return nil

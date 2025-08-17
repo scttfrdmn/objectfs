@@ -358,7 +358,7 @@ func TestPricingManager_ExternalDiscountConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tempFile.Name())
+	defer func() { _ = os.Remove(tempFile.Name()) }()
 	
 	externalConfig := `
 enable_volume_discounts: true
@@ -380,7 +380,7 @@ custom_discounts:
 	if _, err := tempFile.WriteString(externalConfig); err != nil {
 		t.Fatalf("Failed to write temp file: %v", err)
 	}
-	tempFile.Close()
+	_ = tempFile.Close()
 
 	t.Run("Loads External Discount Config", func(t *testing.T) {
 		config := PricingConfig{

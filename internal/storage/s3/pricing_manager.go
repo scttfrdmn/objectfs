@@ -8,9 +8,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	
 	"gopkg.in/yaml.v2"
+)
+
+// Currency Constants
+const (
+	DefaultCurrency = "USD"
 )
 
 // PricingManager handles AWS S3 pricing with custom discounts and overrides
@@ -25,7 +31,7 @@ type PricingManager struct {
 // NewPricingManager creates a new pricing manager
 func NewPricingManager(config PricingConfig, logger *slog.Logger) *PricingManager {
 	if config.Currency == "" {
-		config.Currency = "USD"
+		config.Currency = DefaultCurrency
 	}
 	if config.Region == "" {
 		config.Region = "us-east-1" // Default pricing region
@@ -460,8 +466,14 @@ type TierPricingSummary struct {
 func loadDiscountConfigFromFile(filePath string, logger *slog.Logger) (DiscountConfig, error) {
 	var discountConfig DiscountConfig
 	
+	// Validate file path to prevent directory traversal
+	cleanPath := filepath.Clean(filePath)
+	if strings.Contains(cleanPath, "..") {
+		return discountConfig, fmt.Errorf("invalid discount config file path: %s", filePath)
+	}
+	
 	// Resolve relative paths
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := filepath.Abs(cleanPath)
 	if err != nil {
 		return discountConfig, fmt.Errorf("failed to resolve path %s: %w", filePath, err)
 	}
@@ -471,8 +483,8 @@ func loadDiscountConfigFromFile(filePath string, logger *slog.Logger) (DiscountC
 		return discountConfig, fmt.Errorf("discount config file does not exist: %s", absPath)
 	}
 	
-	// Read file
-	data, err := os.ReadFile(absPath)
+	// Read file - path has been validated above to prevent directory traversal
+	data, err := os.ReadFile(absPath) // #nosec G304
 	if err != nil {
 		return discountConfig, fmt.Errorf("failed to read discount config file %s: %w", absPath, err)
 	}

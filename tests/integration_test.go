@@ -43,10 +43,10 @@ func (suite *IntegrationTestSuite) SetupSuite() {
 	suite.cacheDir = filepath.Join(suite.tempDir, "cache")
 	suite.configFile = filepath.Join(suite.tempDir, "config.yaml")
 	
-	err = os.MkdirAll(suite.mountPoint, 0755)
+	err = os.MkdirAll(suite.mountPoint, 0750)
 	require.NoError(suite.T(), err)
 	
-	err = os.MkdirAll(suite.cacheDir, 0755)
+	err = os.MkdirAll(suite.cacheDir, 0750)
 	require.NoError(suite.T(), err)
 	
 	// Set up test context
@@ -63,7 +63,7 @@ func (suite *IntegrationTestSuite) TearDownSuite() {
 	}
 	
 	if suite.tempDir != "" {
-		os.RemoveAll(suite.tempDir)
+		_ = os.RemoveAll(suite.tempDir)
 	}
 }
 
@@ -97,7 +97,7 @@ func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 	// Create S3 backend
 	backend, err := s3.NewBackend(suite.ctx, suite.testBucket, s3Config)
 	require.NoError(t, err)
-	defer backend.Close()
+	defer func() { _ = backend.Close() }()
 	
 	// Test basic operations
 	testKey := "integration-test/test-file.txt"
@@ -221,7 +221,7 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 	// Create write buffer
 	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, flushCallback)
 	require.NoError(t, err)
-	defer writeBuffer.Close()
+	defer func() { _ = writeBuffer.Close() }()
 	
 	// Test buffered writes
 	testKey := "buffer-test-key"
@@ -290,7 +290,7 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 	
 	err = manager.Start(suite.ctx)
 	require.NoError(t, err)
-	defer manager.Stop()
+	defer func() { _ = manager.Stop() }()
 	
 	// Test manager operations
 	err = manager.Write(suite.ctx, "manager-test", 0, []byte("manager test data"), false)
@@ -326,7 +326,7 @@ func (suite *IntegrationTestSuite) TestMetricsIntegration() {
 	// Start metrics collection
 	err = collector.Start(suite.ctx)
 	require.NoError(t, err)
-	defer collector.Stop(suite.ctx)
+	defer func() { _ = collector.Stop(suite.ctx) }()
 	
 	// Record some test operations
 	collector.RecordOperation("read", 100*time.Millisecond, 1024, true)
@@ -515,7 +515,7 @@ func (suite *IntegrationTestSuite) TestErrorHandlingAndRecovery() {
 	
 	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, errorCallback)
 	require.NoError(t, err)
-	defer writeBuffer.Close()
+	defer func() { _ = writeBuffer.Close() }()
 	
 	// Write data that will trigger flush
 	req := &buffer.WriteRequest{
@@ -545,7 +545,7 @@ func (suite *IntegrationTestSuite) cleanupTestData() {
 		if err == nil {
 			for _, entry := range entries {
 				if !entry.IsDir() {
-					os.Remove(filepath.Join(suite.mountPoint, entry.Name()))
+					_ = os.Remove(filepath.Join(suite.mountPoint, entry.Name()))
 				}
 			}
 		}
@@ -553,8 +553,8 @@ func (suite *IntegrationTestSuite) cleanupTestData() {
 	
 	// Clean up cache directory
 	if suite.cacheDir != "" {
-		os.RemoveAll(suite.cacheDir)
-		os.MkdirAll(suite.cacheDir, 0755)
+		_ = os.RemoveAll(suite.cacheDir)
+		_ = os.MkdirAll(suite.cacheDir, 0750)
 	}
 }
 
@@ -612,7 +612,7 @@ func BenchmarkWriteBuffer(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer writeBuffer.Close()
+	defer func() { _ = writeBuffer.Close() }()
 	
 	testData := make([]byte, 1024) // 1KB per write
 	
@@ -626,7 +626,7 @@ func BenchmarkWriteBuffer(b *testing.B) {
 				Data:   testData,
 				Sync:   false,
 			}
-			writeBuffer.Write(req.Key, req.Offset, req.Data)
+			_ = writeBuffer.Write(req.Key, req.Offset, req.Data)
 			i++
 		}
 	})

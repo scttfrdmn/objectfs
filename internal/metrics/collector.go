@@ -396,21 +396,6 @@ func (c *Collector) registerMetrics() error {
 	return nil
 }
 
-func (c *Collector) buildLabels(additional map[string]string) prometheus.Labels {
-	labels := make(prometheus.Labels)
-	
-	// Add configured labels
-	for k, v := range c.config.Labels {
-		labels[k] = v
-	}
-	
-	// Add additional labels
-	for k, v := range additional {
-		labels[k] = v
-	}
-	
-	return labels
-}
 
 func (c *Collector) determineCacheSource(key string) string {
 	// Simple heuristic to determine cache level
@@ -468,30 +453,32 @@ func (c *Collector) debugMetricsHandler(w http.ResponseWriter, r *http.Request) 
 	
 	w.Header().Set("Content-Type", "application/json")
 	
-	// Simple JSON encoding
-	fmt.Fprintf(w, "{\n")
-	fmt.Fprintf(w, "  \"uptime\": \"%v\",\n", metrics["uptime"])
-	fmt.Fprintf(w, "  \"last_reset\": \"%v\",\n", metrics["last_reset"])
-	fmt.Fprintf(w, "  \"operations\": {\n")
+	// Simple JSON encoding - using helper to avoid errcheck issues
+	writef := func(format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
+	
+	writef("{\n")
+	writef("  \"uptime\": \"%v\",\n", metrics["uptime"])
+	writef("  \"last_reset\": \"%v\",\n", metrics["last_reset"])
+	writef("  \"operations\": {\n")
 	
 	if operations, ok := metrics["operations"].(map[string]*OperationMetrics); ok {
 		first := true
 		for name, op := range operations {
 			if !first {
-				fmt.Fprintf(w, ",\n")
+				writef(",\n")
 			}
-			fmt.Fprintf(w, "    \"%s\": {\n", name)
-			fmt.Fprintf(w, "      \"count\": %d,\n", op.Count)
-			fmt.Fprintf(w, "      \"errors\": %d,\n", op.Errors)
-			fmt.Fprintf(w, "      \"avg_duration\": \"%v\",\n", op.AvgDuration)
-			fmt.Fprintf(w, "      \"avg_size\": %.2f\n", op.AvgSize)
-			fmt.Fprintf(w, "    }")
+			writef("    \"%s\": {\n", name)
+			writef("      \"count\": %d,\n", op.Count)
+			writef("      \"errors\": %d,\n", op.Errors)
+			writef("      \"avg_duration\": \"%v\",\n", op.AvgDuration)
+			writef("      \"avg_size\": %.2f\n", op.AvgSize)
+			writef("    }")
 			first = false
 		}
 	}
 	
-	fmt.Fprintf(w, "\n  }\n")
-	fmt.Fprintf(w, "}\n")
+	writef("\n  }\n")
+	writef("}\n")
 }
 
 func (c *Collector) debugOperationsHandler(w http.ResponseWriter, r *http.Request) {
@@ -500,23 +487,26 @@ func (c *Collector) debugOperationsHandler(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "text/plain")
 	
-	fmt.Fprintf(w, "ObjectFS Operations Summary\n")
-	fmt.Fprintf(w, "==========================\n\n")
-	fmt.Fprintf(w, "Uptime: %v\n", time.Since(c.lastReset))
-	fmt.Fprintf(w, "Last Reset: %v\n\n", c.lastReset)
+	// Helper to avoid errcheck issues
+	writef := func(format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
+	
+	writef("ObjectFS Operations Summary\n")
+	writef("==========================\n\n")
+	writef("Uptime: %v\n", time.Since(c.lastReset))
+	writef("Last Reset: %v\n\n", c.lastReset)
 	
 	if len(c.operations) == 0 {
-		fmt.Fprintf(w, "No operations recorded.\n")
+		writef("No operations recorded.\n")
 		return
 	}
 	
-	fmt.Fprintf(w, "%-20s %10s %10s %12s %12s %10s\n", 
+	writef("%-20s %10s %10s %12s %12s %10s\n", 
 		"Operation", "Count", "Errors", "Avg Duration", "Avg Size", "Last Op")
-	fmt.Fprintf(w, "%-20s %10s %10s %12s %12s %10s\n", 
+	writef("%-20s %10s %10s %12s %12s %10s\n", 
 		"----------", "-----", "------", "------------", "--------", "-------")
 	
 	for name, op := range c.operations {
-		fmt.Fprintf(w, "%-20s %10d %10d %12v %12.0f %10s\n",
+		writef("%-20s %10d %10d %12v %12.0f %10s\n",
 			name, op.Count, op.Errors, op.AvgDuration, 
 			op.AvgSize, op.LastOperation.Format("15:04:05"))
 	}

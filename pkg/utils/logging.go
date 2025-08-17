@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -95,7 +96,7 @@ func (l *Logger) Error(format string, args ...interface{}) {
 // log writes a log message
 func (l *Logger) log(level, format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.output, "[%s] %s\n", level, message)
+	_, _ = fmt.Fprintf(l.output, "[%s] %s\n", level, message)
 }
 
 // SetupLogging configures the global logger
@@ -110,7 +111,13 @@ func SetupLogging(levelStr, logFile string) error {
 	var output io.Writer = os.Stdout
 	
 	if logFile != "" {
-		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		// Validate log file path
+		cleanPath := filepath.Clean(logFile)
+		if strings.Contains(cleanPath, "..") {
+			return fmt.Errorf("invalid log file path: %s", logFile)
+		}
+		
+		file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %w", err)
 		}
