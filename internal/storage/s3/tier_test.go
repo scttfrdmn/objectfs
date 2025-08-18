@@ -1,55 +1,55 @@
 package s3
 
 import (
-	"testing"
-	"time"
 	"log/slog"
 	"os"
-	
+	"testing"
+	"time"
+
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 )
 
 func TestStorageTiers(t *testing.T) {
 	tests := []struct {
-		name           string
-		tier           string
-		expectedName   string
+		name            string
+		tier            string
+		expectedName    string
 		expectedMinSize int64
 		expectedEmbargo time.Duration
 		expectedCost    float64
 	}{
 		{
-			name:           "Standard Tier",
-			tier:           TierStandard,
-			expectedName:   "Standard",
+			name:            "Standard Tier",
+			tier:            TierStandard,
+			expectedName:    "Standard",
 			expectedMinSize: 0,
 			expectedEmbargo: 0,
-			expectedCost:   0.023,
+			expectedCost:    0.023,
 		},
 		{
-			name:           "Standard-IA Tier",
-			tier:           TierStandardIA,
-			expectedName:   "Standard-Infrequent Access",
+			name:            "Standard-IA Tier",
+			tier:            TierStandardIA,
+			expectedName:    "Standard-Infrequent Access",
 			expectedMinSize: 128 * 1024,
 			expectedEmbargo: 30 * 24 * time.Hour,
-			expectedCost:   0.0125,
+			expectedCost:    0.0125,
 		},
 		{
-			name:           "One Zone-IA Tier",
-			tier:           TierOneZoneIA,
-			expectedName:   "One Zone-Infrequent Access",
+			name:            "One Zone-IA Tier",
+			tier:            TierOneZoneIA,
+			expectedName:    "One Zone-Infrequent Access",
 			expectedMinSize: 128 * 1024,
 			expectedEmbargo: 30 * 24 * time.Hour,
-			expectedCost:   0.01,
+			expectedCost:    0.01,
 		},
 		{
-			name:           "Glacier Instant Retrieval",
-			tier:           TierGlacierIR,
-			expectedName:   "Glacier Instant Retrieval",
+			name:            "Glacier Instant Retrieval",
+			tier:            TierGlacierIR,
+			expectedName:    "Glacier Instant Retrieval",
 			expectedMinSize: 128 * 1024,
 			expectedEmbargo: 90 * 24 * time.Hour,
-			expectedCost:   0.004,
+			expectedCost:    0.004,
 		},
 	}
 
@@ -128,7 +128,7 @@ func TestTierValidator(t *testing.T) {
 
 	t.Run("Custom Constraints Override", func(t *testing.T) {
 		constraints := TierConstraints{
-			MinObjectSize:   256 * 1024, // 256KB custom minimum
+			MinObjectSize:   256 * 1024,          // 256KB custom minimum
 			DeletionEmbargo: 60 * 24 * time.Hour, // 60 days custom embargo
 		}
 		validator := NewTierValidator(TierStandardIA, constraints, logger)
@@ -186,17 +186,17 @@ func TestTierRecommendations(t *testing.T) {
 }
 
 func TestStorageClassConversion(t *testing.T) {
-	// Test AWS SDK conversion  
-	if convertTierToStorageClass(TierStandard) != s3types.StorageClassStandard {
+	// Test AWS SDK conversion
+	if ConvertTierToStorageClass(TierStandard) != s3types.StorageClassStandard {
 		t.Error("Standard tier should convert to STANDARD storage class")
 	}
 
-	if convertTierToStorageClass(TierStandardIA) != s3types.StorageClassStandardIa {
+	if ConvertTierToStorageClass(TierStandardIA) != s3types.StorageClassStandardIa {
 		t.Error("Standard-IA tier should convert to STANDARD_IA storage class")
 	}
 
 	// Test CargoShip conversion
-	if convertTierToCargoShipStorageClass(TierStandard) != awsconfig.StorageClassStandard {
+	if ConvertTierToCargoShipStorageClass(TierStandard) != awsconfig.StorageClassStandard {
 		t.Error("Standard tier should convert to CargoShip STANDARD storage class")
 	}
 }
@@ -205,7 +205,7 @@ func TestTierCostCalculation(t *testing.T) {
 	// Test cost calculation
 	standardTier := StorageTiers[TierStandard]
 	expectedCost := 100.0 * standardTier.CostPerGBMonth // 100GB
-	
+
 	if expectedCost != 100.0*0.023 {
 		t.Errorf("Expected cost calculation %f, got %f", 100.0*0.023, expectedCost)
 	}

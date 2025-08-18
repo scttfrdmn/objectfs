@@ -19,7 +19,6 @@ type PlatformFileSystem interface {
 // CreatePlatformMountManager creates the appropriate mount manager for the platform
 func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeBuffer types.WriteBuffer,
 	metrics types.MetricsCollector, config *MountConfig) PlatformFileSystem {
-	
 	// Use original hanwen/go-fuse implementation
 	fuseConfig := &Config{
 		MountPoint:  config.MountPoint,
@@ -29,7 +28,7 @@ func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeB
 		DefaultMode: 0644,
 		CacheTTL:    60 * 1000000000, // 60 seconds in nanoseconds
 	}
-	
+
 	filesystem := NewFileSystem(backend, cache, writeBuffer, metrics, fuseConfig)
 	return NewMountManager(filesystem, config)
 }

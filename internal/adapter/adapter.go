@@ -20,18 +20,18 @@ type Adapter struct {
 	storageURI string
 	mountPoint string
 	config     *config.Configuration
-	
+
 	// Core components
 	backend     *s3.Backend
 	cache       *cache.MultiLevelCache
 	writeBuffer *buffer.WriteBuffer
 	mountMgr    fuse.PlatformFileSystem
 	metrics     *metrics.Collector
-	
+
 	// Internal state
-	started     bool
-	bucketName  string
-	s3Config    *s3.Config
+	started    bool
+	bucketName string
+	s3Config   *s3.Config
 }
 
 // New creates a new ObjectFS adapter instance
@@ -119,7 +119,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		},
 		Policy: a.config.Cache.EvictionPolicy,
 	}
-	
+
 	a.cache, err = cache.NewMultiLevelCache(cacheConfig)
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
@@ -127,8 +127,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 
 	// 4. Initialize write buffer - use simple WriteBuffer for now
 	writeBufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  int64(parseSize(a.config.WriteBuffer.MaxMemory) / 100), // Reasonable default
-		FlushThreshold: int64(parseSize(a.config.WriteBuffer.MaxMemory) / 200),
+		MaxBufferSize:  parseSize(a.config.WriteBuffer.MaxMemory) / 100, // Reasonable default
+		FlushThreshold: parseSize(a.config.WriteBuffer.MaxMemory) / 200,
 		AsyncFlush:     true,
 		MaxWriteDelay:  a.config.WriteBuffer.FlushInterval,
 	}
@@ -242,10 +242,10 @@ func validateStorageURI(uri string) error {
 func parseSize(sizeStr string) int64 {
 	// Simple implementation - in practice you'd use a proper parsing library
 	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
-	
+
 	var multiplier int64 = 1
 	var numStr string
-	
+
 	if strings.HasSuffix(sizeStr, "GB") {
 		multiplier = 1024 * 1024 * 1024
 		numStr = strings.TrimSuffix(sizeStr, "GB")
@@ -261,7 +261,7 @@ func parseSize(sizeStr string) int64 {
 	} else {
 		numStr = sizeStr
 	}
-	
+
 	// Parse the numeric part
 	var num int64 = 1024 * 1024 * 1024 // Default 1GB
 	if numStr != "" {
@@ -269,6 +269,6 @@ func parseSize(sizeStr string) int64 {
 			return 1024 * 1024 * 1024 // Default 1GB on error
 		}
 	}
-	
+
 	return num * multiplier
 }

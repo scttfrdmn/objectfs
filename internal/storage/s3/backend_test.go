@@ -11,7 +11,7 @@ import (
 
 func TestConfig_Defaults(t *testing.T) {
 	cfg := &Config{}
-	
+
 	// Test that defaults are applied appropriately
 	assert.Equal(t, 0, cfg.MaxRetries) // Should be set by NewBackend
 	assert.Equal(t, time.Duration(0), cfg.ConnectTimeout)
@@ -24,7 +24,7 @@ func TestNewBackend_EmptyBucket(t *testing.T) {
 	cfg := &Config{
 		Region: "us-east-1",
 	}
-	
+
 	backend, err := NewBackend(ctx, "", cfg)
 	assert.Error(t, err)
 	assert.Nil(t, backend)
@@ -33,11 +33,11 @@ func TestNewBackend_EmptyBucket(t *testing.T) {
 
 func TestNewBackend_NilConfig(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// This test may fail without proper AWS credentials
 	// but we can at least test the config defaults
 	_, err := NewBackend(ctx, "test-bucket", nil)
-	
+
 	// We expect this to fail with AWS credentials error, not config error
 	if err != nil {
 		// Should not be a config-related error
@@ -47,7 +47,7 @@ func TestNewBackend_NilConfig(t *testing.T) {
 
 func TestBackendMetrics_InitialState(t *testing.T) {
 	metrics := BackendMetrics{}
-	
+
 	assert.Equal(t, int64(0), metrics.Requests)
 	assert.Equal(t, int64(0), metrics.Errors)
 	assert.Equal(t, int64(0), metrics.BytesUploaded)
@@ -59,7 +59,7 @@ func TestBackendMetrics_InitialState(t *testing.T) {
 
 func TestDetectContentType(t *testing.T) {
 	backend := &Backend{}
-	
+
 	tests := []struct {
 		key      string
 		expected string
@@ -75,7 +75,7 @@ func TestDetectContentType(t *testing.T) {
 		{"file.unknown", "application/octet-stream"},
 		{"file", "application/octet-stream"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
 			result := backend.detectContentType(tt.key)
@@ -85,49 +85,62 @@ func TestDetectContentType(t *testing.T) {
 }
 
 func TestBackend_recordMetrics(t *testing.T) {
-	backend := &Backend{}
-	
+	metricsCollector := NewMetricsCollector()
+	backend := &Backend{
+		metricsCollector: metricsCollector,
+	}
+
 	// Test initial state
-	assert.Equal(t, int64(0), backend.metrics.Requests)
-	assert.Equal(t, int64(0), backend.metrics.Errors)
-	
+	metrics := backend.GetMetrics()
+	assert.Equal(t, int64(0), metrics.Requests)
+	assert.Equal(t, int64(0), metrics.Errors)
+
 	// Record first metric
-	backend.recordMetrics(100*time.Millisecond, false)
-	assert.Equal(t, int64(1), backend.metrics.Requests)
-	assert.Equal(t, int64(0), backend.metrics.Errors)
-	assert.Equal(t, 100*time.Millisecond, backend.metrics.AverageLatency)
-	
+	backend.metricsCollector.RecordMetrics(100*time.Millisecond, false)
+	metrics = backend.GetMetrics()
+	assert.Equal(t, int64(1), metrics.Requests)
+	assert.Equal(t, int64(0), metrics.Errors)
+	assert.Equal(t, 100*time.Millisecond, metrics.AverageLatency)
+
 	// Record second metric
-	backend.recordMetrics(200*time.Millisecond, true)
-	assert.Equal(t, int64(2), backend.metrics.Requests)
-	assert.Equal(t, int64(1), backend.metrics.Errors)
-	
+	backend.metricsCollector.RecordMetrics(200*time.Millisecond, true)
+	metrics = backend.GetMetrics()
+	assert.Equal(t, int64(2), metrics.Requests)
+	assert.Equal(t, int64(1), metrics.Errors)
+
 	// Check average latency calculation (rolling average)
 	expectedAvg := time.Duration((int64(100*time.Millisecond)*9 + int64(200*time.Millisecond)) / 10)
-	assert.Equal(t, expectedAvg, backend.metrics.AverageLatency)
+	assert.Equal(t, expectedAvg, metrics.AverageLatency)
 }
 
 func TestBackend_recordError(t *testing.T) {
-	backend := &Backend{}
+	metricsCollector := NewMetricsCollector()
+	backend := &Backend{
+		metricsCollector: metricsCollector,
+	}
 	err := assert.AnError
-	
+
 	// Record error
-	backend.recordError(err)
-	
-	assert.Equal(t, err.Error(), backend.metrics.LastError)
-	assert.False(t, backend.metrics.LastErrorTime.IsZero())
+	backend.metricsCollector.RecordError(err)
+
+	metrics := backend.GetMetrics()
+	assert.Equal(t, err.Error(), metrics.LastError)
+	assert.False(t, metrics.LastErrorTime.IsZero())
 }
 
 func TestBackend_GetMetrics(t *testing.T) {
-	backend := &Backend{}
-	
+	metricsCollector := NewMetricsCollector()
+	backend := &Backend{
+		metricsCollector: metricsCollector,
+	}
+
 	// Record some metrics
-	backend.recordMetrics(100*time.Millisecond, false)
-	backend.recordError(assert.AnError)
-	
+	backend.metricsCollector.RecordMetrics(100*time.Millisecond, false)
+	backend.metricsCollector.RecordError(assert.AnError)
+
 	// Get metrics copy
 	metrics := backend.GetMetrics()
-	
+
 	assert.Equal(t, int64(1), metrics.Requests)
 	assert.Equal(t, assert.AnError.Error(), metrics.LastError)
 	assert.False(t, metrics.LastErrorTime.IsZero())
@@ -137,27 +150,27 @@ func TestBackend_GetMetrics(t *testing.T) {
 func TestBackend_Operations_Mock(t *testing.T) {
 	// These are mock tests that demonstrate the interface
 	// without requiring actual S3 credentials
-	
+
 	t.Run("GetObjects_EmptyKeys", func(t *testing.T) {
 		backend := &Backend{
 			config: &Config{PoolSize: 4},
 		}
-		
+
 		ctx := context.Background()
 		result, err := backend.GetObjects(ctx, []string{})
-		
+
 		require.NoError(t, err)
 		assert.Empty(t, result)
 	})
-	
+
 	t.Run("PutObjects_EmptyObjects", func(t *testing.T) {
 		backend := &Backend{
 			config: &Config{PoolSize: 4},
 		}
-		
+
 		ctx := context.Background()
 		err := backend.PutObjects(ctx, map[string][]byte{})
-		
+
 		assert.NoError(t, err)
 	})
 }
@@ -167,12 +180,12 @@ func BenchmarkDetectContentType(b *testing.B) {
 	backend := &Backend{}
 	keys := []string{
 		"file.json",
-		"file.xml", 
+		"file.xml",
 		"file.txt",
 		"file.jpg",
 		"file.unknown",
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := keys[i%len(keys)]
@@ -181,11 +194,14 @@ func BenchmarkDetectContentType(b *testing.B) {
 }
 
 func BenchmarkRecordMetrics(b *testing.B) {
-	backend := &Backend{}
+	metricsCollector := NewMetricsCollector()
+	backend := &Backend{
+		metricsCollector: metricsCollector,
+	}
 	duration := 100 * time.Millisecond
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		backend.recordMetrics(duration, i%10 == 0) // 10% error rate
+		backend.metricsCollector.RecordMetrics(duration, i%10 == 0) // 10% error rate
 	}
 }

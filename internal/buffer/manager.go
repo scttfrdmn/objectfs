@@ -22,53 +22,53 @@ type Manager struct {
 type ManagerConfig struct {
 	// Buffer settings
 	WriteBufferConfig *WriteBufferConfig `yaml:"write_buffer"`
-	
+
 	// Manager settings
-	EnableMetrics     bool          `yaml:"enable_metrics"`
-	MetricsInterval   time.Duration `yaml:"metrics_interval"`
-	
+	EnableMetrics   bool          `yaml:"enable_metrics"`
+	MetricsInterval time.Duration `yaml:"metrics_interval"`
+
 	// Health monitoring
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
 	MaxErrorRate        float64       `yaml:"max_error_rate"`
 	AlertThreshold      int           `yaml:"alert_threshold"`
-	
+
 	// Advanced features
-	EnableCompression   bool    `yaml:"enable_compression"`
-	EnableDeduplication bool    `yaml:"enable_deduplication"`
-	EnableEncryptionn   bool    `yaml:"enable_encryption"`
-	CompressionLevel    int     `yaml:"compression_level"`
-	
+	EnableCompression   bool `yaml:"enable_compression"`
+	EnableDeduplication bool `yaml:"enable_deduplication"`
+	EnableEncryptionn   bool `yaml:"enable_encryption"`
+	CompressionLevel    int  `yaml:"compression_level"`
+
 	// Performance tuning
-	WorkerThreads       int           `yaml:"worker_threads"`
-	QueueSize          int           `yaml:"queue_size"`
-	BatchTimeout       time.Duration `yaml:"batch_timeout"`
+	WorkerThreads int           `yaml:"worker_threads"`
+	QueueSize     int           `yaml:"queue_size"`
+	BatchTimeout  time.Duration `yaml:"batch_timeout"`
 }
 
 // ManagerStats tracks manager-level statistics
 type ManagerStats struct {
 	WriteBufferStats WriteBufferStats `json:"write_buffer_stats"`
-	
+
 	// Manager-specific stats
-	TotalOperations  uint64        `json:"total_operations"`
-	SuccessfulOps    uint64        `json:"successful_ops"`
-	FailedOps        uint64        `json:"failed_ops"`
-	AverageLatency   time.Duration `json:"average_latency"`
-	ErrorRate        float64       `json:"error_rate"`
-	
+	TotalOperations uint64        `json:"total_operations"`
+	SuccessfulOps   uint64        `json:"successful_ops"`
+	FailedOps       uint64        `json:"failed_ops"`
+	AverageLatency  time.Duration `json:"average_latency"`
+	ErrorRate       float64       `json:"error_rate"`
+
 	// Health metrics
-	IsHealthy        bool      `json:"is_healthy"`
-	LastHealthCheck  time.Time `json:"last_health_check"`
-	ConsecutiveErrs  int       `json:"consecutive_errors"`
-	
+	IsHealthy       bool      `json:"is_healthy"`
+	LastHealthCheck time.Time `json:"last_health_check"`
+	ConsecutiveErrs int       `json:"consecutive_errors"`
+
 	// Resource usage
-	MemoryUsage      int64     `json:"memory_usage"`
-	ActiveBuffers    int       `json:"active_buffers"`
-	QueuedOperations int       `json:"queued_operations"`
-	
+	MemoryUsage      int64 `json:"memory_usage"`
+	ActiveBuffers    int   `json:"active_buffers"`
+	QueuedOperations int   `json:"queued_operations"`
+
 	// Performance metrics
-	ThroughputMBps   float64   `json:"throughput_mbps"`
-	CompressionRatio float64   `json:"compression_ratio"`
-	DedupeRatio      float64   `json:"dedupe_ratio"`
+	ThroughputMBps   float64 `json:"throughput_mbps"`
+	CompressionRatio float64 `json:"compression_ratio"`
+	DedupeRatio      float64 `json:"dedupe_ratio"`
 }
 
 // Operation represents a buffered operation
@@ -86,17 +86,17 @@ type Operation struct {
 func NewManager(config *ManagerConfig) (*Manager, error) {
 	if config == nil {
 		config = &ManagerConfig{
-			WriteBufferConfig: nil, // Will use defaults
-			EnableMetrics:     true,
-			MetricsInterval:   30 * time.Second,
+			WriteBufferConfig:   nil, // Will use defaults
+			EnableMetrics:       true,
+			MetricsInterval:     30 * time.Second,
 			HealthCheckInterval: time.Minute,
-			MaxErrorRate:      0.05, // 5%
-			AlertThreshold:    10,
-			EnableCompression: true,
-			CompressionLevel:  1,
-			WorkerThreads:     4,
-			QueueSize:         1000,
-			BatchTimeout:      100 * time.Millisecond,
+			MaxErrorRate:        0.05, // 5%
+			AlertThreshold:      10,
+			EnableCompression:   true,
+			CompressionLevel:    1,
+			WorkerThreads:       4,
+			QueueSize:           1000,
+			BatchTimeout:        100 * time.Millisecond,
 		}
 	}
 
@@ -132,7 +132,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.config.EnableMetrics {
 		go m.metricsLoop()
 	}
-	
+
 	go m.healthCheckLoop()
 
 	return nil
@@ -169,7 +169,7 @@ func (m *Manager) RegisterFlushCallback(pattern string, callback FlushCallback) 
 // Write performs a buffered write operation
 func (m *Manager) Write(ctx context.Context, key string, offset int64, data []byte, sync bool) error {
 	start := time.Now()
-	
+
 	m.mu.RLock()
 	if !m.started {
 		m.mu.RUnlock()
@@ -188,7 +188,7 @@ func (m *Manager) Write(ctx context.Context, key string, offset int64, data []by
 
 	// Perform the write
 	response := wb.WriteWithRequest(ctx, req)
-	
+
 	// Update stats
 	m.updateStats(start, response.Error)
 
@@ -298,13 +298,13 @@ func (m *Manager) matchesPattern(key, pattern string) bool {
 	if pattern == "*" {
 		return true
 	}
-	
+
 	// Check prefix match
 	if len(pattern) > 0 && pattern[len(pattern)-1] == '*' {
 		prefix := pattern[:len(pattern)-1]
 		return len(key) >= len(prefix) && key[:len(prefix)] == prefix
 	}
-	
+
 	// Exact match
 	return key == pattern
 }
@@ -348,9 +348,9 @@ func (m *Manager) updateStats(start time.Time, err error) {
 func (m *Manager) checkHealth() {
 	// Simple health check logic
 	m.stats.LastHealthCheck = time.Now()
-	
+
 	// Reset health if error rate is acceptable
-	if m.stats.ErrorRate <= m.config.MaxErrorRate && 
+	if m.stats.ErrorRate <= m.config.MaxErrorRate &&
 		m.stats.ConsecutiveErrs < m.config.AlertThreshold {
 		m.stats.IsHealthy = true
 	}
@@ -361,7 +361,7 @@ func (m *Manager) metricsLoop() {
 	if interval <= 0 {
 		interval = 30 * time.Second // Default metrics interval
 	}
-	
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -380,7 +380,7 @@ func (m *Manager) healthCheckLoop() {
 	if interval <= 0 {
 		interval = time.Minute // Default health check interval
 	}
-	
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -403,7 +403,7 @@ func (m *Manager) collectMetrics() {
 	if m.writeBuffer != nil {
 		wbStats := m.writeBuffer.GetStats()
 		m.stats.WriteBufferStats = wbStats
-		
+
 		// Calculate throughput
 		if wbStats.TotalFlushes > 0 && !wbStats.LastFlush.IsZero() {
 			timeSinceStart := time.Since(wbStats.LastFlush)
@@ -412,10 +412,10 @@ func (m *Manager) collectMetrics() {
 				m.stats.ThroughputMBps = bytesPerSecond / (1024 * 1024)
 			}
 		}
-		
+
 		// Update memory usage estimate
 		m.stats.MemoryUsage = wbStats.PendingBytes
-		m.stats.ActiveBuffers = int(wbStats.PendingWrites)
+		m.stats.ActiveBuffers = wbStats.PendingWrites
 		m.stats.CompressionRatio = wbStats.CompressionRatio
 	}
 }
@@ -426,7 +426,7 @@ func (m *Manager) collectMetrics() {
 func (m *Manager) EnableAdvancedFeatures() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	m.config.EnableCompression = true
 	m.config.EnableDeduplication = true
 }
