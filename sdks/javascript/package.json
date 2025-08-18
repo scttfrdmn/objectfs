@@ -1,0 +1,119 @@
+{
+  "name": "@objectfs/sdk",
+  "version": "0.1.0",
+  "description": "ObjectFS JavaScript/TypeScript SDK - High-performance POSIX filesystem for object storage",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "format": "prettier --write src/**/*.ts",
+    "format:check": "prettier --check src/**/*.ts",
+    "prepublishOnly": "npm run build",
+    "docs": "typedoc src/index.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/objectfs/objectfs.git",
+    "directory": "sdks/javascript"
+  },
+  "keywords": [
+    "filesystem",
+    "object-storage",
+    "s3",
+    "fuse",
+    "distributed",
+    "cache",
+    "performance",
+    "typescript",
+    "javascript"
+  ],
+  "author": "ObjectFS Team <team@objectfs.io>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/objectfs/objectfs/issues"
+  },
+  "homepage": "https://github.com/objectfs/objectfs/tree/main/sdks/javascript",
+  "dependencies": {
+    "axios": "^1.4.0",
+    "yaml": "^2.3.0",
+    "ws": "^8.13.0",
+    "eventemitter3": "^4.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/jest": "^29.5.0",
+    "@types/ws": "^8.5.0",
+    "@typescript-eslint/eslint-plugin": "^5.59.0",
+    "@typescript-eslint/parser": "^5.59.0",
+    "eslint": "^8.40.0",
+    "eslint-config-prettier": "^8.8.0",
+    "eslint-plugin-prettier": "^4.2.1",
+    "jest": "^29.5.0",
+    "prettier": "^2.8.8",
+    "ts-jest": "^29.1.0",
+    "typedoc": "^0.24.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/**/*.test.ts"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": [
+      "text",
+      "lcov",
+      "html"
+    ]
+  },
+  "prettier": {
+    "semi": true,
+    "trailingComma": "es5",
+    "singleQuote": true,
+    "printWidth": 80,
+    "tabWidth": 2
+  },
+  "eslintConfig": {
+    "parser": "@typescript-eslint/parser",
+    "extends": [
+      "eslint:recommended",
+      "@typescript-eslint/recommended",
+      "prettier"
+    ],
+    "plugins": [
+      "@typescript-eslint",
+      "prettier"
+    ],
+    "env": {
+      "node": true,
+      "es6": true
+    },
+    "rules": {
+      "prettier/prettier": "error",
+      "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+      "@typescript-eslint/explicit-function-return-type": "off",
+      "@typescript-eslint/explicit-module-boundary-types": "off",
+      "@typescript-eslint/no-explicit-any": "warn"
+    }
+  }
+}
