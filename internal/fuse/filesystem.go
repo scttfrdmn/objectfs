@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -37,23 +38,27 @@ func safeIntToUint32(i int) uint32 {
 // FileSystem implements the FUSE filesystem interface
 type FileSystem struct {
 	fs.Inode
-	
+
 	// Backend storage
 	backend types.Backend
 	cache   types.Cache
 	buffer  types.WriteBuffer
 	metrics types.MetricsCollector
-	
+
 	// Configuration
 	config *Config
-	
+
 	// Internal state
 	mu           sync.RWMutex
 	openFiles    map[uint64]*OpenFile
 	nextHandle   uint64
-	
+
 	// Performance tracking
 	stats        *Stats
+
+	// Performance optimizations
+	readAhead    *ReadAheadManager
+	writeCoalescer *WriteCoalescer
 }
 
 // Config represents FUSE filesystem configuration
@@ -62,20 +67,20 @@ type Config struct {
 	MountPoint   string `yaml:"mount_point"`
 	ReadOnly     bool   `yaml:"read_only"`
 	AllowOther   bool   `yaml:"allow_other"`
-	
+
 	// FUSE options
 	DirectIO     bool   `yaml:"direct_io"`
 	KeepCache    bool   `yaml:"keep_cache"`
 	BigWrites    bool   `yaml:"big_writes"`
 	MaxRead      uint32 `yaml:"max_read"`
 	MaxWrite     uint32 `yaml:"max_write"`
-	
+
 	// Filesystem behavior
 	DefaultUID   uint32        `yaml:"default_uid"`
 	DefaultGID   uint32        `yaml:"default_gid"`
 	DefaultMode  uint32        `yaml:"default_mode"`
 	CacheTTL     time.Duration `yaml:"cache_ttl"`
-	
+
 	// Performance settings
 	ReadAhead    uint32 `yaml:"read_ahead"`
 	WriteBuffer  uint32 `yaml:"write_buffer"`
@@ -90,7 +95,7 @@ type OpenFile struct {
 	size     int64
 	modified bool
 	dirty    bool
-	
+
 	// Access tracking
 	lastAccess time.Time
 	accessCount int64
@@ -99,7 +104,7 @@ type OpenFile struct {
 // Stats tracks filesystem operation statistics
 type Stats struct {
 	mu             sync.RWMutex
-	
+
 	// Operation counts
 	Lookups        int64 `json:"lookups"`
 	Opens          int64 `json:"opens"`
@@ -107,18 +112,18 @@ type Stats struct {
 	Writes         int64 `json:"writes"`
 	Creates        int64 `json:"creates"`
 	Deletes        int64 `json:"deletes"`
-	
+
 	// Data transfer
 	BytesRead      int64 `json:"bytes_read"`
 	BytesWritten   int64 `json:"bytes_written"`
-	
+
 	// Cache statistics
 	CacheHits      int64 `json:"cache_hits"`
 	CacheMisses    int64 `json:"cache_misses"`
-	
+
 	// Error counts
 	Errors         int64 `json:"errors"`
-	
+
 	// Performance metrics
 	AvgReadTime    time.Duration `json:"avg_read_time"`
 	AvgWriteTime   time.Duration `json:"avg_write_time"`
@@ -139,7 +144,7 @@ func NewFileSystem(backend types.Backend, cache types.Cache, buffer types.WriteB
 		}
 	}
 
-	return &FileSystem{
+	filesystem := &FileSystem{
 		backend:    backend,
 		cache:      cache,
 		buffer:     buffer,
@@ -149,6 +154,12 @@ func NewFileSystem(backend types.Backend, cache types.Cache, buffer types.WriteB
 		nextHandle: 1,
 		stats:      &Stats{},
 	}
+
+	// Initialize performance optimizations
+	filesystem.readAhead = NewReadAheadManager(filesystem, nil)
+	filesystem.writeCoalescer = NewWriteCoalescer(filesystem, nil)
+
+	return filesystem
 }
 
 // Root returns the root inode
@@ -163,7 +174,7 @@ func (fs *FileSystem) Root() fs.InodeEmbedder {
 func (fs *FileSystem) GetStats() *Stats {
 	fs.stats.mu.RLock()
 	defer fs.stats.mu.RUnlock()
-	
+
 	return &Stats{
 		Lookups:      fs.stats.Lookups,
 		Opens:        fs.stats.Opens,
@@ -196,13 +207,13 @@ func (n *DirectoryNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	n.fs.stats.mu.Unlock()
 
 	childPath := n.joinPath(name)
-	
+
 	// Check cache first
 	if cachedInfo := n.fs.getCachedInfo(childPath); cachedInfo != nil {
 		n.fs.stats.mu.Lock()
 		n.fs.stats.CacheHits++
 		n.fs.stats.mu.Unlock()
-		
+
 		return n.createChildNode(name, cachedInfo), 0
 	}
 
@@ -213,13 +224,13 @@ func (n *DirectoryNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		n.fs.stats.Errors++
 		n.fs.stats.CacheMisses++
 		n.fs.stats.mu.Unlock()
-		
+
 		// Try as directory by listing
 		objects, listErr := n.fs.backend.ListObjects(ctx, childPath+"/", 1)
 		if listErr != nil || len(objects) == 0 {
 			return nil, syscall.ENOENT
 		}
-		
+
 		// It's a directory
 		return n.createDirectoryNode(name, childPath), 0
 	}
@@ -246,7 +257,7 @@ func (n *DirectoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 		n.fs.stats.mu.Lock()
 		n.fs.stats.Errors++
 		n.fs.stats.mu.Unlock()
-		
+
 		log.Printf("Readdir failed for %s: %v", n.path, err)
 		return nil, syscall.EIO
 	}
@@ -257,7 +268,7 @@ func (n *DirectoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 	for _, obj := range objects {
 		// Remove prefix to get relative name
 		name := strings.TrimPrefix(obj.Key, prefix)
-		
+
 		// Handle nested directories
 		if slashIdx := strings.Index(name, "/"); slashIdx != -1 {
 			// This is a subdirectory
@@ -288,19 +299,66 @@ func (n *DirectoryNode) Mkdir(ctx context.Context, name string, mode uint32, out
 	}
 
 	childPath := n.joinPath(name) + "/"
-	
+
 	// Create an empty object to represent the directory
 	err := n.fs.backend.PutObject(ctx, childPath, []byte{})
 	if err != nil {
 		n.fs.stats.mu.Lock()
 		n.fs.stats.Errors++
 		n.fs.stats.mu.Unlock()
-		
+
 		log.Printf("Mkdir failed for %s: %v", childPath, err)
 		return nil, syscall.EIO
 	}
 
 	return n.createDirectoryNode(name, childPath), 0
+}
+
+// Create creates a new file
+func (n *DirectoryNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	if n.fs.config.ReadOnly {
+		return nil, nil, 0, syscall.EROFS
+	}
+
+	childPath := n.joinPath(name)
+
+	// Create empty file in backend
+	err := n.fs.backend.PutObject(ctx, childPath, []byte{})
+	if err != nil {
+		n.fs.stats.mu.Lock()
+		n.fs.stats.Errors++
+		n.fs.stats.mu.Unlock()
+
+		log.Printf("Create failed for %s: %v", childPath, err)
+		return nil, nil, 0, syscall.EIO
+	}
+
+	n.fs.stats.mu.Lock()
+	n.fs.stats.Creates++
+	n.fs.stats.mu.Unlock()
+
+	// Create object info for new file
+	info := &types.ObjectInfo{
+		Key:          childPath,
+		Size:         0,
+		LastModified: time.Now(),
+	}
+
+	// Create file node
+	fileNode := &FileNode{
+		fs:   n.fs,
+		path: childPath,
+		info: info,
+	}
+
+	node = n.NewInode(ctx, fileNode, fs.StableAttr{
+		Mode: fuse.S_IFREG,
+	})
+
+	// Open the file immediately
+	fh, fuseFlags, errno = fileNode.Open(ctx, flags)
+
+	return node, fh, fuseFlags, errno
 }
 
 // FileNode represents a file in the filesystem
@@ -325,7 +383,7 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 	f.fs.mu.Lock()
 	handle := f.fs.nextHandle
 	f.fs.nextHandle++
-	
+
 	openFile := &OpenFile{
 		path:        f.path,
 		flags:       flags,
@@ -334,7 +392,7 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 		lastAccess:  time.Now(),
 		accessCount: 1,
 	}
-	
+
 	f.fs.openFiles[handle] = openFile
 	f.fs.mu.Unlock()
 
@@ -352,13 +410,13 @@ func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	out.Size = safeInt64ToUint64(f.info.Size)
 	out.Uid = f.fs.config.DefaultUID
 	out.Gid = f.fs.config.DefaultGID
-	
+
 	// Safely convert Unix timestamp to prevent integer overflow
 	unixTime := f.info.LastModified.Unix()
 	out.Mtime = safeInt64ToUint64(unixTime)
 	out.Atime = safeInt64ToUint64(unixTime)
 	out.Ctime = safeInt64ToUint64(unixTime)
-	
+
 	return 0
 }
 
@@ -390,7 +448,7 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		fh.fs.stats.CacheHits++
 		fh.fs.stats.BytesRead += int64(len(cachedData))
 		fh.fs.stats.mu.Unlock()
-		
+
 		return fuse.ReadResultData(cachedData), 0
 	}
 
@@ -401,7 +459,7 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		fh.fs.stats.Errors++
 		fh.fs.stats.CacheMisses++
 		fh.fs.stats.mu.Unlock()
-		
+
 		log.Printf("Read failed for %s at offset %d: %v", fh.file.path, off, err)
 		return nil, syscall.EIO
 	}
@@ -417,6 +475,11 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	// Record metrics
 	if fh.fs.metrics != nil {
 		fh.fs.metrics.RecordCacheMiss(fh.file.path, int64(len(data)))
+	}
+
+	// Trigger read-ahead analysis
+	if fh.fs.readAhead != nil {
+		fh.fs.readAhead.OnRead(fh.file.path, off, int64(len(data)))
 	}
 
 	return fuse.ReadResultData(data), 0
@@ -443,15 +506,23 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 	fh.file.dirty = true
 	fh.file.lastAccess = time.Now()
 
-	// Use write buffer for efficiency
-	err := fh.fs.buffer.Write(fh.file.path, off, data)
-	if err != nil {
-		fh.fs.stats.mu.Lock()
-		fh.fs.stats.Errors++
-		fh.fs.stats.mu.Unlock()
-		
-		log.Printf("Write failed for %s at offset %d: %v", fh.file.path, off, err)
-		return 0, syscall.EIO
+	// Try write coalescing first
+	coalesced := false
+	if fh.fs.writeCoalescer != nil {
+		coalesced = fh.fs.writeCoalescer.CoalesceWrite(fh.file.path, off, data)
+	}
+
+	if !coalesced {
+		// Use write buffer for efficiency
+		err := fh.fs.buffer.Write(fh.file.path, off, data)
+		if err != nil {
+			fh.fs.stats.mu.Lock()
+			fh.fs.stats.Errors++
+			fh.fs.stats.mu.Unlock()
+
+			log.Printf("Write failed for %s at offset %d: %v", fh.file.path, off, err)
+			return 0, syscall.EIO
+		}
 	}
 
 	// Update file size if we wrote past the end
@@ -474,7 +545,7 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 		fh.fs.stats.mu.Lock()
 		fh.fs.stats.Errors++
 		fh.fs.stats.mu.Unlock()
-		
+
 		log.Printf("Flush failed for %s: %v", fh.file.path, err)
 		return syscall.EIO
 	}
@@ -485,6 +556,11 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 
 // Release releases the file handle
 func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
+	// Flush any coalesced writes first
+	if fh.fs.writeCoalescer != nil {
+		fh.fs.writeCoalescer.FlushAll()
+	}
+
 	// Flush any pending writes
 	if fh.file.dirty {
 		_ = fh.Flush(ctx)
@@ -509,13 +585,13 @@ func (n *DirectoryNode) joinPath(name string) string {
 
 func (n *DirectoryNode) createChildNode(name string, info *types.ObjectInfo) *fs.Inode {
 	childPath := n.joinPath(name)
-	
+
 	fileNode := &FileNode{
 		fs:   n.fs,
 		path: childPath,
 		info: info,
 	}
-	
+
 	return n.NewInode(context.Background(), fileNode, fs.StableAttr{
 		Mode: fuse.S_IFREG,
 	})
@@ -526,7 +602,7 @@ func (n *DirectoryNode) createDirectoryNode(name, path string) *fs.Inode {
 		fs:   n.fs,
 		path: path,
 	}
-	
+
 	return n.NewInode(context.Background(), dirNode, fs.StableAttr{
 		Mode: fuse.S_IFDIR,
 	})
@@ -535,20 +611,33 @@ func (n *DirectoryNode) createDirectoryNode(name, path string) *fs.Inode {
 // Helper methods for FileSystem
 
 func (fs *FileSystem) getCachedInfo(path string) *types.ObjectInfo {
-	// This would interface with the cache system
-	// For now, return nil (cache miss)
+	// Try to get metadata from cache
+	if fs.cache != nil {
+		// Use a special metadata key prefix
+		metaKey := "__meta__" + path
+		if cachedData := fs.cache.Get(metaKey, 0, 1024); cachedData != nil {
+			// In a real implementation, deserialize ObjectInfo from cached data
+			// For now, return nil to force backend lookup
+		}
+	}
 	return nil
 }
 
 func (fs *FileSystem) cacheInfo(path string, info *types.ObjectInfo) {
-	// This would interface with the cache system
-	// Store metadata in cache
+	if fs.cache != nil && info != nil {
+		// Use a special metadata key prefix
+		metaKey := "__meta__" + path
+		// In a real implementation, serialize ObjectInfo to bytes
+		// For now, just cache a placeholder
+		metaData := []byte(fmt.Sprintf("%d:%d", info.Size, info.LastModified.Unix()))
+		fs.cache.Put(metaKey, 0, metaData)
+	}
 }
 
 func (fs *FileSystem) recordLookupTime(duration time.Duration) {
 	fs.stats.mu.Lock()
 	defer fs.stats.mu.Unlock()
-	
+
 	if fs.stats.Lookups == 1 {
 		fs.stats.AvgLookupTime = duration
 	} else {
@@ -561,7 +650,7 @@ func (fs *FileSystem) recordLookupTime(duration time.Duration) {
 func (fs *FileSystem) recordReadTime(duration time.Duration) {
 	fs.stats.mu.Lock()
 	defer fs.stats.mu.Unlock()
-	
+
 	if fs.stats.Reads == 1 {
 		fs.stats.AvgReadTime = duration
 	} else {
@@ -574,7 +663,7 @@ func (fs *FileSystem) recordReadTime(duration time.Duration) {
 func (fs *FileSystem) recordWriteTime(duration time.Duration) {
 	fs.stats.mu.Lock()
 	defer fs.stats.mu.Unlock()
-	
+
 	if fs.stats.Writes == 1 {
 		fs.stats.AvgWriteTime = duration
 	} else {

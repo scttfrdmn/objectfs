@@ -25,13 +25,13 @@ type WriteBufferConfig struct {
 	MaxBuffers       int           `yaml:"max_buffers"`
 	FlushInterval    time.Duration `yaml:"flush_interval"`
 	FlushThreshold   int64         `yaml:"flush_threshold"`
-	
+
 	// Performance settings
 	AsyncFlush       bool          `yaml:"async_flush"`
 	BatchSize        int           `yaml:"batch_size"`
 	MaxWriteDelay    time.Duration `yaml:"max_write_delay"`
 	CompressionLevel int           `yaml:"compression_level"`
-	
+
 	// Reliability settings
 	SyncOnClose      bool          `yaml:"sync_on_close"`
 	VerifyWrites     bool          `yaml:"verify_writes"`
@@ -176,7 +176,7 @@ func (wb *WriteBuffer) WriteWithRequest(ctx context.Context, req *WriteRequest) 
 		// Buffer the write
 		response.Buffered = true
 		response.BytesWritten = len(req.Data)
-		
+
 		wb.appendToBuffer(buf, req)
 		wb.stats.PendingWrites++
 		wb.stats.PendingBytes += int64(len(req.Data))
@@ -222,11 +222,11 @@ func (wb *WriteBuffer) Sync(ctx context.Context) error {
 			wb.mu.RLock()
 			pendingCount := len(wb.buffers)
 			wb.mu.RUnlock()
-			
+
 			if pendingCount == 0 {
 				return nil
 			}
-			
+
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -239,7 +239,7 @@ func (wb *WriteBuffer) GetStats() WriteBufferStats {
 
 	stats := wb.stats
 	stats.PendingWrites = len(wb.buffers)
-	
+
 	// Calculate pending bytes
 	stats.PendingBytes = 0
 	for _, buf := range wb.buffers {
@@ -268,7 +268,7 @@ func (wb *WriteBuffer) Close() error {
 func (wb *WriteBuffer) canBufferWrite(buf *buffer, req *WriteRequest) bool {
 	buf.mu.RLock()
 	defer buf.mu.RUnlock()
-	
+
 	// Check if adding this write would exceed buffer size
 	newSize := int64(len(buf.data)) + int64(len(req.Data))
 	if newSize > wb.config.MaxBufferSize {
@@ -289,7 +289,7 @@ func (wb *WriteBuffer) canBufferWrite(buf *buffer, req *WriteRequest) bool {
 func (wb *WriteBuffer) appendToBuffer(buf *buffer, req *WriteRequest) {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
-	
+
 	if len(buf.data) == 0 {
 		buf.offset = req.Offset
 	}
@@ -303,7 +303,7 @@ func (wb *WriteBuffer) appendToBuffer(buf *buffer, req *WriteRequest) {
 func (wb *WriteBuffer) shouldFlushBuffer(buf *buffer) bool {
 	buf.mu.RLock()
 	defer buf.mu.RUnlock()
-	
+
 	// Flush if buffer size exceeds threshold
 	if int64(len(buf.data)) >= wb.config.FlushThreshold {
 		return true
@@ -386,11 +386,11 @@ func (wb *WriteBuffer) flushBuffer(key string, callback FlushCallback) {
 	wb.mu.Lock()
 	buf, exists := wb.buffers[key]
 	wb.mu.Unlock()
-	
+
 	if !exists {
 		return
 	}
-	
+
 	buf.mu.Lock()
 	if !buf.dirty || buf.flushing {
 		buf.mu.Unlock()
@@ -406,7 +406,7 @@ func (wb *WriteBuffer) flushBuffer(key string, callback FlushCallback) {
 	// Perform the actual flush
 	start := time.Now()
 	var err error
-	
+
 	if callback != nil {
 		err = callback(key, data, offset)
 	}
@@ -422,7 +422,7 @@ func (wb *WriteBuffer) flushBuffer(key string, callback FlushCallback) {
 		wb.stats.PendingWrites--
 		wb.stats.PendingBytes -= int64(len(data))
 		wb.stats.LastFlush = time.Now()
-		
+
 		// Update average flush time
 		if wb.stats.TotalFlushes == 1 {
 			wb.stats.AvgFlushTime = flushTime
@@ -436,13 +436,13 @@ func (wb *WriteBuffer) flushBuffer(key string, callback FlushCallback) {
 		// Flush failed, mark buffer as not flushing for retry
 		buf, stillExists := wb.buffers[key]
 		wb.mu.Unlock()
-		
+
 		if stillExists {
 			buf.mu.Lock()
 			buf.flushing = false
 			buf.mu.Unlock()
 		}
-		
+
 		wb.mu.Lock()
 		wb.stats.Errors++
 		wb.mu.Unlock()
