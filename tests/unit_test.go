@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,8 +111,11 @@ func TestMultiLevelCacheUnit(t *testing.T) {
 
 // Unit tests for write buffer system
 func TestWriteBufferUnit(t *testing.T) {
+	var flushedDataMu sync.RWMutex
 	flushedData := make(map[string][]byte)
 	flushCallback := func(key string, data []byte, offset int64) error {
+		flushedDataMu.Lock()
+		defer flushedDataMu.Unlock()
 		flushedData[key] = make([]byte, len(data))
 		copy(flushedData[key], data)
 		return nil
@@ -189,8 +193,11 @@ func TestWriteBufferUnit(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Sync data should be flushed
+	flushedDataMu.RLock()
 	assert.Contains(t, flushedData, syncKey)
-	assert.Equal(t, syncData, flushedData[syncKey])
+	actualData := flushedData[syncKey]
+	flushedDataMu.RUnlock()
+	assert.Equal(t, syncData, actualData)
 
 	// Test buffer stats
 	stats := writeBuffer.GetStats()
@@ -339,7 +346,7 @@ func TestMetricsCollectorUnit(t *testing.T) {
 
 	// Verify operations were recorded
 	assert.Contains(t, metrics, "operations")
-	
+
 	// Test reset
 	collector.ResetMetrics()
 	metricsAfterReset := collector.GetMetrics()
