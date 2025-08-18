@@ -1,0 +1,183 @@
+version: '3.8'
+
+services:
+  # ObjectFS Documentation Platform
+  docs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_DATE: ${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}
+        VERSION: ${VERSION:-latest}
+        VCS_REF: ${VCS_REF:-$(git rev-parse --short HEAD)}
+    container_name: objectfs-docs
+    ports:
+    - 3001:3001
+    environment:
+    - NODE_ENV=production
+    - API_PORT=3001
+    - OBJECTFS_API_BASE=http://objectfs:8081
+    - ENABLE_CODE_EXECUTION=true
+    - CORS_ORIGIN=${CORS_ORIGIN:-*}
+    - RATE_LIMIT_MAX=100
+    - RATE_LIMIT_WINDOW_MS=900000
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - docs-cache:/app/cache
+    - docs-logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:3001/api/health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+    - objectfs
+    networks:
+    - objectfs-net
+
+  # ObjectFS Core Service (for API playground)
+  objectfs:
+    image: objectfs/objectfs:latest
+    container_name: objectfs-core
+    ports:
+    - 8081:8081      # Health/API port
+    - 9090:9090      # Metrics port
+    environment:
+    - OBJECTFS_LOG_LEVEL=info
+    - OBJECTFS_CACHE_SIZE=2GB
+    - OBJECTFS_METRICS_ENABLED=true
+    - OBJECTFS_HEALTH_CHECK_ADDR=:8081
+    - OBJECTFS_METRICS_ADDR=:9090
+      # AWS Configuration (set via .env)
+    - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+    - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    - AWS_REGION=${AWS_REGION:-us-east-1}
+    volumes:
+    - objectfs-data:/mnt/objectfs
+    - objectfs-cache:/var/cache/objectfs
+    - objectfs-logs:/var/log/objectfs
+    restart: unless-stopped
+    privileged: true  # Required for FUSE mounting
+    cap_add:
+    - SYS_ADMIN
+    devices:
+    - /dev/fuse:/dev/fuse
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:8081/health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+    - objectfs-net
+
+  # Reverse Proxy (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: objectfs-proxy
+    ports:
+    - 80:80
+    - 443:443
+    volumes:
+    - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    - ./ssl:/etc/nginx/ssl:ro
+    - nginx-cache:/var/cache/nginx
+    - nginx-logs:/var/log/nginx
+    restart: unless-stopped
+    depends_on:
+    - docs
+    networks:
+    - objectfs-net
+    - default
+    profiles:
+    - production
+
+  # Prometheus (optional monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: objectfs-prometheus
+    ports:
+    - 9091:9090
+    volumes:
+    - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - prometheus-data:/prometheus
+    command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    - --storage.tsdb.path=/prometheus
+    - --web.console.libraries=/usr/share/prometheus/console_libraries
+    - --web.console.templates=/usr/share/prometheus/consoles
+    - --storage.tsdb.retention.time=168h
+    - --web.enable-lifecycle
+    restart: unless-stopped
+    depends_on:
+    - objectfs
+    networks:
+    - objectfs-net
+    profiles:
+    - monitoring
+
+  # Grafana (optional monitoring)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: objectfs-grafana
+    ports:
+    - 3000:3000
+    environment:
+    - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+    - grafana-data:/var/lib/grafana
+    - ./grafana/dashboards:/var/lib/grafana/dashboards
+    - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+    depends_on:
+    - prometheus
+    networks:
+    - objectfs-net
+    profiles:
+    - monitoring
+
+  # Redis (for caching and sessions)
+  redis:
+    image: redis:7-alpine
+    container_name: objectfs-redis
+    ports:
+    - 6379:6379
+    volumes:
+    - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    networks:
+    - objectfs-net
+    profiles:
+    - caching
+
+volumes:
+  docs-cache:
+    driver: local
+  docs-logs:
+    driver: local
+  objectfs-data:
+    driver: local
+  objectfs-cache:
+    driver: local
+  objectfs-logs:
+    driver: local
+  nginx-cache:
+    driver: local
+  nginx-logs:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  objectfs-net:
+    driver: bridge
+    ipam:
+      config:
+      - subnet: 172.20.0.0/16

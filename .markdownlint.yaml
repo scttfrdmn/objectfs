@@ -1,0 +1,23 @@
+# Markdownlint configuration for ObjectFS
+# Allows documentation platform specific formatting
+
+# Line length - allow longer lines for documentation URLs and component usage
+MD013:
+  # Allow longer lines in documentation
+  line_length: 120
+  # Ignore code blocks, tables, and headings
+  code_blocks: false
+  tables: false
+  headings: false
+
+# Allow inline HTML for Vue components in VitePress
+MD033: false
+
+# Allow duplicate headings as they may be in different contexts
+MD024: false
+
+# Allow fenced code blocks without language (for configuration examples)
+MD040: false
+
+# Allow indented code blocks for structured documentation
+MD046: false
