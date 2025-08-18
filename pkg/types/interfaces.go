@@ -12,16 +12,25 @@ type Backend interface {
 	PutObject(ctx context.Context, key string, data []byte) error
 	DeleteObject(ctx context.Context, key string) error
 	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
-	
+
 	// Batch operations
 	GetObjects(ctx context.Context, keys []string) (map[string][]byte, error)
 	PutObjects(ctx context.Context, objects map[string][]byte) error
-	
+
 	// List operations
 	ListObjects(ctx context.Context, prefix string, limit int) ([]ObjectInfo, error)
-	
+
 	// Health check
 	HealthCheck(ctx context.Context) error
+}
+
+// DistributedCoordinator manages distributed operations across cluster nodes
+type DistributedCoordinator interface {
+	// Execute a distributed operation
+	ExecuteOperation(ctx context.Context, op interface{}) (interface{}, error)
+
+	// Get coordinator statistics
+	GetStats() map[string]interface{}
 }
 
 // Cache defines the caching interface
