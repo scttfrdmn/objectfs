@@ -7,7 +7,7 @@
 import { EventEmitter } from 'eventemitter3';
 import { Configuration } from './config';
 import { MountManager } from './mount';
-import { StorageAdapter } from './storage';
+import { S3StorageAdapter } from './storage';
 import { MetricsCollector, HealthChecker } from './monitoring';
 import {
   ObjectFSError,
@@ -47,7 +47,7 @@ export class ObjectFSClient extends EventEmitter {
   private retries: number;
 
   private mountManager: MountManager;
-  private storageAdapter: StorageAdapter;
+  private storageAdapter: S3StorageAdapter;
   private metricsCollector: MetricsCollector;
   private healthChecker: HealthChecker;
 
@@ -64,7 +64,7 @@ export class ObjectFSClient extends EventEmitter {
     this.retries = options.retries || 3;
 
     this.mountManager = new MountManager(this.binaryPath, this.config);
-    this.storageAdapter = new StorageAdapter(this.config.storage);
+    this.storageAdapter = new S3StorageAdapter(this.config.storage);
     this.metricsCollector = new MetricsCollector(this.timeout);
     this.healthChecker = new HealthChecker(this.timeout, this.retries);
 

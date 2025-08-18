@@ -14,7 +14,7 @@ ObjectFS follows a layered architecture with well-defined interfaces between com
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│            Core Adapter Layer              │  
+	│            Core Adapter Layer              │
 	│           (internal/adapter)               │
 	└─────────────────────────────────────────────┘
 	          │        │        │        │
@@ -28,7 +28,7 @@ ObjectFS follows a layered architecture with well-defined interfaces between com
 The package defines several critical interfaces that enable loose coupling and testability:
 
 Backend Interface:
-Abstracts object storage operations (S3, GCS, Azure Blob) with support for both
+Abstracts AWS S3 storage operations with support for both
 individual and batch operations. Implementations handle storage-specific details
 while providing a uniform API.
 
@@ -109,7 +109,7 @@ Using configuration types:
 All interfaces in this package follow these principles:
 
 1. Context Awareness: Operations accept context.Context for cancellation and timeouts
-2. Error Handling: All operations return explicit errors following Go conventions  
+2. Error Handling: All operations return explicit errors following Go conventions
 3. Range Operations: Support efficient partial reads with offset/size parameters
 4. Batch Operations: Provide batch variants for improved performance when applicable
 5. Statistics: Include statistics and monitoring capabilities where appropriate
@@ -119,7 +119,7 @@ All interfaces in this package follow these principles:
 The interfaces are designed with performance in mind:
 
 - Range-based operations minimize data transfer
-- Batch operations reduce API call overhead  
+- Batch operations reduce API call overhead
 - Asynchronous patterns supported through contexts
 - Statistics collection enables performance monitoring and tuning
 - Configuration supports performance profiling (low/medium/high latency)
@@ -138,10 +138,10 @@ implemented. Implementers must ensure:
 
 The configuration system supports multiple sources with precedence:
 
-	1. Default values (lowest priority)
-	2. Configuration files (YAML)
-	3. Environment variables
-	4. Runtime overrides (highest priority)
+ 1. Default values (lowest priority)
+ 2. Configuration files (YAML)
+ 3. Environment variables
+ 4. Runtime overrides (highest priority)
 
 # Monitoring Integration
 

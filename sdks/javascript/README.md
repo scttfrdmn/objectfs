@@ -9,7 +9,7 @@ JavaScript/TypeScript API support.
 - **Easy Integration**: Simple, intuitive API for mounting and managing
   ObjectFS instances
 - **Promise-based**: Modern async/await support for all operations
-- **Multiple Backends**: Support for S3, Google Cloud Storage, and Azure Blob Storage
+- **AWS S3 Deep Integration**: Optimized specifically for AWS S3 with intelligent tiering and cost management
 - **Distributed Operations**: Built-in support for distributed clusters and replication
 - **Monitoring & Metrics**: Comprehensive health checking and metrics collection
 - **Event-driven**: EventEmitter-based architecture for real-time updates

@@ -9,7 +9,7 @@ Before you begin, ensure you have:
 
 - Linux, macOS, or Windows with WSL2
 - Root access (for FUSE mounting)
-- An object storage account (AWS S3, Google Cloud Storage, or Azure Blob Storage)
+- An AWS account with S3 access
 - Basic familiarity with command-line operations
 
 ## Installation
@@ -82,7 +82,7 @@ makepkg -si
 
 ## First Mount
 
-Let's mount your first object storage bucket as a local filesystem.
+Let's mount your first S3 bucket as a local filesystem.
 
 ### 1. Set Up Credentials
 
@@ -102,34 +102,6 @@ aws configure
 
 </CodeRunner>
 
-#### Google Cloud Storage
-
-<CodeRunner language="bash">
-
-```bash
-# Authenticate with Google Cloud
-gcloud auth application-default login
-
-# Set project
-gcloud config set project your-project-id
-```
-
-</CodeRunner>
-
-#### Azure Blob Storage
-
-<CodeRunner language="bash">
-
-```bash
-# Set Azure credentials
-export AZURE_STORAGE_ACCOUNT="your-account"
-export AZURE_STORAGE_KEY="your-key"
-
-# Or use Azure CLI
-az login
-```
-
-</CodeRunner>
 
 ### 2. Create a Mount Point
 

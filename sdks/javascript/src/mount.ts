@@ -322,9 +322,9 @@ export class MountManager {
       throw new MountError('Storage URI cannot be empty');
     }
 
-    // Validate storage URI format
-    if (!storageUri.match(/^(s3|gs|az):\/\/.+/)) {
-      throw new MountError(`Unsupported storage URI: ${storageUri}`);
+    // Validate S3 URI format
+    if (!storageUri.match(/^s3:\/\/.+/)) {
+      throw new MountError(`Only S3 URIs are supported. Got: ${storageUri}`);
     }
 
     // Validate mount point

@@ -1,17 +1,16 @@
 # Introduction to ObjectFS
 
-ObjectFS is a high-performance POSIX filesystem that provides seamless access to object
-storage backends like AWS S3, Google Cloud Storage, and Azure Blob Storage. It bridges
-the gap between traditional filesystems and modern cloud storage, offering the best
-of both worlds.
+ObjectFS is a high-performance POSIX filesystem that provides seamless access to AWS S3.
+It bridges the gap between traditional filesystems and S3 object storage, offering the best
+of both worlds with deep S3 optimizations.
 
 ## What is ObjectFS?
 
-ObjectFS uses FUSE (Filesystem in Userspace) to mount object storage buckets as local directories. This means you can:
+ObjectFS uses FUSE (Filesystem in Userspace) to mount S3 buckets as local directories. This means you can:
 
-- **Use standard file operations** (`ls`, `cat`, `cp`, `mv`, etc.) on cloud storage
-- **Run existing applications** without modification
-- **Access massive datasets** stored in object storage as if they were local files
+- **Use standard file operations** (`ls`, `cat`, `cp`, `mv`, etc.) on S3
+- **Run existing applications** without modification  
+- **Access massive datasets** stored in S3 as if they were local files
 - **Benefit from advanced caching** and performance optimizations
 
 ## Key Features
@@ -30,12 +29,12 @@ ObjectFS uses FUSE (Filesystem in Userspace) to mount object storage buckets as 
 - **Multiple mounting options** for different use cases
 - **Hot configuration reloading** without unmounting
 
-### 🌐 Multi-Cloud Support
+### 🚀 S3 Deep Integration
 
-- **AWS S3** with full feature support including storage classes
-- **Google Cloud Storage** with lifecycle management
-- **Azure Blob Storage** with hot/cool/archive tiers
-- **Cost optimization** with automatic tiering
+- **AWS S3 storage classes** with intelligent tiering support
+- **S3 Transfer Acceleration** for faster uploads/downloads
+- **S3 lifecycle management** integration
+- **Cost optimization** with automatic S3 tiering and storage class transitions
 
 ### 🏗️ Enterprise Ready
 
@@ -55,8 +54,6 @@ graph TB
     D --> F[L1 Memory Cache]
     D --> G[L2 Persistent Cache]
     E --> H[AWS S3]
-    E --> I[Google Cloud Storage]
-    E --> J[Azure Blob Storage]
     C --> K[Distributed Coordinator]
     K --> L[Cluster Nodes]
 ```
@@ -65,14 +62,14 @@ graph TB
 
 1. **FUSE Interface**: Translates POSIX filesystem calls to ObjectFS operations
 2. **Cache Layer**: Multi-level caching system with intelligent prefetching
-3. **Storage Adapters**: Unified interface for different object storage backends
+3. **S3 Adapter**: Optimized interface exclusively for AWS S3 with intelligent tiering
 4. **Distributed Coordinator**: Manages cluster membership and data consistency
 
 ## Use Cases
 
 ### Data Science & Machine Learning
 
-- Access training datasets stored in object storage
+- Access training datasets stored in S3
 - Stream large models and data files efficiently
 - Collaborative data sharing across teams
 - Cost-effective storage for experimental data
@@ -86,10 +83,10 @@ graph TB
 
 ### Media & Content Processing
 
-- Video transcoding from cloud storage
-- Image processing pipelines
-- Content distribution workflows
-- Digital asset management
+- Video transcoding from S3 storage
+- Image processing pipelines with S3 integration
+- Content distribution workflows using S3
+- Digital asset management with S3 lifecycle policies
 
 ### Backup & Archive
 

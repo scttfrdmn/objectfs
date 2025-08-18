@@ -62,20 +62,20 @@ and performance analytics for operational visibility.
 The adapter implements a structured startup and shutdown sequence:
 
 Startup Sequence:
-	1. Configuration validation and parsing
-	2. Metrics collector initialization
-	3. S3 backend connection establishment
-	4. Multi-level cache system initialization
-	5. Write buffer configuration and startup
-	6. Platform-specific FUSE filesystem mounting
-	7. Health monitoring activation
+ 1. Configuration validation and parsing
+ 2. Metrics collector initialization
+ 3. S3 backend connection establishment
+ 4. Multi-level cache system initialization
+ 5. Write buffer configuration and startup
+ 6. Platform-specific FUSE filesystem mounting
+ 7. Health monitoring activation
 
 Shutdown Sequence:
-	1. FUSE filesystem unmounting
-	2. Write buffer flushing and closure
-	3. Backend connection cleanup
-	4. Cache persistence and cleanup
-	5. Metrics collection finalization
+ 1. FUSE filesystem unmounting
+ 2. Write buffer flushing and closure
+ 3. Backend connection cleanup
+ 4. Cache persistence and cleanup
+ 5. Metrics collection finalization
 
 # Configuration Integration
 
@@ -107,9 +107,9 @@ Basic adapter lifecycle:
 
 	// Create adapter
 	adapter, err := adapter.New(
-		ctx, 
-		"s3://production-data", 
-		"/mnt/s3-data", 
+		ctx,
+		"s3://production-data",
+		"/mnt/s3-data",
 		config,
 	)
 	if err != nil {
@@ -157,10 +157,7 @@ Currently supported storage URIs:
 	s3://bucket-name              # AWS S3 with default region
 	s3://bucket-name/path/prefix  # S3 with path prefix
 
-Future planned support:
-	gs://bucket-name              # Google Cloud Storage  
-	azure://container-name        # Azure Blob Storage
-	minio://bucket-name           # MinIO compatible
+Exclusively supports AWS S3 buckets with deep integration and optimization.
 
 # Performance Characteristics
 
@@ -199,7 +196,7 @@ The adapter provides comprehensive observability:
 
 Metrics:
 - Component-level performance metrics
-- Resource utilization tracking  
+- Resource utilization tracking
 - Error rate monitoring
 - Latency distribution analysis
 

@@ -1,7 +1,7 @@
 # ObjectFS Playground
 
 Welcome to the ObjectFS Playground! This interactive environment lets you explore ObjectFS
-features, test API endpoints, and experiment with configurations without needing a local
+S3 integration, test API endpoints, and experiment with configurations without needing a local
 installation.
 
 ## Interactive API Explorer

@@ -7,7 +7,7 @@ Python API support.
 
 - **Easy Integration**: Simple, pythonic API for mounting and managing ObjectFS
 - **Async Support**: Full async/await support for high-performance applications
-- **Multiple Backends**: Support for S3, Google Cloud Storage, Azure Blob Storage
+- **AWS S3 Deep Integration**: Optimized specifically for AWS S3 with intelligent tiering and cost management
 - **Distributed Operations**: Built-in support for distributed clusters
 - **Monitoring & Metrics**: Comprehensive health checking and metrics collection
 - **Configuration Management**: Flexible configuration with presets and validation

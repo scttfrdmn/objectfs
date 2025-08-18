@@ -33,7 +33,7 @@
 
 ### Project Vision
 
-ObjectFS transforms any object storage service (Amazon S3, Google Cloud Storage, Azure Blob Storage) into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows. This enterprise-grade solution addresses the growing need for scalable, cost-effective storage that maintains compatibility with existing tools and processes.
+ObjectFS transforms AWS S3 into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows. This enterprise-grade solution addresses the growing need for scalable, cost-effective storage that maintains compatibility with existing tools and processes.
 
 ### Key Value Propositions
 
@@ -58,7 +58,7 @@ ObjectFS transforms any object storage service (Amazon S3, Google Cloud Storage,
 - **Content Distribution**: Global content delivery with intelligent caching
 - **Hybrid Cloud**: Bridge on-premises applications with cloud object storage
 - **Remote Operations**: Efficient data access from high-latency locations
-- **Multi-Cloud**: Unified filesystem interface across AWS S3, GCS, and Azure Blob
+- **S3-Optimized**: Deep integration with AWS S3 features including storage classes and intelligent tiering
 
 ---
 
@@ -69,7 +69,7 @@ ObjectFS transforms any object storage service (Amazon S3, Google Cloud Storage,
 ObjectFS is built on modern Go architecture utilizing:
 
 - **FUSE (Filesystem in Userspace)**: Kernel-level filesystem integration
-- **Multi-Cloud SDK Support**: AWS SDK v2, Google Cloud SDK, Azure SDK
+- **AWS SDK Integration**: Deep AWS SDK v2 integration with S3 optimization features
 - **Concurrent Design**: Goroutine-based parallelism for maximum throughput
 - **Advanced Caching**: Multi-level cache hierarchy with intelligent eviction
 - **Connection Pooling**: Multiple client connections for parallel operations
@@ -172,19 +172,19 @@ graph TB
         A3[Analytics Platforms]
         A4[Content Management]
     end
-    
+
     subgraph "Operating System"
         K[Kernel VFS]
         F[FUSE Driver]
     end
-    
+
     subgraph "ObjectFS Core"
         subgraph "Interface Layer"
             I1[File Operations]
             I2[Directory Operations]
             I3[Metadata Operations]
         end
-        
+
         subgraph "Performance Layer"
             P1[Connection Pool]
             P2[LRU Cache]
@@ -192,14 +192,14 @@ graph TB
             P4[Prefetcher]
             P5[Batch Processor]
         end
-        
+
         subgraph "Storage Layer"
             S1[Metadata Manager]
             S2[Content Compressor]
             S3[Small File Aggregator]
             S4[Access Pattern Analyzer]
         end
-        
+
         subgraph "Reliability Layer"
             R1[Health Monitor]
             R2[Circuit Breaker]
@@ -207,14 +207,11 @@ graph TB
             R4[Error Recovery]
         end
     end
-    
-    subgraph "Object Storage Backends"
+
+    subgraph "AWS S3 Storage"
         AWS[Amazon S3]
-        GCS[Google Cloud Storage]
-        AZURE[Azure Blob Storage]
-        MINIO[MinIO]
     end
-    
+
     A1 --> K
     A2 --> K
     A3 --> K
@@ -223,21 +220,18 @@ graph TB
     F --> I1
     F --> I2
     F --> I3
-    
+
     I1 --> P1
     I2 --> P2
     I3 --> P3
-    
+
     P1 --> S1
     P2 --> S2
     P3 --> S3
     P4 --> S4
     P5 --> R1
-    
+
     R1 --> AWS
-    R2 --> GCS
-    R3 --> AZURE
-    R4 --> MINIO
 ```
 
 #### Component Details
@@ -278,11 +272,11 @@ sequenceDiagram
     participant ObjectFS as ObjectFS Core
     participant Cache as Cache Layer
     participant Backend as Object Storage
-    
+
     App->>FUSE: read(file, offset, size)
     FUSE->>ObjectFS: Read Request
     ObjectFS->>Cache: Check Cache
-    
+
     alt Cache Hit
         Cache-->>ObjectFS: Return Cached Data
         ObjectFS-->>FUSE: Data
@@ -293,7 +287,7 @@ sequenceDiagram
         ObjectFS->>Cache: Store Data
         ObjectFS-->>FUSE: Data
         FUSE-->>App: Data
-        
+
         Note over ObjectFS: Trigger Prefetch
         ObjectFS->>Backend: Prefetch Next Range
     end
@@ -308,11 +302,11 @@ sequenceDiagram
     participant ObjectFS as ObjectFS Core
     participant Buffer as Write Buffer
     participant Backend as Object Storage
-    
+
     App->>FUSE: write(file, data, offset)
     FUSE->>ObjectFS: Write Request
     ObjectFS->>Buffer: Buffer Data
-    
+
     alt Small Write
         Note over Buffer: Accumulate in buffer
         Buffer-->>ObjectFS: Buffered
@@ -326,7 +320,7 @@ sequenceDiagram
         ObjectFS-->>FUSE: Success
         FUSE-->>App: Success
     end
-    
+
     Note over Buffer: Background Auto-flush
     Buffer->>Backend: Periodic Flush
 ```
@@ -341,21 +335,18 @@ graph LR
         U[User Process]
         OS[Operating System]
     end
-    
+
     subgraph "ObjectFS"
         A[ObjectFS Process]
         C[Credential Manager]
     end
-    
-    subgraph "Cloud Providers"
+
+    subgraph "AWS Services"
         AWS_IAM[AWS IAM]
-        GCP_IAM[GCP IAM]
-        AZURE_AD[Azure AD]
         AWS_S3[Amazon S3]
-        GCS[Google Cloud Storage]
-        AZURE_BLOB[Azure Blob]
+        AWS_STS[AWS STS]
     end
-    
+
     U -->|System Call| OS
     OS -->|FUSE| A
     A -->|Authenticate| C
@@ -464,13 +455,13 @@ graph LR
 | **ARMv7** | ⚠️ Limited | 80% | Raspberry Pi support |
 | **s390x** | ❌ Unsupported | N/A | IBM Z series |
 
-#### Cloud Platforms
+#### AWS Deployment Platforms
 
 | Platform | Status | Features | Notes |
 |----------|--------|----------|-------|
-| **AWS EC2** | ✅ Full Support | All features | Native environment |
-| **Google Cloud** | ✅ Supported | Core features | Cross-cloud access |
-| **Azure** | ✅ Supported | Core features | Cross-cloud access |
+| **AWS EC2** | ✅ Full Support | All features | Native environment with IAM roles |
+| **AWS ECS/Fargate** | ✅ Supported | All features | Container-native deployment |
+| **AWS EKS** | ✅ Supported | All features | Kubernetes integration |
 | **On-Premises** | ✅ Supported | All features | Internet connectivity required |
 | **Edge/Satellite** | ✅ Supported | High-latency mode | Special configuration |
 
@@ -1114,7 +1105,7 @@ type WeightedLRUCache struct {
     currentSize int64
     items       map[string]*CacheItem
     evictionList *list.List
-    
+
     // Metrics
     hits        uint64
     misses      uint64
@@ -1133,7 +1124,7 @@ type CacheItem struct {
 func (c *WeightedLRUCache) calculateWeight(item *CacheItem) float64 {
     recency := time.Since(item.accessTime).Seconds()
     frequency := float64(item.accessCount)
-    
+
     // Higher weight = less likely to be evicted
     return frequency / (1.0 + recency/3600.0) // Age factor in hours
 }
@@ -1171,7 +1162,7 @@ type AdaptiveConnectionPool struct {
     metrics     *ConnectionMetrics
     scaler      *ConnectionScaler
     monitor     *LatencyMonitor
-    
+
     minConnections int
     maxConnections int
     currentIndex   int
@@ -1188,19 +1179,19 @@ type ConnectionMetrics struct {
 func (pool *AdaptiveConnectionPool) selectClient() *s3.Client {
     pool.mu.Lock()
     defer pool.mu.Unlock()
-    
+
     // Select least loaded client
     return pool.clients[pool.selectLeastLoaded()]
 }
 
 func (pool *AdaptiveConnectionPool) adjustPoolSize() {
     metrics := pool.monitor.GetMetrics()
-    
-    if metrics.AverageLatency > 500*time.Millisecond && 
+
+    if metrics.AverageLatency > 500*time.Millisecond &&
        len(pool.clients) < pool.maxConnections {
         // Add connection for high latency
         pool.addConnection()
-    } else if metrics.AverageLatency < 100*time.Millisecond && 
+    } else if metrics.AverageLatency < 100*time.Millisecond &&
               len(pool.clients) > pool.minConnections {
         // Remove connection for low utilization
         pool.removeConnection()
@@ -1221,7 +1212,7 @@ type ConnectionHealth struct {
 func (h *HealthChecker) monitorConnection(client *s3.Client) {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ticker.C:
@@ -1229,9 +1220,9 @@ func (h *HealthChecker) monitorConnection(client *s3.Client) {
             _, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
                 Bucket: aws.String(h.bucket),
             })
-            
+
             duration := time.Since(start)
-            
+
             if err != nil {
                 h.recordError(client, err, duration)
             } else {
@@ -1266,7 +1257,7 @@ type FlushPolicy struct {
 func (wb *SmartWriteBuffer) shouldFlush(buffer *FileBuffer) bool {
     age := time.Since(buffer.lastMod)
     memoryUsage := float64(wb.totalMemory) / float64(wb.maxMemory)
-    
+
     return age > wb.flushPolicy.MaxAge ||
            len(buffer.data) > int(wb.flushPolicy.MaxSize) ||
            memoryUsage > wb.flushPolicy.MemoryPressure
@@ -1287,9 +1278,9 @@ func (c *ContentCompressor) shouldCompress(data []byte, filename string) bool {
     if len(data) < int(c.sizeThreshold) {
         return false
     }
-    
+
     contentType := c.typeDetector.Detect(data, filename)
-    
+
     switch contentType {
     case "text/*", "application/json", "application/xml":
         return true
@@ -1346,23 +1337,23 @@ func (p *PredictivePrefetcher) analyzePattern(path string, offset, size int64) {
         pattern = &AccessPattern{Path: path}
         p.patterns[path] = pattern
     }
-    
+
     pattern.Frequency++
     pattern.LastAccess = time.Now()
     pattern.AccessTimes = append(pattern.AccessTimes, time.Now())
     pattern.ReadRanges = append(pattern.ReadRanges, Range{offset, size})
-    
+
     // Detect sequential access
     if len(pattern.ReadRanges) >= 2 {
         last := pattern.ReadRanges[len(pattern.ReadRanges)-2]
         current := pattern.ReadRanges[len(pattern.ReadRanges)-1]
-        
+
         if current.Offset == last.Offset + last.Size {
             pattern.Sequential = true
             pattern.Confidence = min(pattern.Confidence + 0.1, 1.0)
         }
     }
-    
+
     // Trigger prefetch prediction
     if pattern.Confidence > 0.7 {
         p.triggerPrefetch(pattern)
@@ -1376,26 +1367,26 @@ func (p *PredictivePrefetcher) analyzePattern(path string, offset, size int64) {
 func (r *ReadAheadController) calculateReadAhead(
     fileSize, currentOffset, requestSize int64,
     pattern *AccessPattern) int64 {
-    
+
     baseReadAhead := requestSize * 2
-    
+
     // Adjust based on access pattern
     if pattern.Sequential {
         baseReadAhead = requestSize * 4
     }
-    
+
     // Adjust based on file size
     if fileSize < 1*MB {
         baseReadAhead = fileSize  // Read entire small file
     } else if fileSize > 100*MB {
         baseReadAhead = min(baseReadAhead, 32*MB)  // Cap for large files
     }
-    
+
     // Adjust based on network latency
     if r.networkLatency > 200*time.Millisecond {
         baseReadAhead *= 4  // More aggressive for high latency
     }
-    
+
     // Don't read past file end
     remaining := fileSize - currentOffset
     return min(baseReadAhead, remaining)
@@ -1423,24 +1414,24 @@ type Metric struct {
 }
 
 func (pc *PerformanceCollector) recordOperation(
-    operation string, 
-    duration time.Duration, 
-    size int64, 
+    operation string,
+    duration time.Duration,
+    size int64,
     success bool) {
-    
+
     // Record latency
-    pc.recordHistogram("operation_duration_seconds", 
-        duration.Seconds(), 
+    pc.recordHistogram("operation_duration_seconds",
+        duration.Seconds(),
         map[string]string{"operation": operation})
-    
+
     // Record throughput
     if size > 0 {
         throughput := float64(size) / duration.Seconds()
         pc.recordGauge("throughput_bytes_per_second", throughput)
     }
-    
+
     // Record success rate
-    pc.recordCounter("operations_total", 1, 
+    pc.recordCounter("operations_total", 1,
         map[string]string{
             "operation": operation,
             "status": map[bool]string{true: "success", false: "error"}[success],
@@ -1499,7 +1490,7 @@ time find $MOUNT_POINT -type f -exec stat {} \; > /dev/null
 echo "Running cache performance test..."
 # First read (cache miss)
 time cat $MOUNT_POINT/test-1gb.dat > /dev/null
-# Second read (cache hit) 
+# Second read (cache hit)
 time cat $MOUNT_POINT/test-1gb.dat > /dev/null
 
 # Cleanup
@@ -1535,14 +1526,14 @@ type LatencyProfile struct {
 func (so *SatelliteOptimizer) optimizeForLatency(profile LatencyProfile) {
     // Aggressive caching
     so.cache.SetSize(profile.ExpectedLatency.Seconds() * 1GB)
-    
+
     // Minimize API calls
     so.batchAggregator.SetBatchSize(profile.ExpectedLatency.Seconds() * 100)
-    
+
     // Longer flush intervals
     flushInterval := profile.ExpectedLatency * 10
     so.writeBuffer.SetFlushInterval(flushInterval)
-    
+
     // Whole-file prefetching for small files
     if profile.CostSensitive {
         so.enableWholeFilePrefetch(16 * MB)
@@ -1566,25 +1557,25 @@ func (om *OfflineMode) handleRead(path string, offset, size int64) ([]byte, erro
     if data := om.localCache.Get(path, offset, size); data != nil {
         return data, nil
     }
-    
+
     // If offline, return error for cache miss
     if !om.isOnline() {
         return nil, ErrOfflineUnavailable
     }
-    
+
     // Fetch from S3 and cache locally
     data, err := om.fetchFromS3(path, offset, size)
     if err == nil {
         om.localCache.Put(path, offset, data)
     }
-    
+
     return data, err
 }
 
 func (om *OfflineMode) handleWrite(path string, data []byte, offset int64) error {
     // Always write to local cache
     om.localCache.Put(path, offset, data)
-    
+
     // Queue for background sync
     om.syncQueue.Add(SyncItem{
         Path:      path,
@@ -1593,7 +1584,7 @@ func (om *OfflineMode) handleWrite(path string, data []byte, offset int64) error
         Timestamp: time.Now(),
         Operation: WriteOperation,
     })
-    
+
     return nil
 }
 ```
@@ -1633,23 +1624,23 @@ func (fa *FileAggregator) shouldPack(path string, size int64) bool {
     if size > 4*KB {
         return false
     }
-    
+
     // Don't pack frequently modified files
     if fa.isFrequentlyModified(path) {
         return false
     }
-    
+
     // Don't pack executable files
     if fa.isExecutable(path) {
         return false
     }
-    
+
     return true
 }
 
 func (fa *FileAggregator) packFile(path string, data []byte, metadata map[string]string) error {
     pack := fa.findOrCreatePack()
-    
+
     // Compress if beneficial
     compressedData := data
     compressed := false
@@ -1659,7 +1650,7 @@ func (fa *FileAggregator) packFile(path string, data []byte, metadata map[string
             compressed = true
         }
     }
-    
+
     packedFile := &PackedFile{
         Path:       path,
         Offset:     pack.TotalSize,
@@ -1668,15 +1659,15 @@ func (fa *FileAggregator) packFile(path string, data []byte, metadata map[string
         Metadata:   metadata,
         Compressed: compressed,
     }
-    
+
     pack.Files[path] = packedFile
     pack.TotalSize += int64(len(compressedData))
-    
+
     // Flush pack if it's getting large
     if pack.TotalSize > fa.maxPackSize {
         return fa.flushPack(pack)
     }
-    
+
     return nil
 }
 ```
@@ -1735,17 +1726,17 @@ type FeatureVector struct {
 
 func (ap *AccessPredictor) predict(path string, currentTime time.Time) []PrefetchCandidate {
     features := ap.features.extract(path, currentTime)
-    
+
     // Predict access probability
     probability := ap.model.predict(features)
-    
+
     if probability < 0.7 {
         return nil  // Low confidence, don't prefetch
     }
-    
+
     // Generate prefetch candidates
     candidates := []PrefetchCandidate{}
-    
+
     // Predict next access offset
     if ap.isSequential(path) {
         nextOffset := ap.predictNextOffset(path)
@@ -1756,7 +1747,7 @@ func (ap *AccessPredictor) predict(path string, currentTime time.Time) []Prefetc
             Priority: int(probability * 10),
         })
     }
-    
+
     // Predict related files
     relatedFiles := ap.predictRelatedFiles(path)
     for _, related := range relatedFiles {
@@ -1767,7 +1758,7 @@ func (ap *AccessPredictor) predict(path string, currentTime time.Time) []Prefetc
             Priority: int(probability * 5),  // Lower priority
         })
     }
-    
+
     return candidates
 }
 ```
@@ -1788,12 +1779,12 @@ func (ps *PrefetchScheduler) schedule(candidates []PrefetchCandidate) {
         if !ps.bandwidthMgr.canPrefetch(candidate.Size) {
             continue
         }
-        
+
         // Check cache space
         if !ps.cache.hasSpace(candidate.Size) {
             ps.cache.evictForSpace(candidate.Size)
         }
-        
+
         // Add to priority queue
         ps.queue.Push(PrefetchTask{
             Candidate: candidate,
@@ -1805,30 +1796,30 @@ func (ps *PrefetchScheduler) schedule(candidates []PrefetchCandidate) {
 func (pw *PrefetchWorker) execute(task PrefetchTask) {
     // Rate limiting
     pw.scheduler.rateLimiter.Wait()
-    
+
     // Bandwidth management
     pw.scheduler.bandwidthMgr.Reserve(task.Candidate.Size)
     defer pw.scheduler.bandwidthMgr.Release(task.Candidate.Size)
-    
+
     // Fetch data
     data, err := pw.fetcher.fetch(
         task.Candidate.Path,
         task.Candidate.Offset,
         task.Candidate.Size,
     )
-    
+
     if err != nil {
         pw.metrics.recordPrefetchError(task.Candidate.Path)
         return
     }
-    
+
     // Cache data
     pw.cache.Put(
         task.Candidate.Path,
         task.Candidate.Offset,
         data,
     )
-    
+
     pw.metrics.recordPrefetchSuccess(task.Candidate.Path, len(data))
 }
 ```
@@ -1854,12 +1845,12 @@ type OptimizationProfile struct {
 func (co *ContentOptimizer) optimize(path string, data []byte) OptimizedContent {
     contentType := co.detectContentType(path, data)
     profile := co.profiles[contentType]
-    
+
     result := OptimizedContent{
         Original: data,
         Type:     contentType,
     }
-    
+
     // Apply compression if beneficial
     if profile.Compression.Enabled {
         compressed := co.compress(data, profile.Compression)
@@ -1870,15 +1861,15 @@ func (co *ContentOptimizer) optimize(path string, data []byte) OptimizedContent 
             result.Data = data
         }
     }
-    
+
     // Set caching parameters
     result.CacheTTL = profile.Caching.TTL
     result.CachePriority = profile.Caching.Priority
-    
+
     // Set prefetch parameters
     result.PrefetchEnabled = profile.Prefetching.Enabled
     result.PrefetchSize = profile.Prefetching.Size
-    
+
     return result
 }
 

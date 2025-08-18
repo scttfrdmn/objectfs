@@ -19,6 +19,7 @@ const (
 // Configuration represents the complete application configuration
 type Configuration struct {
 	Global      GlobalConfig      `yaml:"global"`
+	Storage     StorageConfig     `yaml:"storage"`
 	Performance PerformanceConfig `yaml:"performance"`
 	Cache       CacheConfig       `yaml:"cache"`
 	WriteBuffer WriteBufferConfig `yaml:"write_buffer"`
@@ -26,6 +27,7 @@ type Configuration struct {
 	Security    SecurityConfig    `yaml:"security"`
 	Monitoring  MonitoringConfig  `yaml:"monitoring"`
 	Features    FeatureConfig     `yaml:"features"`
+	Cluster     ClusterConfig     `yaml:"cluster"`
 }
 
 // GlobalConfig represents global application settings
@@ -45,6 +47,9 @@ type PerformanceConfig struct {
 	ReadAheadSize      string `yaml:"read_ahead_size"`
 	CompressionEnabled bool   `yaml:"compression_enabled"`
 	ConnectionPoolSize int    `yaml:"connection_pool_size"`
+	PredictiveCaching  bool   `yaml:"predictive_caching"`
+	MLModelPath        string `yaml:"ml_model_path"`
+	MultilevelCaching  bool   `yaml:"multilevel_caching"`
 }
 
 // CacheConfig represents cache configuration
@@ -108,8 +113,13 @@ type CircuitBreakerConfig struct {
 
 // SecurityConfig represents security settings
 type SecurityConfig struct {
-	TLS        TLSConfig        `yaml:"tls"`
-	Encryption EncryptionConfig `yaml:"encryption"`
+	Enabled     bool             `yaml:"enabled"`
+	AuthMethod  string           `yaml:"auth_method"`
+	TLSEnabled  bool             `yaml:"tls_enabled"`
+	TLSCertPath string           `yaml:"tls_cert_path"`
+	TLSKeyPath  string           `yaml:"tls_key_path"`
+	TLS         TLSConfig        `yaml:"tls"`
+	Encryption  EncryptionConfig `yaml:"encryption"`
 }
 
 // TLSConfig represents TLS settings
@@ -126,9 +136,14 @@ type EncryptionConfig struct {
 
 // MonitoringConfig represents monitoring settings
 type MonitoringConfig struct {
-	Metrics      MetricsConfig      `yaml:"metrics"`
-	HealthChecks HealthChecksConfig `yaml:"health_checks"`
-	Logging      LoggingConfig      `yaml:"logging"`
+	Enabled         bool                `yaml:"enabled"`
+	MetricsAddr     string              `yaml:"metrics_addr"`
+	EnablePprof     bool                `yaml:"enable_pprof"`
+	HealthCheckAddr string              `yaml:"health_check_addr"`
+	OpenTelemetry   OpenTelemetryConfig `yaml:"opentelemetry"`
+	Metrics         MetricsConfig       `yaml:"metrics"`
+	HealthChecks    HealthChecksConfig  `yaml:"health_checks"`
+	Logging         LoggingConfig       `yaml:"logging"`
 }
 
 // MetricsConfig represents metrics settings
@@ -152,6 +167,13 @@ type LoggingConfig struct {
 	Sampling   SamplingConfig `yaml:"sampling"`
 }
 
+// OpenTelemetryConfig represents OpenTelemetry settings
+type OpenTelemetryConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Endpoint    string `yaml:"endpoint"`
+	ServiceName string `yaml:"service_name"`
+}
+
 // SamplingConfig represents log sampling settings
 type SamplingConfig struct {
 	Enabled bool `yaml:"enabled"`
@@ -167,6 +189,41 @@ type FeatureConfig struct {
 	OfflineMode           bool `yaml:"offline_mode"`
 }
 
+// StorageConfig represents storage backend configuration
+type StorageConfig struct {
+	S3 S3Config `yaml:"s3"`
+}
+
+// S3Config represents AWS S3 configuration
+type S3Config struct {
+	Region           string             `yaml:"region"`
+	Endpoint         string             `yaml:"endpoint"`
+	Profile          string             `yaml:"profile"`
+	UseAcceleration  bool               `yaml:"use_acceleration"`
+	ForcePathStyle   bool               `yaml:"force_path_style"`
+	CostOptimization S3CostOptimization `yaml:"cost_optimization"`
+}
+
+// S3CostOptimization represents S3 cost optimization settings
+type S3CostOptimization struct {
+	Enabled             bool `yaml:"enabled"`
+	TieringEnabled      bool `yaml:"tiering_enabled"`
+	LifecycleEnabled    bool `yaml:"lifecycle_enabled"`
+	TransitionToIA      int  `yaml:"transition_to_ia"`
+	TransitionToGlacier int  `yaml:"transition_to_glacier"`
+}
+
+// ClusterConfig represents distributed cluster settings
+type ClusterConfig struct {
+	Enabled           bool     `yaml:"enabled"`
+	NodeID            string   `yaml:"node_id"`
+	ListenAddr        string   `yaml:"listen_addr"`
+	AdvertiseAddr     string   `yaml:"advertise_addr"`
+	SeedNodes         []string `yaml:"seed_nodes"`
+	ReplicationFactor int      `yaml:"replication_factor"`
+	ConsistencyLevel  string   `yaml:"consistency_level"`
+}
+
 // NewDefault returns a configuration with sensible defaults
 func NewDefault() *Configuration {
 	return &Configuration{
@@ -177,6 +234,22 @@ func NewDefault() *Configuration {
 			HealthPort:  8081,
 			ProfilePort: 6060,
 		},
+		Storage: StorageConfig{
+			S3: S3Config{
+				Region:          "us-east-1",
+				Endpoint:        "",
+				Profile:         "",
+				UseAcceleration: false,
+				ForcePathStyle:  false,
+				CostOptimization: S3CostOptimization{
+					Enabled:             false,
+					TieringEnabled:      false,
+					LifecycleEnabled:    false,
+					TransitionToIA:      30,
+					TransitionToGlacier: 90,
+				},
+			},
+		},
 		Performance: PerformanceConfig{
 			CacheSize:          "2GB",
 			WriteBufferSize:    "16MB",
@@ -184,6 +257,9 @@ func NewDefault() *Configuration {
 			ReadAheadSize:      "64MB",
 			CompressionEnabled: true,
 			ConnectionPoolSize: 8,
+			PredictiveCaching:  false,
+			MLModelPath:        "",
+			MultilevelCaching:  false,
 		},
 		Cache: CacheConfig{
 			TTL:            5 * time.Minute,
@@ -224,6 +300,11 @@ func NewDefault() *Configuration {
 			},
 		},
 		Security: SecurityConfig{
+			Enabled:     false,
+			AuthMethod:  "none",
+			TLSEnabled:  false,
+			TLSCertPath: "",
+			TLSKeyPath:  "",
 			TLS: TLSConfig{
 				VerifyCertificates: true,
 				MinVersion:         "1.2",
@@ -234,6 +315,15 @@ func NewDefault() *Configuration {
 			},
 		},
 		Monitoring: MonitoringConfig{
+			Enabled:         false,
+			MetricsAddr:     ":9090",
+			EnablePprof:     false,
+			HealthCheckAddr: ":8081",
+			OpenTelemetry: OpenTelemetryConfig{
+				Enabled:     false,
+				Endpoint:    "localhost:4317",
+				ServiceName: "objectfs",
+			},
 			Metrics: MetricsConfig{
 				Enabled:    true,
 				Prometheus: true,
@@ -262,6 +352,15 @@ func NewDefault() *Configuration {
 			MetadataCaching:       true,
 			OfflineMode:           false,
 		},
+		Cluster: ClusterConfig{
+			Enabled:           false,
+			NodeID:            "",
+			ListenAddr:        "0.0.0.0:8080",
+			AdvertiseAddr:     "127.0.0.1:8080",
+			SeedNodes:         []string{},
+			ReplicationFactor: 3,
+			ConsistencyLevel:  "eventual",
+		},
 	}
 }
 
@@ -272,7 +371,7 @@ func (c *Configuration) LoadFromFile(filename string) error {
 	if strings.Contains(cleanPath, "..") {
 		return fmt.Errorf("invalid config file path: %s", filename)
 	}
-	
+
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
@@ -386,7 +485,7 @@ func (c *Configuration) Validate() error {
 		}
 	}
 	if !logLevelValid {
-		return fmt.Errorf("invalid log_level: %s (must be one of: %s)", 
+		return fmt.Errorf("invalid log_level: %s (must be one of: %s)",
 			c.Global.LogLevel, strings.Join(validLogLevels, ", "))
 	}
 

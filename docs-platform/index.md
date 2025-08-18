@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: ObjectFS
-  text: High-Performance POSIX Filesystem for Object Storage
-  tagline: Mount any object storage as a local filesystem with enterprise-grade performance, caching, and reliability.
+  text: High-Performance POSIX Filesystem for AWS S3
+  tagline: Mount AWS S3 as a local filesystem with enterprise-grade performance, caching, and reliability optimized for S3.
   image:
     src: /logo.svg
     alt: ObjectFS
@@ -29,8 +29,8 @@ features:
     details: Drop-in replacement for traditional filesystems. Works with any existing application without code changes.
 
   - icon: 🌐
-    title: Multi-Cloud Support
-    details: Unified interface for AWS S3, Google Cloud Storage, and Azure Blob Storage with automatic cost optimization.
+    title: S3 Optimization
+    details: Deep integration with AWS S3 including Intelligent Tiering, storage classes, and automatic cost optimization.
 
   - icon: 🏗️
     title: Enterprise Ready

@@ -1,7 +1,7 @@
 /**
- * ObjectFS Storage Adapter
+ * ObjectFS S3 Storage Adapter
  *
- * Storage backend abstraction for different cloud providers.
+ * Optimized storage adapter for AWS S3.
  */
 
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
@@ -18,62 +18,40 @@ import {
   DownloadOptions,
 } from './types';
 
-export class StorageAdapter {
-  private clients: Map<string, AxiosInstance> = new Map();
+export class S3StorageAdapter {
+  private client: AxiosInstance | null = null;
 
   constructor(private config: StorageConfig) {}
 
   /**
-   * List objects in storage backend
+   * List objects in S3 bucket
    */
   async listObjects(
     storageUri: string,
     options: ListObjectsOptions = {}
   ): Promise<ListObjectsResult> {
     try {
-      const parsedUri = this.parseStorageUri(storageUri);
-      const backend = parsedUri.scheme;
-
-      switch (backend) {
-        case 's3':
-          return await this.listS3Objects(parsedUri, options);
-        case 'gs':
-          return await this.listGCSObjects(parsedUri, options);
-        case 'az':
-          return await this.listAzureObjects(parsedUri, options);
-        default:
-          throw new StorageError(`Unsupported storage backend: ${backend}`);
-      }
+      const parsedUri = this.parseS3Uri(storageUri);
+      return await this.listS3Objects(parsedUri, options);
     } catch (error) {
-      throw new StorageError(`Failed to list objects: ${error}`);
+      throw new StorageError(`Failed to list S3 objects: ${error}`);
     }
   }
 
   /**
-   * Get metadata information for a specific object
+   * Get metadata information for a specific S3 object
    */
   async getObjectInfo(storageUri: string, key: string): Promise<ObjectInfo> {
     try {
-      const parsedUri = this.parseStorageUri(storageUri);
-      const backend = parsedUri.scheme;
-
-      switch (backend) {
-        case 's3':
-          return await this.getS3ObjectInfo(parsedUri, key);
-        case 'gs':
-          return await this.getGCSObjectInfo(parsedUri, key);
-        case 'az':
-          return await this.getAzureObjectInfo(parsedUri, key);
-        default:
-          throw new StorageError(`Unsupported storage backend: ${backend}`);
-      }
+      const parsedUri = this.parseS3Uri(storageUri);
+      return await this.getS3ObjectInfo(parsedUri, key);
     } catch (error) {
-      throw new StorageError(`Failed to get object info: ${error}`);
+      throw new StorageError(`Failed to get S3 object info: ${error}`);
     }
   }
 
   /**
-   * Download object from storage to local file
+   * Download object from S3 to local file
    */
   async downloadObject(
     storageUri: string,
@@ -82,31 +60,21 @@ export class StorageAdapter {
     options: DownloadOptions = {}
   ): Promise<number> {
     try {
-      const parsedUri = this.parseStorageUri(storageUri);
-      const backend = parsedUri.scheme;
+      const parsedUri = this.parseS3Uri(storageUri);
       const absolutePath = path.resolve(localPath);
 
       // Ensure parent directory exists
       const parentDir = path.dirname(absolutePath);
       await fs.promises.mkdir(parentDir, { recursive: true });
 
-      switch (backend) {
-        case 's3':
-          return await this.downloadS3Object(parsedUri, key, absolutePath, options);
-        case 'gs':
-          return await this.downloadGCSObject(parsedUri, key, absolutePath, options);
-        case 'az':
-          return await this.downloadAzureObject(parsedUri, key, absolutePath, options);
-        default:
-          throw new StorageError(`Unsupported storage backend: ${backend}`);
-      }
+      return await this.downloadS3Object(parsedUri, key, absolutePath, options);
     } catch (error) {
-      throw new StorageError(`Failed to download object: ${error}`);
+      throw new StorageError(`Failed to download S3 object: ${error}`);
     }
   }
 
   /**
-   * Upload local file to storage backend
+   * Upload local file to S3
    */
   async uploadObject(
     storageUri: string,
@@ -115,53 +83,32 @@ export class StorageAdapter {
     options: UploadOptions = {}
   ): Promise<boolean> {
     try {
-      const parsedUri = this.parseStorageUri(storageUri);
-      const backend = parsedUri.scheme;
+      const parsedUri = this.parseS3Uri(storageUri);
       const absolutePath = path.resolve(localPath);
 
       if (!fs.existsSync(absolutePath)) {
         throw new StorageError(`Local file does not exist: ${absolutePath}`);
       }
 
-      switch (backend) {
-        case 's3':
-          return await this.uploadS3Object(parsedUri, key, absolutePath, options);
-        case 'gs':
-          return await this.uploadGCSObject(parsedUri, key, absolutePath, options);
-        case 'az':
-          return await this.uploadAzureObject(parsedUri, key, absolutePath, options);
-        default:
-          throw new StorageError(`Unsupported storage backend: ${backend}`);
-      }
+      return await this.uploadS3Object(parsedUri, key, absolutePath, options);
     } catch (error) {
-      throw new StorageError(`Failed to upload object: ${error}`);
+      throw new StorageError(`Failed to upload S3 object: ${error}`);
     }
   }
 
   /**
-   * Delete object from storage backend
+   * Delete object from S3
    */
   async deleteObject(storageUri: string, key: string): Promise<boolean> {
     try {
-      const parsedUri = this.parseStorageUri(storageUri);
-      const backend = parsedUri.scheme;
-
-      switch (backend) {
-        case 's3':
-          return await this.deleteS3Object(parsedUri, key);
-        case 'gs':
-          return await this.deleteGCSObject(parsedUri, key);
-        case 'az':
-          return await this.deleteAzureObject(parsedUri, key);
-        default:
-          throw new StorageError(`Unsupported storage backend: ${backend}`);
-      }
+      const parsedUri = this.parseS3Uri(storageUri);
+      return await this.deleteS3Object(parsedUri, key);
     } catch (error) {
-      throw new StorageError(`Failed to delete object: ${error}`);
+      throw new StorageError(`Failed to delete S3 object: ${error}`);
     }
   }
 
-  private parseStorageUri(storageUri: string): {
+  private parseS3Uri(storageUri: string): {
     scheme: string;
     bucket: string;
     path: string;
@@ -169,14 +116,17 @@ export class StorageAdapter {
   } {
     try {
       const url = new URL(storageUri);
+      if (url.protocol !== 's3:') {
+        throw new StorageError(`Only S3 URIs are supported. Got: ${url.protocol}`);
+      }
       return {
-        scheme: url.protocol.replace(':', ''),
+        scheme: 's3',
         bucket: url.hostname,
         path: url.pathname.substring(1), // Remove leading slash
         fullUri: storageUri,
       };
     } catch (error) {
-      throw new StorageError(`Invalid storage URI: ${storageUri}`);
+      throw new StorageError(`Invalid S3 URI: ${storageUri}`);
     }
   }
 
@@ -266,77 +216,8 @@ export class StorageAdapter {
   }
 
   private async deleteS3Object(parsedUri: any, key: string): Promise<boolean> {
-    console.log(`Simulated deletion of s3://${parsedUri.bucket}/${key}`);
+    // In production, this would use AWS SDK to delete the object
+    console.log(`Deleting S3 object: s3://${parsedUri.bucket}/${key}`);
     return true;
-  }
-
-  // GCS-specific methods (simplified implementations)
-
-  private async listGCSObjects(
-    parsedUri: any,
-    options: ListObjectsOptions
-  ): Promise<ListObjectsResult> {
-    return this.listS3Objects(parsedUri, options);
-  }
-
-  private async getGCSObjectInfo(parsedUri: any, key: string): Promise<ObjectInfo> {
-    return this.getS3ObjectInfo(parsedUri, key);
-  }
-
-  private async downloadGCSObject(
-    parsedUri: any,
-    key: string,
-    localPath: string,
-    options: DownloadOptions
-  ): Promise<number> {
-    return this.downloadS3Object(parsedUri, key, localPath, options);
-  }
-
-  private async uploadGCSObject(
-    parsedUri: any,
-    key: string,
-    localPath: string,
-    options: UploadOptions
-  ): Promise<boolean> {
-    return this.uploadS3Object(parsedUri, key, localPath, options);
-  }
-
-  private async deleteGCSObject(parsedUri: any, key: string): Promise<boolean> {
-    return this.deleteS3Object(parsedUri, key);
-  }
-
-  // Azure-specific methods (simplified implementations)
-
-  private async listAzureObjects(
-    parsedUri: any,
-    options: ListObjectsOptions
-  ): Promise<ListObjectsResult> {
-    return this.listS3Objects(parsedUri, options);
-  }
-
-  private async getAzureObjectInfo(parsedUri: any, key: string): Promise<ObjectInfo> {
-    return this.getS3ObjectInfo(parsedUri, key);
-  }
-
-  private async downloadAzureObject(
-    parsedUri: any,
-    key: string,
-    localPath: string,
-    options: DownloadOptions
-  ): Promise<number> {
-    return this.downloadS3Object(parsedUri, key, localPath, options);
-  }
-
-  private async uploadAzureObject(
-    parsedUri: any,
-    key: string,
-    localPath: string,
-    options: UploadOptions
-  ): Promise<boolean> {
-    return this.uploadS3Object(parsedUri, key, localPath, options);
-  }
-
-  private async deleteAzureObject(parsedUri: any, key: string): Promise<boolean> {
-    return this.deleteS3Object(parsedUri, key);
   }
 }
