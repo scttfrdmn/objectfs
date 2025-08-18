@@ -854,9 +854,9 @@ func (gp *GossipProtocol) generateMessageID() string {
 }
 
 // GetStats returns gossip protocol statistics
-func (gp *GossipProtocol) GetStats() GossipStats {
+func (gp *GossipProtocol) GetStats() *GossipStats {
 	gp.stats.mu.RLock()
-	stats := GossipStats{
+	stats := &GossipStats{
 		MessagesSent:        gp.stats.MessagesSent,
 		MessagesReceived:    gp.stats.MessagesReceived,
 		BytesSent:           gp.stats.BytesSent,

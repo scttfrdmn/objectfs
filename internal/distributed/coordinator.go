@@ -757,7 +757,7 @@ func (c *Coordinator) GetStats() map[string]interface{} {
 
 	return map[string]interface{}{
 		"active_operations": activeOps,
-		"replication":       replicationStats,
-		"load_balancer":     loadBalancerStats,
+		"replication":       &replicationStats,
+		"load_balancer":     &loadBalancerStats,
 	}
 }

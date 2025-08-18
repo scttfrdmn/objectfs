@@ -8,22 +8,22 @@ import (
 
 // ReadAheadManager implements intelligent read-ahead strategies
 type ReadAheadManager struct {
-	mu             sync.RWMutex
-	activeReads    map[string]*ReadPattern
-	fs             *FileSystem
-	config         *ReadAheadConfig
-	prefetchQueue  chan *PrefetchRequest
-	stopCh         chan struct{}
+	mu            sync.RWMutex
+	activeReads   map[string]*ReadPattern
+	fs            *FileSystem
+	config        *ReadAheadConfig
+	prefetchQueue chan *PrefetchRequest
+	stopCh        chan struct{}
 }
 
 // ReadAheadConfig configures read-ahead behavior
 type ReadAheadConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	WindowSize     int64         `yaml:"window_size"`     // Read-ahead window size
-	MaxDistance    int64         `yaml:"max_distance"`    // Maximum read-ahead distance
-	MinSequential  int           `yaml:"min_sequential"`  // Minimum sequential reads to trigger
-	ConcurrentReads int          `yaml:"concurrent_reads"` // Max concurrent prefetch operations
-	TTL            time.Duration `yaml:"ttl"`             // Pattern TTL
+	Enabled         bool          `yaml:"enabled"`
+	WindowSize      int64         `yaml:"window_size"`      // Read-ahead window size
+	MaxDistance     int64         `yaml:"max_distance"`     // Maximum read-ahead distance
+	MinSequential   int           `yaml:"min_sequential"`   // Minimum sequential reads to trigger
+	ConcurrentReads int           `yaml:"concurrent_reads"` // Max concurrent prefetch operations
+	TTL             time.Duration `yaml:"ttl"`              // Pattern TTL
 }
 
 // ReadPattern tracks access patterns for intelligent prefetching
@@ -49,7 +49,7 @@ func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadMana
 	if config == nil {
 		config = &ReadAheadConfig{
 			Enabled:         true,
-			WindowSize:      64 * 1024,  // 64KB
+			WindowSize:      64 * 1024,   // 64KB
 			MaxDistance:     1024 * 1024, // 1MB
 			MinSequential:   3,
 			ConcurrentReads: 4,
@@ -208,25 +208,24 @@ type WriteCoalescer struct {
 	pendingWrites map[string]*CoalescedWrite
 	fs            *FileSystem
 	config        *WriteCoalescerConfig
-	flushTimer    *time.Timer
 }
 
 // WriteCoalescerConfig configures write coalescing behavior
 type WriteCoalescerConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	WindowSize    int64         `yaml:"window_size"`    // Size window for coalescing
-	MaxDelay      time.Duration `yaml:"max_delay"`      // Maximum delay before forced flush
-	MinWrites     int           `yaml:"min_writes"`     // Minimum writes to trigger coalescing
-	BufferSize    int64         `yaml:"buffer_size"`    // Maximum buffer size per file
+	Enabled    bool          `yaml:"enabled"`
+	WindowSize int64         `yaml:"window_size"` // Size window for coalescing
+	MaxDelay   time.Duration `yaml:"max_delay"`   // Maximum delay before forced flush
+	MinWrites  int           `yaml:"min_writes"`  // Minimum writes to trigger coalescing
+	BufferSize int64         `yaml:"buffer_size"` // Maximum buffer size per file
 }
 
 // CoalescedWrite represents a coalesced write operation
 type CoalescedWrite struct {
-	path       string
-	writes     []WriteOp
-	totalSize  int64
-	firstTime  time.Time
-	lastTime   time.Time
+	path      string
+	writes    []WriteOp
+	totalSize int64
+	firstTime time.Time
+	lastTime  time.Time
 }
 
 // WriteOp represents a single write operation
@@ -241,7 +240,7 @@ func NewWriteCoalescer(fs *FileSystem, config *WriteCoalescerConfig) *WriteCoale
 	if config == nil {
 		config = &WriteCoalescerConfig{
 			Enabled:    true,
-			WindowSize: 64 * 1024,  // 64KB
+			WindowSize: 64 * 1024, // 64KB
 			MaxDelay:   100 * time.Millisecond,
 			MinWrites:  3,
 			BufferSize: 1024 * 1024, // 1MB

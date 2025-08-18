@@ -287,9 +287,9 @@ func (cm *ClusterManager) GetNodes() map[string]*NodeInfo {
 }
 
 // GetStats returns cluster statistics
-func (cm *ClusterManager) GetStats() ClusterStats {
+func (cm *ClusterManager) GetStats() *ClusterStats {
 	cm.stats.mu.RLock()
-	stats := ClusterStats{
+	stats := &ClusterStats{
 		TotalNodes:            cm.stats.TotalNodes,
 		AliveNodes:            cm.stats.AliveNodes,
 		SuspectNodes:          cm.stats.SuspectNodes,

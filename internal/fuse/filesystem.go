@@ -49,42 +49,42 @@ type FileSystem struct {
 	config *Config
 
 	// Internal state
-	mu           sync.RWMutex
-	openFiles    map[uint64]*OpenFile
-	nextHandle   uint64
+	mu         sync.RWMutex
+	openFiles  map[uint64]*OpenFile
+	nextHandle uint64
 
 	// Performance tracking
-	stats        *Stats
+	stats *Stats
 
 	// Performance optimizations
-	readAhead    *ReadAheadManager
+	readAhead      *ReadAheadManager
 	writeCoalescer *WriteCoalescer
 }
 
 // Config represents FUSE filesystem configuration
 type Config struct {
 	// Mount options
-	MountPoint   string `yaml:"mount_point"`
-	ReadOnly     bool   `yaml:"read_only"`
-	AllowOther   bool   `yaml:"allow_other"`
+	MountPoint string `yaml:"mount_point"`
+	ReadOnly   bool   `yaml:"read_only"`
+	AllowOther bool   `yaml:"allow_other"`
 
 	// FUSE options
-	DirectIO     bool   `yaml:"direct_io"`
-	KeepCache    bool   `yaml:"keep_cache"`
-	BigWrites    bool   `yaml:"big_writes"`
-	MaxRead      uint32 `yaml:"max_read"`
-	MaxWrite     uint32 `yaml:"max_write"`
+	DirectIO  bool   `yaml:"direct_io"`
+	KeepCache bool   `yaml:"keep_cache"`
+	BigWrites bool   `yaml:"big_writes"`
+	MaxRead   uint32 `yaml:"max_read"`
+	MaxWrite  uint32 `yaml:"max_write"`
 
 	// Filesystem behavior
-	DefaultUID   uint32        `yaml:"default_uid"`
-	DefaultGID   uint32        `yaml:"default_gid"`
-	DefaultMode  uint32        `yaml:"default_mode"`
-	CacheTTL     time.Duration `yaml:"cache_ttl"`
+	DefaultUID  uint32        `yaml:"default_uid"`
+	DefaultGID  uint32        `yaml:"default_gid"`
+	DefaultMode uint32        `yaml:"default_mode"`
+	CacheTTL    time.Duration `yaml:"cache_ttl"`
 
 	// Performance settings
-	ReadAhead    uint32 `yaml:"read_ahead"`
-	WriteBuffer  uint32 `yaml:"write_buffer"`
-	Concurrency  int    `yaml:"concurrency"`
+	ReadAhead   uint32 `yaml:"read_ahead"`
+	WriteBuffer uint32 `yaml:"write_buffer"`
+	Concurrency int    `yaml:"concurrency"`
 }
 
 // OpenFile represents an open file handle
@@ -97,37 +97,37 @@ type OpenFile struct {
 	dirty    bool
 
 	// Access tracking
-	lastAccess time.Time
+	lastAccess  time.Time
 	accessCount int64
 }
 
 // Stats tracks filesystem operation statistics
 type Stats struct {
-	mu             sync.RWMutex
+	mu sync.RWMutex
 
 	// Operation counts
-	Lookups        int64 `json:"lookups"`
-	Opens          int64 `json:"opens"`
-	Reads          int64 `json:"reads"`
-	Writes         int64 `json:"writes"`
-	Creates        int64 `json:"creates"`
-	Deletes        int64 `json:"deletes"`
+	Lookups int64 `json:"lookups"`
+	Opens   int64 `json:"opens"`
+	Reads   int64 `json:"reads"`
+	Writes  int64 `json:"writes"`
+	Creates int64 `json:"creates"`
+	Deletes int64 `json:"deletes"`
 
 	// Data transfer
-	BytesRead      int64 `json:"bytes_read"`
-	BytesWritten   int64 `json:"bytes_written"`
+	BytesRead    int64 `json:"bytes_read"`
+	BytesWritten int64 `json:"bytes_written"`
 
 	// Cache statistics
-	CacheHits      int64 `json:"cache_hits"`
-	CacheMisses    int64 `json:"cache_misses"`
+	CacheHits   int64 `json:"cache_hits"`
+	CacheMisses int64 `json:"cache_misses"`
 
 	// Error counts
-	Errors         int64 `json:"errors"`
+	Errors int64 `json:"errors"`
 
 	// Performance metrics
-	AvgReadTime    time.Duration `json:"avg_read_time"`
-	AvgWriteTime   time.Duration `json:"avg_write_time"`
-	AvgLookupTime  time.Duration `json:"avg_lookup_time"`
+	AvgReadTime   time.Duration `json:"avg_read_time"`
+	AvgWriteTime  time.Duration `json:"avg_write_time"`
+	AvgLookupTime time.Duration `json:"avg_lookup_time"`
 }
 
 // NewFileSystem creates a new FUSE filesystem instance
@@ -616,8 +616,9 @@ func (fs *FileSystem) getCachedInfo(path string) *types.ObjectInfo {
 		// Use a special metadata key prefix
 		metaKey := "__meta__" + path
 		if cachedData := fs.cache.Get(metaKey, 0, 1024); cachedData != nil {
-			// In a real implementation, deserialize ObjectInfo from cached data
+			// TODO: Deserialize ObjectInfo from cached data
 			// For now, return nil to force backend lookup
+			_ = cachedData // Acknowledge the cached data variable
 		}
 	}
 	return nil

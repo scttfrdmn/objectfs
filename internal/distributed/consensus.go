@@ -475,22 +475,6 @@ func (ce *ConsensusEngine) becomeLeader() {
 	ce.stats.mu.Unlock()
 }
 
-func (ce *ConsensusEngine) stepDown(newTerm uint64) {
-	ce.state = StateFollower
-	ce.currentTerm = newTerm
-	ce.votedFor = ""
-	ce.voteCount = 0
-
-	ce.resetElectionTimer()
-
-	log.Printf("Stepped down to follower for term %d", newTerm)
-
-	ce.stats.mu.Lock()
-	ce.stats.CurrentState = ce.state.String()
-	ce.stats.CurrentTerm = ce.currentTerm
-	ce.stats.mu.Unlock()
-}
-
 // Heartbeat and log replication
 
 func (ce *ConsensusEngine) sendHeartbeats() {
@@ -777,7 +761,7 @@ func (ce *ConsensusEngine) updateStats(ctx context.Context) {
 }
 
 // GetStats returns consensus engine statistics
-func (ce *ConsensusEngine) GetStats() ConsensusStats {
+func (ce *ConsensusEngine) GetStats() *ConsensusStats {
 	ce.mu.RLock()
 	state := ce.state.String()
 	term := ce.currentTerm
@@ -787,7 +771,7 @@ func (ce *ConsensusEngine) GetStats() ConsensusStats {
 	ce.mu.RUnlock()
 
 	ce.stats.mu.RLock()
-	stats := ConsensusStats{
+	stats := &ConsensusStats{
 		CurrentState:      state,
 		CurrentTerm:       term,
 		CurrentLeader:     ce.stats.CurrentLeader,

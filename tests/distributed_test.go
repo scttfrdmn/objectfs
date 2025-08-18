@@ -349,7 +349,7 @@ func TestMultiNodeCluster(t *testing.T) {
 	defer func() {
 		for _, cm := range clusters {
 			if cm != nil {
-				cm.Stop()
+				_ = cm.Stop()
 			}
 		}
 	}()
@@ -537,23 +537,4 @@ func BenchmarkDistributedOperations(b *testing.B) {
 			opID++
 		}
 	})
-}
-
-// Helper function to create test node info
-func createTestNodeInfo(nodeID, address string) *distributed.NodeInfo {
-	return &distributed.NodeInfo{
-		ID:               nodeID,
-		Address:          address,
-		Status:           distributed.NodeStatusAlive,
-		LastSeen:         time.Now(),
-		Version:          "1.0.0",
-		Metadata:         make(map[string]string),
-		CPUUsage:         25.5,
-		MemoryUsage:      60.0,
-		DiskUsage:        45.0,
-		NetworkBandwidth: 1000000,
-		CacheSize:        1024 * 1024,
-		CacheHitRate:     0.85,
-		Operations:       1000,
-	}
 }

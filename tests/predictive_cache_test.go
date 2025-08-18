@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	cryptoRand "crypto/rand"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -222,12 +223,12 @@ func (c *MockBaseCache) Stats() types.CacheStats {
 	}
 
 	return types.CacheStats{
-		Hits:      c.stats.Hits,
-		Misses:    c.stats.Misses,
-		Evictions: c.stats.Evictions,
-		Size:      c.stats.Size,
-		Capacity:  1024 * 1024 * 1024, // 1GB
-		HitRate:   hitRate,
+		Hits:        c.stats.Hits,
+		Misses:      c.stats.Misses,
+		Evictions:   c.stats.Evictions,
+		Size:        c.stats.Size,
+		Capacity:    1024 * 1024 * 1024, // 1GB
+		HitRate:     hitRate,
 		Utilization: float64(c.stats.Size) / float64(1024*1024*1024),
 	}
 }
@@ -339,7 +340,7 @@ func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
 			for j := 0; j < operationsPerGoroutine; j++ {
 				key := fmt.Sprintf("concurrent-key-%d-%d", goroutineID, j)
 				data := make([]byte, 512)
-				rand.Read(data)
+				_, _ = cryptoRand.Read(data)
 
 				// Put data
 				pc.Put(key, 0, data)
@@ -450,7 +451,7 @@ func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 	// Pre-populate cache
 	for i := int64(0); i < numBlocks; i++ {
 		data := make([]byte, blockSize)
-		rand.Read(data)
+		_, _ = cryptoRand.Read(data)
 		pc.Put(key, i*blockSize, data)
 	}
 
@@ -489,7 +490,7 @@ func BenchmarkPredictiveCache_RandomRead(b *testing.B) {
 	for i := 0; i < numKeys; i++ {
 		keys[i] = fmt.Sprintf("benchmark-random-%d", i)
 		data := make([]byte, blockSize)
-		rand.Read(data)
+		_, _ = cryptoRand.Read(data)
 		pc.Put(keys[i], 0, data)
 	}
 
@@ -529,7 +530,7 @@ func BenchmarkPredictiveCache_ConcurrentAccess(b *testing.B) {
 	for i := 0; i < numKeys; i++ {
 		keys[i] = fmt.Sprintf("benchmark-concurrent-%d", i)
 		data := make([]byte, blockSize)
-		rand.Read(data)
+		_, _ = cryptoRand.Read(data)
 		pc.Put(keys[i], 0, data)
 	}
 
