@@ -1,11 +1,13 @@
 # ObjectFS JavaScript/TypeScript SDK
 
-High-performance POSIX filesystem for object storage with comprehensive JavaScript/TypeScript API support.
+High-performance POSIX filesystem for object storage with comprehensive
+JavaScript/TypeScript API support.
 
 ## Features
 
 - **TypeScript First**: Full TypeScript support with comprehensive type definitions
-- **Easy Integration**: Simple, intuitive API for mounting and managing ObjectFS instances
+- **Easy Integration**: Simple, intuitive API for mounting and managing
+  ObjectFS instances
 - **Promise-based**: Modern async/await support for all operations
 - **Multiple Backends**: Support for S3, Google Cloud Storage, and Azure Blob Storage
 - **Distributed Operations**: Built-in support for distributed clusters and replication
@@ -220,7 +222,8 @@ new ObjectFSClient(options?: ClientOptions)
 
 Options:
 
-- `config?: Configuration | string | object` - Configuration object, file path, or plain object
+- `config?: Configuration | string | object` - Configuration object, file
+  path, or plain object
 - `binaryPath?: string` - Path to ObjectFS binary (default: searches PATH)
 - `apiEndpoint?: string` - API endpoint for remote ObjectFS instances
 - `timeout?: number` - Request timeout in milliseconds (default: 30000)
@@ -252,7 +255,7 @@ validateConfig(config?: Configuration): boolean
 generateConfig(preset?: string, outputPath?: string): string
 ```
 
-#### Storage Operations
+#### Storage Methods
 
 ```typescript
 // List objects
@@ -319,7 +322,7 @@ warmCache(paths: string[], options?: WarmCacheOptions): Promise<WarmCacheResult>
 
 ### Configuration Classes
 
-#### Configuration
+#### Configuration Class
 
 Main configuration class with methods:
 
@@ -380,7 +383,7 @@ try {
 }
 ```
 
-## Configuration
+## Configuration Reference
 
 ### Configuration File
 
@@ -483,7 +486,8 @@ npm run test:watch
 
 ## Browser Support
 
-The SDK is primarily designed for Node.js environments. For browser usage, you'll need to:
+The SDK is designed for Node.js environments. For browser usage, you'll
+need to:
 
 1. Use a bundler like Webpack or Rollup
 2. Provide polyfills for Node.js modules (`fs`, `child_process`, etc.)

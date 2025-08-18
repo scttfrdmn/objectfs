@@ -1,13 +1,14 @@
 # ObjectFS Python SDK
 
-High-performance POSIX filesystem for object storage with comprehensive Python API support.
+High-performance POSIX filesystem for object storage with comprehensive
+Python API support.
 
 ## Features
 
-- **Easy Integration**: Simple, pythonic API for mounting and managing ObjectFS instances
+- **Easy Integration**: Simple, pythonic API for mounting and managing ObjectFS
 - **Async Support**: Full async/await support for high-performance applications
-- **Multiple Backends**: Support for S3, Google Cloud Storage, and Azure Blob Storage
-- **Distributed Operations**: Built-in support for distributed clusters and replication
+- **Multiple Backends**: Support for S3, Google Cloud Storage, Azure Blob Storage
+- **Distributed Operations**: Built-in support for distributed clusters
 - **Monitoring & Metrics**: Comprehensive health checking and metrics collection
 - **Configuration Management**: Flexible configuration with presets and validation
 - **CLI Tools**: Command-line interface for common operations
@@ -180,7 +181,7 @@ objectfs-python storage download s3://my-bucket file.txt ./local-file.txt
 objectfs-python unmount /mnt/objectfs
 ```
 
-## Configuration
+## Configuration Reference
 
 ### Configuration File
 
@@ -244,19 +245,20 @@ Main client class for interacting with ObjectFS.
 
 #### Methods
 
-- `mount(storage_uri, mount_point, config_overrides=None, foreground=False)`: Mount filesystem
+- `mount(storage_uri, mount_point, config_overrides=None,
+  foreground=False)`: Mount
 - `unmount(mount_point)`: Unmount filesystem  
 - `list_mounts()`: List active mounts
 - `is_mounted(mount_point)`: Check if path is mounted
 - `validate_config(config=None)`: Validate configuration
-- `generate_config(preset='production', output_path=None)`: Generate configuration
+- `generate_config(preset='production', output_path=None)`: Generate config
 
 #### Async Methods
 
 - `get_health(endpoint=None)`: Get health status
 - `get_metrics(endpoint=None)`: Collect metrics
 - `get_performance_stats()`: Get performance statistics
-- `list_objects(storage_uri, prefix=None, max_keys=1000)`: List storage objects
+- `list_objects(storage_uri, prefix=None, max_keys=1000)`: List objects
 - `download_object(storage_uri, key, local_path)`: Download object
 - `upload_object(storage_uri, key, local_path, metadata=None)`: Upload object
 - `join_cluster(seed_nodes, node_config=None)`: Join distributed cluster
