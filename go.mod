@@ -1,8 +1,6 @@
 module github.com/objectfs/objectfs
 
-go 1.23.0
-
-toolchain go1.24.5
+go 1.23.2
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.36.5

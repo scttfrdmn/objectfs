@@ -41,7 +41,7 @@ logs/
 
 # Cache directories
 .cache/
-cache/
+/cache/
 
 # Build and distribution directories
 dist/
