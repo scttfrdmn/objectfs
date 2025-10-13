@@ -86,13 +86,9 @@ repos:
     files: \.go$
     pass_filenames: false
 
-      # Performance benchmarks (lightweight)
-  - id: performance-check
-    name: Performance Benchmarks
-    entry: sh -c 'echo "⚡ Running performance benchmarks..." && go test -bench=. -benchtime=1s ./... | grep -E "(Benchmark|PASS|FAIL)" || echo "No benchmarks found"'
-    language: system
-    files: \.go$
-    pass_filenames: false
+      # NOTE: Performance benchmarks removed from pre-commit
+      # Run manually with: go test -bench=. -benchtime=5s ./...
+      # Or in CI for performance-critical PRs
 
       # Security-focused dependency check
   - id: security-deps-check
