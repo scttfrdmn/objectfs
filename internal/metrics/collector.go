@@ -9,28 +9,27 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
 )
 
 // Collector implements comprehensive metrics collection
 type Collector struct {
-	mu            sync.RWMutex
-	config        *Config
-	registry      *prometheus.Registry
-	
+	mu       sync.RWMutex
+	config   *Config
+	registry *prometheus.Registry
+
 	// Prometheus metrics
-	operationCounter    *prometheus.CounterVec
-	operationDuration   *prometheus.HistogramVec
-	operationSize       *prometheus.HistogramVec
-	cacheHitCounter     *prometheus.CounterVec
-	cacheSizeGauge      *prometheus.GaugeVec
-	activeConnections   prometheus.Gauge
-	errorCounter        *prometheus.CounterVec
-	
+	operationCounter  *prometheus.CounterVec
+	operationDuration *prometheus.HistogramVec
+	operationSize     *prometheus.HistogramVec
+	cacheHitCounter   *prometheus.CounterVec
+	cacheSizeGauge    *prometheus.GaugeVec
+	activeConnections prometheus.Gauge
+	errorCounter      *prometheus.CounterVec
+
 	// Internal tracking
-	operations        map[string]*OperationMetrics
-	lastReset         time.Time
-	
+	operations map[string]*OperationMetrics
+	lastReset  time.Time
+
 	// HTTP server for metrics endpoint
 	server *http.Server
 }
@@ -172,7 +171,13 @@ func (c *Collector) RecordOperation(operation string, duration time.Duration, si
 			Count:         1,
 			TotalDuration: duration,
 			TotalSize:     size,
-			Errors:        func() int64 { if success { return 0 } else { return 1 } }(),
+			Errors: func() int64 {
+				if success {
+					return 0
+				} else {
+					return 1
+				}
+			}(),
 			LastOperation: time.Now(),
 			AvgDuration:   duration,
 			AvgSize:       float64(size),
@@ -187,7 +192,7 @@ func (c *Collector) RecordOperation(operation string, duration time.Duration, si
 	c.operationDuration.With(prometheus.Labels{
 		"operation": operation,
 	}).Observe(duration.Seconds())
-	
+
 	if size > 0 {
 		c.operationSize.With(prometheus.Labels{
 			"operation": operation,
@@ -264,7 +269,7 @@ func (c *Collector) GetMetrics() map[string]interface{} {
 	defer c.mu.RUnlock()
 
 	metrics := make(map[string]interface{})
-	
+
 	// Copy operation metrics
 	operations := make(map[string]*OperationMetrics)
 	for k, v := range c.operations {
@@ -278,7 +283,7 @@ func (c *Collector) GetMetrics() map[string]interface{} {
 			AvgSize:       v.AvgSize,
 		}
 	}
-	
+
 	metrics["operations"] = operations
 	metrics["last_reset"] = c.lastReset
 	metrics["uptime"] = time.Since(c.lastReset)
@@ -396,7 +401,6 @@ func (c *Collector) registerMetrics() error {
 	return nil
 }
 
-
 func (c *Collector) determineCacheSource(key string) string {
 	// Simple heuristic to determine cache level
 	// In practice, this would be passed explicitly
@@ -450,17 +454,17 @@ func (c *Collector) healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func (c *Collector) debugMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	metrics := c.GetMetrics()
-	
+
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	// Simple JSON encoding - using helper to avoid errcheck issues
 	writef := func(format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
-	
+
 	writef("{\n")
 	writef("  \"uptime\": \"%v\",\n", metrics["uptime"])
 	writef("  \"last_reset\": \"%v\",\n", metrics["last_reset"])
 	writef("  \"operations\": {\n")
-	
+
 	if operations, ok := metrics["operations"].(map[string]*OperationMetrics); ok {
 		first := true
 		for name, op := range operations {
@@ -476,7 +480,7 @@ func (c *Collector) debugMetricsHandler(w http.ResponseWriter, r *http.Request) 
 			first = false
 		}
 	}
-	
+
 	writef("\n  }\n")
 	writef("}\n")
 }
@@ -486,28 +490,28 @@ func (c *Collector) debugOperationsHandler(w http.ResponseWriter, r *http.Reques
 	defer c.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "text/plain")
-	
+
 	// Helper to avoid errcheck issues
 	writef := func(format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
-	
+
 	writef("ObjectFS Operations Summary\n")
 	writef("==========================\n\n")
 	writef("Uptime: %v\n", time.Since(c.lastReset))
 	writef("Last Reset: %v\n\n", c.lastReset)
-	
+
 	if len(c.operations) == 0 {
 		writef("No operations recorded.\n")
 		return
 	}
-	
-	writef("%-20s %10s %10s %12s %12s %10s\n", 
+
+	writef("%-20s %10s %10s %12s %12s %10s\n",
 		"Operation", "Count", "Errors", "Avg Duration", "Avg Size", "Last Op")
-	writef("%-20s %10s %10s %12s %12s %10s\n", 
+	writef("%-20s %10s %10s %12s %12s %10s\n",
 		"----------", "-----", "------", "------------", "--------", "-------")
-	
+
 	for name, op := range c.operations {
 		writef("%-20s %10d %10d %12v %12.0f %10s\n",
-			name, op.Count, op.Errors, op.AvgDuration, 
+			name, op.Count, op.Errors, op.AvgDuration,
 			op.AvgSize, op.LastOperation.Format("15:04:05"))
 	}
 }
@@ -515,7 +519,7 @@ func (c *Collector) debugOperationsHandler(w http.ResponseWriter, r *http.Reques
 // Utility functions
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || 
+	return len(s) >= len(substr) && (s == substr ||
 		(len(s) > len(substr) && indexOf(s, substr) >= 0))
 }
 

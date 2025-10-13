@@ -460,10 +460,10 @@ func TestUtilityFunctions(t *testing.T) {
 		valid  bool
 	}{
 		{"valid-key", 0, 1024, true},
-		{"", 0, 1024, false},                    // Empty key
-		{"valid-key", -1, 1024, false},          // Negative offset
-		{"valid-key", 0, -1, false},             // Negative size
-		{"valid-key", 0, 0, true},               // Zero size (valid for metadata)
+		{"", 0, 1024, false},                           // Empty key
+		{"valid-key", -1, 1024, false},                 // Negative offset
+		{"valid-key", 0, -1, false},                    // Negative size
+		{"valid-key", 0, 0, true},                      // Zero size (valid for metadata)
 		{"very/long/key/path/file.txt", 0, 1024, true}, // Path-like key
 	}
 

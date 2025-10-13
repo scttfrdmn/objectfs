@@ -199,14 +199,14 @@ func TestLoadFromFileNonExistent(t *testing.T) {
 func TestLoadFromEnv(t *testing.T) {
 	// Set up environment variables
 	testEnvVars := map[string]string{
-		"OBJECTFS_LOG_LEVEL":            "ERROR",
-		"OBJECTFS_METRICS_PORT":         "9090",
-		"OBJECTFS_CACHE_SIZE":           TestCacheSize,
-		"OBJECTFS_MAX_CONCURRENCY":      "300",
-		"OBJECTFS_COMPRESSION_ENABLED":  "false",
-		"OBJECTFS_PREFETCHING":          "false",
-		"OBJECTFS_BATCH_OPERATIONS":     "false",
-		"OBJECTFS_OFFLINE_MODE":         "true",
+		"OBJECTFS_LOG_LEVEL":           "ERROR",
+		"OBJECTFS_METRICS_PORT":        "9090",
+		"OBJECTFS_CACHE_SIZE":          TestCacheSize,
+		"OBJECTFS_MAX_CONCURRENCY":     "300",
+		"OBJECTFS_COMPRESSION_ENABLED": "false",
+		"OBJECTFS_PREFETCHING":         "false",
+		"OBJECTFS_BATCH_OPERATIONS":    "false",
+		"OBJECTFS_OFFLINE_MODE":        "true",
 		"OBJECTFS_CACHE_TTL":           "10m",
 	}
 
@@ -307,9 +307,9 @@ func TestSaveToFileCreateDirectory(t *testing.T) {
 
 // Helper function to check if a string contains a substring
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || (len(s) > len(substr) && 
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || 
-		 indexOf(s, substr) >= 0)))
+	return len(s) >= len(substr) && (s == substr || (len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			indexOf(s, substr) >= 0)))
 }
 
 func indexOf(s, substr string) int {

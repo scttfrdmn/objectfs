@@ -9,22 +9,22 @@ import (
 
 // WriteBuffer implements intelligent write buffering for improved performance
 type WriteBuffer struct {
-	mu       sync.RWMutex
-	config   *WriteBufferConfig
-	buffers  map[string]*buffer
-	stats    WriteBufferStats
-	flushCh  chan string
-	stopCh   chan struct{}
-	stopped  chan struct{}
+	mu      sync.RWMutex
+	config  *WriteBufferConfig
+	buffers map[string]*buffer
+	stats   WriteBufferStats
+	flushCh chan string
+	stopCh  chan struct{}
+	stopped chan struct{}
 }
 
 // WriteBufferConfig represents write buffer configuration
 type WriteBufferConfig struct {
 	// Buffer settings
-	MaxBufferSize    int64         `yaml:"max_buffer_size"`
-	MaxBuffers       int           `yaml:"max_buffers"`
-	FlushInterval    time.Duration `yaml:"flush_interval"`
-	FlushThreshold   int64         `yaml:"flush_threshold"`
+	MaxBufferSize  int64         `yaml:"max_buffer_size"`
+	MaxBuffers     int           `yaml:"max_buffers"`
+	FlushInterval  time.Duration `yaml:"flush_interval"`
+	FlushThreshold int64         `yaml:"flush_threshold"`
 
 	// Performance settings
 	AsyncFlush       bool          `yaml:"async_flush"`
@@ -33,10 +33,10 @@ type WriteBufferConfig struct {
 	CompressionLevel int           `yaml:"compression_level"`
 
 	// Reliability settings
-	SyncOnClose      bool          `yaml:"sync_on_close"`
-	VerifyWrites     bool          `yaml:"verify_writes"`
-	MaxRetries       int           `yaml:"max_retries"`
-	RetryDelay       time.Duration `yaml:"retry_delay"`
+	SyncOnClose  bool          `yaml:"sync_on_close"`
+	VerifyWrites bool          `yaml:"verify_writes"`
+	MaxRetries   int           `yaml:"max_retries"`
+	RetryDelay   time.Duration `yaml:"retry_delay"`
 }
 
 // WriteBufferStats tracks write buffer performance metrics
@@ -194,7 +194,6 @@ func (wb *WriteBuffer) WriteWithRequest(ctx context.Context, req *WriteRequest) 
 	response.FlushTime = time.Since(start)
 	return response
 }
-
 
 // Sync ensures all buffered writes are flushed and synced
 func (wb *WriteBuffer) Sync(ctx context.Context) error {
@@ -470,14 +469,14 @@ func (wb *WriteBuffer) flushStaleBuffers(callback FlushCallback) {
 
 // BufferInfo provides information about a specific buffer
 type BufferInfo struct {
-	Key           string        `json:"key"`
-	Size          int64         `json:"size"`
-	Offset        int64         `json:"offset"`
-	PendingWrites int           `json:"pending_writes"`
-	LastWrite     time.Time     `json:"last_write"`
-	LastAccess    time.Time     `json:"last_access"`
-	Dirty         bool          `json:"dirty"`
-	Flushing      bool          `json:"flushing"`
+	Key           string    `json:"key"`
+	Size          int64     `json:"size"`
+	Offset        int64     `json:"offset"`
+	PendingWrites int       `json:"pending_writes"`
+	LastWrite     time.Time `json:"last_write"`
+	LastAccess    time.Time `json:"last_access"`
+	Dirty         bool      `json:"dirty"`
+	Flushing      bool      `json:"flushing"`
 }
 
 // GetBufferInfo returns information about all buffers

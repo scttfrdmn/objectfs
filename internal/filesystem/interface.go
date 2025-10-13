@@ -1,6 +1,6 @@
 // Package filesystem defines the common interface that all protocol handlers use
 // to interact with the ObjectFS backend. This abstraction allows FUSE, SMB, NFS,
-// and other protocols to share the same S3 backend, cost optimization, and 
+// and other protocols to share the same S3 backend, cost optimization, and
 // enterprise pricing features without code duplication.
 package filesystem
 
@@ -19,43 +19,43 @@ type FilesystemInterface interface {
 	Open(ctx context.Context, path string, flags int) (FileHandle, error)
 	Create(ctx context.Context, path string, mode os.FileMode) (FileHandle, error)
 	Close(ctx context.Context, fh FileHandle) error
-	
+
 	// I/O operations
 	Read(ctx context.Context, fh FileHandle, buf []byte, offset int64) (int, error)
 	Write(ctx context.Context, fh FileHandle, data []byte, offset int64) (int, error)
 	Flush(ctx context.Context, fh FileHandle) error
 	Sync(ctx context.Context, fh FileHandle) error
-	
+
 	// Directory operations
 	ReadDir(ctx context.Context, path string) ([]DirEntry, error)
 	Mkdir(ctx context.Context, path string, mode os.FileMode) error
 	Rmdir(ctx context.Context, path string) error
-	
+
 	// File/directory manipulation
 	Remove(ctx context.Context, path string) error
 	Rename(ctx context.Context, oldPath, newPath string) error
-	
+
 	// Metadata operations
 	Stat(ctx context.Context, path string) (FileInfo, error)
 	Chmod(ctx context.Context, path string, mode os.FileMode) error
 	Chown(ctx context.Context, path string, uid, gid int) error
 	Utimes(ctx context.Context, path string, atime, mtime time.Time) error
 	Truncate(ctx context.Context, path string, size int64) error
-	
+
 	// Link operations
 	Link(ctx context.Context, oldPath, newPath string) error
 	Symlink(ctx context.Context, target, linkPath string) error
 	Readlink(ctx context.Context, path string) (string, error)
-	
+
 	// Extended attributes (useful for storing S3 metadata)
 	GetXattr(ctx context.Context, path string, name string) ([]byte, error)
 	SetXattr(ctx context.Context, path string, name string, data []byte) error
 	ListXattr(ctx context.Context, path string) ([]string, error)
 	RemoveXattr(ctx context.Context, path string, name string) error
-	
+
 	// Filesystem-level operations
 	Statfs(ctx context.Context, path string) (StatfsInfo, error)
-	
+
 	// ObjectFS-specific operations for enterprise features
 	GetCostOptimization(ctx context.Context, path string) (*CostAnalysis, error)
 	GetStorageTier(ctx context.Context, path string) (string, error)
@@ -69,12 +69,12 @@ type FileHandle interface {
 	io.Writer
 	io.Seeker
 	io.Closer
-	
+
 	// Handle-specific operations
 	ID() uint64
 	Path() string
 	Flags() int
-	
+
 	// S3-specific information
 	S3Key() string
 	StorageTier() string
@@ -84,22 +84,22 @@ type FileHandle interface {
 
 // DirEntry represents a directory entry returned by ReadDir
 type DirEntry struct {
-	Name     string
-	Type     FileType
-	Size     int64
-	Mode     os.FileMode
-	ModTime  time.Time
-	IsDir    bool
-	
+	Name    string
+	Type    FileType
+	Size    int64
+	Mode    os.FileMode
+	ModTime time.Time
+	IsDir   bool
+
 	// S3-specific metadata
 	S3Key       string
 	StorageTier string
 	ETag        string
-	
+
 	// Cost information (when available)
-	StorageCost    float64  // Monthly storage cost in USD
-	RetrievalCost  float64  // Per-GB retrieval cost
-	LastAccessed   *time.Time
+	StorageCost   float64 // Monthly storage cost in USD
+	RetrievalCost float64 // Per-GB retrieval cost
+	LastAccessed  *time.Time
 }
 
 // FileInfo represents file metadata, similar to os.FileInfo but with S3-specific fields
@@ -109,18 +109,18 @@ type FileInfo struct {
 	Mode_    os.FileMode
 	ModTime_ time.Time
 	IsDir_   bool
-	
+
 	// Extended S3 metadata
-	S3Key         string
-	StorageTier   string
-	ETag          string
-	ContentType   string
-	Metadata      map[string]string
-	
+	S3Key       string
+	StorageTier string
+	ETag        string
+	ContentType string
+	Metadata    map[string]string
+
 	// ObjectFS enterprise features
-	CostAnalysis   *CostAnalysis
-	AccessPattern  *AccessPattern
-	
+	CostAnalysis  *CostAnalysis
+	AccessPattern *AccessPattern
+
 	// POSIX compatibility
 	Uid int
 	Gid int
@@ -135,17 +135,17 @@ func (fi FileInfo) Sys() interface{}   { return nil }
 
 // StatfsInfo represents filesystem statistics
 type StatfsInfo struct {
-	TotalBytes     uint64
-	FreeBytes      uint64
-	AvailBytes     uint64
-	TotalInodes    uint64
-	FreeInodes     uint64
-	BlockSize      uint32
-	MaxNameLength  uint32
-	
+	TotalBytes    uint64
+	FreeBytes     uint64
+	AvailBytes    uint64
+	TotalInodes   uint64
+	FreeInodes    uint64
+	BlockSize     uint32
+	MaxNameLength uint32
+
 	// S3-specific information
-	StorageCostPerMonth float64 // Total monthly cost
-	ObjectCount         uint64  // Total objects in bucket
+	StorageCostPerMonth float64           // Total monthly cost
+	ObjectCount         uint64            // Total objects in bucket
 	TotalStorageClass   map[string]uint64 // Bytes per storage class
 }
 
@@ -165,24 +165,24 @@ const (
 
 // CostAnalysis provides detailed cost information for a file or directory
 type CostAnalysis struct {
-	CurrentTier     string
+	CurrentTier        string
 	MonthlyStorageCost float64
-	RetrievalCost     float64
-	
+	RetrievalCost      float64
+
 	// Optimization recommendations
-	RecommendedTier   string
-	PotentialSavings  float64
+	RecommendedTier    string
+	PotentialSavings   float64
 	OptimizationReason string
-	
+
 	// Volume discount information
-	VolumeDiscount    float64
-	EffectiveRate     float64
-	
+	VolumeDiscount float64
+	EffectiveRate  float64
+
 	// Access pattern insights
-	AccessFrequency   string // "frequent", "infrequent", "archive", "cold"
-	LastAccessed      time.Time
-	AccessCount       uint64
-	ConfidenceScore   float64 // 0-1, confidence in recommendations
+	AccessFrequency string // "frequent", "infrequent", "archive", "cold"
+	LastAccessed    time.Time
+	AccessCount     uint64
+	ConfidenceScore float64 // 0-1, confidence in recommendations
 }
 
 // AccessPattern tracks how files are accessed to inform cost optimization
@@ -191,10 +191,10 @@ type AccessPattern struct {
 	WriteCount      uint64
 	LastRead        time.Time
 	LastWrite       time.Time
-	AccessFrequency string    // "frequent", "infrequent", "archive", "cold"
+	AccessFrequency string // "frequent", "infrequent", "archive", "cold"
 	ReadBytes       uint64
 	WriteBytes      uint64
-	
+
 	// Predictive analytics
 	PredictedNextAccess time.Time
 	SeasonalPattern     bool
@@ -206,23 +206,23 @@ type ContextKey string
 
 const (
 	// SMB-specific context
-	ContextKeySMBUser     ContextKey = "smb_user"
-	ContextKeySMBShare    ContextKey = "smb_share"
-	ContextKeySMBSession  ContextKey = "smb_session"
-	
-	// FUSE-specific context  
-	ContextKeyFUSEPid     ContextKey = "fuse_pid"
-	ContextKeyFUSEUid     ContextKey = "fuse_uid"
-	ContextKeyFUSEGid     ContextKey = "fuse_gid"
-	
+	ContextKeySMBUser    ContextKey = "smb_user"
+	ContextKeySMBShare   ContextKey = "smb_share"
+	ContextKeySMBSession ContextKey = "smb_session"
+
+	// FUSE-specific context
+	ContextKeyFUSEPid ContextKey = "fuse_pid"
+	ContextKeyFUSEUid ContextKey = "fuse_uid"
+	ContextKeyFUSEGid ContextKey = "fuse_gid"
+
 	// NFS-specific context
-	ContextKeyNFSClient   ContextKey = "nfs_client"
-	ContextKeyNFSExport   ContextKey = "nfs_export"
-	
+	ContextKeyNFSClient ContextKey = "nfs_client"
+	ContextKeyNFSExport ContextKey = "nfs_export"
+
 	// Common context
-	ContextKeyProtocol    ContextKey = "protocol"    // "fuse", "smb", "nfs"
-	ContextKeyClientIP    ContextKey = "client_ip"
-	ContextKeyRequestID   ContextKey = "request_id"
+	ContextKeyProtocol  ContextKey = "protocol" // "fuse", "smb", "nfs"
+	ContextKeyClientIP  ContextKey = "client_ip"
+	ContextKeyRequestID ContextKey = "request_id"
 )
 
 // Helper functions for protocol handlers
@@ -264,9 +264,9 @@ func (e *FilesystemError) Unwrap() error {
 
 // Common error variables
 var (
-	ErrNotExist     = &FilesystemError{Err: os.ErrNotExist}
-	ErrPermission   = &FilesystemError{Err: os.ErrPermission}
-	ErrExist        = &FilesystemError{Err: os.ErrExist}
-	ErrInvalid      = &FilesystemError{Err: os.ErrInvalid}
+	ErrNotExist         = &FilesystemError{Err: os.ErrNotExist}
+	ErrPermission       = &FilesystemError{Err: os.ErrPermission}
+	ErrExist            = &FilesystemError{Err: os.ErrExist}
+	ErrInvalid          = &FilesystemError{Err: os.ErrInvalid}
 	ErrTierNotSupported = &FilesystemError{Err: os.ErrInvalid}
 )

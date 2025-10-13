@@ -13,7 +13,7 @@ func abs(x float64) float64 {
 
 func TestPricingManager_CustomPricing(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	// Create pricing config with custom pricing
 	config := PricingConfig{
 		UsePricingAPI: false,
@@ -33,7 +33,7 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 			EnterpriseDiscount: 10.0, // 10% enterprise discount
 		},
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Uses Custom Pricing", func(t *testing.T) {
@@ -44,7 +44,7 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 
 		// Should use custom pricing with enterprise discount applied
 		expectedCost := 0.020 * 0.9 // 10% discount
-		if abs(pricing.StorageCostPerGBMonth - expectedCost) > 0.000001 {
+		if abs(pricing.StorageCostPerGBMonth-expectedCost) > 0.000001 {
 			t.Errorf("Expected storage cost %f, got %f", expectedCost, pricing.StorageCostPerGBMonth)
 		}
 
@@ -72,7 +72,7 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 
 func TestPricingManager_VolumeDiscounts(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	config := PricingConfig{
 		DiscountConfig: DiscountConfig{
 			EnableVolumeDiscounts: true,
@@ -84,63 +84,63 @@ func TestPricingManager_VolumeDiscounts(t *testing.T) {
 					AppliesTo:       []string{"ALL"},
 				},
 				{
-					MinSizeGB:       1024.0, // 1TB
+					MinSizeGB:       1024.0,  // 1TB
 					MaxSizeGB:       10240.0, // 10TB
 					DiscountPercent: 5.0,
 					AppliesTo:       []string{"STANDARD", "STANDARD_IA"},
 				},
 				{
 					MinSizeGB:       10240.0, // 10TB
-					MaxSizeGB:       -1, // Unlimited
+					MaxSizeGB:       -1,      // Unlimited
 					DiscountPercent: 10.0,
 					AppliesTo:       []string{"ALL"},
 				},
 			},
 		},
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	tests := []struct {
-		name           string
-		tier           string
-		sizeGB         float64
-		baseCost       float64
+		name             string
+		tier             string
+		sizeGB           float64
+		baseCost         float64
 		expectedDiscount float64
 	}{
 		{
-			name:           "No Volume Discount",
-			tier:           TierStandard,
-			sizeGB:         500.0, // 500GB
-			baseCost:       100.0,
+			name:             "No Volume Discount",
+			tier:             TierStandard,
+			sizeGB:           500.0, // 500GB
+			baseCost:         100.0,
 			expectedDiscount: 0.0, // No discount for <1TB
 		},
 		{
-			name:           "5% Volume Discount",
-			tier:           TierStandard,
-			sizeGB:         5000.0, // 5TB
-			baseCost:       100.0,
+			name:             "5% Volume Discount",
+			tier:             TierStandard,
+			sizeGB:           5000.0, // 5TB
+			baseCost:         100.0,
 			expectedDiscount: 5.0, // 5% discount for 1-10TB
 		},
 		{
-			name:           "10% Volume Discount",
-			tier:           TierStandardIA,
-			sizeGB:         50000.0, // 50TB
-			baseCost:       100.0,
+			name:             "10% Volume Discount",
+			tier:             TierStandardIA,
+			sizeGB:           50000.0, // 50TB
+			baseCost:         100.0,
 			expectedDiscount: 10.0, // 10% discount for >10TB
 		},
 		{
-			name:           "Tier Not Applicable",
-			tier:           TierGlacier,
-			sizeGB:         5000.0, // 5TB
-			baseCost:       100.0,
+			name:             "Tier Not Applicable",
+			tier:             TierGlacier,
+			sizeGB:           5000.0, // 5TB
+			baseCost:         100.0,
 			expectedDiscount: 0.0, // Glacier not in 5% tier applies_to
 		},
 		{
-			name:           "All Tiers Applicable",
-			tier:           TierGlacier,
-			sizeGB:         50000.0, // 50TB
-			baseCost:       100.0,
+			name:             "All Tiers Applicable",
+			tier:             TierGlacier,
+			sizeGB:           50000.0, // 50TB
+			baseCost:         100.0,
 			expectedDiscount: 10.0, // 10% tier applies to ALL
 		},
 	}
@@ -149,7 +149,7 @@ func TestPricingManager_VolumeDiscounts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			discountedCost := manager.CalculateVolumeDiscount(tt.tier, tt.sizeGB, tt.baseCost)
 			expectedCost := tt.baseCost * (1.0 - tt.expectedDiscount/100.0)
-			
+
 			if discountedCost != expectedCost {
 				t.Errorf("Expected cost %f, got %f", expectedCost, discountedCost)
 			}
@@ -159,7 +159,7 @@ func TestPricingManager_VolumeDiscounts(t *testing.T) {
 
 func TestPricingManager_MultipleDiscounts(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	config := PricingConfig{
 		CustomPricing: map[string]TierPricing{
 			TierStandardIA: {
@@ -168,14 +168,14 @@ func TestPricingManager_MultipleDiscounts(t *testing.T) {
 			},
 		},
 		DiscountConfig: DiscountConfig{
-			EnterpriseDiscount:      15.0, // 15% enterprise discount
+			EnterpriseDiscount:       15.0, // 15% enterprise discount
 			ReservedCapacityDiscount: 10.0, // 10% reserved capacity discount
 			CustomDiscounts: map[string]float64{
 				TierStandardIA: 5.0, // Additional 5% for Standard-IA
 			},
 		},
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Multiple Discounts Applied", func(t *testing.T) {
@@ -187,10 +187,10 @@ func TestPricingManager_MultipleDiscounts(t *testing.T) {
 		// Calculate expected cost with all discounts:
 		// Base: 0.015
 		// Enterprise discount: 0.015 * (1 - 0.15) = 0.01275
-		// Reserved capacity: 0.01275 * (1 - 0.10) = 0.011475  
+		// Reserved capacity: 0.01275 * (1 - 0.10) = 0.011475
 		// Custom tier discount: 0.011475 * (1 - 0.05) = 0.01090125
 		expectedStorageCost := 0.015 * 0.85 * 0.90 * 0.95
-		
+
 		if pricing.StorageCostPerGBMonth != expectedStorageCost {
 			t.Errorf("Expected storage cost %f, got %f", expectedStorageCost, pricing.StorageCostPerGBMonth)
 		}
@@ -205,12 +205,12 @@ func TestPricingManager_MultipleDiscounts(t *testing.T) {
 
 func TestPricingManager_DefaultPricing(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	// Minimal config - should use all defaults
 	config := PricingConfig{
 		UsePricingAPI: false,
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Uses Default Pricing", func(t *testing.T) {
@@ -251,7 +251,7 @@ func TestPricingManager_DefaultPricing(t *testing.T) {
 
 func TestPricingManager_PricingSummary(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	config := PricingConfig{
 		UsePricingAPI: false,
 		Region:        "us-west-2",
@@ -260,7 +260,7 @@ func TestPricingManager_PricingSummary(t *testing.T) {
 			EnterpriseDiscount: 20.0,
 		},
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Generates Summary", func(t *testing.T) {
@@ -291,12 +291,12 @@ func TestPricingManager_PricingSummary(t *testing.T) {
 
 func TestPricingManager_ErrorHandling(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	config := PricingConfig{
 		UsePricingAPI: true, // Will fail without internet/proper endpoint
 		Region:        "invalid-region",
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Falls Back on API Failure", func(t *testing.T) {
@@ -315,12 +315,12 @@ func TestPricingManager_ErrorHandling(t *testing.T) {
 
 func TestPricingManager_CurrencyAndRegion(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	config := PricingConfig{
 		Currency: "EUR",
 		Region:   "eu-west-1",
 	}
-	
+
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Respects Currency and Region", func(t *testing.T) {
@@ -352,14 +352,14 @@ func TestPricingManager_CurrencyAndRegion(t *testing.T) {
 
 func TestPricingManager_ExternalDiscountConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	// Create temporary external discount config file
 	tempFile, err := os.CreateTemp("", "discount-config-*.yaml")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	defer func() { _ = os.Remove(tempFile.Name()) }()
-	
+
 	externalConfig := `
 enable_volume_discounts: true
 enterprise_discount: 25.0
@@ -376,7 +376,7 @@ volume_tiers:
 custom_discounts:
   GLACIER: 40.0
 `
-	
+
 	if _, err := tempFile.WriteString(externalConfig); err != nil {
 		t.Fatalf("Failed to write temp file: %v", err)
 	}
@@ -389,25 +389,25 @@ custom_discounts:
 				EnterpriseDiscount: 10.0, // Should be overridden by external file
 			},
 		}
-		
+
 		manager := NewPricingManager(config, logger)
-		
+
 		// Verify external config was loaded
 		if manager.config.DiscountConfig.EnterpriseDiscount != 25.0 {
-			t.Errorf("Expected enterprise discount 25.0 from external file, got %f", 
+			t.Errorf("Expected enterprise discount 25.0 from external file, got %f",
 				manager.config.DiscountConfig.EnterpriseDiscount)
 		}
-		
+
 		if manager.config.DiscountConfig.ReservedCapacityDiscount != 20.0 {
-			t.Errorf("Expected reserved capacity discount 20.0 from external file, got %f", 
+			t.Errorf("Expected reserved capacity discount 20.0 from external file, got %f",
 				manager.config.DiscountConfig.ReservedCapacityDiscount)
 		}
-		
+
 		if len(manager.config.DiscountConfig.VolumeTiers) != 2 {
-			t.Errorf("Expected 2 volume tiers from external file, got %d", 
+			t.Errorf("Expected 2 volume tiers from external file, got %d",
 				len(manager.config.DiscountConfig.VolumeTiers))
 		}
-		
+
 		if glacierDiscount, exists := manager.config.DiscountConfig.CustomDiscounts["GLACIER"]; !exists || glacierDiscount != 40.0 {
 			t.Errorf("Expected Glacier custom discount 40.0 from external file, got %f", glacierDiscount)
 		}
@@ -420,12 +420,12 @@ custom_discounts:
 				EnterpriseDiscount: 15.0, // Should fallback to this
 			},
 		}
-		
+
 		manager := NewPricingManager(config, logger)
-		
+
 		// Should fallback to inline config
 		if manager.config.DiscountConfig.EnterpriseDiscount != 15.0 {
-			t.Errorf("Expected fallback to inline enterprise discount 15.0, got %f", 
+			t.Errorf("Expected fallback to inline enterprise discount 15.0, got %f",
 				manager.config.DiscountConfig.EnterpriseDiscount)
 		}
 	})

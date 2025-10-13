@@ -21,20 +21,20 @@ import (
 // CgoFuseFS implements ObjectFS using cgofuse for cross-platform support
 type CgoFuseFS struct {
 	fuse.FileSystemBase
-	
+
 	// ObjectFS components
 	backend     types.Backend
 	cache       types.Cache
 	writeBuffer types.WriteBuffer
 	metrics     types.MetricsCollector
 	config      *Config
-	
+
 	// Internal state
-	mu          sync.RWMutex
-	openFiles   map[uint64]*OpenFile
-	nextHandle  uint64
-	host        *fuse.FileSystemHost
-	mounted     bool
+	mu         sync.RWMutex
+	openFiles  map[uint64]*OpenFile
+	nextHandle uint64
+	host       *fuse.FileSystemHost
+	mounted    bool
 }
 
 // OpenFile represents an open file handle
@@ -47,9 +47,9 @@ type OpenFile struct {
 }
 
 // NewCgoFuseFS creates a new cgofuse-based filesystem
-func NewCgoFuseFS(backend types.Backend, cache types.Cache, writeBuffer types.WriteBuffer, 
+func NewCgoFuseFS(backend types.Backend, cache types.Cache, writeBuffer types.WriteBuffer,
 	metrics types.MetricsCollector, config *Config) *CgoFuseFS {
-	
+
 	return &CgoFuseFS{
 		backend:     backend,
 		cache:       cache,
@@ -65,20 +65,20 @@ func NewCgoFuseFS(backend types.Backend, cache types.Cache, writeBuffer types.Wr
 func (fs *CgoFuseFS) Mount(ctx context.Context) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	
+
 	if fs.mounted {
 		return fmt.Errorf("filesystem already mounted")
 	}
-	
+
 	fs.host = fuse.NewFileSystemHost(fs)
-	
+
 	// Mount options for cross-platform compatibility
 	options := []string{
 		"-o", "fsname=objectfs",
 		"-o", "subtype=s3",
 		"-o", "allow_other",
 	}
-	
+
 	// Platform-specific options
 	switch {
 	case strings.Contains(os.Getenv("GOOS"), "darwin"):
@@ -88,17 +88,17 @@ func (fs *CgoFuseFS) Mount(ctx context.Context) error {
 		// Windows specific options
 		options = append(options, "-o", "FileSystemName=ObjectFS")
 	}
-	
+
 	go func() {
 		ret := fs.host.Mount(fs.config.MountPoint, options)
 		if ret != 0 {
 			log.Printf("Mount failed with code: %d", ret)
 		}
 	}()
-	
+
 	// Wait a bit for mount to establish
 	time.Sleep(100 * time.Millisecond)
-	
+
 	fs.mounted = true
 	log.Printf("ObjectFS mounted at: %s", fs.config.MountPoint)
 	return nil
@@ -108,18 +108,18 @@ func (fs *CgoFuseFS) Mount(ctx context.Context) error {
 func (fs *CgoFuseFS) Unmount() error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	
+
 	if !fs.mounted {
 		return fmt.Errorf("filesystem not mounted")
 	}
-	
+
 	if fs.host != nil {
 		ret := fs.host.Unmount()
 		if ret != 0 {
 			return fmt.Errorf("unmount failed with code: %d", ret)
 		}
 	}
-	
+
 	fs.mounted = false
 	log.Printf("ObjectFS unmounted from: %s", fs.config.MountPoint)
 	return nil
@@ -137,23 +137,23 @@ func (fs *CgoFuseFS) IsMounted() bool {
 // Getattr gets file attributes
 func (fs *CgoFuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	defer fs.recordOperation("getattr", time.Now())
-	
+
 	// Handle root directory
 	if path == "/" {
 		stat.Mode = fuse.S_IFDIR | 0755
 		stat.Nlink = 2
 		return 0
 	}
-	
+
 	// Clean path for S3
 	key := strings.TrimPrefix(path, "/")
-	
+
 	// Try cache first
 	if info := fs.getCachedInfo(key); info != nil {
 		fs.fillStat(stat, info)
 		return 0
 	}
-	
+
 	// Check S3
 	ctx := context.Background()
 	info, err := fs.backend.HeadObject(ctx, key)
@@ -168,7 +168,7 @@ func (fs *CgoFuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		}
 		return -fuse.ENOENT
 	}
-	
+
 	// Cache the info
 	fs.cacheInfo(key, info)
 	fs.fillStat(stat, info)
@@ -178,19 +178,19 @@ func (fs *CgoFuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 // Open opens a file
 func (fs *CgoFuseFS) Open(path string, flags int) (int, uint64) {
 	defer fs.recordOperation("open", time.Now())
-	
+
 	key := strings.TrimPrefix(path, "/")
-	
+
 	fs.mu.Lock()
 	handle := fs.nextHandle
 	fs.nextHandle++
-	
+
 	fs.openFiles[handle] = &OpenFile{
 		Path:   key,
 		Offset: 0,
 	}
 	fs.mu.Unlock()
-	
+
 	return 0, handle
 }
 
@@ -198,27 +198,27 @@ func (fs *CgoFuseFS) Open(path string, flags int) (int, uint64) {
 func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	start := time.Now()
 	defer fs.recordOperation("read", start)
-	
+
 	key := strings.TrimPrefix(path, "/")
-	
+
 	// Try cache first
 	if cached := fs.cache.Get(key, ofst, int64(len(buff))); cached != nil {
 		fs.metrics.RecordCacheHit(key, int64(len(cached)))
 		copy(buff, cached)
 		return len(cached)
 	}
-	
+
 	// Read from S3
 	ctx := context.Background()
 	data, err := fs.backend.GetObject(ctx, key, ofst, int64(len(buff)))
 	if err != nil {
 		return -fuse.EIO
 	}
-	
+
 	// Cache the data
 	fs.cache.Put(key, ofst, data)
 	fs.metrics.RecordCacheMiss(key, int64(len(data)))
-	
+
 	copy(buff, data)
 	return len(data)
 }
@@ -226,49 +226,49 @@ func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 // Write writes to a file
 func (fs *CgoFuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	defer fs.recordOperation("write", time.Now())
-	
+
 	key := strings.TrimPrefix(path, "/")
-	
+
 	// Write to buffer
 	err := fs.writeBuffer.Write(key, ofst, buff)
 	if err != nil {
 		return -fuse.EIO
 	}
-	
+
 	return len(buff)
 }
 
 // Release closes a file
 func (fs *CgoFuseFS) Release(path string, fh uint64) int {
 	defer fs.recordOperation("release", time.Now())
-	
+
 	fs.mu.Lock()
 	delete(fs.openFiles, fh)
 	fs.mu.Unlock()
-	
+
 	return 0
 }
 
 // Readdir reads directory contents
 func (fs *CgoFuseFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
 	defer fs.recordOperation("readdir", time.Now())
-	
+
 	// Add standard entries
 	fill(".", nil, 0)
 	fill("..", nil, 0)
-	
+
 	// List objects from S3
 	prefix := strings.TrimPrefix(path, "/")
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	
+
 	ctx := context.Background()
 	objects, err := fs.backend.ListObjects(ctx, prefix, 1000)
 	if err != nil {
 		return -fuse.EIO
 	}
-	
+
 	// Convert S3 objects to directory entries
 	seen := make(map[string]bool)
 	for _, obj := range objects {
@@ -276,16 +276,16 @@ func (fs *CgoFuseFS) Readdir(path string, fill func(name string, stat *fuse.Stat
 		if relativePath == "" {
 			continue
 		}
-		
+
 		// Handle directory-like structure
 		parts := strings.Split(relativePath, "/")
 		name := parts[0]
-		
+
 		if seen[name] {
 			continue
 		}
 		seen[name] = true
-		
+
 		stat := &fuse.Stat_t{}
 		if len(parts) > 1 {
 			// It's a directory
@@ -297,12 +297,12 @@ func (fs *CgoFuseFS) Readdir(path string, fill func(name string, stat *fuse.Stat
 			stat.Size = obj.Size
 			stat.Nlink = 1
 		}
-		
+
 		if !fill(name, stat, 0) {
 			break
 		}
 	}
-	
+
 	return 0
 }
 
@@ -335,14 +335,14 @@ func (fs *CgoFuseFS) recordOperation(op string, start time.Time) {
 // GetStats returns filesystem statistics
 func (fs *CgoFuseFS) GetStats() *FilesystemStats {
 	return &FilesystemStats{
-		Lookups:     0, // TODO: implement proper stats
-		Opens:       0,
-		Reads:       0,
-		Writes:      0,
-		BytesRead:   0,
+		Lookups:      0, // TODO: implement proper stats
+		Opens:        0,
+		Reads:        0,
+		Writes:       0,
+		BytesRead:    0,
 		BytesWritten: 0,
-		CacheHits:   0,
-		CacheMisses: 0,
-		Errors:      0,
+		CacheHits:    0,
+		CacheMisses:  0,
+		Errors:       0,
 	}
 }

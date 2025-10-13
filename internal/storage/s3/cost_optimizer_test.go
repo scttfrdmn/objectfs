@@ -9,14 +9,14 @@ import (
 
 func TestCostOptimizer_StandardTierOverhead(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	// Create cost optimizer with monitoring enabled
 	config := CostOptimization{
 		EnableAutoTiering:     false,
 		MonitorAccessPatterns: true,
 		CostThreshold:         0.001, // $0.001/GB/month threshold
 	}
-	
+
 	// Create mock backend
 	backend := &Backend{
 		currentTier: TierStandardIA,
@@ -24,16 +24,16 @@ func TestCostOptimizer_StandardTierOverhead(t *testing.T) {
 			CostOptimization: config,
 		},
 	}
-	
+
 	// Initialize pricing manager for the backend
 	backend.pricingManager = NewPricingManager(PricingConfig{}, logger)
-	
+
 	optimizer := NewCostOptimizer(backend, config, logger)
 
 	t.Run("Small Object Uses Standard Tier", func(t *testing.T) {
 		// Small object (64KB) should use Standard tier to avoid IA minimum charges
 		effectiveTier := optimizer.HandleStandardTierOverhead("small.txt", 64*1024)
-		
+
 		if effectiveTier != TierStandard {
 			t.Errorf("Expected Standard tier for small object, got %s", effectiveTier)
 		}
@@ -42,7 +42,7 @@ func TestCostOptimizer_StandardTierOverhead(t *testing.T) {
 	t.Run("Large Object Uses Configured Tier", func(t *testing.T) {
 		// Large object (1MB) should use configured tier (Standard-IA)
 		effectiveTier := optimizer.HandleStandardTierOverhead("large.txt", 1024*1024)
-		
+
 		if effectiveTier != TierStandardIA {
 			t.Errorf("Expected Standard-IA tier for large object, got %s", effectiveTier)
 		}
@@ -51,18 +51,18 @@ func TestCostOptimizer_StandardTierOverhead(t *testing.T) {
 
 func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	
+
 	config := CostOptimization{
 		MonitorAccessPatterns: true,
 	}
-	
+
 	backend := &Backend{
 		currentTier: TierStandard,
 	}
-	
+
 	// Initialize pricing manager for the backend
 	backend.pricingManager = NewPricingManager(PricingConfig{}, logger)
-	
+
 	optimizer := NewCostOptimizer(backend, config, logger)
 
 	t.Run("Records Access Pattern", func(t *testing.T) {
@@ -70,17 +70,17 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 		optimizer.RecordAccess("test.txt", 1024)
 		optimizer.RecordAccess("test.txt", 1024)
 		optimizer.RecordAccess("test.txt", 1024)
-		
+
 		// Check that pattern was recorded
 		pattern, exists := optimizer.accessPatterns["test.txt"]
 		if !exists {
 			t.Fatal("Access pattern should be recorded")
 		}
-		
+
 		if pattern.AccessCount != 3 {
 			t.Errorf("Expected 3 accesses, got %d", pattern.AccessCount)
 		}
-		
+
 		if pattern.ObjectSize != 1024 {
 			t.Errorf("Expected object size 1024, got %d", pattern.ObjectSize)
 		}
@@ -90,16 +90,16 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 		disabledConfig := CostOptimization{
 			MonitorAccessPatterns: false,
 		}
-		
+
 		// Create separate backend for disabled test
 		disabledBackend := &Backend{
-			currentTier: TierStandard,  
+			currentTier: TierStandard,
 		}
 		disabledBackend.pricingManager = NewPricingManager(PricingConfig{}, logger)
-		
+
 		disabledOptimizer := NewCostOptimizer(disabledBackend, disabledConfig, logger)
 		disabledOptimizer.RecordAccess("disabled.txt", 1024)
-		
+
 		if len(disabledOptimizer.accessPatterns) != 0 {
 			t.Error("Should not record access patterns when disabled")
 		}
@@ -114,10 +114,10 @@ func TestCostOptimizer_AccessFrequencyCategories(t *testing.T) {
 	optimizer := NewCostOptimizer(backend, config, logger)
 
 	tests := []struct {
-		name           string
-		accessCount    int64
-		objectAge      time.Duration
-		expectedFreq   string
+		name         string
+		accessCount  int64
+		objectAge    time.Duration
+		expectedFreq string
 	}{
 		{
 			name:         "Frequent Access",
@@ -126,7 +126,7 @@ func TestCostOptimizer_AccessFrequencyCategories(t *testing.T) {
 			expectedFreq: "frequent",
 		},
 		{
-			name:         "Infrequent Access", 
+			name:         "Infrequent Access",
 			accessCount:  5,
 			objectAge:    30 * 24 * time.Hour, // 30 days
 			expectedFreq: "infrequent",
@@ -172,7 +172,7 @@ func TestCostOptimizer_CostCalculation(t *testing.T) {
 		// 1GB object in Standard tier
 		cost := optimizer.calculateObjectCost(1024*1024*1024, TierStandard)
 		expected := 1.0 * StorageTiers[TierStandard].CostPerGBMonth
-		
+
 		if cost != expected {
 			t.Errorf("Expected cost %f, got %f", expected, cost)
 		}
@@ -181,9 +181,9 @@ func TestCostOptimizer_CostCalculation(t *testing.T) {
 	t.Run("Standard-IA Minimum Size Charge", func(t *testing.T) {
 		// 64KB object in Standard-IA should be charged for 128KB minimum
 		cost := optimizer.calculateObjectCost(64*1024, TierStandardIA)
-		minSizeGB := float64(128*1024) / (1024*1024*1024)
+		minSizeGB := float64(128*1024) / (1024 * 1024 * 1024)
 		expected := minSizeGB * StorageTiers[TierStandardIA].CostPerGBMonth
-		
+
 		if cost != expected {
 			t.Errorf("Expected minimum size charge %f, got %f", expected, cost)
 		}
@@ -198,10 +198,10 @@ func TestCostOptimizer_OptimalTierSelection(t *testing.T) {
 	optimizer := NewCostOptimizer(backend, config, logger)
 
 	tests := []struct {
-		name           string
-		objectSize     int64
-		accessFreq     string
-		expectedTier   string
+		name         string
+		objectSize   int64
+		accessFreq   string
+		expectedTier string
 	}{
 		{
 			name:         "Small Frequent Object",
@@ -259,7 +259,7 @@ func TestCostOptimizer_StandardTierOverheadEstimation(t *testing.T) {
 	t.Run("Standard More Expensive Than IA", func(t *testing.T) {
 		// For large objects, Standard is more expensive than IA
 		overhead := optimizer.EstimateStandardTierOverhead(1024*1024*1024, TierStandardIA) // 1GB
-		
+
 		if overhead <= 0 {
 			t.Error("Should have overhead when Standard is more expensive")
 		}
@@ -268,7 +268,7 @@ func TestCostOptimizer_StandardTierOverheadEstimation(t *testing.T) {
 	t.Run("No Overhead When Standard is Cheaper", func(t *testing.T) {
 		// For small objects where IA has minimum charges, no overhead
 		overhead := optimizer.EstimateStandardTierOverhead(64*1024, TierStandardIA) // 64KB
-		
+
 		if overhead != 0 {
 			t.Error("Should have no overhead when Standard is cheaper due to IA minimum charges")
 		}
@@ -291,7 +291,7 @@ func TestCostOptimizer_OptimizationReport(t *testing.T) {
 		AccessCount:     5, // Infrequent but not too low
 		FirstAccessTime: oldTime,
 		LastAccessTime:  time.Now().Add(-10 * 24 * time.Hour), // 10 days ago
-		ObjectSize:      1024 * 1024, // 1MB (large enough for IA)
+		ObjectSize:      1024 * 1024,                          // 1MB (large enough for IA)
 		CurrentTier:     TierStandard,
 		EstimatedCost:   optimizer.calculateObjectCost(1024*1024, TierStandard),
 	}
@@ -308,10 +308,10 @@ func TestCostOptimizer_OptimizationReport(t *testing.T) {
 		standardCost := optimizer.calculateObjectCost(1024*1024, TierStandard)
 		iaCost := optimizer.calculateObjectCost(1024*1024, TierStandardIA)
 		savings := standardCost - iaCost
-		
-		t.Logf("Debug: Standard cost=%f, IA cost=%f, savings=%f, threshold=%f", 
+
+		t.Logf("Debug: Standard cost=%f, IA cost=%f, savings=%f, threshold=%f",
 			standardCost, iaCost, savings, config.CostThreshold)
-		
+
 		// If there are actually savings but no optimizations, it might be the threshold
 		if savings > 0 {
 			t.Error("Should have optimization suggestions - positive savings but no recommendations")

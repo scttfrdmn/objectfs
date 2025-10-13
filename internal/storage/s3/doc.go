@@ -104,13 +104,13 @@ The system analyzes access patterns and automatically recommends optimal storage
 
 	// Analyze object for optimal tier
 	optimizer := &CostOptimizer{backend: s3Backend}
-	
+
 	pattern := &AccessPattern{
 		ObjectSize:   1024 * 1024, // 1MB
 		AccessCount:  5,
 		LastAccess:   time.Now().Add(-30 * 24 * time.Hour),
 	}
-	
+
 	optimization := optimizer.AnalyzeObject(pattern)
 	fmt.Printf("Recommended tier: %s", optimization.RecommendedTier)
 	fmt.Printf("Potential savings: $%.2f/month", optimization.MonthlySavings)
@@ -128,19 +128,19 @@ Flexible configuration options:
 	config := &s3.Config{
 		Region:   "us-west-2",
 		Endpoint: "", // Use default AWS
-		
+
 		// CargoShip Optimization
 		CargoShipEnabled: true,
 		OptimizationLevel: "aggressive",
-		
+
 		// Connection Pool
 		MaxConnections:    10,
 		ConnectionTimeout: 30 * time.Second,
-		
+
 		// Storage Tiers
 		DefaultTier:           s3.TierStandard,
 		AutoTierOptimization: true,
-		
+
 		// Enterprise Pricing
 		EnterpriseDiscount: 15.0, // 15% discount
 		VolumeDiscounts:    true,
@@ -160,10 +160,10 @@ Object operations with automatic optimization:
 
 	// Put object with automatic tier selection
 	err := backend.PutObject(ctx, "data/file.txt", data)
-	
+
 	// Get object with CargoShip optimization
 	data, err := backend.GetObject(ctx, "data/file.txt", 0, -1)
-	
+
 	// Head object for metadata
 	info, err := backend.HeadObject(ctx, "data/file.txt")
 
@@ -172,7 +172,7 @@ Batch operations for improved performance:
 	// Batch get operations
 	keys := []string{"file1.txt", "file2.txt", "file3.txt"}
 	results, err := backend.GetObjects(ctx, keys)
-	
+
 	// Batch put operations
 	objects := map[string][]byte{
 		"file1.txt": data1,

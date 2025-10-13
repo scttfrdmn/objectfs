@@ -19,6 +19,6 @@ type PlatformFileSystem interface {
 // CreatePlatformMountManager creates the cgofuse mount manager
 func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeBuffer types.WriteBuffer,
 	metrics types.MetricsCollector, config *MountConfig) PlatformFileSystem {
-	
+
 	return NewCgoFuseMountManager(backend, cache, writeBuffer, metrics, config)
 }

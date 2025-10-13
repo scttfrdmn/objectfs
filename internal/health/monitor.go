@@ -9,13 +9,13 @@ import (
 
 // Monitor provides system-wide health monitoring for ObjectFS
 type Monitor struct {
-	mu       sync.RWMutex
-	checker  *Checker
-	config   *MonitorConfig
-	alerts   *AlertManager
-	started  bool
-	stopCh   chan struct{}
-	
+	mu      sync.RWMutex
+	checker *Checker
+	config  *MonitorConfig
+	alerts  *AlertManager
+	started bool
+	stopCh  chan struct{}
+
 	// Component references (would be injected)
 	components map[string]HealthyComponent
 }
@@ -26,34 +26,34 @@ type MonitorConfig struct {
 	Enabled           bool          `yaml:"enabled"`
 	MonitorInterval   time.Duration `yaml:"monitor_interval"`
 	HealthCheckConfig *Config       `yaml:"health_check"`
-	
+
 	// Alerting settings
-	AlertingEnabled   bool          `yaml:"alerting_enabled"`
-	AlertConfig       *AlertConfig  `yaml:"alert_config"`
-	
+	AlertingEnabled bool         `yaml:"alerting_enabled"`
+	AlertConfig     *AlertConfig `yaml:"alert_config"`
+
 	// Recovery settings
-	AutoRecovery      bool          `yaml:"auto_recovery"`
-	RecoveryAttempts  int           `yaml:"recovery_attempts"`
-	RecoveryDelay     time.Duration `yaml:"recovery_delay"`
-	
+	AutoRecovery     bool          `yaml:"auto_recovery"`
+	RecoveryAttempts int           `yaml:"recovery_attempts"`
+	RecoveryDelay    time.Duration `yaml:"recovery_delay"`
+
 	// Reporting settings
-	ReportingEnabled  bool          `yaml:"reporting_enabled"`
-	ReportInterval    time.Duration `yaml:"report_interval"`
-	ReportFormat      string        `yaml:"report_format"`
-	
+	ReportingEnabled bool          `yaml:"reporting_enabled"`
+	ReportInterval   time.Duration `yaml:"report_interval"`
+	ReportFormat     string        `yaml:"report_format"`
+
 	// Integration settings
-	MetricsIntegration bool         `yaml:"metrics_integration"`
-	LoggingIntegration bool         `yaml:"logging_integration"`
+	MetricsIntegration bool `yaml:"metrics_integration"`
+	LoggingIntegration bool `yaml:"logging_integration"`
 }
 
 // AlertConfig represents alerting configuration
 type AlertConfig struct {
-	Enabled         bool          `yaml:"enabled"`
-	Channels        []string      `yaml:"channels"`
-	Severity        string        `yaml:"severity"`
-	Cooldown        time.Duration `yaml:"cooldown"`
-	RetryAttempts   int           `yaml:"retry_attempts"`
-	RetryInterval   time.Duration `yaml:"retry_interval"`
+	Enabled       bool          `yaml:"enabled"`
+	Channels      []string      `yaml:"channels"`
+	Severity      string        `yaml:"severity"`
+	Cooldown      time.Duration `yaml:"cooldown"`
+	RetryAttempts int           `yaml:"retry_attempts"`
+	RetryInterval time.Duration `yaml:"retry_interval"`
 }
 
 // HealthyComponent defines the interface for components that can report health
@@ -65,21 +65,21 @@ type HealthyComponent interface {
 
 // Alert represents a health alert
 type Alert struct {
-	ID          string    `json:"id"`
-	Component   string    `json:"component"`
-	Check       string    `json:"check"`
-	Severity    string    `json:"severity"`
-	Message     string    `json:"message"`
-	Timestamp   time.Time `json:"timestamp"`
-	Resolved    bool      `json:"resolved"`
-	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
+	ID         string     `json:"id"`
+	Component  string     `json:"component"`
+	Check      string     `json:"check"`
+	Severity   string     `json:"severity"`
+	Message    string     `json:"message"`
+	Timestamp  time.Time  `json:"timestamp"`
+	Resolved   bool       `json:"resolved"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
 
 // AlertManager manages health alerts
 type AlertManager struct {
-	mu      sync.RWMutex
-	config  *AlertConfig
-	alerts  map[string]*Alert
+	mu       sync.RWMutex
+	config   *AlertConfig
+	alerts   map[string]*Alert
 	channels map[string]AlertChannel
 }
 
@@ -158,7 +158,7 @@ func (m *Monitor) Start(ctx context.Context) error {
 
 	// Start monitoring loops
 	go m.monitorLoop()
-	
+
 	if m.config.ReportingEnabled {
 		go m.reportLoop()
 	}
@@ -176,7 +176,7 @@ func (m *Monitor) Stop() error {
 	}
 
 	close(m.stopCh)
-	
+
 	if err := m.checker.Stop(); err != nil {
 		return fmt.Errorf("failed to stop health checker: %w", err)
 	}
@@ -218,8 +218,8 @@ func (m *Monitor) RegisterComponent(component HealthyComponent) error {
 func (m *Monitor) GetStatus() *ServiceStatus {
 	version := "1.0.0" // This would come from build info
 	metadata := map[string]interface{}{
-		"service": "objectfs",
-		"components": len(m.components),
+		"service":        "objectfs",
+		"components":     len(m.components),
 		"monitor_config": m.config,
 	}
 
@@ -354,7 +354,7 @@ func (m *Monitor) monitorLoop() {
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -430,7 +430,7 @@ func (m *Monitor) reportLoop() {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
-	
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -447,7 +447,7 @@ func (m *Monitor) reportLoop() {
 func (m *Monitor) generateHealthReport() {
 	// Generate and log/send health report
 	status := m.GetStatus()
-	
+
 	// This would typically log or send the report
 	_ = status // Placeholder
 }
@@ -554,13 +554,13 @@ func NewHealthEndpoints(monitor *Monitor) *HealthEndpoints {
 func (he *HealthEndpoints) GetHealthStatus() map[string]interface{} {
 	if he.monitor.IsHealthy() {
 		return map[string]interface{}{
-			"status": "healthy",
+			"status":    "healthy",
 			"timestamp": time.Now(),
 		}
 	}
-	
+
 	return map[string]interface{}{
-		"status": "unhealthy",
+		"status":    "unhealthy",
 		"timestamp": time.Now(),
 	}
 }

@@ -15,23 +15,23 @@ const (
 
 // CostOptimizer handles cost optimization decisions and Standard tier overhead management
 type CostOptimizer struct {
-	backend          *Backend
-	config           CostOptimization
-	logger           *slog.Logger
-	accessPatterns   map[string]*AccessPattern
-	costThreshold    float64
+	backend        *Backend
+	config         CostOptimization
+	logger         *slog.Logger
+	accessPatterns map[string]*AccessPattern
+	costThreshold  float64
 }
 
 // AccessPattern tracks object access patterns for cost optimization
 type AccessPattern struct {
-	ObjectKey       string    `json:"object_key"`
-	AccessCount     int64     `json:"access_count"`
-	LastAccessTime  time.Time `json:"last_access_time"`
-	FirstAccessTime time.Time `json:"first_access_time"`
+	ObjectKey       string        `json:"object_key"`
+	AccessCount     int64         `json:"access_count"`
+	LastAccessTime  time.Time     `json:"last_access_time"`
+	FirstAccessTime time.Time     `json:"first_access_time"`
 	AvgAccessGap    time.Duration `json:"avg_access_gap"`
-	ObjectSize      int64     `json:"object_size"`
-	CurrentTier     string    `json:"current_tier"`
-	EstimatedCost   float64   `json:"estimated_cost"`
+	ObjectSize      int64         `json:"object_size"`
+	CurrentTier     string        `json:"current_tier"`
+	EstimatedCost   float64       `json:"estimated_cost"`
 }
 
 // NewCostOptimizer creates a new cost optimizer
@@ -53,7 +53,7 @@ func (co *CostOptimizer) RecordAccess(objectKey string, objectSize int64) {
 
 	now := time.Now()
 	pattern, exists := co.accessPatterns[objectKey]
-	
+
 	if !exists {
 		pattern = &AccessPattern{
 			ObjectKey:       objectKey,
@@ -67,10 +67,10 @@ func (co *CostOptimizer) RecordAccess(objectKey string, objectSize int64) {
 		}
 		co.accessPatterns[objectKey] = pattern
 	} else {
-		// Update access pattern  
+		// Update access pattern
 		pattern.AccessCount++
 		pattern.LastAccessTime = now
-		
+
 		// Calculate rolling average access gap
 		if pattern.AccessCount > 1 {
 			totalTime := now.Sub(pattern.FirstAccessTime)
@@ -122,14 +122,14 @@ func (co *CostOptimizer) AnalyzeAndOptimize(ctx context.Context) error {
 
 // TierOptimization represents a suggested tier optimization
 type TierOptimization struct {
-	ObjectKey               string    `json:"object_key"`
-	FromTier                string    `json:"from_tier"`
-	ToTier                  string    `json:"to_tier"`
-	Reason                  string    `json:"reason"`
-	EstimatedMonthlySavings float64   `json:"estimated_monthly_savings"`
-	ConfidenceLevel         float64   `json:"confidence_level"`
-	ObjectSize              int64     `json:"object_size"`
-	AccessFrequency         string    `json:"access_frequency"`
+	ObjectKey               string  `json:"object_key"`
+	FromTier                string  `json:"from_tier"`
+	ToTier                  string  `json:"to_tier"`
+	Reason                  string  `json:"reason"`
+	EstimatedMonthlySavings float64 `json:"estimated_monthly_savings"`
+	ConfidenceLevel         float64 `json:"confidence_level"`
+	ObjectSize              int64   `json:"object_size"`
+	AccessFrequency         string  `json:"access_frequency"`
 }
 
 // analyzeObject analyzes a single object's access pattern and suggests optimization
@@ -143,7 +143,7 @@ func (co *CostOptimizer) analyzeObject(pattern *AccessPattern) *TierOptimization
 	// Determine access frequency
 	accessFreq := co.categorizeAccessFrequency(pattern)
 	currentCost := co.calculateObjectCost(pattern.ObjectSize, pattern.CurrentTier)
-	
+
 	// Find optimal tier based on access pattern
 	optimalTier := co.findOptimalTier(pattern, accessFreq)
 	if optimalTier == pattern.CurrentTier {
@@ -241,7 +241,7 @@ func (co *CostOptimizer) calculateObjectCost(objectSize int64, tier string) floa
 	}
 
 	objectSizeGB := float64(objectSize) / (1024 * 1024 * 1024)
-	
+
 	// Handle minimum object size charges
 	if objectSize < tierPricing.MinimumBillableSize {
 		// Charge for minimum size
@@ -264,7 +264,7 @@ func (co *CostOptimizer) generateOptimizationReason(pattern *AccessPattern, acce
 	case AccessInfrequent:
 		return "Infrequent access pattern - IA tier more cost-effective"
 	case AccessArchive:
-		return "Archive access pattern - Glacier tier significant savings"  
+		return "Archive access pattern - Glacier tier significant savings"
 	case AccessCold, AccessNever:
 		return "Rarely accessed - Deep archive substantial cost reduction"
 	default:
@@ -276,7 +276,7 @@ func (co *CostOptimizer) generateOptimizationReason(pattern *AccessPattern, acce
 func (co *CostOptimizer) calculateConfidence(pattern *AccessPattern) float64 {
 	// Base confidence on data quality
 	confidence := 0.5 // Base confidence
-	
+
 	// More accesses = higher confidence
 	if pattern.AccessCount >= 10 {
 		confidence += 0.2
@@ -284,7 +284,7 @@ func (co *CostOptimizer) calculateConfidence(pattern *AccessPattern) float64 {
 		confidence += 0.1
 	}
 
-	// Longer observation period = higher confidence  
+	// Longer observation period = higher confidence
 	objectAge := time.Since(pattern.FirstAccessTime)
 	if objectAge >= 90*24*time.Hour {
 		confidence += 0.2
@@ -323,8 +323,8 @@ func (co *CostOptimizer) applyOptimization(ctx context.Context, opt TierOptimiza
 // GetOptimizationReport generates a cost optimization report
 func (co *CostOptimizer) GetOptimizationReport() OptimizationReport {
 	report := OptimizationReport{
-		TotalObjects:        len(co.accessPatterns),
-		OptimizationResults: make([]TierOptimization, 0),
+		TotalObjects:          len(co.accessPatterns),
+		OptimizationResults:   make([]TierOptimization, 0),
 		TotalPotentialSavings: 0,
 	}
 
@@ -367,10 +367,10 @@ func (co *CostOptimizer) HandleStandardTierOverhead(objectKey string, objectSize
 func (co *CostOptimizer) EstimateStandardTierOverhead(objectSize int64, targetTier string) float64 {
 	standardCost := co.calculateObjectCost(objectSize, TierStandard)
 	targetCost := co.calculateObjectCost(objectSize, targetTier)
-	
+
 	if standardCost > targetCost {
 		return standardCost - targetCost
 	}
-	
+
 	return 0 // No overhead if Standard is cheaper
 }
