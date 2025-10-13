@@ -14,6 +14,22 @@ jobs:
       matrix:
         go-version: [1.22.x, 1.23.x, 1.24.x]
 
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+        - 4566:4566
+        env:
+          SERVICES: s3
+          DEBUG: 0
+          DATA_DIR: /tmp/localstack/data
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "awslocal s3 ls || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v4
 
@@ -21,28 +37,57 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: ${{ matrix.go-version }}
+        cache: true
+        cache-dependency-path: go.sum
 
-    - name: Cache Go modules
-      uses: actions/cache@v3
+    - name: Cache Go build
+      uses: actions/cache@v4
       with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
         restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}-
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
           ${{ runner.os }}-go-
 
     - name: Install dependencies
       run: go mod download
 
-    - name: Run tests with coverage
-      run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+    - name: Wait for LocalStack
+      run: |
+        timeout 30 sh -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "\"s3\": *\"running\""; do sleep 1; done'
+
+    - name: Run unit tests
+      run: go test -race -coverprofile=coverage-unit.out -covermode=atomic -short ./...
+      env:
+        AWS_ACCESS_KEY_ID: test
+        AWS_SECRET_ACCESS_KEY: test
+        AWS_REGION: us-east-1
+        AWS_ENDPOINT_URL: http://localhost:4566
+
+    - name: Run integration tests with LocalStack
+      run: go test -race -coverprofile=coverage-integration.out -covermode=atomic -run Integration ./...
+      env:
+        AWS_ACCESS_KEY_ID: test
+        AWS_SECRET_ACCESS_KEY: test
+        AWS_REGION: us-east-1
+        AWS_ENDPOINT_URL: http://localhost:4566
+        LOCALSTACK_ENDPOINT: http://localhost:4566
+
+    - name: Merge coverage reports
+      run: |
+        go install github.com/wadey/gocovmerge@latest
+        gocovmerge coverage-unit.out coverage-integration.out > coverage.out
 
     - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage.out
         flags: unittests
-        name: codecov-umbrella
+        name: codecov-${{ matrix.go-version }}
         fail_ci_if_error: false
 
   lint:
