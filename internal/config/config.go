@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/objectfs/objectfs/pkg/utils"
 	"gopkg.in/yaml.v2"
 )
 
@@ -367,11 +368,11 @@ func NewDefault() *Configuration {
 // LoadFromFile loads configuration from a YAML file
 func (c *Configuration) LoadFromFile(filename string) error {
 	// Validate file path to prevent directory traversal
-	cleanPath := filepath.Clean(filename)
-	if strings.Contains(cleanPath, "..") {
-		return fmt.Errorf("invalid config file path: %s", filename)
+	if err := utils.ValidatePath(filename, true); err != nil {
+		return fmt.Errorf("invalid config file path: %w", err)
 	}
 
+	cleanPath := filepath.Clean(filename)
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)

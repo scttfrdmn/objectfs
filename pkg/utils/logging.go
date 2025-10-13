@@ -109,14 +109,14 @@ func SetupLogging(levelStr, logFile string) error {
 
 	// Determine output destination
 	var output io.Writer = os.Stdout
-	
+
 	if logFile != "" {
 		// Validate log file path
-		cleanPath := filepath.Clean(logFile)
-		if strings.Contains(cleanPath, "..") {
-			return fmt.Errorf("invalid log file path: %s", logFile)
+		if err := ValidatePath(logFile, true); err != nil {
+			return fmt.Errorf("invalid log file path: %w", err)
 		}
-		
+
+		cleanPath := filepath.Clean(logFile)
 		file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %w", err)
@@ -137,13 +137,13 @@ func FormatBytes(bytes int64) string {
 	if bytes < unit {
 		return fmt.Sprintf("%d B", bytes)
 	}
-	
+
 	div, exp := int64(unit), 0
 	for n := bytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
-	
+
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
@@ -154,13 +154,13 @@ func ParseBytes(s string) (int64, error) {
 	}
 
 	s = strings.ToUpper(strings.TrimSpace(s))
-	
+
 	// Handle plain numbers
 	s = strings.TrimSuffix(s, "B")
-	
+
 	var multiplier int64 = 1
 	var numStr string
-	
+
 	if len(s) > 0 {
 		lastChar := s[len(s)-1]
 		switch lastChar {
@@ -183,11 +183,11 @@ func ParseBytes(s string) (int64, error) {
 			numStr = s
 		}
 	}
-	
+
 	var num float64
 	if _, err := fmt.Sscanf(numStr, "%f", &num); err != nil {
 		return 0, fmt.Errorf("invalid number format: %s", s)
 	}
-	
+
 	return int64(num * float64(multiplier)), nil
 }

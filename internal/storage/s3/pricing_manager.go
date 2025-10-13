@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
-	
+
+	"github.com/objectfs/objectfs/pkg/utils"
 	"gopkg.in/yaml.v2"
 )
 
@@ -21,11 +21,11 @@ const (
 
 // PricingManager handles AWS S3 pricing with custom discounts and overrides
 type PricingManager struct {
-	config          PricingConfig
-	logger          *slog.Logger
-	cachedPricing   map[string]TierPricing
-	lastUpdated     time.Time
-	httpClient      *http.Client
+	config        PricingConfig
+	logger        *slog.Logger
+	cachedPricing map[string]TierPricing
+	lastUpdated   time.Time
+	httpClient    *http.Client
 }
 
 // NewPricingManager creates a new pricing manager
@@ -41,7 +41,7 @@ func NewPricingManager(config PricingConfig, logger *slog.Logger) *PricingManage
 	if config.DiscountConfigFile != "" {
 		externalDiscountConfig, err := loadDiscountConfigFromFile(config.DiscountConfigFile, logger)
 		if err != nil {
-			logger.Warn("Failed to load external discount config file, using inline config", 
+			logger.Warn("Failed to load external discount config file, using inline config",
 				"file", config.DiscountConfigFile, "error", err)
 		} else {
 			// Merge external config with inline config (external takes precedence)
@@ -85,7 +85,7 @@ func (pm *PricingManager) getBasePricing(tier string) (TierPricing, error) {
 			pm.lastUpdated = time.Now()
 			return pricing, nil
 		} else {
-			pm.logger.Warn("Failed to fetch pricing from AWS API, using defaults", 
+			pm.logger.Warn("Failed to fetch pricing from AWS API, using defaults",
 				"tier", tier, "error", err)
 		}
 	}
@@ -98,7 +98,7 @@ func (pm *PricingManager) getBasePricing(tier string) (TierPricing, error) {
 func (pm *PricingManager) fetchFromPricingAPI(tier string) (TierPricing, error) {
 	// AWS Pricing API endpoint for S3
 	url := fmt.Sprintf("https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/%s/index.json", pm.config.Region)
-	
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return TierPricing{}, fmt.Errorf("failed to create pricing API request: %w", err)
@@ -124,33 +124,33 @@ func (pm *PricingManager) fetchFromPricingAPI(tier string) (TierPricing, error) 
 
 // AWSPricingResponse represents the AWS Pricing API response structure
 type AWSPricingResponse struct {
-	FormatVersion   string                    `json:"formatVersion"`
-	Disclaimer      string                    `json:"disclaimer"`
-	OfferCode       string                    `json:"offerCode"`
-	Version         string                    `json:"version"`
-	PublicationDate string                    `json:"publicationDate"`
-	Products        map[string]AWSProduct     `json:"products"`
-	Terms           map[string]interface{}    `json:"terms"`
+	FormatVersion   string                 `json:"formatVersion"`
+	Disclaimer      string                 `json:"disclaimer"`
+	OfferCode       string                 `json:"offerCode"`
+	Version         string                 `json:"version"`
+	PublicationDate string                 `json:"publicationDate"`
+	Products        map[string]AWSProduct  `json:"products"`
+	Terms           map[string]interface{} `json:"terms"`
 }
 
 // AWSProduct represents a product in the AWS pricing data
 type AWSProduct struct {
-	SKU           string                 `json:"sku"`
-	ProductFamily string                 `json:"productFamily"`
-	Attributes    map[string]string      `json:"attributes"`
+	SKU           string            `json:"sku"`
+	ProductFamily string            `json:"productFamily"`
+	Attributes    map[string]string `json:"attributes"`
 }
 
 // parsePricingData extracts pricing information from AWS API response
 func (pm *PricingManager) parsePricingData(tier string, data AWSPricingResponse) (TierPricing, error) {
 	// This is a simplified parser - actual AWS pricing API parsing is complex
 	// In production, you'd need more sophisticated parsing logic
-	
+
 	storageClass := pm.mapTierToStorageClass(tier)
-	
+
 	// Look for storage pricing
 	var storageCost = 0.023 // Default fallback
 	var retrievalCost = 0.0
-	
+
 	for _, product := range data.Products {
 		if product.Attributes["storageClass"] == storageClass {
 			// Extract pricing from terms (simplified)
@@ -278,7 +278,7 @@ func (pm *PricingManager) getDefaultRequestCost(requestType, tier string) float6
 			TierIntelligent: 0.0004,
 		},
 	}
-	
+
 	if tierCosts, exists := costs[requestType]; exists {
 		if cost, exists := tierCosts[tier]; exists {
 			return cost / 1000.0 // Convert to cost per request
@@ -377,14 +377,14 @@ func (pm *PricingManager) CalculateVolumeDiscount(tier string, sizeGB float64, b
 		if sizeGB >= volumeTier.MinSizeGB && (volumeTier.MaxSizeGB == -1 || sizeGB <= volumeTier.MaxSizeGB) {
 			discount := volumeTier.DiscountPercent / 100.0
 			discountedCost := baseCost * (1.0 - discount)
-			
+
 			pm.logger.Debug("Applied volume discount",
 				"tier", tier,
 				"size_gb", sizeGB,
 				"discount_percent", volumeTier.DiscountPercent,
 				"original_cost", baseCost,
 				"discounted_cost", discountedCost)
-			
+
 			return discountedCost
 		}
 	}
@@ -399,13 +399,13 @@ func (pm *PricingManager) RefreshPricing(ctx context.Context) error {
 	}
 
 	pm.logger.Info("Refreshing pricing data from AWS API")
-	
+
 	// Clear cached pricing to force refresh
 	pm.cachedPricing = make(map[string]TierPricing)
-	
+
 	// Refresh pricing for all tiers
 	tiers := []string{TierStandard, TierStandardIA, TierOneZoneIA, TierGlacierIR, TierGlacier, TierDeepArchive, TierIntelligent}
-	
+
 	for _, tier := range tiers {
 		if _, err := pm.getBasePricing(tier); err != nil {
 			pm.logger.Warn("Failed to refresh pricing for tier", "tier", tier, "error", err)
@@ -419,17 +419,17 @@ func (pm *PricingManager) RefreshPricing(ctx context.Context) error {
 // GetPricingSummary returns a summary of current pricing configuration
 func (pm *PricingManager) GetPricingSummary() PricingSummary {
 	summary := PricingSummary{
-		UsePricingAPI:       pm.config.UsePricingAPI,
-		Region:              pm.config.Region,
-		Currency:            pm.config.Currency,
-		LastUpdated:         pm.lastUpdated,
-		EnterpriseDiscount:  pm.config.DiscountConfig.EnterpriseDiscount,
-		TierPricing:         make(map[string]TierPricingSummary),
+		UsePricingAPI:      pm.config.UsePricingAPI,
+		Region:             pm.config.Region,
+		Currency:           pm.config.Currency,
+		LastUpdated:        pm.lastUpdated,
+		EnterpriseDiscount: pm.config.DiscountConfig.EnterpriseDiscount,
+		TierPricing:        make(map[string]TierPricingSummary),
 	}
 
 	// Get pricing summary for each tier
 	tiers := []string{TierStandard, TierStandardIA, TierOneZoneIA, TierGlacierIR, TierGlacier, TierDeepArchive, TierIntelligent}
-	
+
 	for _, tier := range tiers {
 		if pricing, err := pm.GetTierPricing(tier); err == nil {
 			summary.TierPricing[tier] = TierPricingSummary{
@@ -446,12 +446,12 @@ func (pm *PricingManager) GetPricingSummary() PricingSummary {
 
 // PricingSummary provides a summary of pricing configuration
 type PricingSummary struct {
-	UsePricingAPI      bool                           `json:"use_pricing_api"`
-	Region             string                         `json:"region"`
-	Currency           string                         `json:"currency"`
-	LastUpdated        time.Time                      `json:"last_updated"`
-	EnterpriseDiscount float64                        `json:"enterprise_discount"`
-	TierPricing        map[string]TierPricingSummary  `json:"tier_pricing"`
+	UsePricingAPI      bool                          `json:"use_pricing_api"`
+	Region             string                        `json:"region"`
+	Currency           string                        `json:"currency"`
+	LastUpdated        time.Time                     `json:"last_updated"`
+	EnterpriseDiscount float64                       `json:"enterprise_discount"`
+	TierPricing        map[string]TierPricingSummary `json:"tier_pricing"`
 }
 
 // TierPricingSummary provides a summary of tier pricing
@@ -465,40 +465,40 @@ type TierPricingSummary struct {
 // loadDiscountConfigFromFile loads discount configuration from an external file
 func loadDiscountConfigFromFile(filePath string, logger *slog.Logger) (DiscountConfig, error) {
 	var discountConfig DiscountConfig
-	
+
 	// Validate file path to prevent directory traversal
-	cleanPath := filepath.Clean(filePath)
-	if strings.Contains(cleanPath, "..") {
-		return discountConfig, fmt.Errorf("invalid discount config file path: %s", filePath)
+	if err := utils.ValidatePath(filePath, true); err != nil {
+		return discountConfig, fmt.Errorf("invalid discount config file path: %w", err)
 	}
-	
+
 	// Resolve relative paths
+	cleanPath := filepath.Clean(filePath)
 	absPath, err := filepath.Abs(cleanPath)
 	if err != nil {
 		return discountConfig, fmt.Errorf("failed to resolve path %s: %w", filePath, err)
 	}
-	
+
 	// Check if file exists
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
 		return discountConfig, fmt.Errorf("discount config file does not exist: %s", absPath)
 	}
-	
+
 	// Read file - path has been validated above to prevent directory traversal
 	data, err := os.ReadFile(absPath) // #nosec G304
 	if err != nil {
 		return discountConfig, fmt.Errorf("failed to read discount config file %s: %w", absPath, err)
 	}
-	
+
 	// Parse YAML
 	if err := yaml.Unmarshal(data, &discountConfig); err != nil {
 		return discountConfig, fmt.Errorf("failed to parse discount config YAML from %s: %w", absPath, err)
 	}
-	
-	logger.Debug("Successfully loaded discount config from file", 
-		"file", absPath, 
+
+	logger.Debug("Successfully loaded discount config from file",
+		"file", absPath,
 		"enterprise_discount", discountConfig.EnterpriseDiscount,
 		"volume_tiers", len(discountConfig.VolumeTiers))
-	
+
 	return discountConfig, nil
 }
 
@@ -506,29 +506,29 @@ func loadDiscountConfigFromFile(filePath string, logger *slog.Logger) (DiscountC
 // External config takes precedence over inline config for non-zero values
 func mergeDiscountConfigs(inline, external DiscountConfig) DiscountConfig {
 	merged := inline
-	
+
 	// Override with external values if they are non-zero
 	if external.EnableVolumeDiscounts {
 		merged.EnableVolumeDiscounts = external.EnableVolumeDiscounts
 	}
-	
+
 	if external.EnterpriseDiscount > 0 {
 		merged.EnterpriseDiscount = external.EnterpriseDiscount
 	}
-	
+
 	if external.ReservedCapacityDiscount > 0 {
 		merged.ReservedCapacityDiscount = external.ReservedCapacityDiscount
 	}
-	
+
 	if external.SpotDiscount > 0 {
 		merged.SpotDiscount = external.SpotDiscount
 	}
-	
+
 	// Use external volume tiers if provided
 	if len(external.VolumeTiers) > 0 {
 		merged.VolumeTiers = external.VolumeTiers
 	}
-	
+
 	// Merge custom discounts (external takes precedence)
 	if len(external.CustomDiscounts) > 0 {
 		if merged.CustomDiscounts == nil {
@@ -538,6 +538,6 @@ func mergeDiscountConfigs(inline, external DiscountConfig) DiscountConfig {
 			merged.CustomDiscounts[tier] = discount
 		}
 	}
-	
+
 	return merged
 }
