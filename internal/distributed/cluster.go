@@ -125,6 +125,55 @@ type ClusterStats struct {
 	NetworkErrors    int64 `json:"network_errors"`
 }
 
+// applyConfigDefaults applies default values for zero-valued configuration fields
+func applyConfigDefaults(config *ClusterConfig) {
+	if config.ListenAddr == "" {
+		config.ListenAddr = "0.0.0.0:8080"
+	}
+	if config.AdvertiseAddr == "" {
+		config.AdvertiseAddr = "127.0.0.1:8080"
+	}
+	if config.JoinTimeout == 0 {
+		config.JoinTimeout = 30 * time.Second
+	}
+	if config.ElectionTimeout == 0 {
+		config.ElectionTimeout = 5 * time.Second
+	}
+	if config.HeartbeatInterval == 0 {
+		config.HeartbeatInterval = 1 * time.Second
+	}
+	if config.LeadershipTTL == 0 {
+		config.LeadershipTTL = 10 * time.Second
+	}
+	if config.GossipInterval == 0 {
+		config.GossipInterval = 500 * time.Millisecond
+	}
+	if config.GossipFanout == 0 {
+		config.GossipFanout = 3
+	}
+	if config.MaxGossipPacket == 0 {
+		config.MaxGossipPacket = 1024
+	}
+	if config.ReplicationFactor == 0 {
+		config.ReplicationFactor = 3
+	}
+	if config.ConsistencyLevel == "" {
+		config.ConsistencyLevel = "eventual"
+	}
+	if config.MaxConcurrentOps == 0 {
+		config.MaxConcurrentOps = 100
+	}
+	if config.OperationTimeout == 0 {
+		config.OperationTimeout = 30 * time.Second
+	}
+	if config.RetryAttempts == 0 {
+		config.RetryAttempts = 3
+	}
+	if config.RetryBackoff == 0 {
+		config.RetryBackoff = time.Second
+	}
+}
+
 // NewClusterManager creates a new cluster manager
 func NewClusterManager(config *ClusterConfig) (*ClusterManager, error) {
 	if config == nil {
@@ -147,6 +196,9 @@ func NewClusterManager(config *ClusterConfig) (*ClusterManager, error) {
 			RetryBackoff:      time.Second,
 		}
 	}
+
+	// Apply defaults for zero-valued fields
+	applyConfigDefaults(config)
 
 	// Generate node ID if not provided
 	if config.NodeID == "" {
