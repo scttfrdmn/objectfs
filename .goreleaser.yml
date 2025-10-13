@@ -1,0 +1,172 @@
+# GoReleaser configuration for ObjectFS
+# https://goreleaser.com
+
+version: 2
+
+# Project metadata
+project_name: objectfs
+
+# Build configuration
+builds:
+- id: objectfs
+  main: ./cmd/objectfs
+  binary: objectfs
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux
+  - darwin
+  - windows
+  goarch:
+  - amd64
+  - arm64
+    # Ignore certain OS/arch combinations
+  ignore:
+  - goos: windows
+    goarch: arm64
+  ldflags:
+  - -s -w
+  - -X github.com/objectfs/objectfs/internal/version.Version={{.Version}}
+  - -X github.com/objectfs/objectfs/internal/version.Commit={{.Commit}}
+  - -X github.com/objectfs/objectfs/internal/version.Date={{.Date}}
+  - -X github.com/objectfs/objectfs/internal/version.BuiltBy=goreleaser
+  flags:
+  - -trimpath
+
+# Archive configuration
+archives:
+- id: objectfs
+  format: tar.gz
+  name_template: >-
+    {{ .ProjectName }}_
+    {{- .Version }}_
+    {{- title .Os }}_
+    {{- if eq .Arch "amd64" }}x86_64
+    {{- else if eq .Arch "386" }}i386
+    {{- else }}{{ .Arch }}{{ end }}
+    {{- if .Arm }}v{{ .Arm }}{{ end }}
+  format_overrides:
+  - goos: windows
+    format: zip
+  files:
+  - LICENSE
+  - README.md
+  - CHANGELOG.md
+  - docs/**/*
+
+# Checksum configuration
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Snapshot configuration (for local builds)
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+# Changelog configuration
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+    - '^docs:'
+    - '^test:'
+    - '^ci:'
+    - '^chore:'
+    - '^style:'
+    - typo
+  groups:
+  - title: Features
+    regexp: ^.*?feat(\([[:word:]]+\))??!?:.+$
+    order: 0
+  - title: Bug fixes
+    regexp: ^.*?fix(\([[:word:]]+\))??!?:.+$
+    order: 1
+  - title: Performance improvements
+    regexp: ^.*?perf(\([[:word:]]+\))??!?:.+$
+    order: 2
+  - title: Refactorings
+    regexp: ^.*?refactor(\([[:word:]]+\))??!?:.+$
+    order: 3
+  - title: Others
+    order: 999
+
+# GitHub Release configuration
+release:
+  github:
+    owner: objectfs
+    name: objectfs
+  draft: false
+  prerelease: auto
+  mode: append
+  header: |
+    ## ObjectFS {{ .Tag }}
+
+    This release includes binaries for multiple platforms.
+
+    ### Installation
+
+    Download the appropriate binary for your platform from the assets below.
+
+    ### What's Changed
+  footer: |
+    **Full Changelog**: https://github.com/objectfs/objectfs/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+# Homebrew tap (optional - commented out until tap repository is ready)
+# brews:
+#   - repository:
+#       owner: objectfs
+#       name: homebrew-tap
+#     commit_author:
+#       name: ObjectFS Bot
+#       email: bot@objectfs.io
+#     directory: Formula
+#     homepage: https://objectfs.io
+#     description: "High-performance FUSE filesystem for S3 object storage"
+#     license: "Apache-2.0"
+#     install: |
+#       bin.install "objectfs"
+
+# Docker images (optional - commented out until container registry is ready)
+# dockers:
+#   - image_templates:
+#       - "ghcr.io/objectfs/objectfs:{{ .Version }}-amd64"
+#       - "ghcr.io/objectfs/objectfs:latest-amd64"
+#     use: buildx
+#     dockerfile: Dockerfile
+#     build_flag_templates:
+#       - "--platform=linux/amd64"
+#       - "--label=org.opencontainers.image.created={{.Date}}"
+#       - "--label=org.opencontainers.image.title={{.ProjectName}}"
+#       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+#       - "--label=org.opencontainers.image.version={{.Version}}"
+
+# Announce configuration (optional - for future use)
+# announce:
+#   slack:
+#     enabled: false
+#   discord:
+#     enabled: false
+
+# Validation
+before:
+  hooks:
+  - go mod tidy
+  - go mod download
+  - go generate ./...
+
+# SBOM (Software Bill of Materials)
+sboms:
+- artifacts: archive
+
+# Signing (optional - uncomment when GPG key is configured)
+# signs:
+#   - artifacts: checksum
+#     args:
+#       - "--batch"
+#       - "--local-user"
+#       - "{{ .Env.GPG_FINGERPRINT }}"
+#       - "--output"
+#       - "${signature}"
+#       - "--detach-sign"
+#       - "${artifact}"
