@@ -24,6 +24,7 @@ type PredictiveCache struct {
 type PredictiveCacheConfig struct {
 	// Base cache config
 	BaseCache types.Cache
+	Backend   types.Backend // Backend for prefetch operations
 
 	// Prediction settings
 	EnablePrediction    bool    `yaml:"enable_prediction"`
@@ -234,6 +235,7 @@ func NewPredictiveCache(config *PredictiveCacheConfig) (*PredictiveCache, error)
 	}
 
 	prefetcher := &IntelligentPrefetcher{
+		backend:       config.Backend,
 		prefetchQueue: make(chan *PrefetchJob, 1000),
 		activeJobs:    make(map[string]*PrefetchJob),
 		workerPool:    make(chan struct{}, config.MaxConcurrentFetch),
@@ -591,11 +593,13 @@ func (ap *AccessPredictor) updateModel() {
 	examples := ap.createTrainingExamples()
 
 	// Update model weights using gradient descent
-	ap.model.mu.Lock()
 	for _, example := range examples {
+		// Calculate prediction without holding lock
 		prediction := ap.model.predict(example.Features)
 		error := example.Target - prediction
 
+		// Now acquire lock to update weights
+		ap.model.mu.Lock()
 		// Update weights
 		for i, feature := range example.Features {
 			featureName := ap.getFeatureName(i)
@@ -607,9 +611,8 @@ func (ap *AccessPredictor) updateModel() {
 
 		// Update bias
 		ap.model.bias += ap.model.learningRate * error * example.Weight
+		ap.model.mu.Unlock()
 	}
-	// Model training completed
-	ap.model.mu.Unlock()
 }
 
 // Helper methods

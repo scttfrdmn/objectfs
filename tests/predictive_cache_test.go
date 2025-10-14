@@ -266,12 +266,14 @@ func TestPredictiveCache_BasicOperations(t *testing.T) {
 
 func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    10,
 		ConfidenceThreshold: 0.5,
-		EnablePrefetch:      false, // Disable to avoid goroutine leak
+		EnablePrefetch:      true,
 		MaxConcurrentFetch:  2,
 		PrefetchAhead:       3,
 	}
@@ -317,12 +319,14 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 
 func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    50,
 		ConfidenceThreshold: 0.7,
-		EnablePrefetch:      false, // Disable to avoid goroutine leak
+		EnablePrefetch:      true,
 		MaxConcurrentFetch:  4,
 		PrefetchAhead:       2,
 	}
@@ -433,12 +437,14 @@ func TestPredictiveCache_EvictionIntelligence(t *testing.T) {
 
 func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    100,
 		ConfidenceThreshold: 0.7,
-		EnablePrefetch:      false, // Disable to avoid goroutine leak
+		EnablePrefetch:      true,
 		MaxConcurrentFetch:  4,
 		PrefetchAhead:       3,
 	}
@@ -513,12 +519,14 @@ func BenchmarkPredictiveCache_RandomRead(b *testing.B) {
 
 func BenchmarkPredictiveCache_ConcurrentAccess(b *testing.B) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    50,
 		ConfidenceThreshold: 0.7,
-		EnablePrefetch:      false, // Disable to avoid goroutine leak
+		EnablePrefetch:      true,
 		MaxConcurrentFetch:  8,
 	}
 
