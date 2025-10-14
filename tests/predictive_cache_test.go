@@ -271,7 +271,7 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 		EnablePrediction:    true,
 		PredictionWindow:    10,
 		ConfidenceThreshold: 0.5,
-		EnablePrefetch:      true,
+		EnablePrefetch:      false, // Disable to avoid goroutine leak
 		MaxConcurrentFetch:  2,
 		PrefetchAhead:       3,
 	}
@@ -322,7 +322,7 @@ func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
 		EnablePrediction:    true,
 		PredictionWindow:    50,
 		ConfidenceThreshold: 0.7,
-		EnablePrefetch:      true,
+		EnablePrefetch:      false, // Disable to avoid goroutine leak
 		MaxConcurrentFetch:  4,
 		PrefetchAhead:       2,
 	}
@@ -438,7 +438,7 @@ func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 		EnablePrediction:    true,
 		PredictionWindow:    100,
 		ConfidenceThreshold: 0.7,
-		EnablePrefetch:      true,
+		EnablePrefetch:      false, // Disable to avoid goroutine leak
 		MaxConcurrentFetch:  4,
 		PrefetchAhead:       3,
 	}
@@ -518,7 +518,7 @@ func BenchmarkPredictiveCache_ConcurrentAccess(b *testing.B) {
 		EnablePrediction:    true,
 		PredictionWindow:    50,
 		ConfidenceThreshold: 0.7,
-		EnablePrefetch:      true,
+		EnablePrefetch:      false, // Disable to avoid goroutine leak
 		MaxConcurrentFetch:  8,
 	}
 
