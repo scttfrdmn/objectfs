@@ -153,8 +153,8 @@ func NewMockBaseCache() *MockBaseCache {
 }
 
 func (c *MockBaseCache) Get(key string, offset, size int64) []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	cacheKey := fmt.Sprintf("%s:%d:%d", key, offset, size)
 	if data, exists := c.data[cacheKey]; exists {
