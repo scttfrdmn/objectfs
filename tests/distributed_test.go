@@ -1,3 +1,6 @@
+//go:build distributed
+// +build distributed
+
 package tests
 
 import (
