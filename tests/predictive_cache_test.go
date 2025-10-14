@@ -280,6 +280,11 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create predictive cache: %v", err)
 	}
+	defer func() {
+		if err := pc.Close(); err != nil {
+			t.Errorf("Failed to close predictive cache: %v", err)
+		}
+	}()
 
 	key := "sequential-test"
 	blockSize := int64(1024)

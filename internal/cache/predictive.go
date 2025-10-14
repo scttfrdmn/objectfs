@@ -899,3 +899,13 @@ func (pc *PredictiveCache) initializeModel() {
 	pc.predictor.model.weights["size"] = 0.1
 	pc.predictor.model.bias = -0.5
 }
+
+// Close shuts down the predictive cache and stops all background workers
+func (pc *PredictiveCache) Close() error {
+	if pc.config.EnablePrefetch && pc.prefetcher != nil {
+		close(pc.prefetcher.stopCh)
+		// Drain the queue to unblock any pending sends
+		close(pc.prefetcher.prefetchQueue)
+	}
+	return nil
+}
