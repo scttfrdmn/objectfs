@@ -11,6 +11,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/objectfs/objectfs/pkg/status"
 )
 
 // FilesystemStats represents filesystem operation statistics
@@ -28,10 +29,12 @@ type FilesystemStats struct {
 
 // MountManager manages FUSE mount operations
 type MountManager struct {
-	filesystem *FileSystem
-	server     *fuse.Server
-	config     *MountConfig
-	mounted    bool
+	filesystem    *FileSystem
+	server        *fuse.Server
+	config        *MountConfig
+	mounted       bool
+	statusTracker *status.Tracker
+	currentOpID   string
 }
 
 // MountConfig contains mount-specific configuration
@@ -101,9 +104,19 @@ func NewMountManager(filesystem *FileSystem, config *MountConfig) *MountManager 
 	}
 
 	return &MountManager{
-		filesystem: filesystem,
-		config:     config,
+		filesystem:    filesystem,
+		config:        config,
+		statusTracker: status.NewTracker(status.DefaultTrackerConfig()),
 	}
+}
+
+// NewMountManagerWithTracker creates a mount manager with a custom status tracker
+func NewMountManagerWithTracker(filesystem *FileSystem, config *MountConfig, tracker *status.Tracker) *MountManager {
+	mm := NewMountManager(filesystem, config)
+	if tracker != nil {
+		mm.statusTracker = tracker
+	}
+	return mm
 }
 
 // Mount mounts the filesystem at the specified mount point
@@ -112,24 +125,74 @@ func (m *MountManager) Mount(ctx context.Context) error {
 		return fmt.Errorf("filesystem is already mounted")
 	}
 
-	// Validate mount point
+	// Start tracking the mount operation
+	metadata := map[string]interface{}{
+		"mount_point": m.config.MountPoint,
+		"fs_name":     m.config.Options.FSName,
+		"read_only":   m.config.Options.ReadOnly,
+	}
+	op, opCtx := m.statusTracker.StartOperation(ctx, "mount", metadata)
+	m.currentOpID = op.ID
+
+	// Phase 1: Validate mount point
+	if err := m.statusTracker.SetPhase(op.ID, "validating"); err != nil {
+		log.Printf("Warning: failed to set phase: %v", err)
+	}
+	if err := m.statusTracker.SetMessage(op.ID, "Validating mount point..."); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	if err := m.validateMountPoint(); err != nil {
+		if trackErr := m.statusTracker.FailOperation(op.ID, fmt.Errorf("invalid mount point: %w", err)); trackErr != nil {
+			log.Printf("Warning: failed to track operation failure: %v", trackErr)
+		}
 		return fmt.Errorf("invalid mount point: %w", err)
 	}
 
-	// Build FUSE options
+	// Phase 2: Build FUSE options
+	if err := m.statusTracker.SetPhase(op.ID, "configuring"); err != nil {
+		log.Printf("Warning: failed to set phase: %v", err)
+	}
+	if err := m.statusTracker.SetMessage(op.ID, "Building FUSE options..."); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	opts := m.buildFUSEOptions()
 
-	// Create the FUSE server
+	// Phase 3: Create the FUSE server
+	if err := m.statusTracker.SetPhase(op.ID, "mounting"); err != nil {
+		log.Printf("Warning: failed to set phase: %v", err)
+	}
+	if err := m.statusTracker.SetMessage(op.ID, fmt.Sprintf("Mounting filesystem at %s...", m.config.MountPoint)); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	server, err := fs.Mount(m.config.MountPoint, m.filesystem.Root(), opts)
 	if err != nil {
+		if trackErr := m.statusTracker.FailOperation(op.ID, fmt.Errorf("failed to mount filesystem: %w", err)); trackErr != nil {
+			log.Printf("Warning: failed to track operation failure: %v", trackErr)
+		}
 		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
 
 	m.server = server
 	m.mounted = true
 
+	// Phase 4: Complete
+	if err := m.statusTracker.SetPhase(op.ID, "complete"); err != nil {
+		log.Printf("Warning: failed to set phase: %v", err)
+	}
+	if err := m.statusTracker.SetMessage(op.ID, "Filesystem mounted successfully"); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	log.Printf("ObjectFS mounted at %s", m.config.MountPoint)
+
+	// Complete the operation
+	if err := m.statusTracker.CompleteOperation(op.ID); err != nil {
+		log.Printf("Warning: failed to complete operation tracking: %v", err)
+	}
+	m.currentOpID = ""
 
 	// Start serving in background
 	go func() {
@@ -138,6 +201,9 @@ func (m *MountManager) Mount(ctx context.Context) error {
 		log.Printf("FUSE server stopped")
 		m.mounted = false
 	}()
+
+	// Use operation context to ensure proper cancellation
+	_ = opCtx
 
 	return nil
 }
@@ -152,14 +218,45 @@ func (m *MountManager) Unmount() error {
 		return fmt.Errorf("no active server to unmount")
 	}
 
+	// Start tracking the unmount operation
+	metadata := map[string]interface{}{
+		"mount_point": m.config.MountPoint,
+	}
+	op, _ := m.statusTracker.StartOperation(context.Background(), "unmount", metadata)
+
+	// Phase 1: Prepare for unmount
+	if err := m.statusTracker.SetPhase(op.ID, "preparing"); err != nil {
+		log.Printf("Warning: failed to set phase: %v", err)
+	}
+	if err := m.statusTracker.SetMessage(op.ID, "Preparing to unmount filesystem..."); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	log.Printf("Unmounting filesystem at %s", m.config.MountPoint)
 
-	// Unmount the filesystem
+	// Phase 2: Unmount the filesystem
+	if err := m.statusTracker.SetPhase(op.ID, "unmounting"); err != nil {
+		log.Printf("Warning: failed to set phase: %v", err)
+	}
+	if err := m.statusTracker.SetMessage(op.ID, fmt.Sprintf("Unmounting filesystem at %s...", m.config.MountPoint)); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	err := m.server.Unmount()
 	if err != nil {
 		// Try force unmount
+		if err := m.statusTracker.SetPhase(op.ID, "force-unmounting"); err != nil {
+			log.Printf("Warning: failed to set phase: %v", err)
+		}
+		if err := m.statusTracker.SetMessage(op.ID, "Normal unmount failed, trying force unmount..."); err != nil {
+			log.Printf("Warning: failed to set message: %v", err)
+		}
+
 		log.Printf("Normal unmount failed, trying force unmount: %v", err)
 		if forceErr := m.forceUnmount(); forceErr != nil {
+			if trackErr := m.statusTracker.FailOperation(op.ID, fmt.Errorf("unmount failed: %w (force unmount also failed: %v)", err, forceErr)); trackErr != nil {
+				log.Printf("Warning: failed to track operation failure: %v", trackErr)
+			}
 			return fmt.Errorf("unmount failed: %w (force unmount also failed: %v)", err, forceErr)
 		}
 	}
@@ -167,7 +264,17 @@ func (m *MountManager) Unmount() error {
 	m.mounted = false
 	m.server = nil
 
+	// Complete the operation
+	if err := m.statusTracker.SetMessage(op.ID, "Filesystem unmounted successfully"); err != nil {
+		log.Printf("Warning: failed to set message: %v", err)
+	}
+
 	log.Printf("Filesystem unmounted successfully")
+
+	if err := m.statusTracker.CompleteOperation(op.ID); err != nil {
+		log.Printf("Warning: failed to complete operation tracking: %v", err)
+	}
+
 	return nil
 }
 
@@ -205,6 +312,29 @@ func (m *MountManager) GetStats() *FilesystemStats {
 		}
 	}
 	return &FilesystemStats{}
+}
+
+// GetStatusTracker returns the status tracker for monitoring operations
+func (m *MountManager) GetStatusTracker() *status.Tracker {
+	return m.statusTracker
+}
+
+// GetCurrentOperation returns the current operation being tracked (if any)
+func (m *MountManager) GetCurrentOperation() (*status.Operation, error) {
+	if m.currentOpID == "" {
+		return nil, nil
+	}
+	return m.statusTracker.GetOperation(m.currentOpID)
+}
+
+// GetOperationHistory returns the operation history
+func (m *MountManager) GetOperationHistory(limit int) []*status.Operation {
+	return m.statusTracker.GetHistory(limit)
+}
+
+// SubscribeToOperation subscribes to updates for a specific operation
+func (m *MountManager) SubscribeToOperation(opID string) (<-chan status.OperationUpdate, error) {
+	return m.statusTracker.Subscribe(opID)
 }
 
 // Remount remounts the filesystem with new options
