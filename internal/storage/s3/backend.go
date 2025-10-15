@@ -16,6 +16,7 @@ import (
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
 	"github.com/objectfs/objectfs/internal/circuit"
+	"github.com/objectfs/objectfs/pkg/retry"
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
@@ -40,6 +41,9 @@ type Backend struct {
 
 	// Circuit breaker for resilience
 	circuitManager *circuit.Manager
+
+	// Retry logic for error recovery
+	retryer *retry.Retryer
 }
 
 // NewBackend creates a new S3 backend instance
@@ -104,6 +108,16 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	}
 	backend.circuitManager = circuit.NewManager(circuitConfig)
 
+	// Initialize retryer with logging callback
+	retryConfig := cfg.RetryConfig
+	retryConfig.OnRetry = func(attempt int, err error, delay time.Duration) {
+		logger.Warn("Retrying S3 operation",
+			"attempt", attempt,
+			"delay", delay,
+			"error", err)
+	}
+	backend.retryer = retry.New(retryConfig)
+
 	// Log tier configuration
 	logger.Info("S3 storage tier configured",
 		"tier", cfg.StorageTier,
@@ -131,43 +145,46 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	breaker := b.circuitManager.GetBreaker("s3-get")
 	var data []byte
 
-	err := breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
-		// Build range header if needed
-		var rangeHeader *string
-		if offset > 0 || size > 0 {
-			if size > 0 {
-				rangeHeader = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+size-1))
-			} else {
-				rangeHeader = aws.String(fmt.Sprintf("bytes=%d-", offset))
+	// Wrap with retry logic
+	err := b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
+		return breaker.ExecuteWithContext(retryCtx, func(ctx context.Context) error {
+			// Build range header if needed
+			var rangeHeader *string
+			if offset > 0 || size > 0 {
+				if size > 0 {
+					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+size-1))
+				} else {
+					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-", offset))
+				}
 			}
-		}
 
-		input := &s3.GetObjectInput{
-			Bucket: aws.String(b.bucket),
-			Key:    aws.String(key),
-			Range:  rangeHeader,
-		}
+			input := &s3.GetObjectInput{
+				Bucket: aws.String(b.bucket),
+				Key:    aws.String(key),
+				Range:  rangeHeader,
+			}
 
-		// Use standard S3 client for reads (CargoShip optimizes uploads)
-		client := b.clientManager.GetPooledClient()
-		defer b.clientManager.ReturnPooledClient(client)
+			// Use standard S3 client for reads (CargoShip optimizes uploads)
+			client := b.clientManager.GetPooledClient()
+			defer b.clientManager.ReturnPooledClient(client)
 
-		result, err := client.GetObject(ctx, input)
+			result, err := client.GetObject(ctx, input)
 
-		if err != nil {
-			b.metricsCollector.RecordError(err)
-			return b.translateError(err, "GetObject", key)
-		}
-		defer func() { _ = result.Body.Close() }()
+			if err != nil {
+				b.metricsCollector.RecordError(err)
+				return b.translateError(err, "GetObject", key)
+			}
+			defer func() { _ = result.Body.Close() }()
 
-		data, err = io.ReadAll(result.Body)
-		if err != nil {
-			b.metricsCollector.RecordError(err)
-			return fmt.Errorf("failed to read object body: %w", err)
-		}
+			data, err = io.ReadAll(result.Body)
+			if err != nil {
+				b.metricsCollector.RecordError(err)
+				return fmt.Errorf("failed to read object body: %w", err)
+			}
 
-		b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
-		return nil
+			b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
+			return nil
+		})
 	})
 
 	if err != nil {

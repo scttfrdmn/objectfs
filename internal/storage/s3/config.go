@@ -2,6 +2,8 @@ package s3
 
 import (
 	"time"
+
+	"github.com/objectfs/objectfs/pkg/retry"
 )
 
 // Config represents S3 backend configuration
@@ -18,6 +20,9 @@ type Config struct {
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	PoolSize       int           `yaml:"pool_size"`
+
+	// Retry configuration
+	RetryConfig retry.Config `yaml:"retry_config"`
 
 	// Advanced settings
 	UseAccelerate bool `yaml:"use_accelerate"`
@@ -145,11 +150,17 @@ type ReplicationPricing struct {
 
 // NewDefaultConfig returns a configuration with sensible defaults
 func NewDefaultConfig() *Config {
+	retryConfig := retry.DefaultConfig()
+	retryConfig.MaxAttempts = 3
+	retryConfig.InitialDelay = 100 * time.Millisecond
+	retryConfig.MaxDelay = 30 * time.Second
+
 	return &Config{
 		MaxRetries:                  3,
 		ConnectTimeout:              10 * time.Second,
 		RequestTimeout:              30 * time.Second,
 		PoolSize:                    8,
+		RetryConfig:                 retryConfig,
 		EnableCargoShipOptimization: true,
 		TargetThroughput:            800.0, // 800 MB/s target for ObjectFS
 		OptimizationLevel:           "standard",
