@@ -328,3 +328,195 @@ func CaptureStack(skip int) string {
 	}
 	return strings.Join(stack, "\n")
 }
+
+// WithContext adds contextual information to an error
+func (e *ObjectFSError) WithContext(key, value string) *ObjectFSError {
+	if e.Context == nil {
+		e.Context = make(map[string]string)
+	}
+	e.Context[key] = value
+	return e
+}
+
+// WithDetail adds detailed information to an error
+func (e *ObjectFSError) WithDetail(key string, value interface{}) *ObjectFSError {
+	if e.Details == nil {
+		e.Details = make(map[string]interface{})
+	}
+	e.Details[key] = value
+	return e
+}
+
+// WithComponent sets the component for an error
+func (e *ObjectFSError) WithComponent(component string) *ObjectFSError {
+	e.Component = component
+	return e
+}
+
+// WithOperation sets the operation for an error
+func (e *ObjectFSError) WithOperation(operation string) *ObjectFSError {
+	e.Operation = operation
+	return e
+}
+
+// WithCause sets the underlying cause
+func (e *ObjectFSError) WithCause(cause error) *ObjectFSError {
+	e.Cause = cause
+	return e
+}
+
+// WithStack captures the current stack trace
+func (e *ObjectFSError) WithStack() *ObjectFSError {
+	e.Stack = CaptureStack(2)
+	return e
+}
+
+// GetRecommendation returns a user-friendly recommendation for fixing the error
+func (e *ObjectFSError) GetRecommendation() string {
+	recommendations := map[ErrorCode]string{
+		ErrCodeConnectionTimeout: "Check your network connection and AWS endpoint accessibility. " +
+			"Consider increasing timeout values in configuration.",
+		ErrCodeConnectionFailed: "Verify AWS credentials and network connectivity. " +
+			"Check if the S3 endpoint is accessible from your location.",
+		ErrCodeNetworkError: "Network connectivity issue detected. " +
+			"Verify your internet connection and firewall settings.",
+		ErrCodeObjectNotFound: "The requested object does not exist in the S3 bucket. " +
+			"Verify the object key and bucket name.",
+		ErrCodeBucketNotFound: "The specified S3 bucket does not exist or is not accessible. " +
+			"Verify the bucket name and your AWS credentials.",
+		ErrCodeAccessDenied: "AWS credentials lack necessary permissions. " +
+			"Check your IAM policy grants s3:GetObject, s3:PutObject, and s3:ListBucket permissions.",
+		ErrCodePermissionDenied: "Insufficient permissions for this operation. " +
+			"Verify file system permissions or AWS IAM policy.",
+		ErrCodeInvalidConfig: "Configuration validation failed. " +
+			"Check your configuration file syntax and required parameters.",
+		ErrCodeOperationTimeout: "Operation took too long to complete. " +
+			"Consider increasing timeout values or checking S3 service health.",
+		ErrCodeResourceExhausted: "System resources exhausted. " +
+			"Check available memory, disk space, and connection pool limits.",
+		ErrCodeOutOfMemory: "Insufficient memory available. " +
+			"Reduce cache size or increase system memory allocation.",
+		ErrCodeMountFailed: "Failed to mount filesystem. " +
+			"Check mount point permissions and ensure FUSE is installed.",
+		ErrCodeQuotaExceeded: "AWS service quota exceeded. " +
+			"Request a quota increase through AWS Service Quotas console.",
+		ErrCodeAuthenticationFailed: "AWS authentication failed. " +
+			"Verify your AWS access key ID and secret access key are correct.",
+		ErrCodeCredentialsMissing: "AWS credentials not found. " +
+			"Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables " +
+			"or configure aws credentials in ~/.aws/credentials.",
+	}
+
+	if rec, exists := recommendations[e.Code]; exists {
+		return rec
+	}
+
+	return "Please check the error message for details and consult the documentation."
+}
+
+// GetTroubleshootingURL returns a link to troubleshooting documentation
+func (e *ObjectFSError) GetTroubleshootingURL() string {
+	baseURL := "https://github.com/objectfs/objectfs/blob/main/docs/troubleshooting.md"
+
+	urlFragments := map[ErrorCode]string{
+		ErrCodeConnectionTimeout:    "#connection-timeout",
+		ErrCodeConnectionFailed:     "#connection-failed",
+		ErrCodeNetworkError:         "#network-errors",
+		ErrCodeObjectNotFound:       "#object-not-found",
+		ErrCodeBucketNotFound:       "#bucket-not-found",
+		ErrCodeAccessDenied:         "#access-denied",
+		ErrCodePermissionDenied:     "#permission-denied",
+		ErrCodeInvalidConfig:        "#invalid-configuration",
+		ErrCodeOperationTimeout:     "#operation-timeout",
+		ErrCodeResourceExhausted:    "#resource-exhausted",
+		ErrCodeOutOfMemory:          "#out-of-memory",
+		ErrCodeMountFailed:          "#mount-failed",
+		ErrCodeQuotaExceeded:        "#quota-exceeded",
+		ErrCodeAuthenticationFailed: "#authentication-failed",
+		ErrCodeCredentialsMissing:   "#credentials-missing",
+	}
+
+	if fragment, exists := urlFragments[e.Code]; exists {
+		return baseURL + fragment
+	}
+
+	return baseURL
+}
+
+// UserFacingMessage returns a simplified message suitable for end users
+func (e *ObjectFSError) UserFacingMessage() string {
+	if !e.UserFacing {
+		return "An internal error occurred. Please contact support if this persists."
+	}
+
+	messages := map[ErrorCode]string{
+		ErrCodeConnectionTimeout:    "Connection timed out while accessing S3",
+		ErrCodeConnectionFailed:     "Failed to connect to S3 storage",
+		ErrCodeNetworkError:         "Network error occurred",
+		ErrCodeObjectNotFound:       "File not found",
+		ErrCodeBucketNotFound:       "Storage bucket not found",
+		ErrCodeAccessDenied:         "Access denied - check permissions",
+		ErrCodePermissionDenied:     "Permission denied",
+		ErrCodeInvalidConfig:        "Invalid configuration",
+		ErrCodeOperationTimeout:     "Operation timed out",
+		ErrCodeResourceExhausted:    "System resources exhausted",
+		ErrCodeOutOfMemory:          "Out of memory",
+		ErrCodeMountFailed:          "Failed to mount filesystem",
+		ErrCodeQuotaExceeded:        "Storage quota exceeded",
+		ErrCodeAuthenticationFailed: "Authentication failed",
+		ErrCodeCredentialsMissing:   "AWS credentials not configured",
+	}
+
+	if msg, exists := messages[e.Code]; exists {
+		return msg
+	}
+
+	return e.Message
+}
+
+// DetailedDiagnostic returns a comprehensive diagnostic message
+func (e *ObjectFSError) DetailedDiagnostic() string {
+	var parts []string
+
+	parts = append(parts, fmt.Sprintf("Error: %s", e.UserFacingMessage()))
+	parts = append(parts, fmt.Sprintf("Code: %s", e.Code))
+	parts = append(parts, fmt.Sprintf("Category: %s", e.Category))
+
+	if e.Component != "" {
+		parts = append(parts, fmt.Sprintf("Component: %s", e.Component))
+	}
+
+	if e.Operation != "" {
+		parts = append(parts, fmt.Sprintf("Operation: %s", e.Operation))
+	}
+
+	if len(e.Context) > 0 {
+		parts = append(parts, "\nContext:")
+		for k, v := range e.Context {
+			parts = append(parts, fmt.Sprintf("  %s: %s", k, v))
+		}
+	}
+
+	if len(e.Details) > 0 {
+		parts = append(parts, "\nDetails:")
+		for k, v := range e.Details {
+			parts = append(parts, fmt.Sprintf("  %s: %v", k, v))
+		}
+	}
+
+	recommendation := e.GetRecommendation()
+	if recommendation != "" {
+		parts = append(parts, "\nRecommendation:")
+		parts = append(parts, "  "+recommendation)
+	}
+
+	troubleshootingURL := e.GetTroubleshootingURL()
+	parts = append(parts, "\nFor more help:")
+	parts = append(parts, "  "+troubleshootingURL)
+
+	if e.Cause != nil {
+		parts = append(parts, fmt.Sprintf("\nUnderlying cause: %s", e.Cause.Error()))
+	}
+
+	return strings.Join(parts, "\n")
+}

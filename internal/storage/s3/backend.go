@@ -3,7 +3,7 @@ package s3
 import (
 	"bytes"
 	"context"
-	"errors"
+	stderr "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +16,7 @@ import (
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
 	"github.com/objectfs/objectfs/internal/circuit"
+	"github.com/objectfs/objectfs/pkg/errors"
 	"github.com/objectfs/objectfs/pkg/retry"
 	"github.com/objectfs/objectfs/pkg/types"
 )
@@ -296,7 +297,7 @@ func (b *Backend) DeleteObject(ctx context.Context, key string) error {
 	if err != nil {
 		// If object doesn't exist, that's ok for delete operation
 		var notFound *s3types.NoSuchKey
-		if errors.As(err, &notFound) {
+		if stderr.As(err, &notFound) {
 			return nil
 		}
 		return fmt.Errorf("failed to get object metadata for deletion validation: %w", err)
@@ -516,13 +517,93 @@ func (b *Backend) Close() error {
 // Helper methods
 
 func (b *Backend) translateError(err error, operation, key string) error {
+	// Check for specific S3 error types and create rich error objects
 	switch {
 	case isErrorType[*s3types.NoSuchKey](err):
-		return fmt.Errorf("object not found: %s", key)
+		return errors.NewError(errors.ErrCodeObjectNotFound, "object not found").
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithCause(err)
+
 	case isErrorType[*s3types.NoSuchBucket](err):
-		return fmt.Errorf("bucket not found: %s", b.bucket)
+		return errors.NewError(errors.ErrCodeBucketNotFound, "bucket not found").
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("region", b.config.Region).
+			WithCause(err)
+
+	case isErrorType[*s3types.NotFound](err):
+		return errors.NewError(errors.ErrCodeObjectNotFound, "resource not found").
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithCause(err)
+
+	case isErrorType[*s3types.InvalidObjectState](err):
+		return errors.NewError(errors.ErrCodeInvalidState, "object in invalid state for operation").
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithDetail("storage_class", b.currentTier).
+			WithCause(err)
+
 	default:
-		return fmt.Errorf("%s failed for %s: %w", operation, key, err)
+		// Check error message for common patterns
+		errMsg := err.Error()
+
+		// Timeout errors
+		if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "deadline exceeded") {
+			return errors.NewError(errors.ErrCodeOperationTimeout, "S3 operation timed out").
+				WithComponent("s3-backend").
+				WithOperation(operation).
+				WithContext("bucket", b.bucket).
+				WithContext("key", key).
+				WithDetail("timeout_config", map[string]interface{}{
+					"connect_timeout": b.config.ConnectTimeout,
+					"request_timeout": b.config.RequestTimeout,
+				}).
+				WithCause(err)
+		}
+
+		// Network errors
+		if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "network") ||
+			strings.Contains(errMsg, "dial") || strings.Contains(errMsg, "EOF") {
+			return errors.NewError(errors.ErrCodeNetworkError, "network error during S3 operation").
+				WithComponent("s3-backend").
+				WithOperation(operation).
+				WithContext("bucket", b.bucket).
+				WithContext("key", key).
+				WithContext("endpoint", b.config.Endpoint).
+				WithContext("region", b.config.Region).
+				WithCause(err)
+		}
+
+		// Access denied / permission errors
+		if strings.Contains(errMsg, "AccessDenied") || strings.Contains(errMsg, "Forbidden") ||
+			strings.Contains(errMsg, "403") {
+			return errors.NewError(errors.ErrCodeAccessDenied, "access denied to S3 resource").
+				WithComponent("s3-backend").
+				WithOperation(operation).
+				WithContext("bucket", b.bucket).
+				WithContext("key", key).
+				WithDetail("required_permissions", []string{
+					"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
+				}).
+				WithCause(err)
+		}
+
+		// Generic error with context
+		return errors.NewError(errors.ErrCodeStorageRead, fmt.Sprintf("%s operation failed", operation)).
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithCause(err)
 	}
 }
 
@@ -550,7 +631,7 @@ func (b *Backend) detectContentType(key string) string {
 // isErrorType checks if an error is of a specific type
 func isErrorType[T error](err error) bool {
 	var target T
-	return errors.As(err, &target)
+	return stderr.As(err, &target)
 }
 
 // GetCurrentTier returns the current storage tier information
