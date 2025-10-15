@@ -1,1475 +1,542 @@
-# ObjectFS Development Guidelines
+# ObjectFS Development Guide
 
-**Version:** 1.0
+**Version:** 2.0 (Simplified for Solodev)
 **Last Updated:** October 15, 2025
 
 ---
 
-## Table of Contents
+## Overview
 
-1. [Branching Strategy](#branching-strategy)
-2. [Testing Strategy](#testing-strategy)
-3. [Feature Development Workflow](#feature-development-workflow)
-4. [CI/CD Pipeline](#cicd-pipeline)
-5. [Code Quality Standards](#code-quality-standards)
-6. [Performance Optimization](#performance-optimization)
-7. [AWS-C-S3 Integration Plan](#aws-c-s3-integration-plan)
+This is a simplified development guide for ObjectFS as a solodev project.
+The focus is on local development, explicit testing, and minimal CI/CD
+complexity.
 
 ---
 
-## Branching Strategy
+## Quick Start
 
-### Branch Hierarchy
+```bash
+# Clone and setup
+git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs
+go mod download
 
+# Run tests locally
+make test
+
+# Build
+make build
+
+# Run
+./objectfs --help
 ```
-main (protected)
-  ├── develop (integration branch)
-  │   ├── feature/v0.4.0-transfer-acceleration
-  │   ├── feature/v0.4.0-multipart-optimization
-  │   ├── feature/v0.4.0-cargoship-shared-components
-  │   ├── feature/v0.5.0-bbr-optimization
-  │   ├── feature/v0.5.0-distributed-cache
-  │   └── feature/v0.6.0-multi-protocol-arch
-  ├── release/v0.4.0 (release candidate)
-  ├── release/v0.5.0
-  └── hotfix/critical-bug-name
-```
-
-### Branch Types and Policies
-
-#### `main` Branch
-
-- **Purpose:** Production-ready code only
-- **Protection Rules:**
-  - Requires PR approval (2+ reviewers)
-  - All CI checks must pass
-  - No direct commits allowed
-  - Signed commits required
-  - Linear history (squash or rebase merge only)
-
-#### `develop` Branch
-
-- **Purpose:** Integration branch for ongoing development
-- **Protection Rules:**
-  - Requires PR approval (1+ reviewer)
-  - All CI checks must pass
-  - Feature branches merge here first
-  - Regular sync with main
-
-#### `feature/*` Branches
-
-- **Naming Convention:** `feature/vX.Y.Z-descriptive-name`
-  - Examples:
-    - `feature/v0.4.0-s3-transfer-acceleration`
-    - `feature/v0.5.0-redis-cache-backend`
-    - `feature/v0.6.0-filesystem-interface-abstraction`
-
-- **Lifecycle:**
-  1. Branch from `develop`
-  2. Develop with frequent commits
-  3. Keep synced with `develop` (rebase regularly)
-  4. PR to `develop` when ready
-  5. Delete after merge
-
-- **Requirements:**
-  - Comprehensive unit tests
-  - Integration tests (real AWS when needed)
-  - Documentation updates
-  - Performance benchmarks
-  - No performance regression
-
-#### `release/*` Branches
-
-- **Naming Convention:** `release/vX.Y.Z`
-- **Purpose:** Release candidate preparation
-- **Process:**
-  1. Branch from `develop` when feature complete
-  2. Bug fixes and polish only
-  3. Update CHANGELOG.md
-  4. Update version numbers
-  5. Final testing and validation
-  6. Merge to both `main` and `develop`
-  7. Tag release on `main`
-
-#### `hotfix/*` Branches
-
-- **Naming Convention:** `hotfix/critical-bug-description`
-- **Purpose:** Critical production bug fixes
-- **Process:**
-  1. Branch from `main`
-  2. Fix with minimal changes
-  3. Add regression test
-  4. Merge to both `main` and `develop`
-  5. Tag patch release
-
-### Branch Naming Examples
-
-**Good:**
-
-- `feature/v0.4.0-aws-c-s3-integration`
-- `feature/v0.5.0-zstd-compression`
-- `feature/v0.6.0-smb-protocol-handler`
-- `hotfix/cache-memory-leak`
-- `release/v0.4.0`
-
-**Bad:**
-
-- `feature/new-stuff` (too vague)
-- `john-working-branch` (no context)
-- `test` (not descriptive)
-- `fix-bug` (which bug?)
 
 ---
 
 ## Testing Strategy
 
-### No More LocalStack - Real AWS Testing
+### Philosophy
 
-**Philosophy:** LocalStack has proven unreliable in CI. We're moving to a multi-tier testing approach that uses real AWS services for integration testing.
+- **Test locally first** - All testing should be done explicitly on your local machine
+- **Use real AWS when needed** - No LocalStack; use real S3 for integration tests
+- **Keep it simple** - Unit tests for logic, integration tests for AWS interactions
 
-### Testing Tiers
+### Test Types
 
-#### Tier 1: Unit Tests (No External Dependencies)
+#### 1. Unit Tests (Local, Fast)
 
-**Run on:** Every commit, all branches
-**Tools:** Go testing framework, mock interfaces
-**Coverage Target:** 80%+ per package
-
-```go
-// Example: Test cache logic without S3
-func TestCacheGetPut(t *testing.T) {
-    cache := NewMemoryCache(1024 * 1024)
-
-    key := "test-key"
-    data := []byte("test data")
-
-    cache.Put(key, 0, data)
-    result := cache.Get(key, 0, int64(len(data)))
-
-    assert.Equal(t, data, result)
-}
-```
-
-**When to use:**
-
-- Algorithm testing
-- Data structure validation
-- Business logic verification
-- Edge case handling
-- Error condition testing
-
-#### Tier 2: Integration Tests with Mock Backend
-
-**Run on:** Every PR, feature branches
-**Tools:** In-memory mock backends
-**Coverage Target:** Core workflows
-
-```go
-// Example: Test FUSE operations with mock S3
-func TestFUSEReadWrite(t *testing.T) {
-    mockBackend := NewMockS3Backend()
-    fs := NewFileSystem(mockBackend, cacheConfig, bufferConfig)
-
-    // Test read/write operations
-    err := fs.Write("test.txt", []byte("content"))
-    require.NoError(t, err)
-
-    data, err := fs.Read("test.txt")
-    require.NoError(t, err)
-    assert.Equal(t, "content", string(data))
-}
-```
-
-**When to use:**
-
-- Component integration
-- Workflow testing
-- Performance benchmarking
-- Concurrency testing
-
-#### Tier 3: Real AWS Integration Tests
-
-**Run on:** PR approval, pre-release, nightly builds
-**Tools:** Real S3 buckets, test AWS account
-**Coverage Target:** Critical paths and features
-
-```go
-// Example: Real S3 integration test
-func TestRealS3Operations(t *testing.T) {
-    if testing.Short() {
-        t.Skip("Skipping real AWS test in short mode")
-    }
-
-    // Check for AWS credentials
-    if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-        t.Skip("No AWS credentials - skipping real S3 test")
-    }
-
-    // Use dedicated test bucket
-    bucket := os.Getenv("OBJECTFS_TEST_BUCKET") // e.g., "objectfs-ci-test"
-    testPrefix := fmt.Sprintf("test-run-%d/", time.Now().Unix())
-
-    backend := NewS3Backend(bucket, "us-west-2")
-    defer cleanupTestData(backend, testPrefix)
-
-    // Test real S3 operations
-    testKey := testPrefix + "test-file.txt"
-    testData := []byte("real S3 test data")
-
-    err := backend.PutObject(context.Background(), testKey, testData)
-    require.NoError(t, err)
-
-    retrieved, err := backend.GetObject(context.Background(), testKey, 0, 0)
-    require.NoError(t, err)
-    assert.Equal(t, testData, retrieved)
-}
-```
-
-**Test Environment Setup:**
+For pure Go logic without external dependencies:
 
 ```bash
-# Required environment variables for real AWS tests
-export AWS_REGION=us-west-2
-export AWS_ACCESS_KEY_ID=<test-account-key>
-export AWS_SECRET_ACCESS_KEY=<test-account-secret>
-export OBJECTFS_TEST_BUCKET=objectfs-ci-test-$(whoami)
+# Run all unit tests
+go test ./...
 
-# Run tests with real AWS
-go test -v -tags=integration ./...
-
-# Run quick tests only (skip real AWS)
-go test -v -short ./...
-```
-
-**AWS Test Infrastructure:**
-
-- Dedicated S3 bucket: `objectfs-ci-test-*`
-- Lifecycle policy: Auto-delete objects >7 days old
-- Budget alerts: Alert if costs >$50/month
-- IAM role: Restricted permissions (S3 only, specific bucket)
-
-#### Tier 4: Performance & Stress Tests
-
-**Run on:** Release candidates, manual trigger
-**Tools:** Custom benchmarking suite, real AWS
-**Coverage Target:** Performance regression detection
-
-```go
-// Example: Performance benchmark
-func BenchmarkS3LargeFileRead(b *testing.B) {
-    if testing.Short() {
-        b.Skip("Skipping benchmark in short mode")
-    }
-
-    backend := setupRealS3Backend(b)
-    testFile := "benchmark/1gb-file.dat"
-
-    b.ResetTimer()
-    b.SetBytes(1024 * 1024 * 1024) // 1GB
-
-    for i := 0; i < b.N; i++ {
-        data, err := backend.GetObject(context.Background(), testFile, 0, 0)
-        if err != nil {
-            b.Fatal(err)
-        }
-        if len(data) != 1024*1024*1024 {
-            b.Fatal("Incorrect data size")
-        }
-    }
-
-    // Report throughput
-    mbps := float64(b.N*1024) / b.Elapsed().Seconds()
-    b.ReportMetric(mbps, "MB/s")
-}
-```
-
-### Test Organization
-
-```
-tests/
-├── unit/                    # Tier 1: Pure unit tests
-│   ├── cache_test.go
-│   ├── buffer_test.go
-│   └── metrics_test.go
-├── integration/             # Tier 2: Mock integration tests
-│   ├── fuse_test.go
-│   ├── backend_mock_test.go
-│   └── e2e_mock_test.go
-├── aws/                     # Tier 3: Real AWS tests
-│   ├── s3_real_test.go
-│   ├── performance_test.go
-│   └── stress_test.go
-└── benchmarks/              # Tier 4: Performance benchmarks
-    ├── throughput_test.go
-    ├── latency_test.go
-    └── concurrency_test.go
-```
-
-### Running Tests
-
-```bash
-# Quick validation (Tier 1 + 2)
-make test-quick
-
-# Full test suite including real AWS (Tier 1-3)
-make test-full
-
-# Performance benchmarks (Tier 4)
-make test-benchmark
-
-# Specific test with verbose output
-go test -v -run TestSpecificFunction ./internal/cache
-
-# Test with race detector
+# Run with race detector
 go test -race ./...
 
-# Test with coverage
+# Run with coverage
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-### CI Testing Matrix
+#### 2. AWS Integration Tests (Local, Requires AWS)
 
-**On every commit to feature branch:**
+For testing against real S3:
 
-- Tier 1: Unit tests
-- Tier 2: Integration tests (mock)
-- Code quality checks (lint, format)
-- Race detector
+```bash
+# Setup environment
+export AWS_PROFILE=aws
+export AWS_REGION=us-west-2
+export OBJECTFS_TEST_BUCKET=objectfs-test-$(whoami)
 
-**On PR to develop:**
+# Create test bucket (one time)
+aws s3 mb s3://$OBJECTFS_TEST_BUCKET
 
-- All Tier 1 + 2 tests
-- Tier 3: Real AWS tests (subset)
-- Performance benchmarks (comparison)
-- Documentation validation
+# Run integration tests
+go test -v ./tests/aws/...
 
-**On PR to main (release):**
+# Cleanup when done
+aws s3 rm s3://$OBJECTFS_TEST_BUCKET --recursive
+aws s3 rb s3://$OBJECTFS_TEST_BUCKET
+```
 
-- All test tiers (1-4)
-- Extended real AWS testing
-- Full performance validation
-- Security scanning
-- Multi-platform build verification
+**Test Best Practices:**
 
-**Nightly builds:**
+- Use `testing.Short()` to skip AWS tests: `if testing.Short() { t.Skip() }`
+- Always cleanup test data in defer statements
+- Use unique prefixes for each test run: `test-run-<timestamp>/`
 
-- Full Tier 3 testing
-- Extended stress tests
-- Memory leak detection
-- Long-running stability tests
+### Running Tests
+
+```bash
+# Quick tests (skip AWS integration)
+go test -short ./...
+
+# All tests including AWS integration
+go test ./...
+
+# Specific package
+go test -v ./internal/cache
+
+# Specific test
+go test -v -run TestCacheGetPut ./internal/cache
+
+# Benchmarks
+go test -bench=. ./...
+```
 
 ---
 
-## Feature Development Workflow
+## Code Quality
 
-### Phase-Based Development Process
+### Linting
 
-Each feature follows a structured development process with clear checkpoints.
-
-### Phase 1: Design & Planning
-
-**Duration:** 1-2 weeks
-**Branch:** Design documented in issue/PR description
-
-**Activities:**
-
-1. Create GitHub issue with feature proposal
-2. Design document in `docs/design/feature-name.md`
-3. Architecture review with maintainers
-4. Interface definitions and API design
-5. Test plan creation
-6. Performance baseline establishment
-
-**Deliverables:**
-
-- [ ] Design document approved
-- [ ] Test plan defined
-- [ ] Performance targets set
-- [ ] Dependencies identified
-
-**Example Design Document Structure:**
-
-```markdown
-# Feature: S3 Transfer Acceleration Support
-
-## Objective
-Enable S3 Transfer Acceleration for improved upload/download performance.
-
-## Design
-### Architecture Changes
-- Add acceleration endpoint configuration
-- Implement endpoint fallback logic
-- Add acceleration metrics
-
-### Interface Changes
-```go
-type S3Config struct {
-    // ...existing fields
-    TransferAcceleration bool
-    AccelerationEndpoint string
-}
-```
-
-### Testing Approach
-
-- Unit tests for endpoint selection logic
-- Real S3 tests with acceleration enabled
-- Performance comparison benchmarks
-
-### Performance Targets
-
-- 2x+ improvement for cross-region transfers
-- <5% overhead for same-region transfers
-- Graceful degradation if acceleration unavailable
-
-### Rollout Plan
-
-1. Implement with feature flag (disabled by default)
-2. Test with subset of users
-3. Enable by default in v0.4.1
-
-```
-
-### Phase 2: Implementation
-**Duration:** 2-6 weeks (varies by feature)
-**Branch:** `feature/vX.Y.Z-feature-name`
-
-**Development Checklist:**
-- [ ] Create feature branch from `develop`
-- [ ] Implement core functionality
-- [ ] Write unit tests (Tier 1)
-- [ ] Write integration tests (Tier 2)
-- [ ] Update documentation
-- [ ] Add performance benchmarks
-- [ ] Test with real AWS (Tier 3)
-- [ ] Code review with maintainers
-
-**Daily Development Workflow:**
 ```bash
-# Start of day: Sync with develop
-git checkout develop
-git pull origin develop
-git checkout feature/v0.4.0-my-feature
-git rebase develop
+# Install golangci-lint
+brew install golangci-lint  # macOS
+# or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
-# During development: Commit frequently
-git add -p  # Stage changes interactively
-git commit -m "feat: implement X component"
+# Run lint
+golangci-lint run
 
-# Run tests before pushing
-make test-quick
-make lint
-
-# Push to remote
-git push origin feature/v0.4.0-my-feature
-
-# End of day/week: Sync again
-git fetch origin develop
-git rebase origin/develop
+# Auto-fix issues
+golangci-lint run --fix
 ```
 
-**Commit Message Convention:**
+### Formatting
+
+```bash
+# Format all code
+go fmt ./...
+
+# More aggressive formatting with goimports
+go install golang.org/x/tools/cmd/goimports@latest
+goimports -w .
+```
+
+### Security Scanning
+
+```bash
+# Install gosec
+go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+# Scan for security issues
+gosec ./...
+```
+
+---
+
+## Development Workflow
+
+### Simple Git Workflow
+
+```bash
+# Work directly on main for small changes
+git checkout main
+git pull
+# make changes
+git add .
+git commit -m "feat: add new feature"
+git push
+
+# Use feature branches for larger work
+git checkout -b feature/my-feature
+# make changes, commit
+git checkout main
+git merge feature/my-feature
+git push
+git branch -d feature/my-feature
+```
+
+### Commit Message Format
 
 ```
-<type>(<scope>): <subject>
+<type>: <subject>
 
-<body>
-
-<footer>
+<optional body>
 ```
 
 **Types:**
 
 - `feat`: New feature
 - `fix`: Bug fix
-- `perf`: Performance improvement
 - `refactor`: Code refactoring
-- `test`: Test additions/changes
-- `docs`: Documentation changes
-- `ci`: CI/CD changes
-- `chore`: Maintenance tasks
+- `test`: Test changes
+- `docs`: Documentation
+- `chore`: Maintenance
 
 **Examples:**
 
 ```
-feat(s3): add transfer acceleration support
-
-Implement S3 Transfer Acceleration with automatic fallback to standard
-endpoints if acceleration is unavailable.
-
-- Add TransferAcceleration config option
-- Implement endpoint selection logic
-- Add acceleration metrics
-- Include performance benchmarks
-
-Closes #123
+feat: add S3 transfer acceleration support
+fix: resolve cache memory leak
+refactor: simplify buffer management
+test: add integration tests for multipart upload
+docs: update README with installation instructions
 ```
 
-### Phase 3: Testing & Validation
+---
 
-**Duration:** 1-2 weeks
-**Branch:** Same feature branch
+## AWS Setup for Testing
 
-**Testing Checklist:**
+### Test Account Configuration
 
-- [ ] All unit tests passing (80%+ coverage)
-- [ ] All integration tests passing
-- [ ] Real AWS tests passing
-- [ ] Performance benchmarks meet targets
-- [ ] No performance regression (<5% overhead)
-- [ ] Memory leak testing (run for 24+ hours)
-- [ ] Race detector clean
-- [ ] Cross-platform build verification
-
-**Performance Validation:**
+Create a dedicated AWS account or IAM user for testing:
 
 ```bash
-# Baseline benchmark (develop branch)
-git checkout develop
-go test -bench=BenchmarkFeature -benchmem -count=10 > baseline.txt
+# Configure AWS CLI with test credentials
+aws configure --profile aws
+# AWS Access Key ID: <your-test-key>
+# AWS Secret Access Key: <your-test-secret>
+# Default region name: us-west-2
+# Default output format: json
 
-# Feature benchmark
-git checkout feature/v0.4.0-my-feature
-go test -bench=BenchmarkFeature -benchmem -count=10 > feature.txt
-
-# Compare results
-benchstat baseline.txt feature.txt
+# Verify configuration
+aws sts get-caller-identity --profile aws
 ```
 
-**Expected Output:**
-
-```
-name                old time/op    new time/op    delta
-LargeFileUpload-8     1.50s ± 2%     0.75s ± 1%  -50.00%  (p=0.000 n=10+10)
-
-name                old alloc/op   new alloc/op   delta
-LargeFileUpload-8     500MB ± 0%     250MB ± 0%  -50.00%  (p=0.000 n=10+10)
-
-name                old allocs/op  new allocs/op  delta
-LargeFileUpload-8      1.5k ± 0%      1.5k ± 0%     ~     (all equal)
-```
-
-### Phase 4: Code Review & Iteration
-
-**Duration:** 3-7 days
-**Branch:** Same feature branch
-
-**PR Checklist:**
-
-```markdown
-## Description
-Brief description of the feature and its motivation.
-
-## Changes
-- List key changes
-- Highlight breaking changes (if any)
-- Note deprecated features
-
-## Testing
-- [ ] Unit tests added/updated (coverage: X%)
-- [ ] Integration tests added/updated
-- [ ] Real AWS tests passing
-- [ ] Performance benchmarks included
-- [ ] Manual testing completed
-
-## Performance Impact
-- Throughput: X% improvement/regression
-- Latency: X ms average
-- Memory: X MB average usage
-- No performance regression verified
-
-## Documentation
-- [ ] Code comments updated
-- [ ] README updated (if needed)
-- [ ] CHANGELOG.md updated
-- [ ] API documentation updated
-
-## Checklist
-- [ ] Code follows project style guidelines
-- [ ] All tests passing
-- [ ] No linting errors
-- [ ] Commits are signed
-- [ ] Branch is up-to-date with develop
-```
-
-**Review Process:**
-
-1. Self-review: Review your own PR first
-2. Address automated checks (CI, linting)
-3. Request reviews from 1-2 maintainers
-4. Address feedback promptly
-5. Update tests/docs as needed
-6. Get approval from required reviewers
-7. Squash/rebase for clean history
-8. Merge to develop
-
-### Phase 5: Integration & Release
-
-**Duration:** Varies by release cycle
-**Branch:** `develop` → `release/vX.Y.Z` → `main`
-
-**Release Process:**
-
-1. Feature merged to `develop`
-2. Integration testing on `develop`
-3. Create release branch when ready
-4. Final testing and bug fixes
-5. Update version and CHANGELOG
-6. Merge to `main` and tag release
-7. Publish release notes
-8. Monitor for issues
-
----
-
-## CI/CD Pipeline
-
-### GitHub Actions Workflow
-
-#### Workflow: Feature Branch CI
-
-**Trigger:** Push to `feature/*`
-**File:** `.github/workflows/feature-ci.yml`
-
-```yaml
-name: Feature Branch CI
-
-on:
-  push:
-    branches:
-      - 'feature/**'
-  pull_request:
-    branches:
-      - develop
-
-jobs:
-  test-quick:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: [1.22.x, 1.23.x, 1.24.x]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: ${{ matrix.go-version }}
-        cache: true
-
-    - name: Cache Go modules
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-
-    - name: Install dependencies
-      run: go mod download
-
-    - name: Run unit tests
-      run: go test -race -short -coverprofile=coverage.out -covermode=atomic ./...
-
-    - name: Upload coverage
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.out
-        flags: unittests-${{ matrix.go-version }}
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.23.x
-
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v4
-      with:
-        version: latest
-        args: --timeout=10m
-
-  security:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Run gosec
-      run: |
-        go install github.com/securego/gosec/v2/cmd/gosec@latest
-        gosec -fmt sarif -out gosec.sarif -no-fail ./...
-
-    - name: Upload SARIF
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      continue-on-error: true
-      with:
-        sarif_file: gosec.sarif
-```
-
-#### Workflow: PR to Develop
-
-**Trigger:** PR to `develop`
-**File:** `.github/workflows/pr-develop.yml`
-
-```yaml
-name: PR to Develop
-
-on:
-  pull_request:
-    branches:
-      - develop
-
-jobs:
-  # Include all jobs from feature-ci.yml
-
-  test-real-aws:
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.23.x
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-west-2
-
-    - name: Run real AWS integration tests
-      env:
-        OBJECTFS_TEST_BUCKET: objectfs-ci-test-${{ github.run_id }}
-      run: |
-        # Create test bucket
-        aws s3 mb s3://$OBJECTFS_TEST_BUCKET
-
-        # Run tests
-        go test -v -tags=integration ./tests/aws/...
-
-        # Cleanup
-        aws s3 rb s3://$OBJECTFS_TEST_BUCKET --force
-
-  benchmark:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Need full history for comparison
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.23.x
-
-    - name: Run benchmarks on base branch
-      run: |
-        git checkout ${{ github.base_ref }}
-        go test -bench=. -benchmem -count=5 ./... > base-bench.txt
-
-    - name: Run benchmarks on PR branch
-      run: |
-        git checkout ${{ github.head_ref }}
-        go test -bench=. -benchmem -count=5 ./... > pr-bench.txt
-
-    - name: Compare benchmarks
-      run: |
-        go install golang.org/x/perf/cmd/benchstat@latest
-        benchstat base-bench.txt pr-bench.txt | tee benchmark-comparison.txt
-
-    - name: Comment PR with results
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          const results = fs.readFileSync('benchmark-comparison.txt', 'utf8');
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `## Performance Benchmark Results\n\n\`\`\`\n${results}\n\`\`\`\n`
-          });
-```
-
-#### Workflow: Release
-
-**Trigger:** PR to `main`
-**File:** `.github/workflows/release.yml`
-
-```yaml
-name: Release
-
-on:
-  pull_request:
-    branches:
-      - main
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  # All previous tests plus:
-
-  test-full:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: [1.22.x, 1.23.x, 1.24.x]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: ${{ matrix.go-version }}
-
-    - name: Run full test suite
-      run: go test -v -race ./...
-
-  stress-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Run stress tests
-      run: |
-        go test -v -timeout=60m -tags=stress ./tests/stress/...
-
-  build-release:
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [test-full, stress-test]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.23.x
-
-    - name: Build binaries
-      run: |
-        GOOS=linux GOARCH=amd64 go build -o objectfs-linux-amd64 ./cmd/objectfs
-        GOOS=darwin GOARCH=amd64 go build -o objectfs-darwin-amd64 ./cmd/objectfs
-        GOOS=darwin GOARCH=arm64 go build -o objectfs-darwin-arm64 ./cmd/objectfs
-        GOOS=windows GOARCH=amd64 go build -o objectfs-windows-amd64.exe ./cmd/objectfs
-
-    - name: Create release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          objectfs-*
-        generate_release_notes: true
-```
-
-#### Workflow: Nightly Tests
-
-**Trigger:** Cron schedule (2 AM UTC)
-**File:** `.github/workflows/nightly.yml`
-
-```yaml
-name: Nightly Tests
-
-on:
-  schedule:
-    - cron: '0 2 * * *'  # 2 AM UTC daily
-  workflow_dispatch:  # Allow manual trigger
-
-jobs:
-  extended-aws-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.23.x
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-west-2
-
-    - name: Run extended tests
-      env:
-        OBJECTFS_TEST_BUCKET: objectfs-nightly-test
-      run: |
-        go test -v -timeout=3h -tags=nightly ./...
-
-  memory-leak-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Run memory leak detection
-      run: |
-        go test -v -timeout=4h -memprofile=mem.prof ./...
-        go tool pprof -top mem.prof
-
-  notify-failures:
-    needs: [extended-aws-tests, memory-leak-test]
-    if: failure()
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Notify team
-      uses: actions/github-script@v7
-      with:
-        script: |
-          github.rest.issues.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            title: '🚨 Nightly Tests Failed',
-            body: 'Nightly test suite failed. Please investigate.',
-            labels: ['bug', 'nightly-failure']
-          });
-```
-
----
-
-## Code Quality Standards
-
-### Go Style Guidelines
-
-**Follow:**
-
-- [Effective Go](https://golang.org/doc/effective_go)
-- [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
-- [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md)
-
-### Key Principles
-
-#### 1. Error Handling
-
-```go
-// Good: Wrap errors with context
-func readConfig(path string) (*Config, error) {
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return nil, fmt.Errorf("read config %s: %w", path, err)
+### IAM Policy for Testing
+
+Create an IAM policy for testing (least privilege):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:PutBucketLifecycleConfiguration",
+        "s3:GetBucketLifecycleConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::objectfs-test-*",
+        "arn:aws:s3:::objectfs-test-*/*"
+      ]
     }
-    // ...
-    return config, nil
-}
-
-// Bad: Swallow or ignore errors
-func readConfig(path string) *Config {
-    data, _ := os.ReadFile(path)  // BAD: ignored error
-    // ...
+  ]
 }
 ```
 
-#### 2. Interfaces
+### Test Bucket Lifecycle Policy
 
-```go
-// Good: Small, focused interfaces
-type ObjectGetter interface {
-    GetObject(ctx context.Context, key string, offset, size int64) ([]byte, error)
-}
-
-// Good: Accept interfaces, return structs
-func NewCache(backend ObjectGetter) *Cache {
-    return &Cache{backend: backend}
-}
-
-// Bad: Large, monolithic interfaces
-type Everything interface {
-    GetObject(...)
-    PutObject(...)
-    ListObjects(...)
-    DeleteObject(...)
-    HealthCheck(...)
-    GetMetrics(...)
-    // ... 20 more methods
-}
-```
-
-#### 3. Concurrency
-
-```go
-// Good: Use sync primitives correctly
-type SafeCounter struct {
-    mu    sync.RWMutex
-    count int64
-}
-
-func (c *SafeCounter) Inc() {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    c.count++
-}
-
-func (c *SafeCounter) Value() int64 {
-    c.mu.RLock()
-    defer c.mu.RUnlock()
-    return c.count
-}
-
-// Good: Use context for cancellation
-func (s *Server) Serve(ctx context.Context) error {
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case req := <-s.requests:
-            s.handle(ctx, req)
-        }
-    }
-}
-```
-
-#### 4. Performance-Critical Code
-
-```go
-// Good: Pre-allocate slices when size is known
-func readChunks(size int) []byte {
-    chunks := make([]byte, 0, size/chunkSize)  // Pre-allocate capacity
-    // ...
-    return chunks
-}
-
-// Good: Reuse buffers
-var bufferPool = sync.Pool{
-    New: func() interface{} {
-        return make([]byte, 64*1024)
-    },
-}
-
-func processData(data []byte) {
-    buf := bufferPool.Get().([]byte)
-    defer bufferPool.Put(buf)
-    // Use buf...
-}
-
-// Good: Avoid allocations in hot paths
-func (c *Cache) Get(key string, offset, size int64) []byte {
-    // Use string key directly, don't format
-    cacheKey := key + ":" + strconv.FormatInt(offset, 10)  // Allocates!
-
-    // Better: Use bytes.Buffer or strings.Builder
-    var b strings.Builder
-    b.WriteString(key)
-    b.WriteByte(':')
-    b.WriteString(strconv.FormatInt(offset, 10))
-    cacheKey := b.String()
-    // ...
-}
-```
-
-### Code Review Checklist
-
-**For Reviewers:**
-
-- [ ] Code follows Go style guidelines
-- [ ] All functions have doc comments
-- [ ] Error handling is correct and thorough
-- [ ] Concurrency is safe (proper locking)
-- [ ] No obvious performance issues
-- [ ] Tests are comprehensive
-- [ ] No obvious security issues
-- [ ] Changes are well-documented
-
-**For Authors:**
-
-- [ ] Self-reviewed the code
-- [ ] Added tests for new code
-- [ ] Updated documentation
-- [ ] Ran linter and fixed issues
-- [ ] Ran tests locally
-- [ ] No debug code or commented-out code
-- [ ] Commit messages are clear
-
----
-
-## Performance Optimization
-
-### Profiling & Benchmarking
-
-#### CPU Profiling
+Set up automatic cleanup for test buckets:
 
 ```bash
-# Run with CPU profiling
+# Create lifecycle policy
+cat > lifecycle.json <<EOF
+{
+  "Rules": [{
+    "Id": "DeleteOldTestData",
+    "Status": "Enabled",
+    "Prefix": "",
+    "Expiration": {
+      "Days": 7
+    }
+  }]
+}
+EOF
+
+# Apply to test bucket
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket objectfs-test-$(whoami) \
+  --lifecycle-configuration file://lifecycle.json \
+  --profile aws
+```
+
+---
+
+## Performance Profiling
+
+### CPU Profiling
+
+```bash
+# Generate CPU profile
 go test -cpuprofile=cpu.prof -bench=.
 
-# Analyze profile
+# Analyze
 go tool pprof cpu.prof
-(pprof) top10
-(pprof) list functionName
-(pprof) web  # Requires graphviz
+# (pprof) top10
+# (pprof) list <function-name>
+# (pprof) web  # requires graphviz
 ```
 
-#### Memory Profiling
+### Memory Profiling
 
 ```bash
-# Run with memory profiling
+# Generate memory profile
 go test -memprofile=mem.prof -bench=.
 
-# Analyze profile
+# Analyze
 go tool pprof mem.prof
-(pprof) top10
-(pprof) list functionName
+# (pprof) top10
+# (pprof) list <function-name>
 ```
 
-#### Trace Analysis
+### Trace Analysis
 
 ```bash
-# Generate trace
+# Generate execution trace
 go test -trace=trace.out -bench=BenchmarkOperation
 
-# View trace
+# View in browser
 go tool trace trace.out
 ```
 
-### Performance Targets
+---
 
-**By Component:**
+## Building and Releases
 
-| Component | Metric | Target | Measurement |
-|-----------|--------|--------|-------------|
-| S3 Backend | Throughput | 400-800 MB/s | Large file sequential read |
-| Cache L1 | Hit latency | <1ms | Cached object retrieval |
-| Cache L2 | Hit latency | <10ms | Disk cached retrieval |
-| Write Buffer | Flush time | <100ms | 1MB buffer flush |
-| FUSE Operations | Latency | <10ms | readdir, stat, open |
+### Local Build
 
-**Regression Tolerance:**
+```bash
+# Build for current platform
+go build -o objectfs ./cmd/objectfs
 
-- <5% performance degradation acceptable for major features
-- <2% for refactoring and code quality improvements
-- 0% for bug fixes (must not introduce regression)
+# Build with version info
+VERSION=$(git describe --tags --always --dirty)
+go build -ldflags "-X main.Version=$VERSION" -o objectfs ./cmd/objectfs
+
+# Run
+./objectfs --version
+```
+
+### Cross-Platform Build
+
+```bash
+# Linux AMD64
+GOOS=linux GOARCH=amd64 go build -o objectfs-linux-amd64 ./cmd/objectfs
+
+# macOS AMD64
+GOOS=darwin GOARCH=amd64 go build -o objectfs-darwin-amd64 ./cmd/objectfs
+
+# macOS ARM64 (M1/M2/M3)
+GOOS=darwin GOARCH=arm64 go build -o objectfs-darwin-arm64 ./cmd/objectfs
+
+# Windows
+GOOS=windows GOARCH=amd64 go build -o objectfs-windows-amd64.exe ./cmd/objectfs
+```
+
+### Release Process
+
+```bash
+# 1. Update version
+vim CHANGELOG.md  # Document changes
+vim internal/version/version.go  # Update version constant
+
+# 2. Commit changes
+git add CHANGELOG.md internal/version/version.go
+git commit -m "chore: bump version to v0.4.0"
+
+# 3. Tag release
+git tag -a v0.4.0 -m "Release v0.4.0"
+git push origin v0.4.0
+git push origin main
+
+# 4. Build binaries
+./scripts/build-release.sh
+
+# 5. Create GitHub release (manual or via gh CLI)
+gh release create v0.4.0 \
+  objectfs-* \
+  --title "ObjectFS v0.4.0" \
+  --notes-file CHANGELOG.md
+```
 
 ---
 
-## AWS-C-S3 Integration Plan
+## AWS-C-S3 Integration (Future)
 
-### Overview
+When ready to integrate aws-c-s3 for performance:
 
-AWS-C-S3 is a high-performance C library for S3 operations that provides:
-
-- Automatic request splitting across multiple connections
-- Parallel chunk uploads/downloads
-- Advanced network optimization
-- Significantly better throughput than standard SDKs
-
-### Integration Strategy
-
-#### Phase 1: Research & Prototyping (v0.4.0)
-
-**Duration:** 4-6 weeks
-**Branch:** `feature/v0.4.0-aws-c-s3-research`
-
-**Goals:**
-
-1. Build aws-c-s3 and dependencies
-2. Create Go bindings using CGo
-3. Prototype basic operations (Get, Put)
-4. Benchmark against current AWS SDK v2
-5. Identify integration challenges
-
-**Tasks:**
-
-- [ ] Build aws-c-s3 on Linux/macOS/Windows
-- [ ] Create CGo wrapper for core operations
-- [ ] Implement basic error handling
-- [ ] Write proof-of-concept tests
-- [ ] Performance comparison benchmarks
-
-**Expected Outcome:**
-
-- Working prototype demonstrating >2x throughput improvement
-- Technical design document for full integration
-- Risk assessment and mitigation plan
-
-#### Phase 2: Backend Implementation (v0.5.0)
-
-**Duration:** 6-8 weeks
-**Branch:** `feature/v0.5.0-aws-c-s3-backend`
-
-**Goals:**
-
-1. Implement complete S3 backend using aws-c-s3
-2. Feature parity with current AWS SDK v2 backend
-3. Comprehensive testing
-4. Performance validation
-
-**Architecture:**
-
-```go
-// New aws-c-s3 backend
-package awscs3
-
-// #cgo LDFLAGS: -laws-c-s3 -laws-c-common -laws-checksums
-// #include <aws/s3/s3.h>
-import "C"
-
-type Backend struct {
-    client *C.struct_aws_s3_client
-    config *BackendConfig
-    // ...
-}
-
-func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64) ([]byte, error) {
-    // CGo calls to aws-c-s3
-    // ...
-}
-
-// Factory pattern for backend selection
-type BackendFactory interface {
-    CreateBackend(config *Config) (Backend, error)
-}
-
-// Allow runtime selection
-func NewBackend(config *Config) (Backend, error) {
-    switch config.BackendType {
-    case "aws-sdk-v2":
-        return s3.NewBackend(config)
-    case "aws-c-s3":
-        return awscs3.NewBackend(config)
-    default:
-        return s3.NewBackend(config)  // Default to SDK v2
-    }
-}
-```
-
-**Configuration:**
-
-```yaml
-backends:
-  s3:
-    bucket: "my-bucket"
-    region: "us-west-2"
-
-    # Backend selection
-    backend_type: "aws-c-s3"  # or "aws-sdk-v2"
-
-    # aws-c-s3 specific config
-    aws_c_s3:
-      part_size: 8388608  # 8MB
-      max_connections: 10
-      throughput_target_gbps: 10
-```
-
-**Testing Requirements:**
-
-- [ ] All Tier 1-3 tests passing
-- [ ] Feature parity with AWS SDK v2 backend
-- [ ] >2x throughput improvement demonstrated
-- [ ] No memory leaks (valgrind clean)
-- [ ] Cross-platform build working
-
-#### Phase 3: Optimization & Tuning (v0.6.0)
-
-**Duration:** 4-6 weeks
-**Branch:** `feature/v0.6.0-aws-c-s3-optimization`
-
-**Goals:**
-
-1. Optimize performance for common workloads
-2. Tune connection pooling and chunking
-3. Implement advanced features (multipart, etc.)
-4. Production hardening
-
-**Optimizations:**
-
-- Connection pool sizing for different workloads
-- Chunk size tuning based on file size
-- Memory pool optimization
-- Error handling and retry logic
-- Graceful degradation
-
-**Performance Targets:**
-
-- 5-10x improvement for large file uploads (>100MB)
-- 3-5x improvement for large file downloads
-- 2x improvement for small file operations (<10MB)
-- Maintain current performance for metadata operations
-
-#### Phase 4: Production Rollout (v0.7.0)
-
-**Duration:** Ongoing
-**Branch:** N/A (merged to main)
-
-**Rollout Strategy:**
-
-1. **v0.5.0:** Available as opt-in experimental feature
-2. **v0.6.0:** Beta quality, recommended for testing
-3. **v0.7.0:** Production ready, default for new deployments
-4. **v0.8.0:** Default for all deployments, AWS SDK v2 deprecated
-
-**Migration Path:**
-
-```yaml
-# v0.5.0-v0.6.0: Opt-in
-backends:
-  s3:
-    backend_type: "aws-c-s3"  # Explicit opt-in
-
-# v0.7.0: Default changed, opt-out available
-backends:
-  s3:
-    backend_type: "aws-sdk-v2"  # Explicit opt-out if needed
-
-# v0.8.0+: aws-c-s3 only (aws-sdk-v2 removed)
-backends:
-  s3:
-    # backend_type no longer needed
-```
-
-### Build & Dependency Management
-
-#### CMake Integration
-
-```cmake
-# CMakeLists.txt for aws-c-s3 dependencies
-cmake_minimum_required(VERSION 3.9)
-project(objectfs-aws-c-s3)
-
-# Find or build aws-c-s3 and dependencies
-find_package(aws-c-s3 REQUIRED)
-find_package(aws-c-common REQUIRED)
-find_package(aws-checksums REQUIRED)
-
-# Link libraries
-target_link_libraries(objectfs-cgo
-    AWS::aws-c-s3
-    AWS::aws-c-common
-    AWS::aws-checksums
-)
-```
-
-#### Build Script
+### 1. Research Phase
 
 ```bash
-#!/bin/bash
-# scripts/build-aws-c-s3.sh
-
-set -e
-
-# Build dependencies in order
-build_dep() {
-    local repo=$1
-    local dir=$2
-
-    echo "Building $repo..."
-    git clone https://github.com/awslabs/$repo.git $dir
-    cd $dir
-    mkdir -p build
-    cd build
-    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
-    make -j$(nproc)
-    sudo make install
-    cd ../..
-}
-
-# Build in dependency order
-build_dep "aws-c-common" "aws-c-common"
-build_dep "aws-checksums" "aws-checksums"
-build_dep "aws-c-cal" "aws-c-cal"
-build_dep "aws-c-io" "aws-c-io"
-build_dep "aws-c-compression" "aws-c-compression"
-build_dep "aws-c-http" "aws-c-http"
-build_dep "aws-c-auth" "aws-c-auth"
-build_dep "aws-c-s3" "aws-c-s3"
-
-echo "AWS-C-S3 build complete!"
+# Clone and build aws-c-s3
+git clone https://github.com/awslabs/aws-c-s3.git
+cd aws-c-s3
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make
+sudo make install
 ```
 
-#### Go Build Tags
+### 2. Create CGo Wrapper
 
-```go
-// +build awscs3
+Create `internal/backend/awscs3/` package with CGo bindings.
 
-// backend_awscs3.go
-package backend
-
-// This file only compiles when 'awscs3' build tag is present
-```
+### 3. Benchmark Comparison
 
 ```bash
-# Build with aws-c-s3 support
+# Baseline with AWS SDK v2
+go test -bench=BenchmarkS3 -benchmem -count=10 > baseline.txt
+
+# With aws-c-s3
+go test -bench=BenchmarkS3 -benchmem -count=10 -tags=awscs3 > awscs3.txt
+
+# Compare
+benchstat baseline.txt awscs3.txt
+```
+
+### 4. Integration
+
+Add build tags to allow building with/without aws-c-s3:
+
+```bash
+# Build with aws-c-s3
 go build -tags awscs3 ./cmd/objectfs
 
-# Build without (use AWS SDK v2)
+# Build without (standard AWS SDK)
 go build ./cmd/objectfs
 ```
 
-### Risk Mitigation
+---
 
-**Risk 1: Build Complexity**
+## Makefile Targets
 
-- **Mitigation:** Provide pre-built binaries for common platforms
-- **Fallback:** AWS SDK v2 backend always available
+Create a simple Makefile for common tasks:
 
-**Risk 2: Platform Compatibility**
+```makefile
+.PHONY: all build test lint clean
 
-- **Mitigation:** Extensive cross-platform testing in CI
-- **Fallback:** Build tags allow platform-specific builds
+all: build
 
-**Risk 3: Memory Safety (CGo)**
+build:
+ go build -o objectfs ./cmd/objectfs
 
-- **Mitigation:** Comprehensive memory leak testing
-- **Tools:** valgrind, AddressSanitizer, Go race detector
+test:
+ go test ./...
 
-**Risk 4: Performance Regression**
+test-quick:
+ go test -short ./...
 
-- **Mitigation:** Extensive benchmarking at each phase
-- **Requirement:** Must show >2x improvement to justify complexity
+test-aws:
+ go test -v ./tests/aws/...
 
-### Success Metrics
+lint:
+ golangci-lint run
 
-**Technical:**
+fmt:
+ go fmt ./...
+ goimports -w .
 
-- [ ] 5x+ throughput for large files (>100MB)
-- [ ] 3x+ throughput for medium files (10-100MB)
-- [ ] Zero memory leaks in 72-hour stress test
-- [ ] Cross-platform builds working (Linux, macOS, Windows)
+clean:
+ rm -f objectfs coverage.out cpu.prof mem.prof trace.out
+ go clean
 
-**Operational:**
-
-- [ ] Feature parity with AWS SDK v2 backend
-- [ ] Clear migration documentation
-- [ ] Production deployments running successfully
-- [ ] User satisfaction with performance
+install:
+ go install ./cmd/objectfs
+```
 
 ---
 
-## Summary: Key Principles
+## CI/CD (Minimal)
 
-1. **Branch Strategy:** Feature branches → develop → release → main
-2. **No LocalStack:** Use real AWS for integration testing
-3. **Test Tiers:** Unit (always) → Integration (PR) → Real AWS (release)
-4. **Performance:** Benchmark everything, no regressions
-5. **AWS-C-S3:** Phased integration with fallback to AWS SDK v2
-6. **Quality:** 80%+ test coverage, all tests passing
-7. **Documentation:** Update docs with code changes
+The `.github/workflows/ci.yml` provides basic checks:
+
+- Runs tests on push/PR to main
+- Runs linting
+- That's it - keep it simple!
+
+All serious testing should be done locally before pushing.
 
 ---
 
-## Questions or Feedback?
+## Project Structure
 
-- **GitHub Issues:** <https://github.com/scttfrdmn/objectfs/issues>
+```
+objectfs/
+├── cmd/
+│   └── objectfs/          # Main binary
+├── internal/
+│   ├── cache/             # Caching layer
+│   ├── backend/           # Storage backends
+│   │   ├── s3/           # AWS S3 backend
+│   │   └── mock/         # Mock backend for testing
+│   ├── buffer/            # Write buffer
+│   ├── fuse/              # FUSE implementation
+│   └── config/            # Configuration
+├── tests/
+│   ├── unit/              # Unit tests
+│   └── aws/               # AWS integration tests
+├── docs/                  # Documentation
+├── scripts/               # Build/utility scripts
+└── Makefile               # Common tasks
+```
+
+---
+
+## Tips and Best Practices
+
+### Local Development
+
+1. **Use environment variables** for configuration during development
+2. **Keep test buckets isolated** - use unique names per developer
+3. **Clean up regularly** - delete old test buckets and data
+4. **Profile often** - catch performance issues early
+
+### Testing
+
+1. **Write tests first** - TDD helps with design
+2. **Test error paths** - don't just test happy paths
+3. **Use table-driven tests** - makes adding cases easy
+4. **Mock external dependencies** - for fast unit tests
+
+### Performance
+
+1. **Benchmark before optimizing** - measure first
+2. **Use pprof** - find actual bottlenecks
+3. **Pre-allocate when size is known** - avoid repeated allocations
+4. **Use sync.Pool for buffers** - reuse memory
+
+### Code Quality
+
+1. **Run formatters** - go fmt, goimports
+2. **Run linters** - golangci-lint catches issues
+3. **Document public APIs** - godoc comments
+4. **Keep functions small** - easier to test and understand
+
+---
+
+## Getting Help
+
+- **Issues:** <https://github.com/scttfrdmn/objectfs/issues>
 - **Discussions:** <https://github.com/scttfrdmn/objectfs/discussions>
 
-This document is a living guide and will be updated as we learn and improve our processes.
+---
+
+## Summary
+
+This is a **simple, pragmatic development guide** for solodev work:
+
+- ✅ Test locally with explicit commands
+- ✅ Use real AWS (no LocalStack complexity)
+- ✅ Minimal CI/CD (just basic checks)
+- ✅ Focus on code quality and performance
+- ✅ Keep it simple and maintainable
