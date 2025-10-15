@@ -62,6 +62,8 @@ const (
 	ErrCodeInvalidState       ErrorCode = "INVALID_STATE"
 	ErrCodeShutdownInProgress ErrorCode = "SHUTDOWN_IN_PROGRESS"
 	ErrCodeComponentStopped   ErrorCode = "COMPONENT_STOPPED"
+	ErrCodeServiceUnavailable ErrorCode = "SERVICE_UNAVAILABLE"
+	ErrCodeServiceDegraded    ErrorCode = "SERVICE_DEGRADED"
 
 	// Operation Errors (7000-7999)
 	ErrCodeOperationTimeout  ErrorCode = "OPERATION_TIMEOUT"
@@ -299,6 +301,8 @@ func GetDefaultHTTPStatus(code ErrorCode) int {
 		ErrCodeLimitExceeded:        429,
 		ErrCodeQuotaExceeded:        429,
 		ErrCodeInternalError:        500, // Internal Server Error
+		ErrCodeServiceUnavailable:   503, // Service Unavailable
+		ErrCodeServiceDegraded:      503,
 		ErrCodeOperationTimeout:     504, // Gateway Timeout
 		ErrCodeConnectionTimeout:    504,
 	}
@@ -405,6 +409,10 @@ func (e *ObjectFSError) GetRecommendation() string {
 		ErrCodeCredentialsMissing: "AWS credentials not found. " +
 			"Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables " +
 			"or configure aws credentials in ~/.aws/credentials.",
+		ErrCodeServiceUnavailable: "Service is currently unavailable. " +
+			"The system is temporarily unable to process requests. Please retry later.",
+		ErrCodeServiceDegraded: "Service is running in degraded mode. " +
+			"Some operations may be temporarily unavailable or slower than usual.",
 	}
 
 	if rec, exists := recommendations[e.Code]; exists {
@@ -465,6 +473,8 @@ func (e *ObjectFSError) UserFacingMessage() string {
 		ErrCodeQuotaExceeded:        "Storage quota exceeded",
 		ErrCodeAuthenticationFailed: "Authentication failed",
 		ErrCodeCredentialsMissing:   "AWS credentials not configured",
+		ErrCodeServiceUnavailable:   "Service temporarily unavailable",
+		ErrCodeServiceDegraded:      "Service running in degraded mode",
 	}
 
 	if msg, exists := messages[e.Code]; exists {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/objectfs/objectfs/internal/circuit"
 	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/retry"
 	"github.com/objectfs/objectfs/pkg/types"
 )
@@ -45,6 +46,9 @@ type Backend struct {
 
 	// Retry logic for error recovery
 	retryer *retry.Retryer
+
+	// Health tracking for graceful degradation
+	healthTracker *health.Tracker
 }
 
 // NewBackend creates a new S3 backend instance
@@ -119,6 +123,39 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	}
 	backend.retryer = retry.New(retryConfig)
 
+	// Initialize health tracker for graceful degradation
+	healthConfig := health.DefaultConfig()
+	backend.healthTracker = health.NewTracker(healthConfig)
+	backend.healthTracker.RegisterComponent("s3-reads")
+	backend.healthTracker.RegisterComponent("s3-writes")
+	backend.healthTracker.RegisterComponent("s3-deletes")
+	backend.healthTracker.RegisterComponent("s3-lists")
+
+	// Add health state change callbacks
+	backend.healthTracker.AddStateChangeCallback(health.StateReadOnly, func(component string, oldState, newState health.HealthState, err error) {
+		logger.Warn("S3 component transitioned to read-only mode",
+			"component", component,
+			"old_state", oldState.String(),
+			"new_state", newState.String(),
+			"error", err)
+	})
+
+	backend.healthTracker.AddStateChangeCallback(health.StateUnavailable, func(component string, oldState, newState health.HealthState, err error) {
+		logger.Error("S3 component became unavailable",
+			"component", component,
+			"old_state", oldState.String(),
+			"new_state", newState.String(),
+			"error", err)
+	})
+
+	backend.healthTracker.AddStateChangeCallback(health.StateHealthy, func(component string, oldState, newState health.HealthState, err error) {
+		if oldState != health.StateHealthy {
+			logger.Info("S3 component recovered to healthy state",
+				"component", component,
+				"old_state", oldState.String())
+		}
+	})
+
 	// Log tier configuration
 	logger.Info("S3 storage tier configured",
 		"tier", cfg.StorageTier,
@@ -142,6 +179,17 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	defer func() {
 		b.metricsCollector.RecordMetrics(time.Since(start), false)
 	}()
+
+	// Check if reads are available in current health state
+	if !b.healthTracker.CanRead("s3-reads") {
+		state := b.healthTracker.GetState("s3-reads")
+		return nil, errors.NewError(errors.ErrCodeServiceUnavailable, "S3 read operations are unavailable").
+			WithComponent("s3-backend").
+			WithOperation("GetObject").
+			WithContext("health_state", state.String()).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key)
+	}
 
 	breaker := b.circuitManager.GetBreaker("s3-get")
 	var data []byte
@@ -173,17 +221,22 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 
 			if err != nil {
 				b.metricsCollector.RecordError(err)
-				return b.translateError(err, "GetObject", key)
+				translatedErr := b.translateError(err, "GetObject", key)
+				b.healthTracker.RecordError("s3-reads", translatedErr)
+				return translatedErr
 			}
 			defer func() { _ = result.Body.Close() }()
 
 			data, err = io.ReadAll(result.Body)
 			if err != nil {
 				b.metricsCollector.RecordError(err)
-				return fmt.Errorf("failed to read object body: %w", err)
+				readErr := fmt.Errorf("failed to read object body: %w", err)
+				b.healthTracker.RecordError("s3-reads", readErr)
+				return readErr
 			}
 
 			b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
+			b.healthTracker.RecordSuccess("s3-reads")
 			return nil
 		})
 	})
@@ -204,6 +257,18 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 	defer func() {
 		b.metricsCollector.RecordMetrics(time.Since(start), false)
 	}()
+
+	// Check if writes are available in current health state
+	if !b.healthTracker.CanWrite("s3-writes") {
+		state := b.healthTracker.GetState("s3-writes")
+		return errors.NewError(errors.ErrCodeServiceUnavailable, "S3 write operations are unavailable").
+			WithComponent("s3-backend").
+			WithOperation("PutObject").
+			WithContext("health_state", state.String()).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithDetail("suggestion", "System is in read-only mode. Writes will be available once service recovers.")
+	}
 
 	// Validate write operation against tier constraints
 	if err := b.tierValidator.ValidateWrite(key, int64(len(data))); err != nil {
@@ -226,7 +291,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 
 	breaker := b.circuitManager.GetBreaker("s3-put")
 
-	return breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
+	err := breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
 		// Get storage class for effective tier
 		storageClass := ConvertTierToStorageClass(effectiveTier)
 
@@ -264,6 +329,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 					"throughput", result.Throughput,
 					"duration", result.Duration)
 				b.metricsCollector.RecordBytesUploaded(int64(len(data)))
+				b.healthTracker.RecordSuccess("s3-writes")
 				return nil
 			}
 
@@ -277,12 +343,17 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 
 		if err != nil {
 			b.metricsCollector.RecordError(err)
-			return b.translateError(err, "PutObject", key)
+			translatedErr := b.translateError(err, "PutObject", key)
+			b.healthTracker.RecordError("s3-writes", translatedErr)
+			return translatedErr
 		}
 
 		b.metricsCollector.RecordBytesUploaded(int64(len(data)))
+		b.healthTracker.RecordSuccess("s3-writes")
 		return nil
 	})
+
+	return err
 }
 
 // DeleteObject removes an object from S3
@@ -736,4 +807,36 @@ func (b *Backend) CalculateCostWithVolume(tier string, sizeGB float64) (float64,
 
 	baseCost := sizeGB * tierPricing.StorageCostPerGBMonth
 	return b.pricingManager.CalculateVolumeDiscount(tier, sizeGB, baseCost), nil
+}
+
+// Health Status Management Methods
+
+// GetHealthStatus returns the overall health status of the S3 backend
+func (b *Backend) GetHealthStatus() health.HealthState {
+	return b.healthTracker.GetOverallHealth()
+}
+
+// GetComponentHealth returns health status for a specific S3 operation component
+func (b *Backend) GetComponentHealth(component string) (*health.ComponentHealth, error) {
+	return b.healthTracker.GetComponentHealth(component)
+}
+
+// GetAllComponentsHealth returns health status for all S3 operation components
+func (b *Backend) GetAllComponentsHealth() map[string]*health.ComponentHealth {
+	return b.healthTracker.GetAllComponents()
+}
+
+// IsReadAvailable checks if read operations are currently available
+func (b *Backend) IsReadAvailable() bool {
+	return b.healthTracker.CanRead("s3-reads")
+}
+
+// IsWriteAvailable checks if write operations are currently available
+func (b *Backend) IsWriteAvailable() bool {
+	return b.healthTracker.CanWrite("s3-writes")
+}
+
+// IsFullyHealthy checks if all components are in healthy state
+func (b *Backend) IsFullyHealthy() bool {
+	return b.healthTracker.GetOverallHealth() == health.StateHealthy
 }
