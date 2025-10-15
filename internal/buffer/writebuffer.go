@@ -9,22 +9,23 @@ import (
 
 // WriteBuffer implements intelligent write buffering for improved performance
 type WriteBuffer struct {
-	mu       sync.RWMutex
-	config   *WriteBufferConfig
-	buffers  map[string]*buffer
-	stats    WriteBufferStats
-	flushCh  chan string
-	stopCh   chan struct{}
-	stopped  chan struct{}
+	mu            sync.RWMutex
+	config        *WriteBufferConfig
+	buffers       map[string]*buffer
+	stats         WriteBufferStats
+	flushCh       chan string
+	stopCh        chan struct{}
+	stopped       chan struct{}
+	flushCallback FlushCallback
 }
 
 // WriteBufferConfig represents write buffer configuration
 type WriteBufferConfig struct {
 	// Buffer settings
-	MaxBufferSize    int64         `yaml:"max_buffer_size"`
-	MaxBuffers       int           `yaml:"max_buffers"`
-	FlushInterval    time.Duration `yaml:"flush_interval"`
-	FlushThreshold   int64         `yaml:"flush_threshold"`
+	MaxBufferSize  int64         `yaml:"max_buffer_size"`
+	MaxBuffers     int           `yaml:"max_buffers"`
+	FlushInterval  time.Duration `yaml:"flush_interval"`
+	FlushThreshold int64         `yaml:"flush_threshold"`
 
 	// Performance settings
 	AsyncFlush       bool          `yaml:"async_flush"`
@@ -33,10 +34,10 @@ type WriteBufferConfig struct {
 	CompressionLevel int           `yaml:"compression_level"`
 
 	// Reliability settings
-	SyncOnClose      bool          `yaml:"sync_on_close"`
-	VerifyWrites     bool          `yaml:"verify_writes"`
-	MaxRetries       int           `yaml:"max_retries"`
-	RetryDelay       time.Duration `yaml:"retry_delay"`
+	SyncOnClose  bool          `yaml:"sync_on_close"`
+	VerifyWrites bool          `yaml:"verify_writes"`
+	MaxRetries   int           `yaml:"max_retries"`
+	RetryDelay   time.Duration `yaml:"retry_delay"`
 }
 
 // WriteBufferStats tracks write buffer performance metrics
@@ -119,12 +120,13 @@ func NewWriteBuffer(config *WriteBufferConfig, flushCallback FlushCallback) (*Wr
 	}
 
 	wb := &WriteBuffer{
-		config:  config,
-		buffers: make(map[string]*buffer),
-		stats:   WriteBufferStats{},
-		flushCh: make(chan string, config.MaxBuffers),
-		stopCh:  make(chan struct{}),
-		stopped: make(chan struct{}),
+		config:        config,
+		buffers:       make(map[string]*buffer),
+		stats:         WriteBufferStats{},
+		flushCh:       make(chan string, config.MaxBuffers),
+		stopCh:        make(chan struct{}),
+		stopped:       make(chan struct{}),
+		flushCallback: flushCallback,
 	}
 
 	// Start background flush goroutine
@@ -194,7 +196,6 @@ func (wb *WriteBuffer) WriteWithRequest(ctx context.Context, req *WriteRequest) 
 	response.FlushTime = time.Since(start)
 	return response
 }
-
 
 // Sync ensures all buffered writes are flushed and synced
 func (wb *WriteBuffer) Sync(ctx context.Context) error {
@@ -301,6 +302,11 @@ func (wb *WriteBuffer) appendToBuffer(buf *buffer, req *WriteRequest) {
 }
 
 func (wb *WriteBuffer) shouldFlushBuffer(buf *buffer) bool {
+	// Never auto-flush when AsyncFlush is disabled - only flush on explicit request
+	if !wb.config.AsyncFlush {
+		return false
+	}
+
 	buf.mu.RLock()
 	defer buf.mu.RUnlock()
 
@@ -470,14 +476,14 @@ func (wb *WriteBuffer) flushStaleBuffers(callback FlushCallback) {
 
 // BufferInfo provides information about a specific buffer
 type BufferInfo struct {
-	Key           string        `json:"key"`
-	Size          int64         `json:"size"`
-	Offset        int64         `json:"offset"`
-	PendingWrites int           `json:"pending_writes"`
-	LastWrite     time.Time     `json:"last_write"`
-	LastAccess    time.Time     `json:"last_access"`
-	Dirty         bool          `json:"dirty"`
-	Flushing      bool          `json:"flushing"`
+	Key           string    `json:"key"`
+	Size          int64     `json:"size"`
+	Offset        int64     `json:"offset"`
+	PendingWrites int       `json:"pending_writes"`
+	LastWrite     time.Time `json:"last_write"`
+	LastAccess    time.Time `json:"last_access"`
+	Dirty         bool      `json:"dirty"`
+	Flushing      bool      `json:"flushing"`
 }
 
 // GetBufferInfo returns information about all buffers
@@ -596,6 +602,24 @@ func (wb *WriteBuffer) FlushWithContext(ctx context.Context, key string) error {
 
 // FlushAll flushes all buffers (required by types.WriteBuffer interface)
 func (wb *WriteBuffer) FlushAll() error {
+	// For synchronous flushes, flush directly without going through the channel
+	if !wb.config.AsyncFlush {
+		wb.mu.RLock()
+		keys := make([]string, 0, len(wb.buffers))
+		for key := range wb.buffers {
+			keys = append(keys, key)
+		}
+		wb.mu.RUnlock()
+
+		// Flush each buffer synchronously
+		for _, key := range keys {
+			wb.flushBuffer(key, wb.flushCallback)
+		}
+
+		return nil
+	}
+
+	// For async flushes, schedule and wait
 	wb.mu.RLock()
 	keys := make([]string, 0, len(wb.buffers))
 	for key := range wb.buffers {
@@ -603,11 +627,34 @@ func (wb *WriteBuffer) FlushAll() error {
 	}
 	wb.mu.RUnlock()
 
-	// Flush each buffer
+	// Schedule flush for all buffers
 	for _, key := range keys {
 		if err := wb.Flush(key); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	// Wait for all flushes to complete
+	maxWait := 10 * time.Second
+	if wb.config.MaxWriteDelay > 0 {
+		maxWait = wb.config.MaxWriteDelay * 2
+	}
+	timeout := time.After(maxWait)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			return fmt.Errorf("flush all timeout after %v", maxWait)
+		case <-ticker.C:
+			wb.mu.RLock()
+			remaining := len(wb.buffers)
+			wb.mu.RUnlock()
+
+			if remaining == 0 {
+				return nil
+			}
+		}
+	}
 }
