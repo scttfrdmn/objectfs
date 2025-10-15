@@ -1,64 +1,83 @@
 version: 2
 updates:
   # Enable version updates for Go modules
-  - package-ecosystem: "gomod"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 5
-    reviewers:
-      - "objectfs/maintainers"
-    assignees:
-      - "objectfs/maintainers"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "go"
-    ignore:
+- package-ecosystem: gomod
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 5
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: deps
+    include: scope
+  labels:
+  - dependencies
+  - go
+  - automerge
+  groups:
+    aws-sdk:
+      patterns:
+      - github.com/aws/aws-sdk-go-v2*
+      update-types:
+      - minor
+      - patch
+    production-dependencies:
+      dependency-type: production
+      update-types:
+      - patch
+    development-dependencies:
+      dependency-type: development
+      update-types:
+      - minor
+      - patch
+  ignore:
       # Ignore major version updates for critical dependencies
-      - dependency-name: "github.com/aws/aws-sdk-go-v2"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "google.golang.org/api"
-        update-types: ["version-update:semver-major"]
+  - dependency-name: github.com/aws/aws-sdk-go-v2
+    update-types:
+    - version-update:semver-major
 
   # Enable version updates for GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 5
-    reviewers:
-      - "objectfs/maintainers"
-    assignees:
-      - "objectfs/maintainers"
-    commit-message:
-      prefix: "ci"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "github-actions"
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 5
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: ci
+    include: scope
+  labels:
+  - dependencies
+  - github-actions
+  - automerge
+  groups:
+    github-actions:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
 
   # Enable version updates for Docker
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 3
-    reviewers:
-      - "objectfs/maintainers"
-    assignees:
-      - "objectfs/maintainers"
-    commit-message:
-      prefix: "docker"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
+- package-ecosystem: docker
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 3
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: docker
+    include: scope
+  labels:
+  - dependencies
+  - docker
+  - automerge

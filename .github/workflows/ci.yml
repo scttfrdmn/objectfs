@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,13 +25,19 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: ${{ matrix.go-version }}
+        cache: true
+        cache-dependency-path: go.sum
 
-    - name: Cache Go modules
-      uses: actions/cache@v3
+    - name: Cache Go build
+      uses: actions/cache@v4
       with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
         restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}-
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
           ${{ runner.os }}-go-
 
     - name: Install dependencies
@@ -37,12 +47,12 @@ jobs:
       run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
     - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage.out
         flags: unittests
-        name: codecov-umbrella
+        name: codecov-${{ matrix.go-version }}
         fail_ci_if_error: false
 
   lint:

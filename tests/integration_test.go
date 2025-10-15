@@ -83,6 +83,11 @@ func (suite *IntegrationTestSuite) TearDownTest() {
 func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 	t := suite.T()
 
+	// Skip in short mode
+	if testing.Short() {
+		t.Skip("Skipping S3 integration test in short mode")
+	}
+
 	// Skip if no S3 credentials available
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
 		t.Skip("Skipping S3 integration test - no AWS credentials")
@@ -379,6 +384,11 @@ func (suite *IntegrationTestSuite) TestMetricsIntegration() {
 // Test End-to-End File Operations
 func (suite *IntegrationTestSuite) TestEndToEndFileOperations() {
 	t := suite.T()
+
+	// Skip in short mode
+	if testing.Short() {
+		t.Skip("Skipping end-to-end test in short mode")
+	}
 
 	// Skip if no S3 credentials available
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
