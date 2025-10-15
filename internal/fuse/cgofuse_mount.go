@@ -19,18 +19,18 @@ type CgoFuseMountManager struct {
 // NewCgoFuseMountManager creates a new cgofuse mount manager
 func NewCgoFuseMountManager(backend types.Backend, cache types.Cache, writeBuffer types.WriteBuffer,
 	metrics types.MetricsCollector, config *MountConfig) *CgoFuseMountManager {
-	
+
 	fuseConfig := &Config{
 		MountPoint:  config.MountPoint,
 		ReadOnly:    false,
 		DefaultUID:  1000, // TODO: Make configurable
-		DefaultGID:  1000, // TODO: Make configurable  
+		DefaultGID:  1000, // TODO: Make configurable
 		DefaultMode: 0644,
 		CacheTTL:    config.Options.MaxRead, // Reuse for TTL
 	}
-	
+
 	filesystem := NewCgoFuseFS(backend, cache, writeBuffer, metrics, fuseConfig)
-	
+
 	return &CgoFuseMountManager{
 		filesystem: filesystem,
 		config:     config,

@@ -23,13 +23,13 @@ import (
 // IntegrationTestSuite contains all integration tests
 type IntegrationTestSuite struct {
 	suite.Suite
-	tempDir     string
-	mountPoint  string
-	cacheDir    string
-	configFile  string
-	testBucket  string
-	ctx         context.Context
-	cancel      context.CancelFunc
+	tempDir    string
+	mountPoint string
+	cacheDir   string
+	configFile string
+	testBucket string
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // SetupSuite runs once before all tests
@@ -90,9 +90,9 @@ func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 
 	// Create S3 backend configuration
 	s3Config := &s3.Config{
-		Region:      "us-west-2",
-		MaxRetries:  3,
-		PoolSize:    4,
+		Region:     "us-west-2",
+		MaxRetries: 3,
+		PoolSize:   4,
 	}
 
 	// Create S3 backend
@@ -372,7 +372,7 @@ func (suite *IntegrationTestSuite) TestMetricsIntegration() {
 	assert.Contains(t, operations, "write")
 
 	readMetrics := operations["read"]
-	assert.Equal(t, int64(2), readMetrics.Count) // 1 success + 1 failure
+	assert.Equal(t, int64(2), readMetrics.Count)  // 1 success + 1 failure
 	assert.Equal(t, int64(1), readMetrics.Errors) // 1 failure
 }
 

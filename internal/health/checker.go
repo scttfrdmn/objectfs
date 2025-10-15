@@ -22,24 +22,24 @@ type Checker struct {
 // Config represents health checker configuration
 type Config struct {
 	// Basic settings
-	Enabled          bool          `yaml:"enabled"`
-	CheckInterval    time.Duration `yaml:"check_interval"`
-	Timeout          time.Duration `yaml:"timeout"`
-	
+	Enabled       bool          `yaml:"enabled"`
+	CheckInterval time.Duration `yaml:"check_interval"`
+	Timeout       time.Duration `yaml:"timeout"`
+
 	// Failure handling
 	MaxFailures      int           `yaml:"max_failures"`
 	FailureWindow    time.Duration `yaml:"failure_window"`
 	RecoveryRequired int           `yaml:"recovery_required"`
-	
+
 	// Advanced settings
-	EnableAlerts     bool          `yaml:"enable_alerts"`
-	AlertThreshold   int           `yaml:"alert_threshold"`
-	MetricsEnabled   bool          `yaml:"metrics_enabled"`
-	
+	EnableAlerts   bool `yaml:"enable_alerts"`
+	AlertThreshold int  `yaml:"alert_threshold"`
+	MetricsEnabled bool `yaml:"metrics_enabled"`
+
 	// HTTP endpoint settings
-	HTTPEnabled      bool   `yaml:"http_enabled"`
-	HTTPPort         int    `yaml:"http_port"`
-	HTTPPath         string `yaml:"http_path"`
+	HTTPEnabled bool   `yaml:"http_enabled"`
+	HTTPPort    int    `yaml:"http_port"`
+	HTTPPath    string `yaml:"http_path"`
 }
 
 // Check represents a health check function
@@ -50,11 +50,11 @@ type Check struct {
 	Priority    Priority
 	Timeout     time.Duration
 	Function    CheckFunction
-	
+
 	// State management
-	enabled     bool
-	lastRun     time.Time
-	runCount    int64
+	enabled      bool
+	lastRun      time.Time
+	runCount     int64
 	successCount int64
 	failureCount int64
 	consecutive  int
@@ -65,45 +65,47 @@ type CheckFunction func(ctx context.Context) error
 
 // Result represents the result of a health check
 type Result struct {
-	Check     string    `json:"check"`
-	Status    Status    `json:"status"`
-	Message   string    `json:"message"`
+	Check     string        `json:"check"`
+	Status    Status        `json:"status"`
+	Message   string        `json:"message"`
 	Duration  time.Duration `json:"duration"`
-	Timestamp time.Time `json:"timestamp"`
-	Error     string    `json:"error,omitempty"`
+	Timestamp time.Time     `json:"timestamp"`
+	Error     string        `json:"error,omitempty"`
 }
 
 // Stats tracks overall health check statistics
 type Stats struct {
-	TotalChecks    int64         `json:"total_checks"`
-	SuccessfulChecks int64        `json:"successful_checks"`
-	FailedChecks   int64         `json:"failed_checks"`
-	AverageLatency time.Duration `json:"average_latency"`
-	LastCheck      time.Time     `json:"last_check"`
-	
+	TotalChecks      int64         `json:"total_checks"`
+	SuccessfulChecks int64         `json:"successful_checks"`
+	FailedChecks     int64         `json:"failed_checks"`
+	AverageLatency   time.Duration `json:"average_latency"`
+	LastCheck        time.Time     `json:"last_check"`
+
 	// Status counts
 	HealthyChecks   int `json:"healthy_checks"`
 	UnhealthyChecks int `json:"unhealthy_checks"`
 	UnknownChecks   int `json:"unknown_checks"`
-	
+
 	// System status
-	OverallStatus Status    `json:"overall_status"`
+	OverallStatus Status        `json:"overall_status"`
 	SystemUptime  time.Duration `json:"system_uptime"`
-	LastFailure   time.Time `json:"last_failure"`
+	LastFailure   time.Time     `json:"last_failure"`
 }
 
 // Enums for health check categorization
 type Category string
+
 const (
-	CategoryCore      Category = "core"
-	CategoryStorage   Category = "storage"
-	CategoryCache     Category = "cache"
-	CategoryNetwork   Category = "network"
-	CategorySecurity  Category = "security"
+	CategoryCore        Category = "core"
+	CategoryStorage     Category = "storage"
+	CategoryCache       Category = "cache"
+	CategoryNetwork     Category = "network"
+	CategorySecurity    Category = "security"
 	CategoryPerformance Category = "performance"
 )
 
 type Priority string
+
 const (
 	PriorityCritical Priority = "critical"
 	PriorityHigh     Priority = "high"
@@ -112,6 +114,7 @@ const (
 )
 
 type Status string
+
 const (
 	StatusHealthy   Status = "healthy"
 	StatusUnhealthy Status = "unhealthy"
@@ -250,10 +253,10 @@ func (c *Checker) RunAllChecks(ctx context.Context) (map[string]*Result, error) 
 	c.mu.RUnlock()
 
 	results := make(map[string]*Result)
-	
+
 	// Run checks concurrently
 	resultsChan := make(chan *Result, len(checks))
-	
+
 	for _, check := range checks {
 		go func(ch *Check) {
 			result, _ := c.executeCheck(ctx, ch)
@@ -345,7 +348,7 @@ func (c *Checker) IsHealthy() bool {
 
 func (c *Checker) executeCheck(ctx context.Context, check *Check) (*Result, error) {
 	start := time.Now()
-	
+
 	// Create timeout context
 	checkCtx, cancel := context.WithTimeout(ctx, check.Timeout)
 	defer cancel()
@@ -358,7 +361,7 @@ func (c *Checker) executeCheck(ctx context.Context, check *Check) (*Result, erro
 	c.mu.Lock()
 	check.lastRun = start
 	check.runCount++
-	
+
 	result := &Result{
 		Check:     check.Name,
 		Duration:  duration,
@@ -387,7 +390,7 @@ func (c *Checker) checkLoop() {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -414,7 +417,7 @@ func (c *Checker) updateStats() {
 
 	var totalDuration time.Duration
 	criticalFailures := 0
-	
+
 	for _, check := range c.checks {
 		c.stats.TotalChecks += check.runCount
 		c.stats.SuccessfulChecks += check.successCount
@@ -423,7 +426,7 @@ func (c *Checker) updateStats() {
 
 	for _, result := range c.results {
 		totalDuration += result.Duration
-		
+
 		switch result.Status {
 		case StatusHealthy:
 			c.stats.HealthyChecks++
@@ -518,11 +521,11 @@ func NetworkCheck(host string, port int) CheckFunction {
 // ServiceStatus represents the health status of the entire service
 type ServiceStatus struct {
 	Status    Status                 `json:"status"`
-	Timestamp time.Time             `json:"timestamp"`
-	Uptime    time.Duration         `json:"uptime"`
-	Version   string                `json:"version,omitempty"`
-	Checks    map[string]*Result    `json:"checks"`
-	Stats     Stats                 `json:"stats"`
+	Timestamp time.Time              `json:"timestamp"`
+	Uptime    time.Duration          `json:"uptime"`
+	Version   string                 `json:"version,omitempty"`
+	Checks    map[string]*Result     `json:"checks"`
+	Stats     Stats                  `json:"stats"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 

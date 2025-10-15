@@ -11,7 +11,6 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-
 )
 
 // FilesystemStats represents filesystem operation statistics
@@ -45,31 +44,31 @@ type MountConfig struct {
 // MountOptions contains FUSE mount options
 type MountOptions struct {
 	// Basic options
-	ReadOnly     bool   `yaml:"read_only"`
-	AllowOther   bool   `yaml:"allow_other"`
-	AllowRoot    bool   `yaml:"allow_root"`
-	DefaultPerms bool   `yaml:"default_permissions"`
-	
+	ReadOnly     bool `yaml:"read_only"`
+	AllowOther   bool `yaml:"allow_other"`
+	AllowRoot    bool `yaml:"allow_root"`
+	DefaultPerms bool `yaml:"default_permissions"`
+
 	// Performance options
-	DirectIO     bool   `yaml:"direct_io"`
-	KeepCache    bool   `yaml:"keep_cache"`
-	BigWrites    bool   `yaml:"big_writes"`
-	MaxRead      uint32 `yaml:"max_read"`
-	MaxWrite     uint32 `yaml:"max_write"`
-	
+	DirectIO  bool   `yaml:"direct_io"`
+	KeepCache bool   `yaml:"keep_cache"`
+	BigWrites bool   `yaml:"big_writes"`
+	MaxRead   uint32 `yaml:"max_read"`
+	MaxWrite  uint32 `yaml:"max_write"`
+
 	// Advanced options
 	Debug        bool          `yaml:"debug"`
 	FSName       string        `yaml:"fsname"`
 	Subtype      string        `yaml:"subtype"`
 	AttrTimeout  time.Duration `yaml:"attr_timeout"`
 	EntryTimeout time.Duration `yaml:"entry_timeout"`
-	
+
 	// Kernel options
-	AsyncRead    bool `yaml:"async_read"`
+	AsyncRead      bool `yaml:"async_read"`
 	WritebackCache bool `yaml:"writeback_cache"`
-	SpliceRead   bool `yaml:"splice_read"`
-	SpliceWrite  bool `yaml:"splice_write"`
-	SpliceMove   bool `yaml:"splice_move"`
+	SpliceRead     bool `yaml:"splice_read"`
+	SpliceWrite    bool `yaml:"splice_write"`
+	SpliceMove     bool `yaml:"splice_move"`
 }
 
 // Permissions contains permission settings
@@ -211,7 +210,7 @@ func (m *MountManager) GetStats() *FilesystemStats {
 // Remount remounts the filesystem with new options
 func (m *MountManager) Remount(newConfig *MountConfig) error {
 	wasUnmounted := !m.mounted
-	
+
 	if m.mounted {
 		if err := m.Unmount(); err != nil {
 			return fmt.Errorf("failed to unmount for remount: %w", err)
@@ -274,18 +273,18 @@ func (m *MountManager) buildFUSEOptions() *fs.Options {
 	opts := &fs.Options{
 		// Server options
 		MountOptions: fuse.MountOptions{
-			Name:         m.config.Options.FSName,
-			FsName:       m.config.Options.FSName,
-			DirectMount:  true,
-			Debug:        m.config.Options.Debug,
-			AllowOther:   m.config.Options.AllowOther,
-			MaxWrite:     int(m.config.Options.MaxWrite),
+			Name:        m.config.Options.FSName,
+			FsName:      m.config.Options.FSName,
+			DirectMount: true,
+			Debug:       m.config.Options.Debug,
+			AllowOther:  m.config.Options.AllowOther,
+			MaxWrite:    int(m.config.Options.MaxWrite),
 		},
-		
+
 		// Attribute caching
 		AttrTimeout:  &m.config.Options.AttrTimeout,
 		EntryTimeout: &m.config.Options.EntryTimeout,
-		
+
 		// I/O options
 		NullPermissions: !m.config.Options.DefaultPerms,
 	}
@@ -302,7 +301,7 @@ func (m *MountManager) buildFUSEOptions() *fs.Options {
 
 	// Add custom options
 	if m.config.Options.FSName != "" {
-		opts.Options = append(opts.Options, 
+		opts.Options = append(opts.Options,
 			fmt.Sprintf("fsname=%s", m.config.Options.FSName))
 	}
 
@@ -317,7 +316,7 @@ func (m *MountManager) buildFUSEOptions() *fs.Options {
 func (m *MountManager) isAlreadyMounted() bool {
 	// Check /proc/mounts to see if the mount point is already mounted
 	mountsFile := "/proc/mounts"
-	
+
 	data, err := os.ReadFile(mountsFile)
 	if err != nil {
 		// If we can't read /proc/mounts, assume not mounted
@@ -343,7 +342,7 @@ func (m *MountManager) forceUnmount() error {
 // Utility functions
 
 func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || 
+	return len(s) >= len(substr) && (s == substr ||
 		(len(s) > len(substr) && indexOf(s, substr) >= 0))
 }
 
@@ -391,7 +390,7 @@ func (w *MountWatcher) Stop() {
 
 func (w *MountWatcher) run() {
 	defer close(w.stopped)
-	
+
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 

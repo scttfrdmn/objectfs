@@ -439,9 +439,9 @@ func BenchmarkFUSEOperations(b *testing.B) {
 	})
 
 	writeBuffer, _ := buffer.NewWriteBuffer(&buffer.WriteBufferConfig{
-		MaxBufferSize:  10 * 1024 * 1024,  // 10MB buffer
-		FlushThreshold: 1024 * 1024,       // 1MB threshold
-		MaxBuffers:     1000,               // More buffers
+		MaxBufferSize:  10 * 1024 * 1024, // 10MB buffer
+		FlushThreshold: 1024 * 1024,      // 1MB threshold
+		MaxBuffers:     1000,             // More buffers
 		AsyncFlush:     false,
 	}, func(key string, data []byte, offset int64) error {
 		return backend.PutObject(context.Background(), key, data)

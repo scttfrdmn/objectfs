@@ -34,11 +34,11 @@ type MultiLevelConfig struct {
 
 // L1Config represents L1 (memory) cache configuration
 type L1Config struct {
-	Enabled     bool          `yaml:"enabled"`
-	Size        int64         `yaml:"size"`
-	MaxEntries  int           `yaml:"max_entries"`
-	TTL         time.Duration `yaml:"ttl"`
-	Prefetch    bool          `yaml:"prefetch"`
+	Enabled    bool          `yaml:"enabled"`
+	Size       int64         `yaml:"size"`
+	MaxEntries int           `yaml:"max_entries"`
+	TTL        time.Duration `yaml:"ttl"`
+	Prefetch   bool          `yaml:"prefetch"`
 }
 
 // L2Config represents L2 (persistent) cache configuration
@@ -52,11 +52,11 @@ type L2Config struct {
 
 // MultiLevelStats tracks multi-level cache statistics
 type MultiLevelStats struct {
-	TotalHits   uint64                    `json:"total_hits"`
-	TotalMisses uint64                    `json:"total_misses"`
+	TotalHits   uint64                      `json:"total_hits"`
+	TotalMisses uint64                      `json:"total_misses"`
 	LevelStats  map[string]types.CacheStats `json:"level_stats"`
-	HitRatio    float64                   `json:"hit_ratio"`
-	Efficiency  float64                   `json:"efficiency"`
+	HitRatio    float64                     `json:"hit_ratio"`
+	Efficiency  float64                     `json:"efficiency"`
 }
 
 // NewMultiLevelCache creates a new multi-level cache

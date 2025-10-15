@@ -153,8 +153,8 @@ func NewMockBaseCache() *MockBaseCache {
 }
 
 func (c *MockBaseCache) Get(key string, offset, size int64) []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	cacheKey := fmt.Sprintf("%s:%d:%d", key, offset, size)
 	if data, exists := c.data[cacheKey]; exists {
@@ -266,8 +266,10 @@ func TestPredictiveCache_BasicOperations(t *testing.T) {
 
 func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    10,
 		ConfidenceThreshold: 0.5,
@@ -280,6 +282,11 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create predictive cache: %v", err)
 	}
+	defer func() {
+		if err := pc.Close(); err != nil {
+			t.Errorf("Failed to close predictive cache: %v", err)
+		}
+	}()
 
 	key := "sequential-test"
 	blockSize := int64(1024)
@@ -312,8 +319,10 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 
 func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    50,
 		ConfidenceThreshold: 0.7,
@@ -428,8 +437,10 @@ func TestPredictiveCache_EvictionIntelligence(t *testing.T) {
 
 func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    100,
 		ConfidenceThreshold: 0.7,
@@ -508,8 +519,10 @@ func BenchmarkPredictiveCache_RandomRead(b *testing.B) {
 
 func BenchmarkPredictiveCache_ConcurrentAccess(b *testing.B) {
 	baseCache := NewMockBaseCache()
+	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
+		Backend:             backend,
 		EnablePrediction:    true,
 		PredictionWindow:    50,
 		ConfidenceThreshold: 0.7,

@@ -74,21 +74,21 @@ Loading configuration:
 
 	// Create with defaults
 	config := config.NewDefault()
-	
+
 	// Load from file
 	if err := config.LoadFromFile("/etc/objectfs/config.yaml"); err != nil {
 		log.Fatal(err)
 	}
-	
+
 	// Load environment variables
 	if err := config.LoadFromEnv(); err != nil {
 		log.Fatal(err)
 	}
-	
+
 	// Apply command-line overrides
 	config.Performance.CacheSize = "4GB"
 	config.Global.LogLevel = "DEBUG"
-	
+
 	// Validate final configuration
 	if err := config.Validate(); err != nil {
 		log.Fatal(err)
@@ -127,12 +127,12 @@ Environment variable mapping:
 	OBJECTFS_LOG_LEVEL="DEBUG"
 	OBJECTFS_LOG_FILE="/var/log/objectfs.log"
 	OBJECTFS_METRICS_PORT="9090"
-	
+
 	# Performance settings
 	OBJECTFS_CACHE_SIZE="4GB"
 	OBJECTFS_MAX_CONCURRENCY="200"
 	OBJECTFS_COMPRESSION_ENABLED="true"
-	
+
 	# Feature flags
 	OBJECTFS_PREFETCHING="true"
 	OBJECTFS_BATCH_OPERATIONS="true"
@@ -169,17 +169,17 @@ Example validation:
 				return fmt.Errorf("invalid log level: %w", err)
 			}
 		}
-		
+
 		// Validate performance settings
 		if c.Performance.MaxConcurrency < 1 || c.Performance.MaxConcurrency > 10000 {
 			return fmt.Errorf("max_concurrency must be between 1 and 10000")
 		}
-		
+
 		// Validate cache settings
 		if c.Cache.TTL < 0 {
 			return fmt.Errorf("cache TTL cannot be negative")
 		}
-		
+
 		return nil
 	}
 
@@ -188,12 +188,13 @@ Example validation:
 Dynamic configuration updates without restart:
 
 Watch Configuration:
+
 	config := config.NewDefault()
-	
+
 	// Set up file watcher
 	watcher := config.StartWatcher("/etc/objectfs/config.yaml")
 	defer watcher.Stop()
-	
+
 	// Handle updates
 	go func() {
 		for update := range watcher.Updates() {
@@ -219,6 +220,7 @@ Non-Reloadable Settings:
 Sensible defaults for all environments:
 
 Production Defaults:
+
 	Global: {
 		LogLevel:    "INFO",
 		MetricsPort: 8080,
@@ -236,6 +238,7 @@ Production Defaults:
 	}
 
 Development Defaults:
+
 	Global: {
 		LogLevel:    "DEBUG",
 		ProfilePort: 6060, // pprof enabled
@@ -275,6 +278,7 @@ Access Control:
 Pre-configured performance profiles:
 
 Low Latency Profile:
+
 	performance:
 	  cache_size: "1GB"
 	  max_concurrency: 100
@@ -282,6 +286,7 @@ Low Latency Profile:
 	  connection_pool_size: 4
 
 High Throughput Profile:
+
 	performance:
 	  cache_size: "8GB"
 	  max_concurrency: 300
@@ -289,6 +294,7 @@ High Throughput Profile:
 	  connection_pool_size: 16
 
 High Latency/Satellite Profile:
+
 	performance:
 	  cache_size: "16GB"
 	  max_concurrency: 25

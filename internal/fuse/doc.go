@@ -64,9 +64,10 @@ CGO Build (cgofuse):
 - Features: Broader OS support, consistent behavior
 
 Build Selection:
+
 	// Linux with high performance
 	go build -tags default ./...
-	
+
 	// Cross-platform compatibility
 	go build -tags cgofuse ./...
 
@@ -106,15 +107,15 @@ Flexible mount configuration options:
 			ReadOnly:     false,
 			AllowOther:   true,
 			AllowRoot:    false,
-			
+
 			// Performance tuning
 			MaxRead:      128 * 1024,  // 128KB read buffer
 			MaxWrite:     128 * 1024,  // 128KB write buffer
-			
+
 			// Caching
 			AttrTimeout:  5 * time.Second,
 			EntryTimeout: 10 * time.Second,
-			
+
 			// Platform-specific
 			FSName:       "objectfs",
 			Subtype:      "s3",
@@ -133,16 +134,16 @@ Basic filesystem mounting:
 
 	// Create filesystem
 	filesystem := fuse.NewFileSystem(backend, cache, writeBuffer, metrics, config)
-	
+
 	// Create mount manager
 	mountManager := fuse.CreatePlatformMountManager(
-		backend, 
-		cache, 
-		writeBuffer, 
-		metrics, 
+		backend,
+		cache,
+		writeBuffer,
+		metrics,
 		config,
 	)
-	
+
 	// Mount filesystem
 	err := mountManager.Mount(ctx)
 	if err != nil {
@@ -153,20 +154,20 @@ Basic filesystem mounting:
 File operations through mounted filesystem:
 
 	// Standard POSIX operations work transparently
-	
+
 	// Create file
 	file, err := os.Create("/mnt/objectfs/data.txt")
 	if err != nil {
 		log.Fatal(err)
 	}
-	
+
 	// Write data
 	_, err = file.WriteString("Hello, ObjectFS!")
 	if err != nil {
 		log.Fatal(err)
 	}
 	file.Close()
-	
+
 	// Read file
 	data, err := os.ReadFile("/mnt/objectfs/data.txt")
 	if err != nil {
@@ -178,14 +179,14 @@ Directory operations:
 
 	// Create directory
 	err := os.Mkdir("/mnt/objectfs/logs", 0755)
-	
+
 	// List directory contents
 	entries, err := os.ReadDir("/mnt/objectfs")
 	for _, entry := range entries {
 		info, _ := entry.Info()
-		fmt.Printf("%s %d %v\n", 
-			entry.Name(), 
-			info.Size(), 
+		fmt.Printf("%s %d %v\n",
+			entry.Name(),
+			info.Size(),
 			info.ModTime())
 	}
 

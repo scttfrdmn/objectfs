@@ -12,35 +12,36 @@ import (
 
 // PredictiveCache implements ML-based predictive caching with intelligent prefetching
 type PredictiveCache struct {
-	baseCache    types.Cache
-	predictor    *AccessPredictor
-	prefetcher   *IntelligentPrefetcher
-	evictionMgr  *IntelligentEvictionManager
-	config       *PredictiveCacheConfig
-	stats        *PredictiveStats
+	baseCache   types.Cache
+	predictor   *AccessPredictor
+	prefetcher  *IntelligentPrefetcher
+	evictionMgr *IntelligentEvictionManager
+	config      *PredictiveCacheConfig
+	stats       *PredictiveStats
 }
 
 // PredictiveCacheConfig configures predictive caching behavior
 type PredictiveCacheConfig struct {
 	// Base cache config
 	BaseCache types.Cache
+	Backend   types.Backend // Backend for prefetch operations
 
 	// Prediction settings
-	EnablePrediction     bool    `yaml:"enable_prediction"`
-	PredictionWindow     int     `yaml:"prediction_window"`     // Number of accesses to consider
-	ConfidenceThreshold  float64 `yaml:"confidence_threshold"`  // Min confidence to trigger prefetch
-	LearningRate         float64 `yaml:"learning_rate"`         // ML model learning rate
+	EnablePrediction    bool    `yaml:"enable_prediction"`
+	PredictionWindow    int     `yaml:"prediction_window"`    // Number of accesses to consider
+	ConfidenceThreshold float64 `yaml:"confidence_threshold"` // Min confidence to trigger prefetch
+	LearningRate        float64 `yaml:"learning_rate"`        // ML model learning rate
 
 	// Prefetch settings
-	EnablePrefetch       bool    `yaml:"enable_prefetch"`
-	MaxConcurrentFetch   int     `yaml:"max_concurrent_fetch"`
-	PrefetchAhead        int     `yaml:"prefetch_ahead"`        // Number of blocks to prefetch ahead
-	PrefetchBandwidth    int64   `yaml:"prefetch_bandwidth"`    // Max bandwidth for prefetching
+	EnablePrefetch     bool  `yaml:"enable_prefetch"`
+	MaxConcurrentFetch int   `yaml:"max_concurrent_fetch"`
+	PrefetchAhead      int   `yaml:"prefetch_ahead"`     // Number of blocks to prefetch ahead
+	PrefetchBandwidth  int64 `yaml:"prefetch_bandwidth"` // Max bandwidth for prefetching
 
 	// Eviction settings
-	EnableIntelligentEviction bool    `yaml:"enable_intelligent_eviction"`
-	EvictionAlgorithm         string  `yaml:"eviction_algorithm"`    // "lru", "lfu", "arc", "ml"
-	MLModelPath               string  `yaml:"ml_model_path"`         // Path to trained model
+	EnableIntelligentEviction bool   `yaml:"enable_intelligent_eviction"`
+	EvictionAlgorithm         string `yaml:"eviction_algorithm"` // "lru", "lfu", "arc", "ml"
+	MLModelPath               string `yaml:"ml_model_path"`      // Path to trained model
 
 	// Performance settings
 	StatisticsInterval   time.Duration `yaml:"statistics_interval"`
@@ -50,59 +51,59 @@ type PredictiveCacheConfig struct {
 
 // PredictiveStats tracks predictive cache performance
 type PredictiveStats struct {
-	mu                   sync.RWMutex
+	mu sync.RWMutex
 
 	// Prediction metrics
-	PredictionsTotal     uint64    `json:"predictions_total"`
-	PredictionsCorrect   uint64    `json:"predictions_correct"`
-	PredictionAccuracy   float64   `json:"prediction_accuracy"`
-	AvgConfidence        float64   `json:"avg_confidence"`
+	PredictionsTotal   uint64  `json:"predictions_total"`
+	PredictionsCorrect uint64  `json:"predictions_correct"`
+	PredictionAccuracy float64 `json:"prediction_accuracy"`
+	AvgConfidence      float64 `json:"avg_confidence"`
 
 	// Prefetch metrics
-	PrefetchRequests     uint64    `json:"prefetch_requests"`
-	PrefetchHits         uint64    `json:"prefetch_hits"`
-	PrefetchWaste        uint64    `json:"prefetch_waste"`        // Prefetched but never used
-	PrefetchEfficiency   float64   `json:"prefetch_efficiency"`
+	PrefetchRequests   uint64  `json:"prefetch_requests"`
+	PrefetchHits       uint64  `json:"prefetch_hits"`
+	PrefetchWaste      uint64  `json:"prefetch_waste"` // Prefetched but never used
+	PrefetchEfficiency float64 `json:"prefetch_efficiency"`
 
 	// Eviction metrics
-	EvictionsTotal       uint64    `json:"evictions_total"`
-	EvictionsIntelligent uint64    `json:"evictions_intelligent"`  // ML-driven evictions
-	EvictionAccuracy     float64   `json:"eviction_accuracy"`      // How often evicted items stayed evicted
+	EvictionsTotal       uint64  `json:"evictions_total"`
+	EvictionsIntelligent uint64  `json:"evictions_intelligent"` // ML-driven evictions
+	EvictionAccuracy     float64 `json:"eviction_accuracy"`     // How often evicted items stayed evicted
 
 	// Performance impact
-	CacheHitImprovement  float64   `json:"cache_hit_improvement"`
-	LatencyReduction     float64   `json:"latency_reduction"`
-	BandwidthSavings     float64   `json:"bandwidth_savings"`
+	CacheHitImprovement float64 `json:"cache_hit_improvement"`
+	LatencyReduction    float64 `json:"latency_reduction"`
+	BandwidthSavings    float64 `json:"bandwidth_savings"`
 
 	// Model performance
-	ModelAccuracy        float64   `json:"model_accuracy"`
-	ModelTrainingTime    time.Duration `json:"model_training_time"`
-	LastModelUpdate      time.Time  `json:"last_model_update"`
+	ModelAccuracy     float64       `json:"model_accuracy"`
+	ModelTrainingTime time.Duration `json:"model_training_time"`
+	LastModelUpdate   time.Time     `json:"last_model_update"`
 }
 
 // AccessPredictor implements machine learning-based access pattern prediction
 type AccessPredictor struct {
-	mu            sync.RWMutex
-	patterns      map[string]*AccessPattern
-	model         *PredictionModel
-	config        *PredictiveCacheConfig
-	recentAccess  []AccessEvent
-	windowSize    int
+	mu           sync.RWMutex
+	patterns     map[string]*AccessPattern
+	model        *PredictionModel
+	config       *PredictiveCacheConfig
+	recentAccess []AccessEvent
+	windowSize   int
 }
 
 // AccessPattern represents learned access patterns for a file/key
 type AccessPattern struct {
-	Key              string                 `json:"key"`
-	AccessHistory    []AccessEvent          `json:"access_history"`
-	SequentialScore  float64               `json:"sequential_score"`   // 0-1, how sequential accesses are
-	FrequencyScore   float64               `json:"frequency_score"`    // Access frequency
-	RecencyScore     float64               `json:"recency_score"`      // Recent access score
-	SizePattern      []int64               `json:"size_pattern"`       // Common access sizes
-	TimePattern      []time.Duration       `json:"time_pattern"`       // Access intervals
-	Confidence       float64               `json:"confidence"`         // Model confidence
-	LastAccess       time.Time             `json:"last_access"`
-	PredictedNext    []types.PrefetchCandidate `json:"predicted_next"`
-	Features         map[string]float64     `json:"features"`          // ML features
+	Key             string                    `json:"key"`
+	AccessHistory   []AccessEvent             `json:"access_history"`
+	SequentialScore float64                   `json:"sequential_score"` // 0-1, how sequential accesses are
+	FrequencyScore  float64                   `json:"frequency_score"`  // Access frequency
+	RecencyScore    float64                   `json:"recency_score"`    // Recent access score
+	SizePattern     []int64                   `json:"size_pattern"`     // Common access sizes
+	TimePattern     []time.Duration           `json:"time_pattern"`     // Access intervals
+	Confidence      float64                   `json:"confidence"`       // Model confidence
+	LastAccess      time.Time                 `json:"last_access"`
+	PredictedNext   []types.PrefetchCandidate `json:"predicted_next"`
+	Features        map[string]float64        `json:"features"` // ML features
 }
 
 // AccessEvent represents a single access event
@@ -111,36 +112,36 @@ type AccessEvent struct {
 	Offset    int64     `json:"offset"`
 	Size      int64     `json:"size"`
 	Timestamp time.Time `json:"timestamp"`
-	Hit       bool      `json:"hit"`       // Was it a cache hit?
-	Prefetch  bool      `json:"prefetch"`  // Was it prefetched?
+	Hit       bool      `json:"hit"`      // Was it a cache hit?
+	Prefetch  bool      `json:"prefetch"` // Was it prefetched?
 }
 
 // PredictionModel implements the ML model for access prediction
 type PredictionModel struct {
-	mu                sync.RWMutex
-	weights           map[string]float64   // Feature weights
-	bias              float64
-	learningRate      float64
-	trainingData      []TrainingExample
+	mu           sync.RWMutex
+	weights      map[string]float64 // Feature weights
+	bias         float64
+	learningRate float64
+	trainingData []TrainingExample
 }
 
 // TrainingExample represents a training data point
 type TrainingExample struct {
 	Features []float64 `json:"features"`
-	Target   float64   `json:"target"`   // 1.0 if access occurred, 0.0 if not
-	Weight   float64   `json:"weight"`   // Importance weight
+	Target   float64   `json:"target"` // 1.0 if access occurred, 0.0 if not
+	Weight   float64   `json:"weight"` // Importance weight
 }
 
 // IntelligentPrefetcher handles predictive prefetching
 type IntelligentPrefetcher struct {
-	backend         types.Backend
-	prefetchQueue   chan *PrefetchJob
-	activeJobs      map[string]*PrefetchJob
-	workerPool      chan struct{}
-	stats           PrefetchStats
-	rateLimiter     *RateLimiter
-	config          *PredictiveCacheConfig
-	stopCh          chan struct{}
+	backend       types.Backend
+	prefetchQueue chan *PrefetchJob
+	activeJobs    map[string]*PrefetchJob
+	workerPool    chan struct{}
+	stats         PrefetchStats
+	rateLimiter   *RateLimiter
+	config        *PredictiveCacheConfig
+	stopCh        chan struct{}
 }
 
 // PrefetchJob represents a prefetch operation
@@ -158,47 +159,47 @@ type PrefetchJob struct {
 
 // PrefetchStats tracks prefetch performance
 type PrefetchStats struct {
-	JobsQueued        uint64    `json:"jobs_queued"`
-	JobsCompleted     uint64    `json:"jobs_completed"`
-	JobsFailed        uint64    `json:"jobs_failed"`
-	BytesPrefetched   int64     `json:"bytes_prefetched"`
+	JobsQueued        uint64        `json:"jobs_queued"`
+	JobsCompleted     uint64        `json:"jobs_completed"`
+	JobsFailed        uint64        `json:"jobs_failed"`
+	BytesPrefetched   int64         `json:"bytes_prefetched"`
 	AverageLatency    time.Duration `json:"average_latency"`
-	QueueDepth        int       `json:"queue_depth"`
-	WorkerUtilization float64   `json:"worker_utilization"`
+	QueueDepth        int           `json:"queue_depth"`
+	WorkerUtilization float64       `json:"worker_utilization"`
 }
 
 // IntelligentEvictionManager handles ML-driven cache eviction
 type IntelligentEvictionManager struct {
-	cache           types.Cache
-	predictor       *AccessPredictor
-	evictionModel   *EvictionModel
-	config          *PredictiveCacheConfig
+	cache         types.Cache
+	predictor     *AccessPredictor
+	evictionModel *EvictionModel
+	config        *PredictiveCacheConfig
 }
 
 // EvictionCandidate represents an item that could be evicted
 type EvictionCandidate struct {
-	Key              string    `json:"key"`
-	Size             int64     `json:"size"`
-	LastAccess       time.Time `json:"last_access"`
-	AccessCount      int       `json:"access_count"`
-	PredictedReuse   float64   `json:"predicted_reuse"`    // Probability of future access
-	EvictionScore    float64   `json:"eviction_score"`     // Higher = more likely to evict
-	CacheLevel       string    `json:"cache_level"`
+	Key            string    `json:"key"`
+	Size           int64     `json:"size"`
+	LastAccess     time.Time `json:"last_access"`
+	AccessCount    int       `json:"access_count"`
+	PredictedReuse float64   `json:"predicted_reuse"` // Probability of future access
+	EvictionScore  float64   `json:"eviction_score"`  // Higher = more likely to evict
+	CacheLevel     string    `json:"cache_level"`
 }
 
 // EvictionModel implements ML-based eviction decisions
 type EvictionModel struct {
-	weights      map[string]float64
-	threshold    float64
+	weights   map[string]float64
+	threshold float64
 }
 
 // RateLimiter controls prefetch bandwidth usage
 type RateLimiter struct {
-	mu            sync.Mutex
-	capacity      int64           // bytes per second
-	tokens        int64           // current tokens
-	lastRefill    time.Time
-	refillRate    int64           // tokens per second
+	mu         sync.Mutex
+	capacity   int64 // bytes per second
+	tokens     int64 // current tokens
+	lastRefill time.Time
+	refillRate int64 // tokens per second
 }
 
 // NewPredictiveCache creates a new predictive cache
@@ -234,6 +235,7 @@ func NewPredictiveCache(config *PredictiveCacheConfig) (*PredictiveCache, error)
 	}
 
 	prefetcher := &IntelligentPrefetcher{
+		backend:       config.Backend,
 		prefetchQueue: make(chan *PrefetchJob, 1000),
 		activeJobs:    make(map[string]*PrefetchJob),
 		workerPool:    make(chan struct{}, config.MaxConcurrentFetch),
@@ -591,11 +593,13 @@ func (ap *AccessPredictor) updateModel() {
 	examples := ap.createTrainingExamples()
 
 	// Update model weights using gradient descent
-	ap.model.mu.Lock()
 	for _, example := range examples {
+		// Calculate prediction without holding lock
 		prediction := ap.model.predict(example.Features)
 		error := example.Target - prediction
 
+		// Now acquire lock to update weights
+		ap.model.mu.Lock()
 		// Update weights
 		for i, feature := range example.Features {
 			featureName := ap.getFeatureName(i)
@@ -607,9 +611,8 @@ func (ap *AccessPredictor) updateModel() {
 
 		// Update bias
 		ap.model.bias += ap.model.learningRate * error * example.Weight
+		ap.model.mu.Unlock()
 	}
-	// Model training completed
-	ap.model.mu.Unlock()
 }
 
 // Helper methods
@@ -898,4 +901,14 @@ func (pc *PredictiveCache) initializeModel() {
 	pc.predictor.model.weights["recency_score"] = 1.0
 	pc.predictor.model.weights["size"] = 0.1
 	pc.predictor.model.bias = -0.5
+}
+
+// Close shuts down the predictive cache and stops all background workers
+func (pc *PredictiveCache) Close() error {
+	if pc.config.EnablePrefetch && pc.prefetcher != nil {
+		close(pc.prefetcher.stopCh)
+		// Drain the queue to unblock any pending sends
+		close(pc.prefetcher.prefetchQueue)
+	}
+	return nil
 }

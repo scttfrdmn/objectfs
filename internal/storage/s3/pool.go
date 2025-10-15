@@ -17,38 +17,38 @@ type ConnectionPool struct {
 	maxSize     int
 	currentSize int
 	closed      bool
-	
+
 	// Health checking
 	healthCheck *HealthChecker
-	
+
 	// Statistics
 	stats PoolStats
 }
 
 // PoolStats tracks connection pool statistics
 type PoolStats struct {
-	Active      int           `json:"active"`
-	Idle        int           `json:"idle"`
-	Total       int           `json:"total"`
-	MaxSize     int           `json:"max_size"`
-	Hits        int64         `json:"hits"`
-	Misses      int64         `json:"misses"`
-	Timeouts    int64         `json:"timeouts"`
-	Errors      int64         `json:"errors"`
-	Created     int64         `json:"created"`
-	Destroyed   int64         `json:"destroyed"`
-	LastCreated time.Time     `json:"last_created"`
-	LastError   string        `json:"last_error"`
-	LastErrorAt time.Time     `json:"last_error_at"`
+	Active      int       `json:"active"`
+	Idle        int       `json:"idle"`
+	Total       int       `json:"total"`
+	MaxSize     int       `json:"max_size"`
+	Hits        int64     `json:"hits"`
+	Misses      int64     `json:"misses"`
+	Timeouts    int64     `json:"timeouts"`
+	Errors      int64     `json:"errors"`
+	Created     int64     `json:"created"`
+	Destroyed   int64     `json:"destroyed"`
+	LastCreated time.Time `json:"last_created"`
+	LastError   string    `json:"last_error"`
+	LastErrorAt time.Time `json:"last_error_at"`
 }
 
 // HealthChecker monitors connection health
 type HealthChecker struct {
-	pool        *ConnectionPool
-	interval    time.Duration
-	timeout     time.Duration
-	stopCh      chan struct{}
-	stopped     chan struct{}
+	pool     *ConnectionPool
+	interval time.Duration
+	timeout  time.Duration
+	stopCh   chan struct{}
+	stopped  chan struct{}
 }
 
 // NewConnectionPool creates a new connection pool
@@ -111,7 +111,7 @@ func (p *ConnectionPool) GetWithTimeout(timeout time.Duration) *s3.Client {
 		p.mu.Lock()
 		p.stats.Timeouts++
 		p.mu.Unlock()
-		
+
 		// Try to create a new connection
 		client, err := p.factory()
 		if err != nil {
@@ -126,7 +126,7 @@ func (p *ConnectionPool) GetWithTimeout(timeout time.Duration) *s3.Client {
 			if err == nil {
 				return conn
 			}
-			
+
 			p.mu.Lock()
 			p.stats.Errors++
 			p.stats.LastError = err.Error()
@@ -174,11 +174,11 @@ func (p *ConnectionPool) Put(conn *s3.Client) {
 func (p *ConnectionPool) Stats() PoolStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	
+
 	stats := p.stats
 	stats.Total = p.currentSize
 	stats.Idle = len(p.connections)
-	
+
 	return stats
 }
 
@@ -254,7 +254,7 @@ warmupLoop:
 			errors = append(errors, err)
 			continue
 		}
-		
+
 		select {
 		case p.connections <- conn:
 			// Successfully added to pool
@@ -301,7 +301,7 @@ func (p *ConnectionPool) createConnection() (*s3.Client, error) {
 
 func (hc *HealthChecker) run() {
 	defer close(hc.stopped)
-	
+
 	ticker := time.NewTicker(hc.interval)
 	defer ticker.Stop()
 
