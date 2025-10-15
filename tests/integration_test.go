@@ -23,13 +23,13 @@ import (
 // IntegrationTestSuite contains all integration tests
 type IntegrationTestSuite struct {
 	suite.Suite
-	tempDir     string
-	mountPoint  string
-	cacheDir    string
-	configFile  string
-	testBucket  string
-	ctx         context.Context
-	cancel      context.CancelFunc
+	tempDir    string
+	mountPoint string
+	cacheDir   string
+	configFile string
+	testBucket string
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // SetupSuite runs once before all tests
@@ -83,6 +83,11 @@ func (suite *IntegrationTestSuite) TearDownTest() {
 func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 	t := suite.T()
 
+	// Skip in short mode
+	if testing.Short() {
+		t.Skip("Skipping S3 integration test in short mode")
+	}
+
 	// Skip if no S3 credentials available
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
 		t.Skip("Skipping S3 integration test - no AWS credentials")
@@ -90,9 +95,9 @@ func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 
 	// Create S3 backend configuration
 	s3Config := &s3.Config{
-		Region:      "us-west-2",
-		MaxRetries:  3,
-		PoolSize:    4,
+		Region:     "us-west-2",
+		MaxRetries: 3,
+		PoolSize:   4,
 	}
 
 	// Create S3 backend
@@ -372,13 +377,18 @@ func (suite *IntegrationTestSuite) TestMetricsIntegration() {
 	assert.Contains(t, operations, "write")
 
 	readMetrics := operations["read"]
-	assert.Equal(t, int64(2), readMetrics.Count) // 1 success + 1 failure
+	assert.Equal(t, int64(2), readMetrics.Count)  // 1 success + 1 failure
 	assert.Equal(t, int64(1), readMetrics.Errors) // 1 failure
 }
 
 // Test End-to-End File Operations
 func (suite *IntegrationTestSuite) TestEndToEndFileOperations() {
 	t := suite.T()
+
+	// Skip in short mode
+	if testing.Short() {
+		t.Skip("Skipping end-to-end test in short mode")
+	}
 
 	// Skip if no S3 credentials available
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
