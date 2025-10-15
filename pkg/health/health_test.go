@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -177,11 +178,14 @@ func TestTracker_StateChangeCallback(t *testing.T) {
 	tracker := NewTracker(config)
 	tracker.RegisterComponent("test-service")
 
+	var mu sync.Mutex
 	callbackCalled := false
 	var capturedOldState, capturedNewState HealthState
 	var capturedComponent string
 
 	tracker.AddStateChangeCallback(StateDegraded, func(component string, oldState, newState HealthState, err error) {
+		mu.Lock()
+		defer mu.Unlock()
 		callbackCalled = true
 		capturedComponent = component
 		capturedOldState = oldState
@@ -195,6 +199,9 @@ func TestTracker_StateChangeCallback(t *testing.T) {
 
 	// Give callback time to execute (it runs in goroutine)
 	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	if !callbackCalled {
 		t.Error("State change callback was not called")
@@ -343,8 +350,11 @@ func TestTracker_StartHealthChecks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
+	var mu sync.Mutex
 	checkCount := 0
 	checkFn := func(component string) error {
+		mu.Lock()
+		defer mu.Unlock()
 		checkCount++
 		return nil
 	}
@@ -354,6 +364,8 @@ func TestTracker_StartHealthChecks(t *testing.T) {
 	// Wait for a few health checks
 	<-ctx.Done()
 
+	mu.Lock()
+	defer mu.Unlock()
 	if checkCount < 2 {
 		t.Errorf("Expected at least 2 health checks, got %d", checkCount)
 	}
