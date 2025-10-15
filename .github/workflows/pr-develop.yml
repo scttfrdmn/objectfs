@@ -1,0 +1,199 @@
+name: PR to Develop
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  pull-requests: write
+
+jobs:
+  # Include all quick tests
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.22.x, 1.23.x, 1.24.x]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run unit tests
+      run: go test -race -short -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        file: ./coverage.out
+        flags: unittests-${{ matrix.go-version }}
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.23.x
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: latest
+        args: --timeout=10m
+
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.23.x
+
+    - name: Install gosec
+      run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+    - name: Run gosec
+      run: gosec -fmt sarif -out gosec.sarif -no-fail ./...
+
+    - name: Upload SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      continue-on-error: true
+      with:
+        sarif_file: gosec.sarif
+
+  # Real AWS integration tests (Tier 3)
+  aws-integration-tests:
+    runs-on: ubuntu-latest
+    # Only run on non-draft PRs to save costs
+    if: github.event.pull_request.draft == false
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.23.x
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+
+    - name: Create test bucket
+      env:
+        TEST_BUCKET: objectfs-ci-test-pr-${{ github.event.pull_request.number }}
+      run: |
+        # Create bucket with lifecycle policy for auto-cleanup
+        aws s3 mb s3://$TEST_BUCKET || echo "Bucket already exists"
+
+        # Set lifecycle policy to delete objects after 7 days
+        cat > lifecycle.json <<EOF
+        {
+          "Rules": [{
+            "Id": "DeleteOldTestData",
+            "Status": "Enabled",
+            "Prefix": "",
+            "Expiration": {
+              "Days": 7
+            }
+          }]
+        }
+        EOF
+        aws s3api put-bucket-lifecycle-configuration \
+          --bucket $TEST_BUCKET \
+          --lifecycle-configuration file://lifecycle.json
+
+    - name: Run real AWS integration tests
+      env:
+        TEST_BUCKET: objectfs-ci-test-pr-${{ github.event.pull_request.number }}
+        AWS_PROFILE: aws
+        AWS_REGION: us-west-2
+      run: |
+        # Run tests without -short flag to include real AWS tests
+        go test -v -timeout=30m -tags=aws ./tests/aws/...
+
+    - name: Cleanup test bucket
+      if: always()
+      env:
+        TEST_BUCKET: objectfs-ci-test-pr-${{ github.event.pull_request.number }}
+      run: |
+        # Delete all objects and bucket
+        aws s3 rm s3://$TEST_BUCKET --recursive || true
+        aws s3 rb s3://$TEST_BUCKET || true
+
+  # Performance benchmark comparison
+  benchmark:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.23.x
+
+    - name: Install benchstat
+      run: go install golang.org/x/perf/cmd/benchstat@latest
+
+    - name: Run benchmarks on base branch
+      run: |
+        git checkout ${{ github.base_ref }}
+        go test -bench=. -benchmem -count=5 -run=^$ ./... > base-bench.txt || echo "Base benchmarks completed with errors"
+
+    - name: Run benchmarks on PR branch
+      run: |
+        git checkout ${{ github.head_ref }}
+        go test -bench=. -benchmem -count=5 -run=^$ ./... > pr-bench.txt || echo "PR benchmarks completed with errors"
+
+    - name: Compare benchmarks
+      id: benchmark
+      run: |
+        benchstat base-bench.txt pr-bench.txt | tee benchmark-comparison.txt
+        echo "BENCHMARK_RESULTS<<EOF" >> $GITHUB_OUTPUT
+        cat benchmark-comparison.txt >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Comment PR with benchmark results
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const results = process.env.BENCHMARK_RESULTS;
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 📊 Performance Benchmark Results\n\n\`\`\`\n${results}\n\`\`\`\n\n> **Note:** Negative delta is an improvement (faster/less memory)`
+          });
+      env:
+        BENCHMARK_RESULTS: ${{ steps.benchmark.outputs.BENCHMARK_RESULTS }}
