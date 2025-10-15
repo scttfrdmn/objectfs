@@ -24,6 +24,9 @@ type PersistentCache struct {
 	index       map[string]*persistentItem
 	config      *PersistentCacheConfig
 	stats       types.CacheStats
+	// Lifecycle management
+	stopCh chan struct{}
+	closed bool
 }
 
 // PersistentCacheConfig represents persistent cache configuration
@@ -87,6 +90,8 @@ func NewPersistentCache(config *PersistentCacheConfig) (*PersistentCache, error)
 		stats: types.CacheStats{
 			Capacity: config.MaxSize,
 		},
+		stopCh: make(chan struct{}),
+		closed: false,
 	}
 
 	// Load existing index
@@ -302,6 +307,22 @@ func (c *PersistentCache) Clear() {
 	c.index = make(map[string]*persistentItem)
 	c.currentSize = 0
 	c.stats.Evictions += uint64(len(c.index))
+}
+
+// Close stops background goroutines and syncs the index
+func (c *PersistentCache) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil
+	}
+
+	c.closed = true
+	close(c.stopCh)
+
+	// Final sync of index before closing
+	return c.saveIndex()
 }
 
 // Optimize optimizes the cache by defragmenting and cleaning up
@@ -532,23 +553,28 @@ func (c *PersistentCache) cleanupExpired() {
 	ticker := time.NewTicker(c.config.CleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		c.mu.Lock()
-		var expiredKeys []string
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			var expiredKeys []string
 
-		for key, item := range c.index {
-			if c.isExpired(item) {
-				expiredKeys = append(expiredKeys, key)
+			for key, item := range c.index {
+				if c.isExpired(item) {
+					expiredKeys = append(expiredKeys, key)
+				}
 			}
-		}
 
-		for _, key := range expiredKeys {
-			item := c.index[key]
-			_ = os.Remove(item.FilePath) // Ignore error on cleanup
-			delete(c.index, key)
-			c.currentSize -= item.Size
+			for _, key := range expiredKeys {
+				item := c.index[key]
+				_ = os.Remove(item.FilePath) // Ignore error on cleanup
+				delete(c.index, key)
+				c.currentSize -= item.Size
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 	}
 }
 
@@ -556,9 +582,14 @@ func (c *PersistentCache) syncIndex() {
 	ticker := time.NewTicker(c.config.SyncInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		c.mu.RLock()
-		_ = c.saveIndex() // Index save errors are logged internally
-		c.mu.RUnlock()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.mu.RLock()
+			_ = c.saveIndex() // Index save errors are logged internally
+			c.mu.RUnlock()
+		}
 	}
 }

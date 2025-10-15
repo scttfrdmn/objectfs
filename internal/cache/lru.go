@@ -22,6 +22,10 @@ type LRUCache struct {
 
 	// Statistics
 	stats types.CacheStats
+
+	// Lifecycle management
+	stopCh chan struct{}
+	closed bool
 }
 
 // CacheConfig represents cache configuration
@@ -71,6 +75,8 @@ func NewLRUCache(config *CacheConfig) *LRUCache {
 		stats: types.CacheStats{
 			Capacity: config.MaxSize,
 		},
+		stopCh: make(chan struct{}),
+		closed: false,
 	}
 
 	// Start cleanup goroutine
@@ -245,6 +251,26 @@ func (c *LRUCache) Clear() {
 	c.stats.Evictions += uint64(len(c.items))
 }
 
+// Close stops the cleanup goroutine and releases resources
+func (c *LRUCache) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil
+	}
+
+	c.closed = true
+	close(c.stopCh)
+
+	// Clear all items
+	c.items = make(map[string]*cacheItem)
+	c.evictList.Init()
+	c.currentSize = 0
+
+	return nil
+}
+
 // GetKeys returns all cache keys (for debugging)
 func (c *LRUCache) GetKeys() []string {
 	c.mu.RLock()
@@ -354,20 +380,25 @@ func (c *LRUCache) cleanupExpired() {
 	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		c.mu.Lock()
-		var expiredKeys []string
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			var expiredKeys []string
 
-		for key, item := range c.items {
-			if c.isExpired(item) {
-				expiredKeys = append(expiredKeys, key)
+			for key, item := range c.items {
+				if c.isExpired(item) {
+					expiredKeys = append(expiredKeys, key)
+				}
 			}
-		}
 
-		for _, key := range expiredKeys {
-			c.removeItem(key)
+			for _, key := range expiredKeys {
+				c.removeItem(key)
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 	}
 }
 
