@@ -14,11 +14,14 @@ import (
 
 // ClientManager handles S3 client creation and management
 type ClientManager struct {
-	client      *s3.Client
-	pool        *ConnectionPool
-	transporter *cargoships3.Transporter
-	config      *Config
-	logger      *slog.Logger
+	client             *s3.Client
+	acceleratedClient  *s3.Client // Client with Transfer Acceleration enabled
+	standardClient     *s3.Client // Fallback client without acceleration
+	pool               *ConnectionPool
+	transporter        *cargoships3.Transporter
+	config             *Config
+	logger             *slog.Logger
+	accelerationActive bool // Tracks if acceleration is currently active
 }
 
 // NewClientManager creates a new S3 client manager
@@ -40,21 +43,47 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Create S3 client with custom options
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	// Create standard S3 client without acceleration
+	standardClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 		}
 		if cfg.ForcePathStyle {
 			o.UsePathStyle = true
 		}
-		if cfg.UseAccelerate {
-			o.UseAccelerate = true
-		}
 		if cfg.UseDualStack {
 			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
 		}
 	})
+
+	// Create accelerated S3 client if Transfer Acceleration is enabled
+	var acceleratedClient *s3.Client
+	var primaryClient *s3.Client
+	accelerationActive := false
+
+	if cfg.UseAccelerate {
+		acceleratedClient = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			if cfg.Endpoint != "" {
+				o.BaseEndpoint = aws.String(cfg.Endpoint)
+			}
+			if cfg.ForcePathStyle {
+				o.UsePathStyle = true
+			}
+			o.UseAccelerate = true
+			if cfg.UseDualStack {
+				o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
+			}
+		})
+		primaryClient = acceleratedClient
+		accelerationActive = true
+		logger.Info("S3 Transfer Acceleration enabled",
+			"bucket", bucket,
+			"fallback", "automatic")
+	} else {
+		primaryClient = standardClient
+		logger.Info("S3 Transfer Acceleration disabled",
+			"bucket", bucket)
+	}
 
 	// Create connection pool
 	pool, err := NewConnectionPool(cfg.PoolSize, func() (*s3.Client, error) {
@@ -77,7 +106,8 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		}
 
 		// Use CargoShip's optimized transporter with BBR/CUBIC algorithms
-		transporter = cargoships3.NewTransporter(client, cargoConfig)
+		// Use accelerated client if available, otherwise use standard
+		transporter = cargoships3.NewTransporter(primaryClient, cargoConfig)
 		logger.Info("CargoShip S3 optimization enabled",
 			"target_throughput", cfg.TargetThroughput,
 			"chunk_size", "16MB",
@@ -85,11 +115,14 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	}
 
 	return &ClientManager{
-		client:      client,
-		pool:        pool,
-		transporter: transporter,
-		config:      cfg,
-		logger:      logger,
+		client:             primaryClient,
+		acceleratedClient:  acceleratedClient,
+		standardClient:     standardClient,
+		pool:               pool,
+		transporter:        transporter,
+		config:             cfg,
+		logger:             logger,
+		accelerationActive: accelerationActive,
 	}, nil
 }
 
@@ -150,4 +183,42 @@ func (cm *ClientManager) Close() error {
 // GetStats returns connection pool statistics
 func (cm *ClientManager) GetStats() PoolStats {
 	return cm.pool.Stats()
+}
+
+// GetAcceleratedClient returns the accelerated client if acceleration is active
+func (cm *ClientManager) GetAcceleratedClient() *s3.Client {
+	if cm.accelerationActive && cm.acceleratedClient != nil {
+		return cm.acceleratedClient
+	}
+	return nil
+}
+
+// GetStandardClient returns the standard (non-accelerated) client
+func (cm *ClientManager) GetStandardClient() *s3.Client {
+	return cm.standardClient
+}
+
+// IsAccelerationActive returns whether Transfer Acceleration is currently active
+func (cm *ClientManager) IsAccelerationActive() bool {
+	return cm.accelerationActive
+}
+
+// DisableAcceleration temporarily disables Transfer Acceleration and falls back to standard client
+func (cm *ClientManager) DisableAcceleration(reason string) {
+	if cm.accelerationActive {
+		cm.logger.Warn("Disabling S3 Transfer Acceleration",
+			"reason", reason,
+			"fallback_to", "standard_endpoint")
+		cm.accelerationActive = false
+		cm.client = cm.standardClient
+	}
+}
+
+// EnableAcceleration re-enables Transfer Acceleration if configured
+func (cm *ClientManager) EnableAcceleration() {
+	if cm.config.UseAccelerate && cm.acceleratedClient != nil && !cm.accelerationActive {
+		cm.logger.Info("Re-enabling S3 Transfer Acceleration")
+		cm.accelerationActive = true
+		cm.client = cm.acceleratedClient
+	}
 }

@@ -77,6 +77,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 
 	// Initialize metrics collector
 	metricsCollector := NewMetricsCollector()
+	metricsCollector.SetAccelerationEnabled(cfg.UseAccelerate)
 
 	// Initialize tier validator
 	tierValidator := NewTierValidator(cfg.StorageTier, cfg.TierConstraints, logger)
@@ -839,4 +840,80 @@ func (b *Backend) IsWriteAvailable() bool {
 // IsFullyHealthy checks if all components are in healthy state
 func (b *Backend) IsFullyHealthy() bool {
 	return b.healthTracker.GetOverallHealth() == health.StateHealthy
+}
+
+// isAccelerationError checks if an error is related to Transfer Acceleration
+func (b *Backend) isAccelerationError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := err.Error()
+
+	// Common acceleration-specific errors
+	accelerationErrors := []string{
+		"InvalidRequest",         // Acceleration not enabled on bucket
+		"acceleration",           // Generic acceleration error
+		"s3-accelerate",          // Acceleration endpoint error
+		"transfer-acceleration",  // Explicit acceleration error
+		"AccelerateNotSupported", // Bucket doesn't support acceleration
+		"BucketAlreadyExists",    // Sometimes returned for acceleration errors
+	}
+
+	for _, errPattern := range accelerationErrors {
+		if strings.Contains(errMsg, errPattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// executeWithAccelerationFallback executes an S3 operation with automatic fallback
+// nolint:unused // Will be used in future operations (GetObject/PutObject) enhancement
+func (b *Backend) executeWithAccelerationFallback(
+	ctx context.Context,
+	operation string,
+	fn func(client *s3.Client) error,
+) error {
+	// If acceleration is not active, just execute with standard client
+	if !b.clientManager.IsAccelerationActive() {
+		client := b.clientManager.GetPooledClient()
+		defer b.clientManager.ReturnPooledClient(client)
+		return fn(client)
+	}
+
+	// Try with accelerated client first
+	acceleratedClient := b.clientManager.GetAcceleratedClient()
+	if acceleratedClient != nil {
+		start := time.Now()
+		err := fn(acceleratedClient)
+		duration := time.Since(start)
+
+		if err == nil {
+			// Success with acceleration
+			b.metricsCollector.RecordAcceleratedRequest(0, duration)
+			return nil
+		}
+
+		// Check if this is an acceleration-specific error
+		if b.isAccelerationError(err) {
+			b.logger.Warn("S3 Transfer Acceleration error detected, falling back to standard endpoint",
+				"operation", operation,
+				"error", err.Error())
+			b.metricsCollector.RecordFallbackEvent()
+			b.clientManager.DisableAcceleration(fmt.Sprintf("acceleration error: %v", err))
+
+			// Retry with standard client
+			standardClient := b.clientManager.GetStandardClient()
+			return fn(standardClient)
+		}
+
+		// Not an acceleration error, return as-is
+		return err
+	}
+
+	// No accelerated client available, use standard
+	standardClient := b.clientManager.GetStandardClient()
+	return fn(standardClient)
 }

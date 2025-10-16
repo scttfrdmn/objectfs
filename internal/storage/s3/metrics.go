@@ -14,6 +14,13 @@ type BackendMetrics struct {
 	AverageLatency  time.Duration `json:"average_latency"`
 	LastError       string        `json:"last_error"`
 	LastErrorTime   time.Time     `json:"last_error_time"`
+
+	// Transfer Acceleration metrics
+	AcceleratedRequests int64         `json:"accelerated_requests"`
+	AcceleratedBytes    int64         `json:"accelerated_bytes"`
+	FallbackEvents      int64         `json:"fallback_events"`
+	AccelerationEnabled bool          `json:"acceleration_enabled"`
+	AccelerationLatency time.Duration `json:"acceleration_latency"`
 }
 
 // MetricsCollector handles metrics collection and aggregation for S3 backend
@@ -121,4 +128,62 @@ func (mc *MetricsCollector) GetErrorRate() float64 {
 	}
 
 	return float64(mc.metrics.Errors) / float64(mc.metrics.Requests)
+}
+
+// RecordAcceleratedRequest records a request that used Transfer Acceleration
+func (mc *MetricsCollector) RecordAcceleratedRequest(bytes int64, duration time.Duration) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.AcceleratedRequests++
+	mc.metrics.AcceleratedBytes += bytes
+
+	// Calculate rolling average acceleration latency
+	if mc.metrics.AcceleratedRequests == 1 {
+		mc.metrics.AccelerationLatency = duration
+	} else {
+		mc.metrics.AccelerationLatency = time.Duration(
+			(int64(mc.metrics.AccelerationLatency)*9 + int64(duration)) / 10,
+		)
+	}
+}
+
+// RecordFallbackEvent records when acceleration fallback occurs
+func (mc *MetricsCollector) RecordFallbackEvent() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.FallbackEvents++
+}
+
+// SetAccelerationEnabled sets whether acceleration is enabled
+func (mc *MetricsCollector) SetAccelerationEnabled(enabled bool) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.AccelerationEnabled = enabled
+}
+
+// GetAccelerationRate calculates the percentage of requests using acceleration
+func (mc *MetricsCollector) GetAccelerationRate() float64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if mc.metrics.Requests == 0 {
+		return 0
+	}
+
+	return float64(mc.metrics.AcceleratedRequests) / float64(mc.metrics.Requests) * 100
+}
+
+// GetFallbackRate calculates the fallback rate
+func (mc *MetricsCollector) GetFallbackRate() float64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if mc.metrics.AcceleratedRequests == 0 {
+		return 0
+	}
+
+	return float64(mc.metrics.FallbackEvents) / float64(mc.metrics.AcceleratedRequests) * 100
 }
