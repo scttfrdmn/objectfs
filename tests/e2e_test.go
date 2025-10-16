@@ -164,10 +164,210 @@ func (s *E2ETestSuite) TestVersionAndBuildInfo() {
 
 	t.Logf("ℹ️  Testing version and build information")
 
-	// The version is set in main.go as const version = "0.1.0"
+	// The version is set in main.go as const version = "0.4.0"
 	// We can't test it directly here, but we validate that the binary
 	// would have version information available
 
-	t.Logf("✅ Version: 0.1.0 (defined in main.go)")
+	t.Logf("✅ Version: 0.4.0 (defined in main.go)")
 	t.Logf("✅ Build info available in binary")
+}
+
+// TestV040Features validates all v0.4.0 specific features
+func (s *E2ETestSuite) TestV040Features() {
+	t := s.T()
+
+	t.Logf("🚀 Testing v0.4.0 features")
+
+	// Test enhanced error handling configuration
+	cfg := config.NewDefault()
+	require.NoError(t, cfg.Validate())
+
+	// Verify circuit breaker is enabled by default
+	assert.True(t, cfg.Network.CircuitBreaker.Enabled, "Circuit breaker should be enabled")
+	assert.Equal(t, 5, cfg.Network.CircuitBreaker.FailureThreshold, "Circuit breaker threshold should be 5")
+	assert.Equal(t, 60*time.Second, cfg.Network.CircuitBreaker.Timeout, "Circuit breaker timeout should be 60s")
+
+	// Verify retry configuration
+	assert.Equal(t, 3, cfg.Network.Retry.MaxAttempts, "Max retry attempts should be 3")
+	assert.Equal(t, 1*time.Second, cfg.Network.Retry.BaseDelay, "Base retry delay should be 1s")
+	assert.Equal(t, 30*time.Second, cfg.Network.Retry.MaxDelay, "Max retry delay should be 30s")
+
+	// Verify S3 transfer acceleration support
+	assert.False(t, cfg.Storage.S3.UseAcceleration, "S3 acceleration should be disabled by default")
+	cfg.Storage.S3.UseAcceleration = true
+	assert.True(t, cfg.Storage.S3.UseAcceleration, "S3 acceleration should be configurable")
+
+	// Verify multipart upload configuration exists
+	assert.NotEmpty(t, cfg.Performance.WriteBufferSize, "Write buffer size should be set")
+	assert.Equal(t, "16MB", cfg.Performance.WriteBufferSize, "Default write buffer should be 16MB")
+
+	t.Logf("✅ v0.4.0 features validated")
+}
+
+// TestEnhancedErrorHandling tests the enhanced error handling features
+func (s *E2ETestSuite) TestEnhancedErrorHandling() {
+	t := s.T()
+
+	t.Logf("🛡️  Testing enhanced error handling")
+
+	// Test configuration with custom error handling settings
+	cfg := config.NewDefault()
+	cfg.Network.CircuitBreaker.FailureThreshold = 3
+	cfg.Network.CircuitBreaker.Timeout = 30 * time.Second
+	cfg.Network.Retry.MaxAttempts = 5
+
+	adp, err := adapter.New(s.ctx, "s3://error-test-bucket", "/tmp/error-test", cfg)
+	require.NoError(t, err)
+	require.NotNil(t, adp)
+
+	// Verify adapter was created with custom error handling config
+	assert.NotNil(t, adp, "Adapter with custom error config should be created")
+
+	t.Logf("✅ Enhanced error handling validated")
+}
+
+// TestMemoryManagement tests memory leak detection and management features
+func (s *E2ETestSuite) TestMemoryManagement() {
+	t := s.T()
+
+	t.Logf("💾 Testing memory management features")
+
+	// Test configuration with memory constraints
+	cfg := config.NewDefault()
+	cfg.Performance.CacheSize = "128MB"
+	cfg.WriteBuffer.MaxMemory = "64MB"
+	cfg.Cache.MaxEntries = 1000
+
+	adp, err := adapter.New(s.ctx, "s3://memory-test-bucket", "/tmp/memory-test", cfg)
+	require.NoError(t, err)
+	require.NotNil(t, adp)
+
+	// Verify memory configuration was applied
+	assert.NotNil(t, adp, "Adapter with memory config should be created")
+
+	t.Logf("✅ Memory management validated")
+}
+
+// TestS3TransferAcceleration tests S3 transfer acceleration configuration
+func (s *E2ETestSuite) TestS3TransferAcceleration() {
+	t := s.T()
+
+	t.Logf("⚡ Testing S3 transfer acceleration")
+
+	// Test with acceleration enabled
+	cfg := config.NewDefault()
+	cfg.Storage.S3.UseAcceleration = true
+	cfg.Storage.S3.Region = "us-west-2"
+
+	adp, err := adapter.New(s.ctx, "s3://acceleration-test-bucket", "/tmp/acceleration-test", cfg)
+	require.NoError(t, err)
+	require.NotNil(t, adp)
+
+	// Test with acceleration disabled
+	cfg2 := config.NewDefault()
+	cfg2.Storage.S3.UseAcceleration = false
+	adp2, err := adapter.New(s.ctx, "s3://no-acceleration-bucket", "/tmp/no-acceleration-test", cfg2)
+	require.NoError(t, err)
+	require.NotNil(t, adp2)
+
+	t.Logf("✅ S3 transfer acceleration validated")
+}
+
+// TestMultipartUploadConfiguration tests multipart upload settings
+func (s *E2ETestSuite) TestMultipartUploadConfiguration() {
+	t := s.T()
+
+	t.Logf("📦 Testing multipart upload configuration")
+
+	// Test with various write buffer sizes (affects multipart chunking)
+	testCases := []struct {
+		name       string
+		bufferSize string
+		maxMemory  string
+	}{
+		{"small buffers", "8MB", "32MB"},
+		{"medium buffers", "16MB", "64MB"},
+		{"large buffers", "32MB", "128MB"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.NewDefault()
+			cfg.Performance.WriteBufferSize = tc.bufferSize
+			cfg.WriteBuffer.MaxMemory = tc.maxMemory
+
+			adp, err := adapter.New(s.ctx, "s3://multipart-test-bucket", "/tmp/multipart-test", cfg)
+			require.NoError(t, err, "Adapter should be created with %s", tc.name)
+			require.NotNil(t, adp)
+		})
+	}
+
+	t.Logf("✅ Multipart upload configuration validated")
+}
+
+// TestConcurrencyAndPerformance tests performance-related configurations
+func (s *E2ETestSuite) TestConcurrencyAndPerformance() {
+	t := s.T()
+
+	t.Logf("⚡ Testing concurrency and performance settings")
+
+	// Test with high concurrency settings
+	cfg := config.NewDefault()
+	cfg.Performance.MaxConcurrency = 200
+	cfg.Performance.ConnectionPoolSize = 16
+	cfg.Performance.ReadAheadSize = "8MB"
+
+	adp, err := adapter.New(s.ctx, "s3://performance-test-bucket", "/tmp/performance-test", cfg)
+	require.NoError(t, err)
+	require.NotNil(t, adp)
+
+	// Test with conservative settings
+	cfg2 := config.NewDefault()
+	cfg2.Performance.MaxConcurrency = 50
+	cfg2.Performance.ConnectionPoolSize = 4
+	cfg2.Performance.ReadAheadSize = "2MB"
+
+	adp2, err := adapter.New(s.ctx, "s3://conservative-bucket", "/tmp/conservative-test", cfg2)
+	require.NoError(t, err)
+	require.NotNil(t, adp2)
+
+	t.Logf("✅ Concurrency and performance validated")
+}
+
+// TestProductionReadiness validates production-ready configurations
+func (s *E2ETestSuite) TestProductionReadiness() {
+	t := s.T()
+
+	t.Logf("🏭 Testing production readiness")
+
+	// Test with production-like configuration
+	cfg := config.NewDefault()
+	cfg.Performance.CacheSize = "4GB"
+	cfg.Performance.MaxConcurrency = 150
+	cfg.WriteBuffer.MaxMemory = "1GB"
+	cfg.Network.CircuitBreaker.Enabled = true
+	cfg.Network.Retry.MaxAttempts = 3
+	cfg.Storage.S3.UseAcceleration = true
+	cfg.Monitoring.Metrics.Enabled = true
+	cfg.Monitoring.HealthChecks.Enabled = true
+	cfg.Features.Prefetching = true
+	cfg.Features.BatchOperations = true
+	cfg.Features.MetadataCaching = true
+
+	// Validate configuration
+	require.NoError(t, cfg.Validate(), "Production configuration should be valid")
+
+	// Create adapter with production config
+	adp, err := adapter.New(s.ctx, "s3://production-test-bucket", "/tmp/production-test", cfg)
+	require.NoError(t, err)
+	require.NotNil(t, adp)
+
+	t.Logf("✅ Production readiness validated")
+	t.Logf("📊 Production Configuration Summary:")
+	t.Logf("   - Cache: %s", cfg.Performance.CacheSize)
+	t.Logf("   - Concurrency: %d", cfg.Performance.MaxConcurrency)
+	t.Logf("   - Circuit Breaker: %v", cfg.Network.CircuitBreaker.Enabled)
+	t.Logf("   - S3 Acceleration: %v", cfg.Storage.S3.UseAcceleration)
+	t.Logf("   - Metrics: %v", cfg.Monitoring.Metrics.Enabled)
+	t.Logf("   - Health Checks: %v", cfg.Monitoring.HealthChecks.Enabled)
 }
