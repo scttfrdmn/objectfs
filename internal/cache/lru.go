@@ -245,10 +245,22 @@ func (c *LRUCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.items = make(map[string]*cacheItem)
+	// Track evictions before clearing
+	evictCount := uint64(len(c.items))
+
+	// Clear all items properly to help GC
+	for key, item := range c.items {
+		// Clear data slice to help GC
+		if item.data != nil {
+			item.data = nil
+		}
+		item.element = nil
+		delete(c.items, key)
+	}
+
 	c.evictList.Init()
 	c.currentSize = 0
-	c.stats.Evictions += uint64(len(c.items))
+	c.stats.Evictions += evictCount
 }
 
 // Close stops the cleanup goroutine and releases resources
@@ -329,6 +341,12 @@ func (c *LRUCache) removeItem(key string) {
 	// Remove from eviction list
 	if item.element != nil {
 		c.evictList.Remove(item.element)
+		item.element = nil
+	}
+
+	// Clear data to help GC
+	if item.data != nil {
+		item.data = nil
 	}
 
 	// Remove from items map
