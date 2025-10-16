@@ -214,31 +214,31 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 				Range:  rangeHeader,
 			}
 
-			// Use standard S3 client for reads (CargoShip optimizes uploads)
-			client := b.clientManager.GetPooledClient()
-			defer b.clientManager.ReturnPooledClient(client)
+			// Use acceleration fallback pattern for reads
+			err := b.executeWithAccelerationFallback(ctx, "GetObject", func(client *s3.Client) error {
+				result, err := client.GetObject(ctx, input)
+				if err != nil {
+					b.metricsCollector.RecordError(err)
+					translatedErr := b.translateError(err, "GetObject", key)
+					b.healthTracker.RecordError("s3-reads", translatedErr)
+					return translatedErr
+				}
+				defer func() { _ = result.Body.Close() }()
 
-			result, err := client.GetObject(ctx, input)
+				data, err = io.ReadAll(result.Body)
+				if err != nil {
+					b.metricsCollector.RecordError(err)
+					readErr := fmt.Errorf("failed to read object body: %w", err)
+					b.healthTracker.RecordError("s3-reads", readErr)
+					return readErr
+				}
 
-			if err != nil {
-				b.metricsCollector.RecordError(err)
-				translatedErr := b.translateError(err, "GetObject", key)
-				b.healthTracker.RecordError("s3-reads", translatedErr)
-				return translatedErr
-			}
-			defer func() { _ = result.Body.Close() }()
+				b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
+				b.healthTracker.RecordSuccess("s3-reads")
+				return nil
+			})
 
-			data, err = io.ReadAll(result.Body)
-			if err != nil {
-				b.metricsCollector.RecordError(err)
-				readErr := fmt.Errorf("failed to read object body: %w", err)
-				b.healthTracker.RecordError("s3-reads", readErr)
-				return readErr
-			}
-
-			b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
-			b.healthTracker.RecordSuccess("s3-reads")
-			return nil
+			return err
 		})
 	})
 
@@ -337,21 +337,20 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 			b.logger.Warn("CargoShip optimization failed, falling back to standard S3", "key", key, "error", uploadErr)
 		}
 
-		// Fallback to standard S3 client
-		client := b.clientManager.GetPooledClient()
-		defer b.clientManager.ReturnPooledClient(client)
-		_, err := client.PutObject(ctx, input)
+		// Fallback to standard S3 client with acceleration support
+		return b.executeWithAccelerationFallback(ctx, "PutObject", func(client *s3.Client) error {
+			_, err := client.PutObject(ctx, input)
+			if err != nil {
+				b.metricsCollector.RecordError(err)
+				translatedErr := b.translateError(err, "PutObject", key)
+				b.healthTracker.RecordError("s3-writes", translatedErr)
+				return translatedErr
+			}
 
-		if err != nil {
-			b.metricsCollector.RecordError(err)
-			translatedErr := b.translateError(err, "PutObject", key)
-			b.healthTracker.RecordError("s3-writes", translatedErr)
-			return translatedErr
-		}
-
-		b.metricsCollector.RecordBytesUploaded(int64(len(data)))
-		b.healthTracker.RecordSuccess("s3-writes")
-		return nil
+			b.metricsCollector.RecordBytesUploaded(int64(len(data)))
+			b.healthTracker.RecordSuccess("s3-writes")
+			return nil
+		})
 	})
 
 	return err
@@ -870,7 +869,6 @@ func (b *Backend) isAccelerationError(err error) bool {
 }
 
 // executeWithAccelerationFallback executes an S3 operation with automatic fallback
-// nolint:unused // Will be used in future operations (GetObject/PutObject) enhancement
 func (b *Backend) executeWithAccelerationFallback(
 	ctx context.Context,
 	operation string,
