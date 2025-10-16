@@ -49,6 +49,9 @@ type Backend struct {
 
 	// Health tracking for graceful degradation
 	healthTracker *health.Tracker
+
+	// Multipart upload management
+	multipartManager *MultipartStateManager
 }
 
 // NewBackend creates a new S3 backend instance
@@ -99,6 +102,9 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 
 	// Initialize cost optimizer
 	backend.costOptimizer = NewCostOptimizer(backend, cfg.CostOptimization, logger)
+
+	// Initialize multipart upload manager
+	backend.multipartManager = NewMultipartStateManager()
 
 	// Initialize circuit breaker manager
 	circuitConfig := circuit.Config{
@@ -293,6 +299,16 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 	breaker := b.circuitManager.GetBreaker("s3-put")
 
 	err := breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
+		// Check if we should use multipart upload based on size threshold
+		dataSize := int64(len(data))
+		if dataSize >= b.config.MultipartThreshold {
+			b.logger.Debug("Using multipart upload for large object",
+				"key", key,
+				"size", dataSize,
+				"threshold", b.config.MultipartThreshold)
+			return b.putObjectMultipart(ctx, key, data, effectiveTier)
+		}
+
 		// Get storage class for effective tier
 		storageClass := ConvertTierToStorageClass(effectiveTier)
 
@@ -914,4 +930,215 @@ func (b *Backend) executeWithAccelerationFallback(
 	// No accelerated client available, use standard
 	standardClient := b.clientManager.GetStandardClient()
 	return fn(standardClient)
+}
+
+// putObjectMultipart performs a multipart upload for large objects with parallel chunk uploads
+func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier string) error {
+	dataSize := int64(len(data))
+
+	// Calculate optimal chunk size based on file size
+	chunkSize := CalculateOptimalChunkSize(dataSize, b.config.MultipartThreshold, b.config.MultipartChunkSize)
+
+	b.logger.Debug("Starting multipart upload",
+		"key", key,
+		"total_size", dataSize,
+		"chunk_size", chunkSize,
+		"tier", tier)
+
+	// Get storage class for tier
+	storageClass := ConvertTierToStorageClass(tier)
+	contentType := b.detectContentType(key)
+
+	// Initiate multipart upload
+	var uploadID string
+	err := b.executeWithAccelerationFallback(ctx, "CreateMultipartUpload", func(client *s3.Client) error {
+		createInput := &s3.CreateMultipartUploadInput{
+			Bucket:       aws.String(b.bucket),
+			Key:          aws.String(key),
+			ContentType:  aws.String(contentType),
+			StorageClass: storageClass,
+		}
+
+		result, err := client.CreateMultipartUpload(ctx, createInput)
+		if err != nil {
+			b.metricsCollector.RecordError(err)
+			return b.translateError(err, "CreateMultipartUpload", key)
+		}
+
+		uploadID = aws.ToString(result.UploadId)
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to initiate multipart upload: %w", err)
+	}
+
+	// Create upload state tracker
+	uploadState := NewMultipartUploadState(uploadID, b.bucket, key, dataSize, chunkSize)
+	b.multipartManager.TrackUpload(uploadState)
+	defer b.multipartManager.RemoveUpload(uploadID)
+
+	// Calculate number of parts
+	totalParts := CalculatePartCount(dataSize, chunkSize)
+
+	b.logger.Debug("Multipart upload initiated",
+		"upload_id", uploadID,
+		"total_parts", totalParts)
+
+	// Upload parts in parallel with controlled concurrency
+	type partResult struct {
+		partNumber int
+		etag       string
+		size       int64
+		err        error
+	}
+
+	resultCh := make(chan partResult, totalParts)
+	semaphore := make(chan struct{}, b.config.MultipartConcurrency)
+
+	// Launch goroutines for each part
+	for partNum := 1; partNum <= totalParts; partNum++ {
+		go func(pn int) {
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			// Calculate part boundaries
+			startOffset := int64(pn-1) * chunkSize
+			endOffset := startOffset + chunkSize
+			if endOffset > dataSize {
+				endOffset = dataSize
+			}
+
+			partData := data[startOffset:endOffset]
+			partSize := int64(len(partData))
+
+			// Upload this part with retry logic
+			var etag string
+			uploadErr := b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
+				return b.executeWithAccelerationFallback(retryCtx, "UploadPart", func(client *s3.Client) error {
+					uploadPartInput := &s3.UploadPartInput{
+						Bucket:        aws.String(b.bucket),
+						Key:           aws.String(key),
+						UploadId:      aws.String(uploadID),
+						PartNumber:    aws.Int32(int32(pn)),
+						Body:          bytes.NewReader(partData),
+						ContentLength: aws.Int64(partSize),
+					}
+
+					uploadResult, err := client.UploadPart(retryCtx, uploadPartInput)
+					if err != nil {
+						b.metricsCollector.RecordError(err)
+						return b.translateError(err, "UploadPart", key)
+					}
+
+					etag = aws.ToString(uploadResult.ETag)
+					b.multipartManager.UpdatePartStatus(uploadID, pn, partSize, etag, nil)
+
+					b.logger.Debug("Part uploaded successfully",
+						"upload_id", uploadID,
+						"part_number", pn,
+						"size", partSize,
+						"progress", fmt.Sprintf("%.1f%%", uploadState.GetProgress()))
+
+					return nil
+				})
+			})
+
+			if uploadErr != nil {
+				b.multipartManager.UpdatePartStatus(uploadID, pn, 0, "", uploadErr)
+			}
+
+			resultCh <- partResult{
+				partNumber: pn,
+				etag:       etag,
+				size:       partSize,
+				err:        uploadErr,
+			}
+		}(partNum)
+	}
+
+	// Collect all part results
+	completedParts := make([]s3types.CompletedPart, 0, totalParts)
+	var uploadErrors []error
+	var totalBytesUploaded int64
+
+	for i := 0; i < totalParts; i++ {
+		result := <-resultCh
+		if result.err != nil {
+			uploadErrors = append(uploadErrors, fmt.Errorf("part %d failed: %w", result.partNumber, result.err))
+			continue
+		}
+
+		completedParts = append(completedParts, s3types.CompletedPart{
+			PartNumber: aws.Int32(int32(result.partNumber)),
+			ETag:       aws.String(result.etag),
+		})
+
+		totalBytesUploaded += result.size
+	}
+
+	// If any parts failed, abort the multipart upload
+	if len(uploadErrors) > 0 {
+		b.multipartManager.MarkUploadFailed(uploadID)
+
+		// Abort the multipart upload
+		abortErr := b.executeWithAccelerationFallback(ctx, "AbortMultipartUpload", func(client *s3.Client) error {
+			abortInput := &s3.AbortMultipartUploadInput{
+				Bucket:   aws.String(b.bucket),
+				Key:      aws.String(key),
+				UploadId: aws.String(uploadID),
+			}
+			_, err := client.AbortMultipartUpload(ctx, abortInput)
+			return err
+		})
+
+		if abortErr != nil {
+			b.logger.Warn("Failed to abort multipart upload after part failures",
+				"upload_id", uploadID,
+				"abort_error", abortErr)
+		}
+
+		return fmt.Errorf("multipart upload failed: %d parts failed: %v", len(uploadErrors), uploadErrors[0])
+	}
+
+	// Complete the multipart upload
+	err = b.executeWithAccelerationFallback(ctx, "CompleteMultipartUpload", func(client *s3.Client) error {
+		completeInput := &s3.CompleteMultipartUploadInput{
+			Bucket:   aws.String(b.bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+			MultipartUpload: &s3types.CompletedMultipartUpload{
+				Parts: completedParts,
+			},
+		}
+
+		_, err := client.CompleteMultipartUpload(ctx, completeInput)
+		if err != nil {
+			b.metricsCollector.RecordError(err)
+			return b.translateError(err, "CompleteMultipartUpload", key)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		b.multipartManager.MarkUploadFailed(uploadID)
+		return fmt.Errorf("failed to complete multipart upload: %w", err)
+	}
+
+	// Mark upload as completed
+	b.multipartManager.MarkUploadCompleted(uploadID)
+
+	// Record metrics
+	b.metricsCollector.RecordBytesUploaded(totalBytesUploaded)
+	b.healthTracker.RecordSuccess("s3-writes")
+
+	b.logger.Info("Multipart upload completed successfully",
+		"key", key,
+		"upload_id", uploadID,
+		"total_size", dataSize,
+		"total_parts", totalParts,
+		"bytes_uploaded", totalBytesUploaded)
+
+	return nil
 }
