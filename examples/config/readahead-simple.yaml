@@ -1,0 +1,38 @@
+# ObjectFS Configuration - Simple Read-ahead
+# Best for: Development, testing, unpredictable workloads
+
+performance:
+  cache_size: 2GB
+  write_buffer_size: 16MB
+  max_concurrency: 150
+  read_ahead_size: 64MB
+
+  # Simple read-ahead configuration
+  read_ahead:
+    enabled: true
+    size: 32MB
+    strategy: simple                      # No pattern detection
+    sequential_min_size: 1MB
+
+    # Pattern detection disabled for simple strategy
+    enable_pattern_detection: false
+    sequential_threshold: 0.7
+    prediction_window: 100
+
+    # Prefetching disabled for simple strategy
+    enable_prefetch: false
+    max_concurrent_fetch: 4
+    prefetch_ahead: 3
+    prefetch_bandwidth_mbs: 10
+    confidence_threshold: 0.7
+
+    # ML disabled
+    enable_ml_prediction: false
+    ml_model_path: ''
+    learning_rate: 0.01
+    pattern_depth: 1000
+
+    # Metrics enabled for monitoring
+    metrics_enabled: true
+    statistics_interval: 30s
+    model_update_interval: 5m

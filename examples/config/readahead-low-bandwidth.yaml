@@ -1,0 +1,38 @@
+# ObjectFS Configuration - Low Bandwidth / Conservative
+# Best for: Limited bandwidth, mobile, cost-sensitive environments
+
+performance:
+  cache_size: 1GB                         # Smaller cache
+  write_buffer_size: 8MB                  # Smaller buffers
+  max_concurrency: 100
+  read_ahead_size: 32MB                   # Smaller read-ahead
+
+  # Conservative read-ahead configuration
+  read_ahead:
+    enabled: true
+    size: 16MB                            # Small buffer to save bandwidth
+    strategy: predictive
+    sequential_min_size: 2MB              # Higher threshold for detection
+
+    # Conservative pattern detection
+    enable_pattern_detection: true
+    sequential_threshold: 0.8             # High confidence required (80%)
+    prediction_window: 150                # Larger window for better confidence
+
+    # Limited prefetching
+    enable_prefetch: true
+    max_concurrent_fetch: 2               # Minimal parallelism
+    prefetch_ahead: 2                     # Fetch less ahead
+    prefetch_bandwidth_mbs: 5             # Limited bandwidth (5 MB/s)
+    confidence_threshold: 0.8             # High confidence required
+
+    # ML disabled to save resources
+    enable_ml_prediction: false
+    ml_model_path: ''
+    learning_rate: 0.01
+    pattern_depth: 500                    # Shallower analysis
+
+    # Minimal metrics overhead
+    metrics_enabled: true
+    statistics_interval: 60s              # Less frequent monitoring
+    model_update_interval: 10m

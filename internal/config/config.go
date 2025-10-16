@@ -42,15 +42,16 @@ type GlobalConfig struct {
 
 // PerformanceConfig represents performance-related settings
 type PerformanceConfig struct {
-	CacheSize          string `yaml:"cache_size"`
-	WriteBufferSize    string `yaml:"write_buffer_size"`
-	MaxConcurrency     int    `yaml:"max_concurrency"`
-	ReadAheadSize      string `yaml:"read_ahead_size"`
-	CompressionEnabled bool   `yaml:"compression_enabled"`
-	ConnectionPoolSize int    `yaml:"connection_pool_size"`
-	PredictiveCaching  bool   `yaml:"predictive_caching"`
-	MLModelPath        string `yaml:"ml_model_path"`
-	MultilevelCaching  bool   `yaml:"multilevel_caching"`
+	CacheSize          string          `yaml:"cache_size"`
+	WriteBufferSize    string          `yaml:"write_buffer_size"`
+	MaxConcurrency     int             `yaml:"max_concurrency"`
+	ReadAheadSize      string          `yaml:"read_ahead_size"`
+	CompressionEnabled bool            `yaml:"compression_enabled"`
+	ConnectionPoolSize int             `yaml:"connection_pool_size"`
+	PredictiveCaching  bool            `yaml:"predictive_caching"`
+	MLModelPath        string          `yaml:"ml_model_path"`
+	MultilevelCaching  bool            `yaml:"multilevel_caching"`
+	ReadAhead          ReadAheadConfig `yaml:"read_ahead"` // Advanced read-ahead configuration
 }
 
 // CacheConfig represents cache configuration
@@ -66,6 +67,38 @@ type PersistentCacheConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Directory string `yaml:"directory"`
 	MaxSize   string `yaml:"max_size"`
+}
+
+// ReadAheadConfig represents advanced read-ahead and predictive caching settings
+type ReadAheadConfig struct {
+	// Basic read-ahead settings
+	Enabled           bool   `yaml:"enabled"`             // Enable read-ahead
+	Size              string `yaml:"size"`                // Read-ahead buffer size (e.g., "64MB")
+	Strategy          string `yaml:"strategy"`            // "simple", "predictive", "ml"
+	SequentialMinSize string `yaml:"sequential_min_size"` // Min size for sequential detection
+
+	// Pattern detection settings
+	EnablePatternDetection bool    `yaml:"enable_pattern_detection"` // Detect sequential/temporal patterns
+	SequentialThreshold    float64 `yaml:"sequential_threshold"`     // Confidence threshold for sequential (0-1)
+	PredictionWindow       int     `yaml:"prediction_window"`        // Number of accesses to analyze
+
+	// Prefetch settings
+	EnablePrefetch       bool    `yaml:"enable_prefetch"`        // Enable intelligent prefetching
+	MaxConcurrentFetch   int     `yaml:"max_concurrent_fetch"`   // Max parallel prefetch operations
+	PrefetchAhead        int     `yaml:"prefetch_ahead"`         // Number of blocks to prefetch
+	PrefetchBandwidthMBs int     `yaml:"prefetch_bandwidth_mbs"` // Max prefetch bandwidth (MB/s)
+	ConfidenceThreshold  float64 `yaml:"confidence_threshold"`   // Min confidence to trigger prefetch (0-1)
+
+	// ML-based prediction settings (advanced)
+	EnableMLPrediction bool    `yaml:"enable_ml_prediction"` // Use ML for access prediction
+	MLModelPath        string  `yaml:"ml_model_path"`        // Path to trained ML model
+	LearningRate       float64 `yaml:"learning_rate"`        // Model learning rate (0-1)
+	PatternDepth       int     `yaml:"pattern_depth"`        // Analysis depth for patterns
+
+	// Performance tuning
+	MetricsEnabled      bool   `yaml:"metrics_enabled"`       // Track read-ahead effectiveness
+	StatisticsInterval  string `yaml:"statistics_interval"`   // Stats collection interval
+	ModelUpdateInterval string `yaml:"model_update_interval"` // ML model update frequency
 }
 
 // WriteBufferConfig represents write buffer configuration
@@ -261,6 +294,27 @@ func NewDefault() *Configuration {
 			PredictiveCaching:  false,
 			MLModelPath:        "",
 			MultilevelCaching:  false,
+			ReadAhead: ReadAheadConfig{
+				Enabled:                true,
+				Size:                   "64MB",
+				Strategy:               "predictive",
+				SequentialMinSize:      "1MB",
+				EnablePatternDetection: true,
+				SequentialThreshold:    0.7,
+				PredictionWindow:       100,
+				EnablePrefetch:         true,
+				MaxConcurrentFetch:     4,
+				PrefetchAhead:          3,
+				PrefetchBandwidthMBs:   10,
+				ConfidenceThreshold:    0.7,
+				EnableMLPrediction:     false,
+				MLModelPath:            "",
+				LearningRate:           0.01,
+				PatternDepth:           1000,
+				MetricsEnabled:         true,
+				StatisticsInterval:     "30s",
+				ModelUpdateInterval:    "5m",
+			},
 		},
 		Cache: CacheConfig{
 			TTL:            5 * time.Minute,
@@ -442,6 +496,26 @@ func (c *Configuration) LoadFromEnv() error {
 		c.Features.OfflineMode = strings.ToLower(val) == TrueValue
 	}
 
+	// Read-ahead settings
+	if val := os.Getenv("OBJECTFS_READAHEAD_ENABLED"); val != "" {
+		c.Performance.ReadAhead.Enabled = strings.ToLower(val) == TrueValue
+	}
+	if val := os.Getenv("OBJECTFS_READAHEAD_SIZE"); val != "" {
+		c.Performance.ReadAhead.Size = val
+	}
+	if val := os.Getenv("OBJECTFS_READAHEAD_STRATEGY"); val != "" {
+		c.Performance.ReadAhead.Strategy = val
+	}
+	if val := os.Getenv("OBJECTFS_READAHEAD_PATTERN_DETECTION"); val != "" {
+		c.Performance.ReadAhead.EnablePatternDetection = strings.ToLower(val) == TrueValue
+	}
+	if val := os.Getenv("OBJECTFS_READAHEAD_PREFETCH"); val != "" {
+		c.Performance.ReadAhead.EnablePrefetch = strings.ToLower(val) == TrueValue
+	}
+	if val := os.Getenv("OBJECTFS_READAHEAD_ML_PREDICTION"); val != "" {
+		c.Performance.ReadAhead.EnableMLPrediction = strings.ToLower(val) == TrueValue
+	}
+
 	return nil
 }
 
@@ -488,6 +562,71 @@ func (c *Configuration) Validate() error {
 	if !logLevelValid {
 		return fmt.Errorf("invalid log_level: %s (must be one of: %s)",
 			c.Global.LogLevel, strings.Join(validLogLevels, ", "))
+	}
+
+	// Validate read-ahead configuration
+	if err := c.validateReadAheadConfig(); err != nil {
+		return fmt.Errorf("read_ahead configuration invalid: %w", err)
+	}
+
+	return nil
+}
+
+// validateReadAheadConfig validates read-ahead specific settings
+func (c *Configuration) validateReadAheadConfig() error {
+	ra := c.Performance.ReadAhead
+
+	// Validate strategy
+	validStrategies := []string{"simple", "predictive", "ml"}
+	strategyValid := false
+	for _, strategy := range validStrategies {
+		if ra.Strategy == strategy {
+			strategyValid = true
+			break
+		}
+	}
+	if !strategyValid {
+		return fmt.Errorf("invalid strategy: %s (must be one of: %s)",
+			ra.Strategy, strings.Join(validStrategies, ", "))
+	}
+
+	// Validate thresholds
+	if ra.SequentialThreshold < 0 || ra.SequentialThreshold > 1 {
+		return fmt.Errorf("sequential_threshold must be between 0 and 1, got %f", ra.SequentialThreshold)
+	}
+
+	if ra.ConfidenceThreshold < 0 || ra.ConfidenceThreshold > 1 {
+		return fmt.Errorf("confidence_threshold must be between 0 and 1, got %f", ra.ConfidenceThreshold)
+	}
+
+	if ra.LearningRate < 0 || ra.LearningRate > 1 {
+		return fmt.Errorf("learning_rate must be between 0 and 1, got %f", ra.LearningRate)
+	}
+
+	// Validate positive integers
+	if ra.PredictionWindow < 0 {
+		return fmt.Errorf("prediction_window must be non-negative, got %d", ra.PredictionWindow)
+	}
+
+	if ra.MaxConcurrentFetch <= 0 {
+		return fmt.Errorf("max_concurrent_fetch must be greater than 0, got %d", ra.MaxConcurrentFetch)
+	}
+
+	if ra.PrefetchAhead < 0 {
+		return fmt.Errorf("prefetch_ahead must be non-negative, got %d", ra.PrefetchAhead)
+	}
+
+	if ra.PrefetchBandwidthMBs < 0 {
+		return fmt.Errorf("prefetch_bandwidth_mbs must be non-negative, got %d", ra.PrefetchBandwidthMBs)
+	}
+
+	if ra.PatternDepth < 0 {
+		return fmt.Errorf("pattern_depth must be non-negative, got %d", ra.PatternDepth)
+	}
+
+	// Validate ML settings if enabled
+	if ra.EnableMLPrediction && ra.MLModelPath == "" {
+		return fmt.Errorf("ml_model_path must be specified when enable_ml_prediction is true")
 	}
 
 	return nil
