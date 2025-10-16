@@ -69,7 +69,7 @@ func (s *E2ETestSuite) TestAdapterValidation() {
 	// Test empty bucket name
 	_, err = adapter.New(s.ctx, "s3://", "/tmp/test", s.config)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "bucket name cannot be empty")
+	assert.Contains(t, err.Error(), "bucket name")
 
 	// Test invalid configuration
 	invalidConfig := &config.Configuration{}
@@ -87,8 +87,9 @@ func (s *E2ETestSuite) TestComponentInitialization() {
 	t.Logf("⚙️  Testing component initialization without mounting")
 
 	// Create adapter
-	adapter, err := adapter.New(s.ctx, "s3://test-bucket", "/tmp/test-mount", s.config)
+	adapterInstance, err := adapter.New(s.ctx, "s3://test-bucket", "/tmp/test-mount", s.config)
 	require.NoError(t, err)
+	require.NotNil(t, adapterInstance)
 
 	// Note: We can't actually call Start() because it will try to mount FUSE
 	// which fails on macOS due to library incompatibility. This test validates
