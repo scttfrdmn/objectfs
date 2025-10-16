@@ -437,6 +437,7 @@ func TestMultipleOperationTypes(t *testing.T) {
 		metrics := dpm.GetOperationMetrics(opType)
 		if metrics == nil {
 			t.Errorf("Expected metrics for operation type %s", opType)
+			continue
 		}
 
 		if metrics.Count != 1 {
