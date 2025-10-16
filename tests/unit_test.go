@@ -405,12 +405,17 @@ func TestConfigUnit(t *testing.T) {
 		Global: config.GlobalConfig{
 			LogLevel:    "DEBUG",
 			MetricsPort: 9090,
+			HealthPort:  9091,
 		},
 		Performance: config.PerformanceConfig{
 			CacheSize:          "100MB",
 			WriteBufferSize:    "10MB",
 			MaxConcurrency:     8,
 			ConnectionPoolSize: 5,
+			ReadAhead: config.ReadAheadConfig{
+				Strategy:           "predictive",
+				MaxConcurrentFetch: 4, // Required field
+			},
 		},
 		Cache: config.CacheConfig{
 			TTL:            time.Hour,
