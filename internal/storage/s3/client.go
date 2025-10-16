@@ -100,9 +100,9 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		cargoConfig := awsconfig.S3Config{
 			Bucket:             bucket,
 			StorageClass:       awsconfig.StorageClassIntelligentTiering, // Intelligent tiering
-			MultipartThreshold: 32 * 1024 * 1024,                         // 32MB threshold
-			MultipartChunkSize: 16 * 1024 * 1024,                         // 16MB chunks for optimization
-			Concurrency:        cfg.PoolSize,                             // Match pool size
+			MultipartThreshold: cfg.MultipartThreshold,                   // Use configured threshold
+			MultipartChunkSize: cfg.MultipartChunkSize,                   // Use configured chunk size
+			Concurrency:        cfg.MultipartConcurrency,                 // Use configured concurrency
 		}
 
 		// Use CargoShip's optimized transporter with BBR/CUBIC algorithms
@@ -110,8 +110,9 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		transporter = cargoships3.NewTransporter(primaryClient, cargoConfig)
 		logger.Info("CargoShip S3 optimization enabled",
 			"target_throughput", cfg.TargetThroughput,
-			"chunk_size", "16MB",
-			"concurrency", cfg.PoolSize)
+			"multipart_threshold", cfg.MultipartThreshold,
+			"chunk_size", cfg.MultipartChunkSize,
+			"concurrency", cfg.MultipartConcurrency)
 	}
 
 	return &ClientManager{

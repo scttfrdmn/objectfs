@@ -21,6 +21,15 @@ type BackendMetrics struct {
 	FallbackEvents      int64         `json:"fallback_events"`
 	AccelerationEnabled bool          `json:"acceleration_enabled"`
 	AccelerationLatency time.Duration `json:"acceleration_latency"`
+
+	// Multipart upload metrics
+	MultipartUploads          int64         `json:"multipart_uploads"`           // Total multipart uploads initiated
+	MultipartUploadsParts     int64         `json:"multipart_uploads_parts"`     // Total parts uploaded
+	MultipartUploadsCompleted int64         `json:"multipart_uploads_completed"` // Completed multipart uploads
+	MultipartUploadsFailed    int64         `json:"multipart_uploads_failed"`    // Failed multipart uploads
+	MultipartBytes            int64         `json:"multipart_bytes"`             // Total bytes uploaded via multipart
+	AveragePartSize           int64         `json:"average_part_size"`           // Average part size in bytes
+	MultipartLatency          time.Duration `json:"multipart_latency"`           // Average multipart upload latency
 }
 
 // MetricsCollector handles metrics collection and aggregation for S3 backend
@@ -186,4 +195,90 @@ func (mc *MetricsCollector) GetFallbackRate() float64 {
 	}
 
 	return float64(mc.metrics.FallbackEvents) / float64(mc.metrics.AcceleratedRequests) * 100
+}
+
+// RecordMultipartUploadStart records when a multipart upload is initiated
+func (mc *MetricsCollector) RecordMultipartUploadStart() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.MultipartUploads++
+}
+
+// RecordMultipartUploadPart records when a part is uploaded
+func (mc *MetricsCollector) RecordMultipartUploadPart(partSize int64) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.MultipartUploadsParts++
+	mc.metrics.MultipartBytes += partSize
+
+	// Calculate rolling average part size
+	if mc.metrics.MultipartUploadsParts == 1 {
+		mc.metrics.AveragePartSize = partSize
+	} else {
+		mc.metrics.AveragePartSize = (mc.metrics.AveragePartSize*9 + partSize) / 10
+	}
+}
+
+// RecordMultipartUploadComplete records successful completion of a multipart upload
+func (mc *MetricsCollector) RecordMultipartUploadComplete(totalBytes int64, duration time.Duration) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.MultipartUploadsCompleted++
+
+	// Calculate rolling average multipart latency
+	if mc.metrics.MultipartUploadsCompleted == 1 {
+		mc.metrics.MultipartLatency = duration
+	} else {
+		mc.metrics.MultipartLatency = time.Duration(
+			(int64(mc.metrics.MultipartLatency)*9 + int64(duration)) / 10,
+		)
+	}
+}
+
+// RecordMultipartUploadFailed records when a multipart upload fails
+func (mc *MetricsCollector) RecordMultipartUploadFailed() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.MultipartUploadsFailed++
+}
+
+// GetMultipartSuccessRate calculates the success rate of multipart uploads
+func (mc *MetricsCollector) GetMultipartSuccessRate() float64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	totalAttempts := mc.metrics.MultipartUploadsCompleted + mc.metrics.MultipartUploadsFailed
+	if totalAttempts == 0 {
+		return 100.0 // No failures yet, assume 100%
+	}
+
+	return float64(mc.metrics.MultipartUploadsCompleted) / float64(totalAttempts) * 100
+}
+
+// GetMultipartUsageRate calculates the percentage of uploads using multipart
+func (mc *MetricsCollector) GetMultipartUsageRate() float64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if mc.metrics.Requests == 0 {
+		return 0
+	}
+
+	return float64(mc.metrics.MultipartUploads) / float64(mc.metrics.Requests) * 100
+}
+
+// GetAveragePartsPerUpload calculates the average number of parts per multipart upload
+func (mc *MetricsCollector) GetAveragePartsPerUpload() float64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if mc.metrics.MultipartUploads == 0 {
+		return 0
+	}
+
+	return float64(mc.metrics.MultipartUploadsParts) / float64(mc.metrics.MultipartUploads)
 }

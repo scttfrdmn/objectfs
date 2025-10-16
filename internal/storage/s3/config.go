@@ -34,11 +34,26 @@ type Config struct {
 	TargetThroughput            float64 `yaml:"target_throughput"`  // MB/s
 	OptimizationLevel           string  `yaml:"optimization_level"` // "standard", "aggressive"
 
+	// Multipart upload configuration
+	MultipartThreshold   int64 `yaml:"multipart_threshold"`   // Size threshold for multipart uploads (bytes)
+	MultipartChunkSize   int64 `yaml:"multipart_chunk_size"`  // Chunk size for multipart uploads (bytes)
+	MultipartConcurrency int   `yaml:"multipart_concurrency"` // Number of concurrent part uploads
+
 	// S3 Storage Tier Configuration
 	StorageTier      string           `yaml:"storage_tier"`      // "STANDARD", "STANDARD_IA", "ONEZONE_IA", etc.
 	TierConstraints  TierConstraints  `yaml:"tier_constraints"`  // Tier-specific constraints
 	CostOptimization CostOptimization `yaml:"cost_optimization"` // Cost optimization settings
 	PricingConfig    PricingConfig    `yaml:"pricing_config"`    // Custom pricing configuration
+}
+
+// GetOptimalChunkSize returns the optimal chunk size for a given file size
+func (c *Config) GetOptimalChunkSize(fileSize int64) int64 {
+	return CalculateOptimalChunkSize(fileSize, c.MultipartThreshold, c.MultipartChunkSize)
+}
+
+// ShouldUseMultipart determines if a file should use multipart upload
+func (c *Config) ShouldUseMultipart(fileSize int64) bool {
+	return fileSize > c.MultipartThreshold
 }
 
 // TierConstraints defines tier-specific constraints and limitations
@@ -148,6 +163,51 @@ type ReplicationPricing struct {
 	DestinationPutRequests float64 `yaml:"destination_put_requests"` // PUT request cost at destination
 }
 
+// CalculateOptimalChunkSize calculates the optimal chunk size based on file size and network conditions
+func CalculateOptimalChunkSize(fileSize int64, multipartThreshold int64, baseChunkSize int64) int64 {
+	// If file is below multipart threshold, use full file as single chunk
+	if fileSize <= multipartThreshold {
+		return fileSize
+	}
+
+	// For very small files just over threshold, use smaller chunks
+	if fileSize < multipartThreshold*2 {
+		return baseChunkSize / 2 // 8MB for default config
+	}
+
+	// For medium files (up to 1GB), use base chunk size
+	if fileSize < 1024*1024*1024 {
+		return baseChunkSize // 16MB for default config
+	}
+
+	// For large files (1GB - 10GB), use larger chunks
+	if fileSize < 10*1024*1024*1024 {
+		return baseChunkSize * 2 // 32MB
+	}
+
+	// For very large files (10GB+), use even larger chunks
+	// This reduces the number of parts and improves efficiency
+	if fileSize < 100*1024*1024*1024 {
+		return baseChunkSize * 4 // 64MB
+	}
+
+	// For massive files (100GB+), use maximum practical chunk size
+	// S3 allows up to 5GB per part, but 128MB is a good balance
+	return baseChunkSize * 8 // 128MB
+}
+
+// CalculatePartCount calculates the number of parts for a multipart upload
+func CalculatePartCount(fileSize int64, chunkSize int64) int {
+	if chunkSize == 0 {
+		return 0
+	}
+	partCount := int(fileSize / chunkSize)
+	if fileSize%chunkSize != 0 {
+		partCount++
+	}
+	return partCount
+}
+
 // NewDefaultConfig returns a configuration with sensible defaults
 func NewDefaultConfig() *Config {
 	retryConfig := retry.DefaultConfig()
@@ -164,6 +224,9 @@ func NewDefaultConfig() *Config {
 		EnableCargoShipOptimization: true,
 		TargetThroughput:            800.0, // 800 MB/s target for ObjectFS
 		OptimizationLevel:           "standard",
+		MultipartThreshold:          32 * 1024 * 1024,  // 32MB - trigger multipart for larger files
+		MultipartChunkSize:          16 * 1024 * 1024,  // 16MB - optimal chunk size for performance
+		MultipartConcurrency:        8,                 // Match pool size for concurrent uploads
 		StorageTier:                 TierStandard,      // Default to Standard tier
 		TierConstraints:             TierConstraints{}, // Use tier defaults
 		CostOptimization: CostOptimization{
