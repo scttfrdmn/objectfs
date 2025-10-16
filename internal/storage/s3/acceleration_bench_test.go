@@ -95,7 +95,11 @@ func BenchmarkFallback(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to create backend: %v", err)
 	}
-	defer backend.Close()
+	defer func() {
+		if err := backend.Close(); err != nil {
+			b.Logf("Failed to close backend: %v", err)
+		}
+	}()
 
 	data := make([]byte, 1024*1024) // 1MB
 	key := fmt.Sprintf("benchmark-fallback-%d", time.Now().UnixNano())
@@ -161,7 +165,11 @@ func benchmarkGetObject(b *testing.B, useAccelerate bool, objectSize int) {
 	if err != nil {
 		b.Fatalf("Failed to create backend: %v", err)
 	}
-	defer backend.Close()
+	defer func() {
+		if err := backend.Close(); err != nil {
+			b.Logf("Failed to close backend: %v", err)
+		}
+	}()
 
 	// Setup: Create test object
 	data := make([]byte, objectSize)
@@ -169,7 +177,11 @@ func benchmarkGetObject(b *testing.B, useAccelerate bool, objectSize int) {
 	if err := backend.PutObject(ctx, key, data); err != nil {
 		b.Fatalf("Failed to create test object: %v", err)
 	}
-	defer backend.DeleteObject(ctx, key)
+	defer func() {
+		if err := backend.DeleteObject(ctx, key); err != nil {
+			b.Logf("Failed to delete test object: %v", err)
+		}
+	}()
 
 	b.ResetTimer()
 	b.SetBytes(int64(objectSize))
@@ -206,7 +218,11 @@ func benchmarkPutObject(b *testing.B, useAccelerate bool, objectSize int) {
 	if err != nil {
 		b.Fatalf("Failed to create backend: %v", err)
 	}
-	defer backend.Close()
+	defer func() {
+		if err := backend.Close(); err != nil {
+			b.Logf("Failed to close backend: %v", err)
+		}
+	}()
 
 	data := make([]byte, objectSize)
 
@@ -235,7 +251,9 @@ func benchmarkPutObject(b *testing.B, useAccelerate bool, objectSize int) {
 
 	// Cleanup
 	for _, key := range keys {
-		_ = backend.DeleteObject(ctx, key)
+		if err := backend.DeleteObject(ctx, key); err != nil {
+			b.Logf("Failed to delete object %s: %v", key, err)
+		}
 	}
 }
 
@@ -291,7 +309,11 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Failed to create backend: %v", err)
 		}
-		defer backend.Close()
+		defer func() {
+			if err := backend.Close(); err != nil {
+				b.Logf("Failed to close backend: %v", err)
+			}
+		}()
 
 		size := 31 * 1024 * 1024
 		data := make([]byte, size)
@@ -303,7 +325,9 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 			if err := backend.PutObject(ctx, key, data); err != nil {
 				b.Fatalf("PutObject failed: %v", err)
 			}
-			_ = backend.DeleteObject(ctx, key)
+			if err := backend.DeleteObject(ctx, key); err != nil {
+				b.Logf("Failed to delete object %s: %v", key, err)
+			}
 		}
 	})
 
@@ -313,7 +337,11 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Failed to create backend: %v", err)
 		}
-		defer backend.Close()
+		defer func() {
+			if err := backend.Close(); err != nil {
+				b.Logf("Failed to close backend: %v", err)
+			}
+		}()
 
 		size := 33 * 1024 * 1024
 		data := make([]byte, size)
@@ -325,7 +353,9 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 			if err := backend.PutObject(ctx, key, data); err != nil {
 				b.Fatalf("PutObject failed: %v", err)
 			}
-			_ = backend.DeleteObject(ctx, key)
+			if err := backend.DeleteObject(ctx, key); err != nil {
+				b.Logf("Failed to delete object %s: %v", key, err)
+			}
 		}
 	})
 }
@@ -357,7 +387,11 @@ func BenchmarkMultipartConcurrency(b *testing.B) {
 			if err != nil {
 				b.Fatalf("Failed to create backend: %v", err)
 			}
-			defer backend.Close()
+			defer func() {
+				if err := backend.Close(); err != nil {
+					b.Logf("Failed to close backend: %v", err)
+				}
+			}()
 
 			data := make([]byte, size)
 			b.ResetTimer()
@@ -368,7 +402,9 @@ func BenchmarkMultipartConcurrency(b *testing.B) {
 				if err := backend.PutObject(ctx, key, data); err != nil {
 					b.Fatalf("PutObject failed: %v", err)
 				}
-				_ = backend.DeleteObject(ctx, key)
+				if err := backend.DeleteObject(ctx, key); err != nil {
+					b.Logf("Failed to delete object %s: %v", key, err)
+				}
 			}
 		})
 	}

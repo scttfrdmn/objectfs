@@ -174,7 +174,9 @@ func TestLogRotator_ForceRotate(t *testing.T) {
 
 	// Write to new file
 	newMessage := "Test log message after rotation\n"
-	rotator.Write([]byte(newMessage))
+	if _, err := rotator.Write([]byte(newMessage)); err != nil {
+		t.Fatalf("Failed to write after rotation: %v", err)
+	}
 	_ = rotator.Sync()
 
 	// Check new file contains only new message
@@ -208,7 +210,9 @@ func TestLogRotator_Compression(t *testing.T) {
 
 	// Write some data
 	message := "Test log message for compression\n"
-	rotator.Write([]byte(message))
+	if _, err := rotator.Write([]byte(message)); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
 	_ = rotator.Sync()
 
 	// Force rotation
@@ -258,9 +262,13 @@ func TestLogRotator_MaxBackups(t *testing.T) {
 
 	// Create multiple rotations
 	for i := 0; i < 5; i++ {
-		rotator.Write([]byte("Test message\n"))
+		if _, err := rotator.Write([]byte("Test message\n")); err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
 		_ = rotator.Sync()
-		rotator.ForceRotate()
+		if err := rotator.ForceRotate(); err != nil {
+			t.Fatalf("Failed to rotate: %v", err)
+		}
 		time.Sleep(10 * time.Millisecond) // Ensure different timestamps
 	}
 
@@ -330,7 +338,9 @@ func TestLogRotator_Close(t *testing.T) {
 		t.Fatalf("Failed to create rotator: %v", err)
 	}
 
-	rotator.Write([]byte("Test message\n"))
+	if _, err := rotator.Write([]byte("Test message\n")); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
 
 	if err := rotator.Close(); err != nil {
 		t.Fatalf("Failed to close rotator: %v", err)
@@ -379,7 +389,9 @@ func TestLogRotator_Sync(t *testing.T) {
 	defer func() { _ = rotator.Close() }()
 
 	// Write and sync
-	rotator.Write([]byte("Test message\n"))
+	if _, err := rotator.Write([]byte("Test message\n")); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
 	if err := rotator.Sync(); err != nil {
 		t.Fatalf("Failed to sync: %v", err)
 	}
