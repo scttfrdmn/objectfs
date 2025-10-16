@@ -53,7 +53,7 @@ func (c *MockCache) Size() int64 {
 // BenchmarkCacheGet benchmarks cache get operations
 func BenchmarkCacheGet(b *testing.B) {
 	cache := NewMockCache()
-	
+
 	// Pre-populate cache with test data
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("key-%d", i)
@@ -124,7 +124,7 @@ func BenchmarkCacheMixed(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			key := fmt.Sprintf("key-%d", i%100)
-			
+
 			// 70% reads, 25% writes, 5% deletes
 			switch i % 20 {
 			case 0: // 5% deletes
@@ -156,7 +156,7 @@ func BenchmarkCacheVariousDataSizes(b *testing.B) {
 				i := 0
 				for pb.Next() {
 					key := fmt.Sprintf("key-%d", i%100)
-					
+
 					if i%2 == 0 {
 						cache.Put(key, data)
 					} else {
@@ -220,7 +220,7 @@ func BenchmarkCacheEviction(b *testing.B) {
 		// Simulate eviction by deleting random entries
 		keyToDelete := fmt.Sprintf("key-%d", rand.Intn(10000))
 		cache.Delete(keyToDelete)
-		
+
 		// Add new entry
 		newKey := fmt.Sprintf("new-key-%d", i)
 		cache.Put(newKey, data)
@@ -281,7 +281,7 @@ func BenchmarkDataCopy(b *testing.B) {
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("copy-%dB", size), func(b *testing.B) {
 			src := generateRandomData(size)
-			
+
 			b.ResetTimer()
 			b.ReportAllocs()
 
@@ -306,7 +306,7 @@ func BenchmarkTimeOperations(b *testing.B) {
 
 	b.Run("time-since", func(b *testing.B) {
 		start := time.Now()
-		
+
 		b.ResetTimer()
 		b.ReportAllocs()
 

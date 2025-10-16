@@ -111,9 +111,9 @@ func (m *MockS3Optimizer) HealthCheck(ctx context.Context) error {
 
 // MockNetworkOptimizer implements optimization.NetworkOptimizer for testing
 type MockNetworkOptimizer struct {
-	bandwidth         float64
-	rtt               time.Duration
-	congestionWindow  int64
+	bandwidth        float64
+	rtt              time.Duration
+	congestionWindow int64
 }
 
 func NewMockNetworkOptimizer() *MockNetworkOptimizer {
@@ -175,17 +175,17 @@ func NewMockAdaptiveEngine() *MockAdaptiveEngine {
 func (m *MockAdaptiveEngine) OptimizeParameters(ctx context.Context, operation string, dataSize int64) (*optimization.OptimizationParams, error) {
 	// Return mock optimization parameters
 	return &optimization.OptimizationParams{
-		ChunkSize:         64 * 1024, // 64KB
-		Concurrency:       10,
-		BufferSize:        1024 * 1024, // 1MB
-		MaxRetries:        3,
-		InitialBackoff:    100 * time.Millisecond,
-		MaxBackoff:        5 * time.Second,
-		BackoffMultiplier: 2.0,
+		ChunkSize:          64 * 1024, // 64KB
+		Concurrency:        10,
+		BufferSize:         1024 * 1024, // 1MB
+		MaxRetries:         3,
+		InitialBackoff:     100 * time.Millisecond,
+		MaxBackoff:         5 * time.Second,
+		BackoffMultiplier:  2.0,
 		CompressionEnabled: false,
-		CacheEnabled:      true,
-		CacheTTL:          5 * time.Minute,
-		Strategy:          "adaptive",
+		CacheEnabled:       true,
+		CacheTTL:           5 * time.Minute,
+		Strategy:           "adaptive",
 	}, nil
 }
 
@@ -202,10 +202,10 @@ func (m *MockAdaptiveEngine) PredictOptimalStrategy(ctx context.Context, workloa
 			Strategy:    "balanced",
 		},
 	}
-	
+
 	key := fmt.Sprintf("%d-%f", workload.AverageFileSize, workload.ReadWriteRatio)
 	m.predictions[key] = strategy
-	
+
 	return strategy, nil
 }
 
@@ -284,7 +284,7 @@ func (m *MockPerformanceMonitor) RecordOperation(operation string, duration time
 	} else {
 		m.metrics.FailedOps++
 	}
-	
+
 	// Update throughput calculation
 	if operation == "read" {
 		m.metrics.TotalBytesRead += bytes
@@ -315,13 +315,13 @@ func (m *MockPerformanceMonitor) GetMetrics() *optimization.PerformanceMetrics {
 func (m *MockPerformanceMonitor) GetHistoricalMetrics(window time.Duration) []*optimization.PerformanceSnapshot {
 	cutoff := time.Now().Add(-window)
 	var filtered []*optimization.PerformanceSnapshot
-	
+
 	for _, snapshot := range m.snapshots {
 		if snapshot.Timestamp.After(cutoff) {
 			filtered = append(filtered, snapshot)
 		}
 	}
-	
+
 	return filtered
 }
 
