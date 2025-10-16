@@ -14,8 +14,9 @@ import (
 
 // Benchmark configuration from environment variables
 // Set these to run benchmarks against a real S3 bucket:
-//   OBJECTFS_BENCH_BUCKET=your-bucket-name
-//   OBJECTFS_BENCH_REGION=us-west-2  (optional, defaults to us-east-1)
+//
+//	OBJECTFS_BENCH_BUCKET=your-bucket-name
+//	OBJECTFS_BENCH_REGION=us-west-2  (optional, defaults to us-east-1)
 const (
 	envBenchBucket = "OBJECTFS_BENCH_BUCKET"
 	envBenchRegion = "OBJECTFS_BENCH_REGION"
@@ -238,6 +239,141 @@ func benchmarkPutObject(b *testing.B, useAccelerate bool, objectSize int) {
 	}
 }
 
+// BenchmarkMultipart_32MB benchmarks multipart upload at threshold (32MB)
+func BenchmarkMultipart_32MB(b *testing.B) {
+	benchmarkPutObject(b, false, 32*1024*1024)
+}
+
+// BenchmarkMultipart_32MB_Accelerated benchmarks multipart upload with acceleration (32MB)
+func BenchmarkMultipart_32MB_Accelerated(b *testing.B) {
+	benchmarkPutObject(b, true, 32*1024*1024)
+}
+
+// BenchmarkMultipart_100MB benchmarks multipart upload for 100MB objects
+func BenchmarkMultipart_100MB(b *testing.B) {
+	benchmarkPutObject(b, false, 100*1024*1024)
+}
+
+// BenchmarkMultipart_100MB_Accelerated benchmarks multipart upload with acceleration (100MB)
+func BenchmarkMultipart_100MB_Accelerated(b *testing.B) {
+	benchmarkPutObject(b, true, 100*1024*1024)
+}
+
+// BenchmarkMultipart_500MB benchmarks multipart upload for 500MB objects
+func BenchmarkMultipart_500MB(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping large multipart benchmark in short mode")
+	}
+	benchmarkPutObject(b, false, 500*1024*1024)
+}
+
+// BenchmarkMultipart_500MB_Accelerated benchmarks multipart upload with acceleration (500MB)
+func BenchmarkMultipart_500MB_Accelerated(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping large multipart benchmark in short mode")
+	}
+	benchmarkPutObject(b, true, 500*1024*1024)
+}
+
+// BenchmarkSinglePartVsMultipart compares single-part and multipart upload performance
+func BenchmarkSinglePartVsMultipart(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping comparison benchmark in short mode")
+	}
+
+	ctx := context.Background()
+	cfg, bucket := getBenchConfig(b)
+	cfg.UseAccelerate = false
+
+	// Test just below threshold (single-part)
+	b.Run("SinglePart_31MB", func(b *testing.B) {
+		backend, err := NewBackend(ctx, bucket, cfg)
+		if err != nil {
+			b.Fatalf("Failed to create backend: %v", err)
+		}
+		defer backend.Close()
+
+		size := 31 * 1024 * 1024
+		data := make([]byte, size)
+		b.ResetTimer()
+		b.SetBytes(int64(size))
+
+		for i := 0; i < b.N; i++ {
+			key := fmt.Sprintf("benchmark-single-%d-%d", time.Now().UnixNano(), i)
+			if err := backend.PutObject(ctx, key, data); err != nil {
+				b.Fatalf("PutObject failed: %v", err)
+			}
+			_ = backend.DeleteObject(ctx, key)
+		}
+	})
+
+	// Test just above threshold (multipart)
+	b.Run("Multipart_33MB", func(b *testing.B) {
+		backend, err := NewBackend(ctx, bucket, cfg)
+		if err != nil {
+			b.Fatalf("Failed to create backend: %v", err)
+		}
+		defer backend.Close()
+
+		size := 33 * 1024 * 1024
+		data := make([]byte, size)
+		b.ResetTimer()
+		b.SetBytes(int64(size))
+
+		for i := 0; i < b.N; i++ {
+			key := fmt.Sprintf("benchmark-multi-%d-%d", time.Now().UnixNano(), i)
+			if err := backend.PutObject(ctx, key, data); err != nil {
+				b.Fatalf("PutObject failed: %v", err)
+			}
+			_ = backend.DeleteObject(ctx, key)
+		}
+	})
+}
+
+// BenchmarkMultipartConcurrency tests multipart upload with different concurrency levels
+func BenchmarkMultipartConcurrency(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping concurrency benchmark in short mode")
+	}
+
+	ctx := context.Background()
+	_, bucket := getBenchConfig(b)
+
+	concurrencyLevels := []int{1, 4, 8, 16}
+	size := 100 * 1024 * 1024 // 100MB
+
+	for _, concurrency := range concurrencyLevels {
+		b.Run(fmt.Sprintf("Concurrency_%d", concurrency), func(b *testing.B) {
+			cfg := NewDefaultConfig()
+			cfg.Region = os.Getenv(envBenchRegion)
+			if cfg.Region == "" {
+				cfg.Region = "us-east-1"
+			}
+			cfg.PoolSize = 10
+			cfg.EnableCargoShipOptimization = false
+			cfg.MultipartConcurrency = concurrency
+
+			backend, err := NewBackend(ctx, bucket, cfg)
+			if err != nil {
+				b.Fatalf("Failed to create backend: %v", err)
+			}
+			defer backend.Close()
+
+			data := make([]byte, size)
+			b.ResetTimer()
+			b.SetBytes(int64(size))
+
+			for i := 0; i < b.N; i++ {
+				key := fmt.Sprintf("benchmark-concurrency-%d-%d-%d", concurrency, time.Now().UnixNano(), i)
+				if err := backend.PutObject(ctx, key, data); err != nil {
+					b.Fatalf("PutObject failed: %v", err)
+				}
+				_ = backend.DeleteObject(ctx, key)
+			}
+		})
+	}
+}
+
 // BenchmarkSuite runs a comprehensive performance comparison
 func BenchmarkSuite(b *testing.B) {
 	if testing.Short() {
@@ -245,8 +381,8 @@ func BenchmarkSuite(b *testing.B) {
 	}
 
 	sizes := []int{
-		1024,           // 1KB
-		1024 * 1024,    // 1MB
+		1024,             // 1KB
+		1024 * 1024,      // 1MB
 		10 * 1024 * 1024, // 10MB
 	}
 
