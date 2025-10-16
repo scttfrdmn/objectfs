@@ -326,7 +326,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Clear any cached connection state",
 					"Verify new connections work",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement S3 connection pool restart
+					// This should recreate the S3 client connections
+					return fmt.Errorf("s3_restart_connection: not yet implemented")
+				},
 				EstimatedTime: 30 * time.Second,
 				Impact:        "Low risk - May temporarily pause operations",
 				Category:      "connection",
@@ -349,7 +354,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Clear L2 persistent cache if applicable",
 					"Verify cache operations after clear",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement cache clearing
+					// This should clear both L1 and L2 caches
+					return fmt.Errorf("cache_clear: not yet implemented")
+				},
 				EstimatedTime: 10 * time.Second,
 				Impact:        "Medium - Cache will need to warm up again",
 				Category:      "cache",
@@ -388,7 +398,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Wait for GC to complete",
 					"Verify memory usage decreased",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement forced garbage collection
+					// This should call runtime.GC() and monitor memory usage
+					return fmt.Errorf("memory_force_gc: not yet implemented")
+				},
 				EstimatedTime: 5 * time.Second,
 				Impact:        "Low - Brief performance impact during GC",
 				Category:      "memory",
@@ -404,7 +419,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Trigger cache eviction",
 					"Monitor memory usage",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement cache size reduction
+					// This should reduce the cache size and trigger eviction
+					return fmt.Errorf("memory_reduce_cache: not yet implemented")
+				},
 				EstimatedTime: 30 * time.Second,
 				Impact:        "Medium - Cache performance will decrease",
 				Category:      "cache",
@@ -428,7 +448,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Delete logs older than 30 days",
 					"Verify disk space freed",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement log file cleanup
+					// This should rotate, compress, and delete old log files
+					return fmt.Errorf("disk_clean_logs: not yet implemented")
+				},
 				EstimatedTime: 1 * time.Minute,
 				Impact:        "Low - Old logs will be removed",
 				Category:      "disk",
@@ -444,7 +469,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Remove incomplete download files",
 					"Verify disk space freed",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement cache directory cleanup
+					// This should remove old cache files to free disk space
+					return fmt.Errorf("disk_clean_cache: not yet implemented")
+				},
 				EstimatedTime: 2 * time.Minute,
 				Impact:        "Medium - Cache will need to rebuild",
 				Category:      "disk",
@@ -460,7 +490,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Remove orphaned temp files",
 					"Verify disk space freed",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement temporary file cleanup
+					// This should remove old temp files to free disk space
+					return fmt.Errorf("disk_clean_temp: not yet implemented")
+				},
 				EstimatedTime: 1 * time.Minute,
 				Impact:        "Low - Only temp files removed",
 				Category:      "disk",
@@ -483,7 +518,12 @@ func (re *RemediationEngine) registerDefaultRules() {
 					"Retry connection",
 					"Verify connection successful",
 				},
-				Automated:     true,
+				Automated: true,
+				AutoFix: func(ctx context.Context) error {
+					// TODO: Implement network connection retry
+					// This should wait and retry the connection
+					return fmt.Errorf("network_retry: not yet implemented")
+				},
 				EstimatedTime: 10 * time.Second,
 				Impact:        "Low - Brief delay only",
 				Category:      "network",

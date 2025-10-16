@@ -345,6 +345,10 @@ func createTestConfig() *config.Configuration {
 			PredictiveCaching:  false,
 			MLModelPath:        "",
 			MultilevelCaching:  false,
+			ReadAhead: config.ReadAheadConfig{
+				Strategy:           "predictive",
+				MaxConcurrentFetch: 4,
+			},
 		},
 		Cache: config.CacheConfig{
 			EvictionPolicy: "lru",
