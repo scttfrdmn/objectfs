@@ -254,56 +254,111 @@ func (mm *MemoryMonitor) takeSample() {
 // analyzeMemory analyzes memory usage for potential issues
 func (mm *MemoryMonitor) analyzeMemory() {
 	mm.mu.RLock()
-	defer mm.mu.RUnlock()
 
 	if !mm.baselineSet || len(mm.samples) < 2 {
+		mm.mu.RUnlock()
 		return
 	}
 
 	baseline := mm.baselineSample
 	current := mm.currentSample
+	mm.mu.RUnlock()
+
+	// Collect alerts to generate (done outside lock)
+	var alertsToGenerate []struct {
+		alertType AlertType
+		message   string
+		current   uint64
+		baseline  uint64
+		growthPct float64
+	}
 
 	// Check for memory growth
 	if baseline.Alloc > 0 {
 		growthPct := (float64(current.Alloc) - float64(baseline.Alloc)) / float64(baseline.Alloc) * 100
 		if growthPct > mm.config.AlertThreshold {
-			mm.generateAlert(AlertTypeMemoryGrowth, fmt.Sprintf(
-				"Memory usage increased by %.2f%% (from %d to %d bytes)",
-				growthPct, baseline.Alloc, current.Alloc,
-			), current.Alloc, baseline.Alloc, growthPct)
+			alertsToGenerate = append(alertsToGenerate, struct {
+				alertType AlertType
+				message   string
+				current   uint64
+				baseline  uint64
+				growthPct float64
+			}{
+				AlertTypeMemoryGrowth,
+				fmt.Sprintf("Memory usage increased by %.2f%% (from %d to %d bytes)",
+					growthPct, baseline.Alloc, current.Alloc),
+				current.Alloc,
+				baseline.Alloc,
+				growthPct,
+			})
 		}
 	}
 
 	// Check for goroutine leaks (>50% increase from baseline)
 	goroutineGrowthPct := (float64(current.NumGoroutine) - float64(baseline.NumGoroutine)) / float64(baseline.NumGoroutine) * 100
 	if goroutineGrowthPct > 50 {
-		mm.generateAlert(AlertTypeGoroutineLeak, fmt.Sprintf(
-			"Goroutine count increased by %.2f%% (from %d to %d)",
-			goroutineGrowthPct, baseline.NumGoroutine, current.NumGoroutine,
-		), uint64(current.NumGoroutine), uint64(baseline.NumGoroutine), goroutineGrowthPct)
+		alertsToGenerate = append(alertsToGenerate, struct {
+			alertType AlertType
+			message   string
+			current   uint64
+			baseline  uint64
+			growthPct float64
+		}{
+			AlertTypeGoroutineLeak,
+			fmt.Sprintf("Goroutine count increased by %.2f%% (from %d to %d)",
+				goroutineGrowthPct, baseline.NumGoroutine, current.NumGoroutine),
+			uint64(current.NumGoroutine),
+			uint64(baseline.NumGoroutine),
+			goroutineGrowthPct,
+		})
 	}
 
 	// Check for GC pressure (GC using >5% of CPU)
 	if mm.config.EnableGCStats && current.GCCPUFraction > 0.05 {
-		mm.generateAlert(AlertTypeGCPressure, fmt.Sprintf(
-			"GC using %.2f%% of CPU time (threshold 5%%)",
-			current.GCCPUFraction*100,
-		), uint64(current.GCCPUFraction*100), 5, current.GCCPUFraction*100)
+		alertsToGenerate = append(alertsToGenerate, struct {
+			alertType AlertType
+			message   string
+			current   uint64
+			baseline  uint64
+			growthPct float64
+		}{
+			AlertTypeGCPressure,
+			fmt.Sprintf("GC using %.2f%% of CPU time (threshold 5%%)",
+				current.GCCPUFraction*100),
+			uint64(current.GCCPUFraction * 100),
+			5,
+			current.GCCPUFraction * 100,
+		})
 	}
 
 	// Check for heap fragmentation (idle heap > 50% of total heap)
 	if current.HeapSys > 0 {
 		idlePct := float64(current.HeapIdle) / float64(current.HeapSys) * 100
 		if idlePct > 50 {
-			mm.generateAlert(AlertTypeHeapFragmentation, fmt.Sprintf(
-				"Heap fragmentation detected: %.2f%% idle (from %d total)",
-				idlePct, current.HeapSys,
-			), current.HeapIdle, current.HeapSys, idlePct)
+			alertsToGenerate = append(alertsToGenerate, struct {
+				alertType AlertType
+				message   string
+				current   uint64
+				baseline  uint64
+				growthPct float64
+			}{
+				AlertTypeHeapFragmentation,
+				fmt.Sprintf("Heap fragmentation detected: %.2f%% idle (from %d total)",
+					idlePct, current.HeapSys),
+				current.HeapIdle,
+				current.HeapSys,
+				idlePct,
+			})
 		}
+	}
+
+	// Generate all alerts (this will acquire locks internally)
+	for _, alert := range alertsToGenerate {
+		mm.generateAlert(alert.alertType, alert.message, alert.current, alert.baseline, alert.growthPct)
 	}
 }
 
-// generateAlert generates a memory alert (must be called with lock held)
+// generateAlert generates a memory alert (must be called WITHOUT lock, acquires lock internally)
 func (mm *MemoryMonitor) generateAlert(alertType AlertType, message string, current, baseline uint64, growthPct float64) {
 	alert := MemoryAlert{
 		Timestamp:   time.Now(),
@@ -314,7 +369,9 @@ func (mm *MemoryMonitor) generateAlert(alertType AlertType, message string, curr
 		GrowthPct:   growthPct,
 	}
 
+	mm.mu.Lock()
 	mm.alerts = append(mm.alerts, alert)
+	mm.mu.Unlock()
 
 	mm.logger.Warn("Memory alert", map[string]interface{}{
 		"type":       alertType.String(),
@@ -389,7 +446,9 @@ func (mm *MemoryMonitor) TrackObject(name string, alertThreshold int64) {
 // IncrementObject increments the count of a tracked object
 func (mm *MemoryMonitor) IncrementObject(name string, size int64) {
 	mm.mu.Lock()
-	defer mm.mu.Unlock()
+
+	var shouldAlert bool
+	var count, threshold int64
 
 	if obj, exists := mm.trackingObjects[name]; exists {
 		obj.Count++
@@ -398,11 +457,20 @@ func (mm *MemoryMonitor) IncrementObject(name string, size int64) {
 
 		// Check if threshold exceeded
 		if obj.AlertThreshold > 0 && obj.Count > obj.AlertThreshold {
-			mm.generateAlert(AlertTypeMemoryGrowth, fmt.Sprintf(
-				"Tracked object %s exceeded threshold: %d objects (threshold: %d)",
-				name, obj.Count, obj.AlertThreshold,
-			), uint64(obj.Count), uint64(obj.AlertThreshold), float64(obj.Count-obj.AlertThreshold)/float64(obj.AlertThreshold)*100)
+			shouldAlert = true
+			count = obj.Count
+			threshold = obj.AlertThreshold
 		}
+	}
+
+	mm.mu.Unlock()
+
+	// Generate alert outside the lock
+	if shouldAlert {
+		mm.generateAlert(AlertTypeMemoryGrowth, fmt.Sprintf(
+			"Tracked object %s exceeded threshold: %d objects (threshold: %d)",
+			name, count, threshold,
+		), uint64(count), uint64(threshold), float64(count-threshold)/float64(threshold)*100)
 	}
 }
 

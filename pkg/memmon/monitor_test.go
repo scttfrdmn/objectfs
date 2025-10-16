@@ -298,10 +298,8 @@ func TestMemoryMonitor_ClearAlerts(t *testing.T) {
 	config := DefaultMonitorConfig()
 	monitor := NewMemoryMonitor(config)
 
-	// Manually generate an alert
-	monitor.mu.Lock()
+	// Manually generate an alert (without holding lock, as generateAlert acquires it internally)
 	monitor.generateAlert(AlertTypeMemoryGrowth, "test alert", 1000, 500, 100.0)
-	monitor.mu.Unlock()
 
 	// Verify alert exists
 	alerts := monitor.GetAlerts()
