@@ -211,40 +211,60 @@ func NewError(code ErrorCode, message string) *ObjectFSError {
 	}
 }
 
+// Category prefix mappings for efficient lookup
+var categoryPrefixes = map[string]ErrorCategory{
+	"INVALID_CONFIG": CategoryConfiguration,
+	"MISSING_CONFIG": CategoryConfiguration,
+	"CONFIG_":        CategoryConfiguration,
+	"CONNECTION_":    CategoryConnection,
+	"NETWORK_":       CategoryConnection,
+	"OBJECT_":        CategoryStorage,
+	"BUCKET_":        CategoryStorage,
+	"STORAGE_":       CategoryStorage,
+	"TIER_":          CategoryStorage,
+	"ACCESS_":        CategoryStorage,
+	"QUOTA_":         CategoryStorage,
+	"MOUNT_":         CategoryFilesystem,
+	"UNMOUNT_":       CategoryFilesystem,
+	"PERMISSION_":    CategoryFilesystem,
+	"PATH_":          CategoryFilesystem,
+	"FILE_":          CategoryFilesystem,
+	"DIRECTORY_":     CategoryFilesystem,
+	"NOT_DIRECTORY":  CategoryFilesystem,
+	"NOT_EMPTY":      CategoryFilesystem,
+	"OUT_OF_":        CategoryResource,
+	"BUFFER_":        CategoryResource,
+	"RESOURCE_":      CategoryResource,
+	"CACHE_":         CategoryResource,
+	"WORKER_":        CategoryResource,
+	"LIMIT_":         CategoryResource,
+	"ALREADY_":       CategoryState,
+	"NOT_INITIALIZED": CategoryState,
+	"INVALID_STATE":  CategoryState,
+	"SHUTDOWN_":      CategoryState,
+	"COMPONENT_":     CategoryState,
+	"SERVICE_":       CategoryState,
+	"OPERATION_":     CategoryOperation,
+	"RETRY_":         CategoryOperation,
+	"VALIDATION_":    CategoryOperation,
+	"AUTHENTICATION_": CategoryAuth,
+	"AUTHORIZATION_": CategoryAuth,
+	"TOKEN_":         CategoryAuth,
+	"CREDENTIALS_":   CategoryAuth,
+}
+
 // GetCategory determines the category based on the error code.
 func GetCategory(code ErrorCode) ErrorCategory {
 	codeStr := string(code)
-	switch {
-	case strings.HasPrefix(codeStr, "INVALID_CONFIG") || strings.HasPrefix(codeStr, "MISSING_CONFIG") ||
-		strings.HasPrefix(codeStr, "CONFIG_"):
-		return CategoryConfiguration
-	case strings.HasPrefix(codeStr, "CONNECTION_") || strings.HasPrefix(codeStr, "NETWORK_"):
-		return CategoryConnection
-	case strings.HasPrefix(codeStr, "OBJECT_") || strings.HasPrefix(codeStr, "BUCKET_") ||
-		strings.HasPrefix(codeStr, "STORAGE_") || strings.HasPrefix(codeStr, "TIER_") ||
-		strings.HasPrefix(codeStr, "ACCESS_") || strings.HasPrefix(codeStr, "QUOTA_"):
-		return CategoryStorage
-	case strings.HasPrefix(codeStr, "MOUNT_") || strings.HasPrefix(codeStr, "UNMOUNT_") ||
-		strings.HasPrefix(codeStr, "PERMISSION_") || strings.HasPrefix(codeStr, "PATH_") ||
-		strings.HasPrefix(codeStr, "FILE_") || strings.HasPrefix(codeStr, "DIRECTORY_"):
-		return CategoryFilesystem
-	case strings.HasPrefix(codeStr, "OUT_OF_") || strings.HasPrefix(codeStr, "BUFFER_") ||
-		strings.HasPrefix(codeStr, "RESOURCE_") || strings.HasPrefix(codeStr, "CACHE_") ||
-		strings.HasPrefix(codeStr, "WORKER_") || strings.HasPrefix(codeStr, "LIMIT_"):
-		return CategoryResource
-	case strings.HasPrefix(codeStr, "ALREADY_") || strings.HasPrefix(codeStr, "NOT_INITIALIZED") ||
-		strings.HasPrefix(codeStr, "INVALID_STATE") || strings.HasPrefix(codeStr, "SHUTDOWN_") ||
-		strings.HasPrefix(codeStr, "COMPONENT_"):
-		return CategoryState
-	case strings.HasPrefix(codeStr, "OPERATION_") || strings.HasPrefix(codeStr, "RETRY_") ||
-		strings.HasPrefix(codeStr, "VALIDATION_"):
-		return CategoryOperation
-	case strings.HasPrefix(codeStr, "AUTHENTICATION_") || strings.HasPrefix(codeStr, "AUTHORIZATION_") ||
-		strings.HasPrefix(codeStr, "TOKEN_") || strings.HasPrefix(codeStr, "CREDENTIALS_"):
-		return CategoryAuth
-	default:
-		return CategoryInternal
+
+	// Check for exact matches and prefix matches
+	for prefix, category := range categoryPrefixes {
+		if codeStr == prefix || strings.HasPrefix(codeStr, prefix) {
+			return category
+		}
 	}
+
+	return CategoryInternal
 }
 
 // IsRetryableByDefault determines if an error is retryable by default.

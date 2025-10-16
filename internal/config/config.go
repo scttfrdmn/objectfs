@@ -439,83 +439,120 @@ func (c *Configuration) LoadFromFile(filename string) error {
 	return nil
 }
 
+// envMapping defines environment variable mappings and setters
+type envMapping struct {
+	envVar string
+	setter func(*Configuration, string) error
+}
+
+// getEnvMappings returns all environment variable mappings
+func getEnvMappings() []envMapping {
+	return []envMapping{
+		// Global settings
+		{"OBJECTFS_LOG_LEVEL", func(c *Configuration, val string) error {
+			c.Global.LogLevel = val
+			return nil
+		}},
+		{"OBJECTFS_LOG_FILE", func(c *Configuration, val string) error {
+			c.Global.LogFile = val
+			return nil
+		}},
+		{"OBJECTFS_METRICS_PORT", func(c *Configuration, val string) error {
+			if port, err := strconv.Atoi(val); err == nil {
+				c.Global.MetricsPort = port
+			}
+			return nil
+		}},
+
+		// Performance settings
+		{"OBJECTFS_CACHE_SIZE", func(c *Configuration, val string) error {
+			c.Performance.CacheSize = val
+			return nil
+		}},
+		{"OBJECTFS_WRITE_BUFFER_SIZE", func(c *Configuration, val string) error {
+			c.Performance.WriteBufferSize = val
+			return nil
+		}},
+		{"OBJECTFS_MAX_CONCURRENCY", func(c *Configuration, val string) error {
+			if concurrency, err := strconv.Atoi(val); err == nil {
+				c.Performance.MaxConcurrency = concurrency
+			}
+			return nil
+		}},
+		{"OBJECTFS_READ_AHEAD_SIZE", func(c *Configuration, val string) error {
+			c.Performance.ReadAheadSize = val
+			return nil
+		}},
+		{"OBJECTFS_COMPRESSION_ENABLED", func(c *Configuration, val string) error {
+			c.Performance.CompressionEnabled = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+		{"OBJECTFS_CONNECTION_POOL_SIZE", func(c *Configuration, val string) error {
+			if poolSize, err := strconv.Atoi(val); err == nil {
+				c.Performance.ConnectionPoolSize = poolSize
+			}
+			return nil
+		}},
+
+		// Cache settings
+		{"OBJECTFS_CACHE_TTL", func(c *Configuration, val string) error {
+			if duration, err := time.ParseDuration(val); err == nil {
+				c.Cache.TTL = duration
+			}
+			return nil
+		}},
+
+		// Feature flags
+		{"OBJECTFS_PREFETCHING", func(c *Configuration, val string) error {
+			c.Features.Prefetching = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+		{"OBJECTFS_BATCH_OPERATIONS", func(c *Configuration, val string) error {
+			c.Features.BatchOperations = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+		{"OBJECTFS_OFFLINE_MODE", func(c *Configuration, val string) error {
+			c.Features.OfflineMode = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+
+		// Read-ahead settings
+		{"OBJECTFS_READAHEAD_ENABLED", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.Enabled = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+		{"OBJECTFS_READAHEAD_SIZE", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.Size = val
+			return nil
+		}},
+		{"OBJECTFS_READAHEAD_STRATEGY", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.Strategy = val
+			return nil
+		}},
+		{"OBJECTFS_READAHEAD_PATTERN_DETECTION", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.EnablePatternDetection = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+		{"OBJECTFS_READAHEAD_PREFETCH", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.EnablePrefetch = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+		{"OBJECTFS_READAHEAD_ML_PREDICTION", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.EnableMLPrediction = strings.ToLower(val) == TrueValue
+			return nil
+		}},
+	}
+}
+
 // LoadFromEnv loads configuration from environment variables
 func (c *Configuration) LoadFromEnv() error {
-	// Global settings
-	if val := os.Getenv("OBJECTFS_LOG_LEVEL"); val != "" {
-		c.Global.LogLevel = val
-	}
-	if val := os.Getenv("OBJECTFS_LOG_FILE"); val != "" {
-		c.Global.LogFile = val
-	}
-	if val := os.Getenv("OBJECTFS_METRICS_PORT"); val != "" {
-		if port, err := strconv.Atoi(val); err == nil {
-			c.Global.MetricsPort = port
+	for _, mapping := range getEnvMappings() {
+		if val := os.Getenv(mapping.envVar); val != "" {
+			if err := mapping.setter(c, val); err != nil {
+				return fmt.Errorf("failed to set %s: %w", mapping.envVar, err)
+			}
 		}
 	}
-
-	// Performance settings
-	if val := os.Getenv("OBJECTFS_CACHE_SIZE"); val != "" {
-		c.Performance.CacheSize = val
-	}
-	if val := os.Getenv("OBJECTFS_WRITE_BUFFER_SIZE"); val != "" {
-		c.Performance.WriteBufferSize = val
-	}
-	if val := os.Getenv("OBJECTFS_MAX_CONCURRENCY"); val != "" {
-		if concurrency, err := strconv.Atoi(val); err == nil {
-			c.Performance.MaxConcurrency = concurrency
-		}
-	}
-	if val := os.Getenv("OBJECTFS_READ_AHEAD_SIZE"); val != "" {
-		c.Performance.ReadAheadSize = val
-	}
-	if val := os.Getenv("OBJECTFS_COMPRESSION_ENABLED"); val != "" {
-		c.Performance.CompressionEnabled = strings.ToLower(val) == TrueValue
-	}
-	if val := os.Getenv("OBJECTFS_CONNECTION_POOL_SIZE"); val != "" {
-		if poolSize, err := strconv.Atoi(val); err == nil {
-			c.Performance.ConnectionPoolSize = poolSize
-		}
-	}
-
-	// Cache settings
-	if val := os.Getenv("OBJECTFS_CACHE_TTL"); val != "" {
-		if duration, err := time.ParseDuration(val); err == nil {
-			c.Cache.TTL = duration
-		}
-	}
-
-	// Feature flags
-	if val := os.Getenv("OBJECTFS_PREFETCHING"); val != "" {
-		c.Features.Prefetching = strings.ToLower(val) == TrueValue
-	}
-	if val := os.Getenv("OBJECTFS_BATCH_OPERATIONS"); val != "" {
-		c.Features.BatchOperations = strings.ToLower(val) == TrueValue
-	}
-	if val := os.Getenv("OBJECTFS_OFFLINE_MODE"); val != "" {
-		c.Features.OfflineMode = strings.ToLower(val) == TrueValue
-	}
-
-	// Read-ahead settings
-	if val := os.Getenv("OBJECTFS_READAHEAD_ENABLED"); val != "" {
-		c.Performance.ReadAhead.Enabled = strings.ToLower(val) == TrueValue
-	}
-	if val := os.Getenv("OBJECTFS_READAHEAD_SIZE"); val != "" {
-		c.Performance.ReadAhead.Size = val
-	}
-	if val := os.Getenv("OBJECTFS_READAHEAD_STRATEGY"); val != "" {
-		c.Performance.ReadAhead.Strategy = val
-	}
-	if val := os.Getenv("OBJECTFS_READAHEAD_PATTERN_DETECTION"); val != "" {
-		c.Performance.ReadAhead.EnablePatternDetection = strings.ToLower(val) == TrueValue
-	}
-	if val := os.Getenv("OBJECTFS_READAHEAD_PREFETCH"); val != "" {
-		c.Performance.ReadAhead.EnablePrefetch = strings.ToLower(val) == TrueValue
-	}
-	if val := os.Getenv("OBJECTFS_READAHEAD_ML_PREDICTION"); val != "" {
-		c.Performance.ReadAhead.EnableMLPrediction = strings.ToLower(val) == TrueValue
-	}
-
 	return nil
 }
 
