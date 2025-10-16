@@ -13,15 +13,19 @@ import (
 type LogLevel int
 
 const (
-	DEBUG LogLevel = iota
+	TRACE LogLevel = iota
+	DEBUG
 	INFO
 	WARN
 	ERROR
+	FATAL
 )
 
 // String returns the string representation of the log level
 func (l LogLevel) String() string {
 	switch l {
+	case TRACE:
+		return "TRACE"
 	case DEBUG:
 		return "DEBUG"
 	case INFO:
@@ -30,6 +34,8 @@ func (l LogLevel) String() string {
 		return "WARN"
 	case ERROR:
 		return "ERROR"
+	case FATAL:
+		return "FATAL"
 	default:
 		return "UNKNOWN"
 	}
@@ -38,6 +44,8 @@ func (l LogLevel) String() string {
 // ParseLogLevel parses a string log level
 func ParseLogLevel(level string) (LogLevel, error) {
 	switch strings.ToUpper(level) {
+	case "TRACE":
+		return TRACE, nil
 	case "DEBUG":
 		return DEBUG, nil
 	case "INFO":
@@ -46,6 +54,8 @@ func ParseLogLevel(level string) (LogLevel, error) {
 		return WARN, nil
 	case "ERROR":
 		return ERROR, nil
+	case "FATAL":
+		return FATAL, nil
 	default:
 		return INFO, fmt.Errorf("invalid log level: %s", level)
 	}
