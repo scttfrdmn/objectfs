@@ -49,6 +49,16 @@ jobs:
     - name: Run Gosec Security Scanner
       run: gosec -fmt sarif -out gosec.sarif -no-fail ./...
 
+    - name: Fix Gosec SARIF format
+      if: always()
+      run: |
+        # Remove the problematic 'fixes' field from SARIF output
+        # gosec generates invalid artifactChanges that GitHub rejects
+        if [ -f gosec.sarif ]; then
+          jq 'del(.runs[].results[].fixes)' gosec.sarif > gosec-fixed.sarif
+          mv gosec-fixed.sarif gosec.sarif
+        fi
+
     - name: Upload Gosec SARIF file
       uses: github/codeql-action/upload-sarif@v3
       if: always()
