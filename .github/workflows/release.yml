@@ -3,10 +3,10 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+    - v*.*.*
 
 env:
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.24'
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
@@ -32,7 +32,7 @@ jobs:
         # Extract version from tag
         VERSION=${GITHUB_REF#refs/tags/}
         echo "VERSION=$VERSION" >> $GITHUB_ENV
-        
+
         # Generate changelog from commits since last tag
         PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
         if [ -n "$PREVIOUS_TAG" ]; then
@@ -40,11 +40,11 @@ jobs:
         else
           CHANGELOG=$(git log --pretty=format:"* %s (%h)")
         fi
-        
+
         # Save changelog to file
         echo "## Changes" > changelog.md
         echo "$CHANGELOG" >> changelog.md
-        
+
         # Set output for use in release
         {
           echo 'CHANGELOG<<EOF'
@@ -83,29 +83,29 @@ jobs:
     strategy:
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            name: linux-amd64
-          - goos: linux
-            goarch: arm64
-            name: linux-arm64
-          - goos: linux
-            goarch: arm
-            goarm: 7
-            name: linux-armv7
-          - goos: darwin
-            goarch: amd64
-            name: darwin-amd64
-          - goos: darwin
-            goarch: arm64
-            name: darwin-arm64
-          - goos: windows
-            goarch: amd64
-            name: windows-amd64
-            ext: .exe
-          - goos: freebsd
-            goarch: amd64
-            name: freebsd-amd64
+        - goos: linux
+          goarch: amd64
+          name: linux-amd64
+        - goos: linux
+          goarch: arm64
+          name: linux-arm64
+        - goos: linux
+          goarch: arm
+          goarm: 7
+          name: linux-armv7
+        - goos: darwin
+          goarch: amd64
+          name: darwin-amd64
+        - goos: darwin
+          goarch: arm64
+          name: darwin-arm64
+        - goos: windows
+          goarch: amd64
+          name: windows-amd64
+          ext: .exe
+        - goos: freebsd
+          goarch: amd64
+          name: freebsd-amd64
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -133,13 +133,13 @@ jobs:
         VERSION=${GITHUB_REF#refs/tags/}
         COMMIT=$(git rev-parse --short HEAD)
         BUILD_TIME=$(date -u '+%Y-%m-%d_%I:%M:%S%p')
-        
+
         LDFLAGS="-s -w -X main.Version=$VERSION -X main.Commit=$COMMIT -X main.BuildTime=$BUILD_TIME"
-        
+
         mkdir -p dist
         BINARY_NAME="objectfs-${{ matrix.name }}${{ matrix.ext }}"
         go build -ldflags "$LDFLAGS" -tags "release,netgo" -o "dist/$BINARY_NAME" ./cmd/objectfs
-        
+
         # Create tarball (except for Windows)
         cd dist
         if [ "${{ matrix.goos }}" != "windows" ]; then
@@ -234,15 +234,15 @@ jobs:
     - name: Run Trivy vulnerability scanner on binary
       uses: aquasecurity/trivy-action@master
       with:
-        scan-type: 'fs'
-        scan-ref: './objectfs-linux-amd64'
-        format: 'sarif'
-        output: 'trivy-binary.sarif'
+        scan-type: fs
+        scan-ref: ./objectfs-linux-amd64
+        format: sarif
+        output: trivy-binary.sarif
 
     - name: Upload Trivy scan results
       uses: github/codeql-action/upload-sarif@v2
       with:
-        sarif_file: 'trivy-binary.sarif'
+        sarif_file: trivy-binary.sarif
 
   # Update package repositories
   update-packages:
@@ -294,15 +294,15 @@ jobs:
     - name: Generate documentation
       run: |
         mkdir -p site
-        
+
         # Generate API documentation
         go doc -all ./... > site/api.md
-        
+
         # Copy documentation files
         cp README.md site/
         cp CHANGELOG.md site/
         cp CONTRIBUTING.md site/
-        
+
         # Create index page
         cat > site/index.html << 'EOF'
         <!DOCTYPE html>

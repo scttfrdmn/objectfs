@@ -20,7 +20,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: 1.23.x
+        go-version: 1.24.x
         cache: true
 
     - name: Run tests
@@ -35,7 +35,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: 1.23.x
+        go-version: 1.24.x
 
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v4
