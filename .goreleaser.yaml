@@ -1,0 +1,373 @@
+# GoReleaser configuration for ObjectFS
+# https://goreleaser.com/customization/
+
+version: 2
+
+# Project metadata
+project_name: objectfs
+
+# Before hooks - run before building
+before:
+  hooks:
+  - go mod tidy
+  - go generate ./...
+
+# Build configuration
+builds:
+- id: objectfs
+  binary: objectfs
+  main: ./cmd/objectfs
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux      # Linux-only: ObjectFS uses FUSE which is Linux-specific
+  goarch:
+  - amd64
+  - arm64
+  ldflags:
+  - -s -w
+  - -X main.Version={{.Version}}
+  - -X main.Commit={{.Commit}}
+  - -X main.BuildTime={{.Date}}
+  tags:
+  - release
+  - netgo
+
+# Archives configuration
+archives:
+- id: objectfs
+  format: tar.gz
+  name_template: >-
+    {{ .ProjectName }}_
+    {{- .Version }}_
+    {{- .Os }}_
+    {{- if eq .Arch "amd64" }}x86_64
+    {{- else if eq .Arch "386" }}i386
+    {{- else }}{{ .Arch }}{{ end }}
+    {{- if .Arm }}v{{ .Arm }}{{ end }}
+  files:
+  - README.md
+  - CHANGELOG.md
+  - LICENSE
+  - CONTRIBUTING.md
+  - docs/**/*
+  builds:
+  - objectfs
+
+# Checksum configuration
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Snapshot configuration (for testing releases)
+snapshot:
+  version_template: '{{ incpatch .Version }}-snapshot-{{.ShortCommit}}'
+
+# Changelog configuration
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+    - '^docs:'
+    - '^test:'
+    - '^chore:'
+    - Merge pull request
+    - Merge branch
+  groups:
+  - title: 🎉 New Features
+    regexp: ^.*?feat(\([[:word:]]+\))??!?:.+$
+    order: 0
+  - title: 🐛 Bug Fixes
+    regexp: ^.*?fix(\([[:word:]]+\))??!?:.+$
+    order: 1
+  - title: ⚡ Performance Improvements
+    regexp: ^.*?perf(\([[:word:]]+\))??!?:.+$
+    order: 2
+  - title: 🔒 Security Fixes
+    regexp: ^.*?(sec|security)(\([[:word:]]+\))??!?:.+$
+    order: 3
+  - title: 📝 Documentation
+    regexp: ^.*?docs?(\([[:word:]]+\))??!?:.+$
+    order: 4
+  - title: 🔧 Other Changes
+    order: 999
+
+# Homebrew tap configuration (Linuxbrew)
+brews:
+- name: objectfs
+  repository:
+    owner: scttfrdmn
+    name: homebrew-tap
+    branch: main
+    token: '{{ .Env.GITHUB_TOKEN }}'
+
+  commit_msg_template: Brew formula update for {{ .ProjectName }} version {{ .Tag }}
+
+  homepage: https://github.com/scttfrdmn/objectfs
+  description: High-performance FUSE filesystem for S3-compatible object storage
+  license: Apache-2.0
+
+    # Installation configuration
+  install: |
+    bin.install "objectfs"
+
+    # Install documentation
+    doc.install "README.md"
+    doc.install "CHANGELOG.md"
+    doc.install "CONTRIBUTING.md"
+
+    # Install docs directory
+    (share/"objectfs"/"docs").install Dir["docs/*"]
+
+    # Create config directory
+    (etc/"objectfs").mkpath
+
+    # Post-install message
+  caveats: |
+    ObjectFS has been installed!
+
+    Quick start:
+      objectfs --help                                    # Show help
+      objectfs version                                   # Show version
+      objectfs mount s3://bucket /mnt/point              # Mount S3 bucket
+
+    ObjectFS requires:
+      - FUSE 3.x (install: apt-get install fuse3)
+      - S3 credentials (AWS, MinIO, etc.)
+
+    Configuration:
+      Create config at: ~/.config/objectfs/config.yaml
+      Or: /etc/objectfs/config.yaml
+
+    Documentation: https://github.com/scttfrdmn/objectfs/tree/main/docs
+
+    # Test block
+  test: |
+    system "#{bin}/objectfs", "version"
+
+    # Dependencies
+  dependencies:
+  - name: go
+    type: build
+  - name: fuse3
+    type: optional
+
+# Linux packages (deb, rpm, apk)
+nfpms:
+- id: objectfs
+  package_name: objectfs
+
+    # Package metadata
+  vendor: Scott Freedman
+  homepage: https://github.com/scttfrdmn/objectfs
+  maintainer: Scott Freedman <scott@example.com>
+  description: |
+    ObjectFS is a high-performance FUSE filesystem that provides transparent
+    access to S3-compatible object storage. Features include multi-tier caching,
+    compression, archive access, and advanced cost optimization.
+  license: Apache-2.0
+
+    # Formats to generate
+  formats:
+  - deb
+  - rpm
+  - apk      # Alpine Linux
+
+    # System dependencies
+  dependencies:
+  - fuse3
+
+  recommends:
+  - fuse3
+
+    # Additional files
+  contents:
+      # Documentation
+  - src: README.md
+    dst: /usr/share/doc/objectfs/README.md
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/objectfs/CHANGELOG.md
+  - src: CONTRIBUTING.md
+    dst: /usr/share/doc/objectfs/CONTRIBUTING.md
+  - src: LICENSE
+    dst: /usr/share/doc/objectfs/LICENSE
+
+      # Example configuration
+  - src: configs/example.yaml
+    dst: /usr/share/objectfs/configs/example.yaml
+    type: config|noreplace
+
+      # Systemd service
+  - src: configs/systemd/objectfs@.service
+    dst: /usr/lib/systemd/system/objectfs@.service
+
+      # Documentation
+  - src: docs/
+    dst: /usr/share/doc/objectfs/
+    type: doc
+
+    # Scripts
+  scripts:
+    postinstall: scripts/postinstall.sh
+    preremove: scripts/preremove.sh
+
+    # Overrides per package format
+  deb:
+    lintian_overrides:
+    - statically-linked-binary
+    - changelog-file-missing-in-native-package
+
+  rpm:
+    summary: High-performance FUSE filesystem for S3
+    group: System Environment/Daemons
+    compression: lzma
+
+  apk:
+    signature:
+      key_file: '{{ if index .Env "APK_KEY_FILE" }}{{ .Env.APK_KEY_FILE }}{{ end }}'
+
+# Docker images
+dockers:
+- image_templates:
+  - ghcr.io/scttfrdmn/objectfs:{{ .Version }}-amd64
+  - ghcr.io/scttfrdmn/objectfs:latest-amd64
+  use: buildx
+  dockerfile: Dockerfile
+  build_flag_templates:
+  - --platform=linux/amd64
+  - --label=org.opencontainers.image.title={{ .ProjectName }}
+  - --label=org.opencontainers.image.description=High-performance FUSE filesystem for S3
+  - --label=org.opencontainers.image.url=https://github.com/scttfrdmn/objectfs
+  - --label=org.opencontainers.image.source=https://github.com/scttfrdmn/objectfs
+  - --label=org.opencontainers.image.version={{ .Version }}
+  - --label=org.opencontainers.image.created={{ .Date }}
+  - --label=org.opencontainers.image.revision={{ .FullCommit }}
+  - --label=org.opencontainers.image.licenses=Apache-2.0
+  goarch: amd64
+
+- image_templates:
+  - ghcr.io/scttfrdmn/objectfs:{{ .Version }}-arm64
+  - ghcr.io/scttfrdmn/objectfs:latest-arm64
+  use: buildx
+  dockerfile: Dockerfile
+  build_flag_templates:
+  - --platform=linux/arm64
+  - --label=org.opencontainers.image.title={{ .ProjectName }}
+  - --label=org.opencontainers.image.description=High-performance FUSE filesystem for S3
+  - --label=org.opencontainers.image.url=https://github.com/scttfrdmn/objectfs
+  - --label=org.opencontainers.image.source=https://github.com/scttfrdmn/objectfs
+  - --label=org.opencontainers.image.version={{ .Version }}
+  - --label=org.opencontainers.image.created={{ .Date }}
+  - --label=org.opencontainers.image.revision={{ .FullCommit }}
+  - --label=org.opencontainers.image.licenses=Apache-2.0
+  goarch: arm64
+
+# Docker manifest (multi-arch support)
+docker_manifests:
+- name_template: ghcr.io/scttfrdmn/objectfs:{{ .Version }}
+  image_templates:
+  - ghcr.io/scttfrdmn/objectfs:{{ .Version }}-amd64
+  - ghcr.io/scttfrdmn/objectfs:{{ .Version }}-arm64
+
+- name_template: ghcr.io/scttfrdmn/objectfs:latest
+  image_templates:
+  - ghcr.io/scttfrdmn/objectfs:latest-amd64
+  - ghcr.io/scttfrdmn/objectfs:latest-arm64
+
+# GitHub Release configuration
+release:
+  github:
+    owner: scttfrdmn
+    name: objectfs
+
+  # Release notes
+  header: |
+    ## ObjectFS {{ .Tag }}
+
+    High-performance FUSE filesystem for S3-compatible object storage.
+
+    ### What's New
+
+    See changelog below for detailed changes in this release.
+
+  footer: |
+    ## Installation
+
+    ### Homebrew (Linux)
+    ```bash
+    brew install scttfrdmn/tap/objectfs
+    ```
+
+    ### Debian/Ubuntu
+    ```bash
+    wget https://github.com/scttfrdmn/objectfs/releases/download/{{ .Tag }}/objectfs_{{ .Version }}_linux_x86_64.deb
+    sudo dpkg -i objectfs_{{ .Version }}_linux_x86_64.deb
+    ```
+
+    ### RHEL/CentOS/Fedora
+    ```bash
+    wget https://github.com/scttfrdmn/objectfs/releases/download/{{ .Tag }}/objectfs_{{ .Version }}_linux_x86_64.rpm
+    sudo rpm -i objectfs_{{ .Version }}_linux_x86_64.rpm
+    ```
+
+    ### Alpine Linux
+    ```bash
+    wget https://github.com/scttfrdmn/objectfs/releases/download/{{ .Tag }}/objectfs_{{ .Version }}_linux_x86_64.apk
+    sudo apk add --allow-untrusted objectfs_{{ .Version }}_linux_x86_64.apk
+    ```
+
+    ### Docker
+    ```bash
+    docker pull ghcr.io/scttfrdmn/objectfs:{{ .Tag }}
+    ```
+
+    ### Manual Installation
+    ```bash
+    wget https://github.com/scttfrdmn/objectfs/releases/download/{{ .Tag }}/objectfs_{{ .Version }}_linux_x86_64.tar.gz
+    tar -xzf objectfs_{{ .Version }}_linux_x86_64.tar.gz
+    sudo mv objectfs /usr/local/bin/
+    ```
+
+    ## Requirements
+
+    - **Linux kernel 4.9+** (for BBR network optimization)
+    - **FUSE 3.x** (`apt-get install fuse3` or `yum install fuse3`)
+    - **S3-compatible storage** (AWS S3, MinIO, Ceph, etc.)
+
+    ## Quick Start
+
+    ```bash
+    # Mount S3 bucket
+    objectfs mount s3://my-bucket /mnt/objectfs
+
+    # With configuration file
+    objectfs mount --config /etc/objectfs/config.yaml
+
+    # Check version
+    objectfs version
+    ```
+
+    ## Documentation
+
+    - [README](https://github.com/scttfrdmn/objectfs/blob/main/README.md)
+    - [Documentation](https://github.com/scttfrdmn/objectfs/tree/main/docs)
+    - [Configuration Guide](https://github.com/scttfrdmn/objectfs/blob/main/docs/CONFIGURATION.md)
+    - [Performance Tuning](https://github.com/scttfrdmn/objectfs/blob/main/docs/PERFORMANCE.md)
+
+    **Full Changelog**: https://github.com/scttfrdmn/objectfs/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+  # Release name template
+  name_template: ObjectFS v{{.Version}}
+
+  # Draft release (set to false for automatic publishing)
+  draft: false
+
+  # Prerelease detection
+  prerelease: auto
+
+  # Replace existing release
+  mode: replace
+
+  # Include metadata
+  make_latest: true

@@ -1,0 +1,186 @@
+name: 📚 Documentation
+description: Report documentation issues or suggest improvements
+title: '[Docs]: '
+labels: ['type: documentation', 'status: triage']
+body:
+- type: markdown
+  attributes:
+    value: |
+      Help us improve ObjectFS documentation! This includes user guides, API docs, tutorials,
+      architecture documentation, and persona walkthroughs.
+
+- type: dropdown
+  id: doc-type
+  attributes:
+    label: Documentation Type
+    description: What type of documentation needs work?
+    options:
+    - User Guide / Tutorial
+    - API Documentation
+    - Configuration Reference
+    - Architecture / Design
+    - Persona Walkthrough
+    - Performance Tuning Guide
+    - Troubleshooting Guide
+    - Installation Guide
+    - CLI Reference
+    - Code Comments
+    - README
+    - Contributing Guide
+    - Other
+  validations:
+    required: true
+
+- type: dropdown
+  id: area
+  attributes:
+    label: Area
+    description: Which topic or component?
+    options:
+    - Getting Started
+    - Installation & Setup
+    - Configuration
+    - FUSE Operations
+    - S3 Backend
+    - Caching
+    - Performance Tuning
+    - Monitoring & Metrics
+    - Security & Permissions
+    - Archive Support
+    - Compression
+    - Troubleshooting
+    - Advanced Usage
+    - Development & Contributing
+    - All Areas
+  validations:
+    required: true
+
+- type: dropdown
+  id: persona
+  attributes:
+    label: Target Persona
+    description: Which persona would benefit most?
+    options:
+    - Computational Biologist
+    - Physics Researcher
+    - Climate Scientist
+    - Lab Manager / PI
+    - Research Computing Staff
+    - Data Engineer
+    - ML Engineer
+    - DevOps Engineer
+    - Cloud Developer
+    - All Personas
+    - Contributors / Developers
+
+- type: dropdown
+  id: issue-type
+  attributes:
+    label: Issue Type
+    description: What kind of documentation issue?
+    options:
+    - Missing Documentation
+    - Incorrect/Outdated Information
+    - Unclear Explanation
+    - Missing Examples
+    - Poor Organization
+    - Typos / Grammar
+    - Broken Links
+    - Missing Diagrams
+  validations:
+    required: true
+
+- type: textarea
+  id: description
+  attributes:
+    label: Documentation Issue
+    description: What's wrong or missing?
+    placeholder: |
+      The caching configuration documentation doesn't explain how LRU, persistent,
+      and predictive caching differ, or when to use each one. As a new user,
+      I don't know which cache strategy to choose for my workload.
+  validations:
+    required: true
+
+- type: textarea
+  id: location
+  attributes:
+    label: Current Location
+    description: Where is this documentation (or where should it be)?
+    placeholder: |
+      - File: docs/configuration/cache.md
+      - Section: "Cache Configuration"
+      - URL: https://objectfs.io/docs/config/cache
+
+      OR: Should be added to docs/guides/cache-strategies.md (doesn't exist)
+
+- type: textarea
+  id: suggestion
+  attributes:
+    label: Suggested Improvement
+    description: How should this be improved?
+    placeholder: |
+      Add a new guide: "Choosing a Cache Strategy"
+
+      Content should cover:
+      1. Overview of three cache types (LRU, persistent, predictive)
+      2. When to use each:
+         - LRU: General purpose, limited cache size
+         - Persistent: Datasets that fit in cache, frequently re-read
+         - Predictive: Sequential access patterns, prefetching
+      3. Example configurations for common research workloads
+      4. Performance comparison table
+      5. Migration guide between cache types
+
+- type: textarea
+  id: example
+  attributes:
+    label: Example Content (optional)
+    description: Draft content or outline if you have it
+    render: markdown
+    placeholder: |
+      ## Choosing a Cache Strategy
+
+      ObjectFS offers three caching strategies...
+
+      ### LRU Cache
+      Best for: Mixed workloads, limited cache space
+      ```yaml
+      cache:
+        type: lru
+        max_size: 50GB
+      ```
+
+- type: dropdown
+  id: priority
+  attributes:
+    label: Priority
+    description: How important is this documentation?
+    options:
+    - Critical - Blocking users from using ObjectFS
+    - High - Frequently needed, currently unclear
+    - Medium - Would improve user experience
+    - Low - Minor improvement
+  validations:
+    required: true
+
+- type: textarea
+  id: affected
+  attributes:
+    label: Who's Affected?
+    description: Who needs this documentation?
+    placeholder: |
+      - New users trying to configure ObjectFS for the first time
+      - Users migrating from s3fs or goofys
+      - Research computing staff deploying for multiple labs
+      - Anyone experiencing performance issues
+
+- type: textarea
+  id: context
+  attributes:
+    label: Additional Context
+    description: Related issues, discussions, or external references
+    placeholder: |
+      - Related to issue #123 (cache configuration confusion)
+      - Similar to goofys docs: https://example.com/goofys/cache
+      - User question in discussion #456

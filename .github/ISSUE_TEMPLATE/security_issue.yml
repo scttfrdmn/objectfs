@@ -1,0 +1,204 @@
+name: 🔒 Security Issue
+description: Report security vulnerabilities or hardening opportunities (private report recommended)
+title: '[Security]: '
+labels: ['type: security', 'status: triage', 'priority: high']
+body:
+- type: markdown
+  attributes:
+    value: |
+      **⚠️ IMPORTANT: For security vulnerabilities, please use GitHub's Private Security Advisory feature instead.**
+      Go to: Security → Advisories → New draft advisory
+
+      Use this template for:
+      - Security hardening suggestions
+      - Non-critical security improvements
+      - Security-related feature requests
+      - Permission/access control issues (non-exploitable)
+
+      For actual vulnerabilities, exploits, or security bugs, DO NOT create a public issue.
+
+- type: dropdown
+  id: security-type
+  attributes:
+    label: Security Issue Type
+    description: What type of security concern?
+    options:
+    - Vulnerability (use Private Advisory instead!)
+    - Security Hardening
+    - Permission/Access Control
+    - Credential Management
+    - Audit Logging
+    - Encryption
+    - Authentication
+    - Data Privacy
+    - Compliance
+    - Security Documentation
+    - Other
+  validations:
+    required: true
+
+- type: dropdown
+  id: component
+  attributes:
+    label: Component
+    description: Which part of ObjectFS?
+    options:
+    - FUSE Layer (file permissions)
+    - S3 Backend (credentials, encryption)
+    - Configuration (secrets management)
+    - Metrics (data exposure)
+    - Health Monitoring
+    - CLI (credential handling)
+    - API
+    - Logging (sensitive data)
+    - All Components
+  validations:
+    required: true
+
+- type: textarea
+  id: description
+  attributes:
+    label: Description
+    description: Describe the security concern
+    placeholder: |
+      ObjectFS logs S3 request URLs which may contain sensitive bucket names
+      or access patterns. These logs could expose information about research
+      datasets to unauthorized users who have access to log files.
+  validations:
+    required: true
+
+- type: textarea
+  id: current-behavior
+  attributes:
+    label: Current Behavior
+    description: What happens now?
+    placeholder: |
+      Current behavior:
+      - S3 URLs are logged at INFO level
+      - Logs include full bucket paths
+      - Log files are world-readable by default
+      - No log rotation or retention policy
+  validations:
+    required: true
+
+- type: textarea
+  id: proposed-solution
+  attributes:
+    label: Proposed Solution
+    description: How should this be addressed?
+    placeholder: |
+      Proposed improvements:
+      1. Redact sensitive parts of URLs in logs (show only bucket, not full path)
+      2. Log S3 operations at DEBUG level, not INFO
+      3. Restrict log file permissions to 0600 by default
+      4. Add configuration for log retention policy
+      5. Document log security best practices
+  validations:
+    required: true
+
+- type: dropdown
+  id: severity
+  attributes:
+    label: Severity
+    description: How severe is this security issue?
+    options:
+    - Critical - Immediate risk of data breach
+    - High - Significant risk, should be addressed urgently
+    - Medium - Potential risk, should be addressed
+    - Low - Best practice improvement
+  validations:
+    required: true
+
+- type: textarea
+  id: impact
+  attributes:
+    label: Impact
+    description: Who/what is affected?
+    placeholder: |
+      Affected:
+      - Research labs with sensitive data (HIPAA, GDPR)
+      - Multi-tenant environments
+      - Users with shared infrastructure
+      - Systems with audit/compliance requirements
+
+      Potential impact:
+      - Information disclosure about research datasets
+      - Exposure of data access patterns
+      - Compliance violations
+
+- type: dropdown
+  id: compliance
+  attributes:
+    label: Compliance Relevance
+    description: Does this relate to compliance requirements?
+    options:
+    - HIPAA (healthcare data)
+    - GDPR (EU data privacy)
+    - FISMA (federal systems)
+    - SOC 2
+    - ISO 27001
+    - University/Institution Policy
+    - None
+    - Not sure
+
+- type: textarea
+  id: threat-model
+  attributes:
+    label: Threat Model
+    description: What attack or misuse scenario does this address?
+    placeholder: |
+      Threat scenario:
+      1. Attacker gains read access to log directory (e.g., via compromised service account)
+      2. Attacker reads ObjectFS logs containing full S3 paths
+      3. Attacker learns about sensitive research datasets and access patterns
+      4. Information used for targeted attacks or compliance violation
+
+      Mitigations:
+      - Log redaction prevents path disclosure
+      - Restricted permissions prevent unauthorized log access
+      - Audit logs track access to logs themselves
+
+- type: textarea
+  id: workaround
+  attributes:
+    label: Current Workaround
+    description: How are you mitigating this currently?
+    placeholder: |
+      Current workarounds:
+      - Manually restrict log directory permissions
+      - Use log filtering to redact URLs post-creation
+      - Disable INFO-level S3 logging
+      - Store ObjectFS logs on encrypted volumes
+
+- type: textarea
+  id: references
+  attributes:
+    label: References
+    description: Related CVEs, security advisories, or documentation
+    placeholder: |
+      - Similar issue in goofys: https://github.com/kahing/goofys/issues/123
+      - OWASP Logging Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
+      - CWE-532: Insertion of Sensitive Information into Log File
+
+- type: textarea
+  id: testing
+  attributes:
+    label: Testing & Validation
+    description: How can we verify the fix?
+    placeholder: |
+      Verification steps:
+      1. Enable S3 operations
+      2. Check logs for redacted URLs
+      3. Verify log file permissions are 0600
+      4. Test that legitimate debugging still works
+      5. Run security scanner (gosec, trivy)
+
+- type: textarea
+  id: context
+  attributes:
+    label: Additional Context
+    description: Any other relevant information
+    placeholder: |
+      - This becomes more important for multi-tenant deployments
+      - Related to upcoming compliance audit
+      - Similar hardening done in v0.4.0 for credential handling

@@ -1,0 +1,208 @@
+name: 🐛 Bug Report
+description: Report a bug or unexpected behavior
+title: '[Bug]: '
+labels: ['type: bug', 'status: triage']
+body:
+- type: markdown
+  attributes:
+    value: |
+      Thanks for taking the time to report a bug! Please fill out the information below to help us diagnose and fix the issue.
+
+- type: dropdown
+  id: persona
+  attributes:
+    label: User Persona
+    description: Which research persona best describes you?
+    options:
+    - Computational Biologist
+    - Physics Researcher
+    - Climate Scientist
+    - Lab Manager / PI
+    - Research Computing Staff
+    - Data Engineer
+    - ML Engineer
+    - DevOps Engineer
+    - Cloud Developer
+    - Other
+  validations:
+    required: true
+
+- type: dropdown
+  id: component
+  attributes:
+    label: Component
+    description: Which part of ObjectFS is affected?
+    options:
+    - FUSE Layer
+    - S3 Backend
+    - Cache System
+    - Write Buffer
+    - Metadata Management
+    - Metrics & Observability
+    - Health Monitoring
+    - Configuration
+    - CLI
+    - Archive Handling
+    - Compression
+    - Other
+  validations:
+    required: true
+
+- type: textarea
+  id: description
+  attributes:
+    label: Bug Description
+    description: A clear and concise description of the bug
+    placeholder: What happened? What file operation failed?
+  validations:
+    required: true
+
+- type: textarea
+  id: steps
+  attributes:
+    label: Steps to Reproduce
+    description: How can we reproduce this issue?
+    placeholder: |
+      1. Mount ObjectFS with config '...'
+      2. Run command '...'
+      3. Perform file operation '...'
+      4. See error
+  validations:
+    required: true
+
+- type: textarea
+  id: expected
+  attributes:
+    label: Expected Behavior
+    description: What did you expect to happen?
+    placeholder: The file operation should...
+  validations:
+    required: true
+
+- type: textarea
+  id: actual
+  attributes:
+    label: Actual Behavior
+    description: What actually happened?
+    placeholder: Instead, the operation...
+  validations:
+    required: true
+
+- type: input
+  id: version
+  attributes:
+    label: ObjectFS Version
+    description: Run `objectfs version` to get the version
+    placeholder: v0.4.0
+  validations:
+    required: true
+
+- type: dropdown
+  id: os
+  attributes:
+    label: Operating System
+    description: What OS are you running ObjectFS on?
+    options:
+    - Linux (Ubuntu)
+    - Linux (CentOS/RHEL)
+    - Linux (Debian)
+    - Linux (Arch)
+    - Linux (Other)
+    - FreeBSD
+    - Other
+  validations:
+    required: true
+
+- type: input
+  id: os-version
+  attributes:
+    label: OS Version & Kernel
+    description: What version of your OS and kernel?
+    placeholder: Ubuntu 22.04 LTS, Kernel 5.15.0
+
+- type: input
+  id: fuse-version
+  attributes:
+    label: FUSE Version
+    description: Run `fusermount --version` or `fusermount3 --version`
+    placeholder: fusermount3 version 3.10.5
+
+- type: dropdown
+  id: s3-provider
+  attributes:
+    label: S3 Provider
+    description: Which S3-compatible storage are you using?
+    options:
+    - AWS S3
+    - MinIO
+    - Ceph
+    - Wasabi
+    - Backblaze B2
+    - DigitalOcean Spaces
+    - Other S3-compatible
+  validations:
+    required: true
+
+- type: dropdown
+  id: aws-region
+  attributes:
+    label: S3 Region
+    description: Which region is your S3 bucket in?
+    options:
+    - us-east-1
+    - us-east-2
+    - us-west-1
+    - us-west-2
+    - eu-west-1
+    - eu-central-1
+    - ap-southeast-1
+    - ap-northeast-1
+    - Other
+
+- type: textarea
+  id: config
+  attributes:
+    label: Configuration
+    description: Please paste your ObjectFS config (redact credentials!)
+    render: yaml
+
+- type: textarea
+  id: logs
+  attributes:
+    label: Relevant Logs
+    description: Please paste any relevant log output from ObjectFS
+    render: shell
+
+- type: dropdown
+  id: workload
+  attributes:
+    label: Workload Type
+    description: What type of workload triggered this bug?
+    options:
+    - Sequential Read
+    - Random Read
+    - Sequential Write
+    - Random Write
+    - Metadata Operations
+    - Large Files (>1GB)
+    - Small Files (<1MB)
+    - Archive Access
+    - Mixed Workload
+
+- type: textarea
+  id: impact
+  attributes:
+    label: Impact
+    description: How is this affecting your research/work?
+    placeholder: |
+      - Cannot access critical datasets
+      - Performance degradation affecting analysis pipeline
+      - Data integrity concerns
+      etc.
+
+- type: textarea
+  id: context
+  attributes:
+    label: Additional Context
+    description: Any other information that might help us debug this issue
+    placeholder: Error messages, strace output, performance metrics, etc.

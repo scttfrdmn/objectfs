@@ -1,0 +1,162 @@
+name: ✨ Feature Request
+description: Suggest a new feature or enhancement
+title: '[Feature]: '
+labels: ['type: enhancement', 'status: triage']
+body:
+- type: markdown
+  attributes:
+    value: |
+      Thanks for suggesting a new feature! Before submitting, please check:
+      - Does this improve one of our research persona workflows?
+      - Does it align with ObjectFS's core mission of high-performance S3-backed filesystems?
+
+- type: dropdown
+  id: persona
+  attributes:
+    label: Which Persona Benefits?
+    description: Which research persona does this feature help most?
+    options:
+    - Computational Biologist (genomics, proteomics)
+    - Physics Researcher (HPC simulations)
+    - Climate Scientist (large climate models)
+    - Lab Manager / PI (team coordination)
+    - Research Computing Staff (infrastructure)
+    - Data Engineer (data pipelines)
+    - ML Engineer (model training)
+    - DevOps Engineer (infrastructure)
+    - Cloud Developer (applications)
+    - All/Multiple Personas
+    - Not sure
+  validations:
+    required: true
+
+- type: dropdown
+  id: component
+  attributes:
+    label: Component
+    description: Which part of ObjectFS would this affect?
+    options:
+    - FUSE Layer
+    - S3 Backend
+    - Cache System
+    - Write Buffer
+    - Metadata Management
+    - Metrics & Observability
+    - Health Monitoring
+    - Configuration
+    - CLI
+    - Archive Handling (TAR.ZST)
+    - Compression (ZSTD/LZ4)
+    - Lifecycle & Tiering
+    - Network Optimization
+    - Cost Tracking
+    - Documentation
+    - All Components
+  validations:
+    required: true
+
+- type: textarea
+  id: problem
+  attributes:
+    label: Problem Statement
+    description: What research workflow problem does this feature solve?
+    placeholder: |
+      As a [persona], I need to [do something] because [reason]...
+
+      Example: As a computational biologist, I need to quickly access specific files
+      within compressed archives because my analysis pipeline reads metadata from
+      thousands of small files in TAR.ZST archives.
+  validations:
+    required: true
+
+- type: textarea
+  id: solution
+  attributes:
+    label: Proposed Solution
+    description: How would you like this feature to work?
+    placeholder: |
+      I'd like to be able to...
+
+      Example: Mount TAR.ZST archives directly with:
+      `objectfs mount s3://bucket/archive.tar.zst /mnt/archive --archive-mode`
+  validations:
+    required: true
+
+- type: textarea
+  id: alternatives
+  attributes:
+    label: Alternatives Considered
+    description: Have you thought of other ways to solve this problem?
+    placeholder: |
+      I also considered...
+      - Manual extraction (too slow)
+      - Using archivemount (doesn't support ZSTD)
+      - Custom extraction script (reinventing the wheel)
+
+- type: textarea
+  id: workflow
+  attributes:
+    label: Example Workflow
+    description: Show us how this feature would improve your research workflow
+    placeholder: |
+      Current workflow:
+      1. Download entire 100GB TAR.ZST archive from S3
+      2. Extract to local disk (takes 30 minutes)
+      3. Run analysis on extracted files
+      4. Delete extracted files to free space
+
+      With this feature:
+      1. Mount archive directly: `objectfs mount s3://bucket/data.tar.zst /mnt/data --archive-mode`
+      2. Run analysis directly on mounted files (read only what's needed)
+      3. Unmount when done
+
+      Time saved: 30+ minutes, Disk space saved: 100GB
+  validations:
+    required: true
+
+- type: dropdown
+  id: priority
+  attributes:
+    label: Priority
+    description: How important is this feature to your research?
+    options:
+    - Critical - Blocking my research work
+    - High - Would significantly improve my workflow
+    - Medium - Nice to have
+    - Low - Minor improvement
+  validations:
+    required: true
+
+- type: dropdown
+  id: phase
+  attributes:
+    label: Target Phase
+    description: Which ObjectFS development phase should this be in?
+    options:
+    - v0.5.0 - Advanced Features (archive, compression, distributed)
+    - v0.6.0 - Production Hardening (performance, reliability)
+    - v0.7.0 - Enterprise Features (multi-tenancy, compliance)
+    - v0.8.0 - Ecosystem (plugins, extensions)
+    - Future/Unsure
+
+- type: textarea
+  id: performance
+  attributes:
+    label: Performance Expectations
+    description: What are your performance requirements?
+    placeholder: |
+      - Expected throughput: 1 GB/s for sequential reads
+      - Latency requirements: <10ms for metadata ops
+      - Dataset size: 10 TB across 1M files
+      - Concurrent users: 20 researchers
+
+- type: textarea
+  id: context
+  attributes:
+    label: Additional Context
+    description: Any other information, mockups, or examples
+    placeholder: |
+      - Links to similar features in other tools
+      - Research papers describing the workflow
+      - Screenshots or diagrams
+      - Related issues or discussions

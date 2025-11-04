@@ -1,0 +1,171 @@
+name: 🔧 Technical Debt
+description: Report code that needs refactoring or improvement
+title: '[Debt]: '
+labels: ['type: technical-debt', 'status: triage']
+body:
+- type: markdown
+  attributes:
+    value: |
+      Technical debt items are code improvements that enhance maintainability, performance, or testability
+      without changing user-facing behavior. These should be prioritized alongside feature work.
+
+- type: dropdown
+  id: category
+  attributes:
+    label: Category
+    description: What type of technical debt?
+    options:
+    - Test Coverage
+    - Code Refactoring
+    - Performance Optimization
+    - Security Hardening
+    - Code Duplication
+    - API Cleanup
+    - Error Handling
+    - Deprecated Dependencies
+    - Configuration Management
+    - Documentation (Code)
+    - Build System
+    - Other
+  validations:
+    required: true
+
+- type: dropdown
+  id: component
+  attributes:
+    label: Component
+    description: Which part of the codebase?
+    options:
+    - Core (internal/core)
+    - FUSE Layer (internal/fuse)
+    - S3 Backend (internal/storage/s3)
+    - Cache System (internal/cache)
+    - Write Buffer (internal/buffer)
+    - Metadata (internal/metadata)
+    - Metrics (internal/metrics)
+    - Health (internal/health)
+    - Config (internal/config)
+    - Adapter (internal/adapter)
+    - CLI (cmd/objectfs)
+    - Archive (pkg/archive)
+    - Compression (pkg/compression)
+    - Distributed (internal/distributed)
+    - Tests
+    - Build/CI
+    - Multiple Components
+  validations:
+    required: true
+
+- type: textarea
+  id: problem
+  attributes:
+    label: Current State
+    description: What's the problem with the current code?
+    placeholder: |
+      File: internal/storage/s3/backend.go
+      Issue: The putObjectMultipart() function is 209 lines long with nested loops
+      and complex error handling, making it difficult to test and maintain.
+
+      Lines: 936-1144
+  validations:
+    required: true
+
+- type: textarea
+  id: solution
+  attributes:
+    label: Proposed Improvement
+    description: How should this be refactored?
+    placeholder: |
+      Extract multipart upload logic into separate package:
+      - internal/storage/s3/multipart/
+        - uploader.go (core upload logic)
+        - chunker.go (chunk management)
+        - retry.go (retry logic)
+
+      This would:
+      1. Reduce function length to ~50 lines
+      2. Enable unit testing of each component
+      3. Improve readability and maintainability
+  validations:
+    required: true
+
+- type: dropdown
+  id: priority
+  attributes:
+    label: Priority
+    description: How urgent is this refactoring?
+    options:
+    - Critical - Blocking other work or causing bugs
+    - High - Should be addressed in current milestone
+    - Medium - Important but not urgent
+    - Low - Nice to have
+  validations:
+    required: true
+
+- type: dropdown
+  id: effort
+  attributes:
+    label: Estimated Effort
+    description: How much work is this?
+    options:
+    - XS (< 2 hours)
+    - Small (2-4 hours)
+    - Medium (1-2 days)
+    - Large (3-5 days)
+    - XL (1-2 weeks)
+  validations:
+    required: true
+
+- type: textarea
+  id: testing
+  attributes:
+    label: Testing Strategy
+    description: How will you validate the refactoring?
+    placeholder: |
+      - Add unit tests for new multipart package (80%+ coverage)
+      - Run existing integration tests
+      - Benchmark comparison before/after
+      - Manual testing with 10GB files
+
+- type: textarea
+  id: risks
+  attributes:
+    label: Risks & Considerations
+    description: What could go wrong? What else is affected?
+    placeholder: |
+      - This is a critical code path for all writes >5MB
+      - Need to ensure no performance regression
+      - Changes affect retry logic and error handling
+      - Should be done before v0.5.0 archive work which depends on this
+
+- type: dropdown
+  id: blocking
+  attributes:
+    label: Blocks Other Work?
+    description: Does this block other features or fixes?
+    options:
+    - Yes - Blocking other issues
+    - No - Can be done independently
+  validations:
+    required: true
+
+- type: textarea
+  id: related
+  attributes:
+    label: Related Issues
+    description: Link to related TODOs, issues, or technical debt
+    placeholder: |
+      - Related to issue #123 (multipart upload failures)
+      - Blocks #456 (archive multipart support)
+      - See TODO at internal/storage/s3/backend.go:950
+      - Part of v0.5.0 technical debt milestone
+
+- type: textarea
+  id: context
+  attributes:
+    label: Additional Context
+    description: Links to code, discussions, or design docs
+    placeholder: |
+      - Code: https://github.com/scttfrdmn/objectfs/blob/main/internal/storage/s3/backend.go#L936-L1144
+      - Related PR: #789
+      - Design discussion: https://github.com/scttfrdmn/objectfs/discussions/42

@@ -1,0 +1,56 @@
+# ObjectFS Systemd Service Template
+# Usage: systemctl start objectfs@<instance-name>.service
+# Example: systemctl start objectfs@research-data.service
+#
+# Configuration should be at: /etc/objectfs/<instance-name>.yaml
+
+[Unit]
+Description=ObjectFS FUSE filesystem for %I
+Documentation=https://github.com/scttfrdmn/objectfs
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/objectfs/%i
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Environment
+Environment="OBJECTFS_CONFIG=/etc/objectfs/%i.yaml"
+
+# Pre-flight checks
+ExecStartPre=/usr/bin/objectfs version
+ExecStartPre=/bin/mkdir -p /mnt/objectfs/%i
+ExecStartPre=/bin/mkdir -p /var/cache/objectfs/%i
+ExecStartPre=/bin/mkdir -p /var/log/objectfs
+
+# Start ObjectFS
+ExecStart=/usr/bin/objectfs mount --config ${OBJECTFS_CONFIG} --foreground
+
+# Unmount on stop
+ExecStop=/bin/fusermount3 -u /mnt/objectfs/%i
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Security hardening
+# Note: ObjectFS needs privileged access for FUSE operations
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/mnt/objectfs/%i /var/cache/objectfs/%i /var/log/objectfs
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=objectfs-%i
+
+[Install]
+WantedBy=multi-user.target

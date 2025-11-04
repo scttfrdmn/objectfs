@@ -1,0 +1,161 @@
+# ObjectFS Example Configuration
+# Copy to /etc/objectfs/config.yaml or ~/.config/objectfs/config.yaml
+
+# S3 Backend Configuration
+s3:
+  endpoint: https://s3.amazonaws.com    # Or MinIO/Ceph endpoint
+  region: us-west-2
+  bucket: my-research-data
+  access_key_id: ${AWS_ACCESS_KEY_ID}    # Or set directly
+  secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+
+  # Optional: S3-compatible storage settings
+  # use_path_style: false
+  # disable_ssl: false
+
+  # Performance settings
+  max_retries: 3
+  timeout: 30s
+  max_concurrent_requests: 100
+
+# Mount Configuration
+mount:
+  point: /mnt/objectfs
+  options:
+  - allow_other
+  - default_permissions
+  - ro    # Read-only mount (remove for read-write)
+
+  # FUSE-specific options
+  fuse_options:
+  - attr_timeout=600
+  - entry_timeout=600
+  - negative_timeout=120
+
+# Cache Configuration
+cache:
+  # Cache type: lru, persistent, or predictive
+  type: persistent
+
+  # Maximum cache size
+  max_size: 100GB
+
+  # Cache location
+  path: /var/cache/objectfs
+
+  # LRU cache settings
+  lru:
+    max_items: 10000
+    ttl: 1h
+
+  # Persistent cache settings
+  persistent:
+    persist_on_shutdown: true
+    preload_on_startup: false
+
+  # Predictive cache settings
+  predictive:
+    enable: true
+    prefetch_threshold: 0.8
+    max_prefetch_size: 10GB
+
+# Write Buffer Configuration
+buffer:
+  # Maximum buffer size before flushing
+  max_size: 10GB
+
+  # Flush interval
+  flush_interval: 5s
+
+  # Flush on close
+  flush_on_close: true
+
+# Compression Configuration
+compression:
+  # Enable compression
+  enable: true
+
+  # Compression algorithm: zstd, lz4, or auto
+  algorithm: auto
+
+  # ZSTD compression level (1-22)
+  zstd_level: 3
+
+  # Minimum file size for compression
+  min_file_size: 1MB
+
+# Metrics Configuration
+metrics:
+  # Enable metrics collection
+  enable: true
+
+  # Metrics endpoint
+  listen: :9090
+
+  # Export format: prometheus, json
+  format: prometheus
+
+# Health Monitoring Configuration
+health:
+  # Enable health checks
+  enable: true
+
+  # Health check interval
+  interval: 30s
+
+  # Auto-remediation
+  auto_remediate: true
+
+# Logging Configuration
+logging:
+  # Log level: debug, info, warn, error
+  level: info
+
+  # Log format: json, text
+  format: json
+
+  # Log file path (empty for stdout)
+  file: /var/log/objectfs/objectfs.log
+
+  # Log rotation
+  max_size: 100MB
+  max_backups: 3
+  max_age: 7  # days
+
+# Performance Tuning
+performance:
+  # Read buffer size
+  read_buffer_size: 4MB
+
+  # Write buffer size
+  write_buffer_size: 4MB
+
+  # Worker pool size
+  worker_pool_size: 10
+
+  # Enable BBR congestion control (requires kernel 4.9+)
+  enable_bbr: true
+
+# Archive Support (v0.5.0+)
+archive:
+  # Enable archive access
+  enable: false
+
+  # Supported formats
+  formats:
+  - tar.zst
+  - tar.gz
+
+  # Archive cache size
+  cache_size: 10GB
+
+# Cost Optimization (v0.5.0+)
+cost:
+  # Enable cost tracking
+  enable: false
+
+  # Budget alert threshold
+  budget_threshold: 1000.0  # USD
+
+  # Alert email
+  alert_email: admin@example.com

@@ -1,0 +1,236 @@
+name: ⚡ Performance Issue
+description: Report performance problems or optimization opportunities
+title: '[Performance]: '
+labels: ['type: performance', 'status: triage']
+body:
+- type: markdown
+  attributes:
+    value: |
+      Report performance issues with ObjectFS. Include benchmarks and metrics to help us diagnose the problem.
+
+- type: dropdown
+  id: persona
+  attributes:
+    label: User Persona
+    description: Which research persona best describes you?
+    options:
+    - Computational Biologist
+    - Physics Researcher
+    - Climate Scientist
+    - Lab Manager / PI
+    - Research Computing Staff
+    - Data Engineer
+    - ML Engineer
+    - DevOps Engineer
+    - Cloud Developer
+    - Other
+  validations:
+    required: true
+
+- type: dropdown
+  id: component
+  attributes:
+    label: Component
+    description: Which part of ObjectFS is slow?
+    options:
+    - FUSE Layer
+    - S3 Backend
+    - Cache System (LRU/Persistent/Predictive)
+    - Write Buffer
+    - Metadata Operations
+    - Archive Access
+    - Compression/Decompression
+    - Network I/O
+    - Not sure
+  validations:
+    required: true
+
+- type: dropdown
+  id: operation
+  attributes:
+    label: Operation Type
+    description: Which operation is performing poorly?
+    options:
+    - Sequential Read
+    - Random Read
+    - Sequential Write
+    - Random Write
+    - Metadata Operations (stat, readdir, etc.)
+    - Large File Operations (>1GB)
+    - Small File Operations (<1MB)
+    - Archive Extraction/Access
+    - Compression Operations
+    - Cache Warming
+    - Mixed Workload
+  validations:
+    required: true
+
+- type: textarea
+  id: description
+  attributes:
+    label: Performance Issue Description
+    description: What performance problem are you experiencing?
+    placeholder: |
+      Reading 1MB files from S3 cache is taking 500ms per file, expected <50ms
+  validations:
+    required: true
+
+- type: textarea
+  id: metrics
+  attributes:
+    label: Performance Metrics
+    description: Provide specific measurements
+    placeholder: |
+      Observed:
+      - Throughput: 50 MB/s (expected: 500 MB/s)
+      - Latency: 500ms per operation (expected: <50ms)
+      - IOPS: 20 (expected: 200+)
+      - CPU usage: 80% (expected: <30%)
+      - Cache hit rate: 30% (expected: >80%)
+
+      Benchmark command: dd if=/mnt/objectfs/testfile of=/dev/null bs=1M count=1000
+      Result: 1048576000 bytes (1.0 GB) copied, 20.5 s, 51.1 MB/s
+  validations:
+    required: true
+
+- type: textarea
+  id: workload
+  attributes:
+    label: Workload Characteristics
+    description: Describe your workload in detail
+    placeholder: |
+      - Dataset size: 10 TB
+      - Number of files: 1 million
+      - File size distribution: 90% <1MB, 10% 1-100GB
+      - Access pattern: Random reads across 100k files, then sequential read of large files
+      - Concurrency: 10 processes accessing different files
+      - Read/Write ratio: 90% read, 10% write
+  validations:
+    required: true
+
+- type: textarea
+  id: config
+  attributes:
+    label: Configuration
+    description: Paste relevant ObjectFS config (redact credentials)
+    render: yaml
+    placeholder: |
+      cache:
+        type: persistent
+        max_size: 100GB
+        lru_max_items: 10000
+      buffer:
+        max_size: 10GB
+        flush_interval: 5s
+      s3:
+        max_retries: 3
+        timeout: 30s
+
+- type: input
+  id: version
+  attributes:
+    label: ObjectFS Version
+    description: Run `objectfs version`
+    placeholder: v0.4.0
+  validations:
+    required: true
+
+- type: dropdown
+  id: s3-provider
+  attributes:
+    label: S3 Provider
+    description: Which S3-compatible storage?
+    options:
+    - AWS S3
+    - MinIO
+    - Ceph
+    - Wasabi
+    - Backblaze B2
+    - DigitalOcean Spaces
+    - Other
+  validations:
+    required: true
+
+- type: input
+  id: region
+  attributes:
+    label: S3 Region & Network
+    description: Region and network setup
+    placeholder: us-west-2, 10 Gbps link, 15ms latency to S3
+
+- type: textarea
+  id: system-specs
+  attributes:
+    label: System Specifications
+    description: Hardware and system details
+    placeholder: |
+      - CPU: AMD EPYC 7742 (64 cores)
+      - RAM: 256 GB
+      - Storage: NVMe SSD (cache)
+      - Network: 10 Gbps
+      - OS: Ubuntu 22.04 LTS
+      - Kernel: 5.15.0
+      - FUSE version: 3.10.5
+  validations:
+    required: true
+
+- type: textarea
+  id: monitoring
+  attributes:
+    label: ObjectFS Metrics
+    description: Include metrics from ObjectFS if available
+    render: json
+    placeholder: |
+      {
+        "cache_hit_rate": 0.32,
+        "cache_size_bytes": 85899345920,
+        "s3_requests_total": 125000,
+        "s3_errors_total": 15,
+        "read_latency_p95_ms": 485,
+        "write_latency_p95_ms": 1250
+      }
+
+- type: textarea
+  id: profiling
+  attributes:
+    label: Profiling Data
+    description: Include pprof, strace, or other profiling output
+    placeholder: |
+      Attach pprof CPU/memory profiles, strace output, or flame graphs.
+      Or paste links to uploaded profiling data.
+
+- type: textarea
+  id: comparison
+  attributes:
+    label: Performance Comparison
+    description: How does this compare to alternatives?
+    placeholder: |
+      Direct S3 CLI (aws s3 cp): 800 MB/s
+      s3fs: 100 MB/s
+      ObjectFS: 50 MB/s (current)
+
+      Expected ObjectFS performance: 400-600 MB/s (given caching)
+
+- type: dropdown
+  id: priority
+  attributes:
+    label: Priority
+    description: How critical is this performance issue?
+    options:
+    - Critical - Blocking research work
+    - High - Significantly impacting productivity
+    - Medium - Noticeable but workable
+    - Low - Minor optimization opportunity
+  validations:
+    required: true
+
+- type: textarea
+  id: context
+  attributes:
+    label: Additional Context
+    description: Any other relevant information
+    placeholder: |
+      - Performance has degraded since version X
+      - Only happens with specific file types
+      - Related to issue #123
+      - Potential causes identified: ...
