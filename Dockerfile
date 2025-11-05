@@ -1,6 +1,6 @@
 # Multi-stage build for ObjectFS
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -59,7 +59,7 @@ RUN mkdir -p /etc/objectfs && \
     chown objectfs:objectfs /etc/objectfs
 
 # Copy default configuration
-COPY examples/config.yaml /etc/objectfs/config.yaml.example
+COPY configs/example.yaml /etc/objectfs/config.yaml.example
 
 # Set up FUSE
 RUN echo "user_allow_other" >> /etc/fuse.conf
