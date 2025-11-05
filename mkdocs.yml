@@ -1,0 +1,196 @@
+site_name: ObjectFS Documentation
+site_url: https://objectfs.io
+site_description: High-performance FUSE filesystem for S3-compatible object storage
+site_author: ObjectFS Team
+
+repo_url: https://github.com/scttfrdmn/objectfs
+repo_name: scttfrdmn/objectfs
+edit_uri: edit/main/docs/
+
+copyright: Copyright &copy; 2025 ObjectFS
+
+# Custom domain configuration for GitHub Pages
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    # Light mode
+    - scheme: default
+      primary: deep-orange
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - scheme: slate
+      primary: deep-orange
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+  features:
+    - announce.dismiss
+    - content.action.edit
+    - content.action.view
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+    - content.tooltips
+    - navigation.expand
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
+    - navigation.prune
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+  # logo: images/objectfs-logo.png
+  # favicon: images/objectfs-favicon.png
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - minify:
+      minify_html: true
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/scttfrdmn/objectfs
+    - icon: fontawesome/solid/comments
+      link: https://github.com/scttfrdmn/objectfs/discussions
+
+  version:
+    provider: mike
+    default: latest
+
+nav:
+  - Home: index.md
+
+  - Getting Started:
+    - Quick Start: getting-started/quick-start.md
+    - Installation: getting-started/installation.md
+    - Configuration: getting-started/configuration.md
+    - First Mount: getting-started/first-mount.md
+
+  - User Guides:
+    - CLI Reference: user-guides/cli-reference.md
+    - Configuration Guide: user-guides/configuration-guide.md
+    - Cache Strategies: user-guides/cache-strategies.md
+    - Performance Tuning: user-guides/performance-tuning.md
+    - Monitoring & Metrics: user-guides/monitoring-metrics.md
+    - Troubleshooting: user-guides/troubleshooting.md
+
+  - Persona Walkthroughs:
+    - Computational Biologist: personas/computational-biologist.md
+    - Physics Researcher: personas/physics-researcher.md
+    - Climate Scientist: personas/climate-scientist.md
+    - Lab Manager: personas/lab-manager.md
+    - Research Computing Staff: personas/research-computing.md
+
+  - Features:
+    - FUSE Filesystem: features/fuse-filesystem.md
+    - S3 Backend: features/s3-backend.md
+    - Multi-Tier Caching: features/caching.md
+    - Write Buffering: features/write-buffering.md
+    - Compression (v0.5.0): features/compression.md
+    - Archive Access (v0.5.0): features/archive-access.md
+    - Network Optimization: features/network-optimization.md
+    - Cost Tracking (v0.5.0): features/cost-tracking.md
+
+  - Operations:
+    - Deployment: operations/deployment.md
+    - Systemd Integration: operations/systemd-integration.md
+    - Production Checklist: operations/production-checklist.md
+    - Backup & Recovery: operations/backup-recovery.md
+    - Security Hardening: operations/security-hardening.md
+    - Multi-Node Setup (v0.5.0): operations/multi-node-setup.md
+
+  - Architecture:
+    - Vision: VISION.md
+    - Design Principles: DESIGN_PRINCIPLES.md
+    - System Architecture: architecture/system-architecture.md
+    - FUSE Layer: architecture/fuse-layer.md
+    - Storage Backend: architecture/storage-backend.md
+    - Cache Architecture: architecture/cache-architecture.md
+    - Metadata Management: architecture/metadata-management.md
+    - Health & Monitoring: architecture/health-monitoring.md
+
+  - Development:
+    - Development Setup: development/setup.md
+    - Building ObjectFS: development/building.md
+    - Testing Guide: development/testing.md
+    - Contributing: development/contributing.md
+    - Code Quality: development/code-quality.md
+    - Release Process: development/release-process.md
+
+  - Roadmap & Planning:
+    - Development Roadmap: ROADMAP.md
+    - v0.5.0 Plan: v0.5.0-implementation-plan.md
+    - Technical Debt: development/technical-debt.md
+
+  - API Reference:
+    - REST API: api/rest-api.md
+    - Metrics API: api/metrics-api.md
+    - Health API: api/health-api.md
+
+  - Community:
+    - Contributing: https://github.com/scttfrdmn/objectfs/blob/main/CONTRIBUTING.md
+    - Discussions: https://github.com/scttfrdmn/objectfs/discussions
+    - Issues: https://github.com/scttfrdmn/objectfs/issues
+    - Projects: https://github.com/users/scttfrdmn/projects?query=objectfs
