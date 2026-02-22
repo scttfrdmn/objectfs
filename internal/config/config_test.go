@@ -251,6 +251,69 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_S3Region(t *testing.T) {
+	// t.Setenv requires sequential execution; no t.Parallel here.
+
+	t.Run("OBJECTFS_S3_REGION overrides default", func(t *testing.T) {
+		t.Setenv("OBJECTFS_S3_REGION", "ap-southeast-1")
+		cfg := NewDefault()
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+		if cfg.Storage.S3.Region != "ap-southeast-1" {
+			t.Errorf("Region: got %q, want %q", cfg.Storage.S3.Region, "ap-southeast-1")
+		}
+	})
+
+	t.Run("AWS_REGION sets region", func(t *testing.T) {
+		t.Setenv("AWS_REGION", "eu-central-1")
+		cfg := NewDefault()
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+		if cfg.Storage.S3.Region != "eu-central-1" {
+			t.Errorf("Region: got %q, want %q", cfg.Storage.S3.Region, "eu-central-1")
+		}
+	})
+
+	t.Run("OBJECTFS_S3_REGION beats AWS_REGION", func(t *testing.T) {
+		t.Setenv("AWS_REGION", "us-east-1")
+		t.Setenv("OBJECTFS_S3_REGION", "sa-east-1")
+		cfg := NewDefault()
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+		if cfg.Storage.S3.Region != "sa-east-1" {
+			t.Errorf("Region: got %q, want %q", cfg.Storage.S3.Region, "sa-east-1")
+		}
+	})
+
+	t.Run("AWS_REGION beats AWS_DEFAULT_REGION", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_REGION", "us-west-1")
+		t.Setenv("AWS_REGION", "us-west-2")
+		cfg := NewDefault()
+		// Clear default so AWS_DEFAULT_REGION would take effect if order were wrong.
+		cfg.Storage.S3.Region = ""
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+		if cfg.Storage.S3.Region != "us-west-2" {
+			t.Errorf("Region: got %q, want %q", cfg.Storage.S3.Region, "us-west-2")
+		}
+	})
+
+	t.Run("OBJECTFS_S3_ENDPOINT sets endpoint", func(t *testing.T) {
+		t.Setenv("OBJECTFS_S3_ENDPOINT", "http://localhost:9000")
+		cfg := NewDefault()
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+		if cfg.Storage.S3.Endpoint != "http://localhost:9000" {
+			t.Errorf("Endpoint: got %q, want %q", cfg.Storage.S3.Endpoint, "http://localhost:9000")
+		}
+	})
+}
+
 func TestSaveToFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "saved_config.yaml")

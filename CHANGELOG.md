@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dockerfile base image updated: `golang:1.24-alpine` → `golang:1.26-alpine`, `alpine:3.18` → `alpine:3.21`
 
 ### Fixed
+- `internal/adapter`: removed hardcoded `us-west-2` region; adapter now reads `Storage.S3.Region`, `Storage.S3.Endpoint`, `Storage.S3.ForcePathStyle`, and `Storage.S3.UseAcceleration` from `config.Configuration` via new `buildS3Config()` helper (closes #56)
+- `internal/config`: added `AWS_DEFAULT_REGION`, `AWS_REGION`, `OBJECTFS_S3_REGION`, and `OBJECTFS_S3_ENDPOINT` environment variable mappings so region and endpoint are configurable without a config file; priority order is `AWS_DEFAULT_REGION` < `AWS_REGION` < `OBJECTFS_S3_REGION`
 - `internal/health`: implemented all 8 `AutoFix` remediation closures — `memory_force_gc` (runtime.GC + debug.FreeOSMemory), `disk_clean_logs` (removes .log files older than 30 days), `disk_clean_cache` (removes objectfs-cache files older than 7 days), `disk_clean_temp` (removes objectfs-* temp files older than 24h), `network_retry` (context-aware 5 s wait); `s3_restart_connection`, `cache_clear`, and `memory_reduce_cache` log advisory messages until dependency injection is available
 - License references updated from MIT to Apache 2.0 throughout README, SDKs, and docs
 - Copyright year updated to 2025-2026

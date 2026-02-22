@@ -268,6 +268,66 @@ func TestNew(t *testing.T) {
 	})
 }
 
+func TestBuildS3Config(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		region         string
+		endpoint       string
+		forcePathStyle bool
+		useAccelerate  bool
+	}{
+		{
+			name:   "default us-east-1",
+			region: "us-east-1",
+		},
+		{
+			name:   "eu-west-1",
+			region: "eu-west-1",
+		},
+		{
+			name:           "custom endpoint with force path style",
+			region:         "us-east-1",
+			endpoint:       "http://localhost:9000",
+			forcePathStyle: true,
+		},
+		{
+			name:          "acceleration enabled",
+			region:        "us-west-2",
+			useAccelerate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := createTestConfig()
+			cfg.Storage.S3.Region = tt.region
+			cfg.Storage.S3.Endpoint = tt.endpoint
+			cfg.Storage.S3.ForcePathStyle = tt.forcePathStyle
+			cfg.Storage.S3.UseAcceleration = tt.useAccelerate
+
+			adapter := &Adapter{config: cfg}
+			s3cfg := adapter.buildS3Config()
+
+			if s3cfg.Region != tt.region {
+				t.Errorf("Region: got %q, want %q", s3cfg.Region, tt.region)
+			}
+			if s3cfg.Endpoint != tt.endpoint {
+				t.Errorf("Endpoint: got %q, want %q", s3cfg.Endpoint, tt.endpoint)
+			}
+			if s3cfg.ForcePathStyle != tt.forcePathStyle {
+				t.Errorf("ForcePathStyle: got %v, want %v", s3cfg.ForcePathStyle, tt.forcePathStyle)
+			}
+			if s3cfg.UseAccelerate != tt.useAccelerate {
+				t.Errorf("UseAccelerate: got %v, want %v", s3cfg.UseAccelerate, tt.useAccelerate)
+			}
+		})
+	}
+}
+
 func TestAdapterDoubleStart(t *testing.T) {
 	t.Parallel()
 

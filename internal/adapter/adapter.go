@@ -91,10 +91,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}
 
 	// 2. Initialize S3 backend
-	a.s3Config = &s3.Config{
-		Region:   "us-west-2", // Default, should be configurable
-		Endpoint: "",          // Use default AWS endpoint
-	}
+	a.s3Config = a.buildS3Config()
+	log.Printf("S3 Region: %s", a.s3Config.Region)
 
 	a.backend, err = s3.NewBackend(ctx, a.bucketName, a.s3Config)
 	if err != nil {
@@ -217,6 +215,18 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.started = false
 	log.Printf("ObjectFS adapter stopped successfully")
 	return lastErr
+}
+
+// buildS3Config constructs an s3.Config from the adapter's configuration,
+// mapping the configurable storage fields so that no region or endpoint
+// values are hard-coded in adapter logic.
+func (a *Adapter) buildS3Config() *s3.Config {
+	return &s3.Config{
+		Region:         a.config.Storage.S3.Region,
+		Endpoint:       a.config.Storage.S3.Endpoint,
+		ForcePathStyle: a.config.Storage.S3.ForcePathStyle,
+		UseAccelerate:  a.config.Storage.S3.UseAcceleration,
+	}
 }
 
 // validateStorageURI validates the storage URI format

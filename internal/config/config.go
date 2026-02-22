@@ -516,6 +516,28 @@ func getEnvMappings() []envMapping {
 			return nil
 		}},
 
+		// S3 storage settings
+		// AWS_DEFAULT_REGION is processed first (lowest priority); AWS_REGION
+		// overrides it; OBJECTFS_S3_REGION takes highest precedence.
+		{"AWS_DEFAULT_REGION", func(c *Configuration, val string) error {
+			if c.Storage.S3.Region == "" {
+				c.Storage.S3.Region = val
+			}
+			return nil
+		}},
+		{"AWS_REGION", func(c *Configuration, val string) error {
+			c.Storage.S3.Region = val
+			return nil
+		}},
+		{"OBJECTFS_S3_REGION", func(c *Configuration, val string) error {
+			c.Storage.S3.Region = val
+			return nil
+		}},
+		{"OBJECTFS_S3_ENDPOINT", func(c *Configuration, val string) error {
+			c.Storage.S3.Endpoint = val
+			return nil
+		}},
+
 		// Read-ahead settings
 		{"OBJECTFS_READAHEAD_ENABLED", func(c *Configuration, val string) error {
 			c.Performance.ReadAhead.Enabled = strings.ToLower(val) == TrueValue
