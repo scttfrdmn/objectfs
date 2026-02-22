@@ -7,7 +7,7 @@ Enterprise-grade POSIX-compliant FUSE filesystem for AWS S3, optimized for resea
 - **Module**: `github.com/objectfs/objectfs`
 - **Go version**: 1.26.0
 - **License**: Apache 2.0, Copyright 2025-2026 Scott Friedman
-- **Current version**: 0.5.0
+- **Current version**: 0.6.0
 
 ## Project Tracking
 

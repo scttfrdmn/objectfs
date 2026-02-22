@@ -320,7 +320,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 	info := map[string]interface{}{
 		"service":   "ObjectFS API",
-		"version":   "0.5.0",
+		"version":   "0.6.0",
 		"timestamp": time.Now(),
 		"endpoints": []string{
 			"/health",

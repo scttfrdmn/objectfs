@@ -7,16 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-22
+
 ### Added
 - `internal/distributed`: 67 unit tests across 4 new files (`cluster_test.go`, `consensus_test.go`, `coordinator_test.go`, `gossip_test.go`) covering `ClusterManager` lifecycle and node management, `ConsensusEngine` election state machine (Follower→Candidate→Leader with peer simulation), `Coordinator` operation routing and load-balancing strategies (round-robin, least-load, consistent-hash), and `GossipProtocol` message handlers (join, alive, suspect, dead, sync, heartbeat) — closes #73
-
-### Fixed
-- `internal/distributed/consensus.go`: `becomeLeader` called `sendHeartbeats` while holding the write lock; `sendHeartbeats` then tried to reacquire a read lock, causing a deadlock — `sendHeartbeats` is now launched in a goroutine
-- `internal/distributed/coordinator.go`: `ExecuteOperation` panic when node ID is shorter than 8 characters — added bounds check before slicing
-- `internal/distributed/gossip.go`: `handleJoinMessage` called `sendSyncMessage` while holding the write lock; `sendSyncMessage` then tried to reacquire a read lock, causing a deadlock — `sendSyncMessage` is now launched in a goroutine
-- `internal/distributed/gossip.go`: `handleSuspectMessage` outer condition required `gossipNode.State == StateAlive`, making the "add reporter to Suspicion.From" branch unreachable once a node was already marked suspect — condition now accepts `StateAlive` or `StateSuspect`
-
-### Added
 - `tests/aws_s3_test.go`: three new integration tests under the `aws_s3` build tag — `TestListObjects` (prefix listing + limit parameter), `TestMultipartUpload` (6 MB object with 5 MB threshold to force the multipart code path, partial-read verification), `TestZSTDCompression` (ZSTD round-trip, partial read, raw-storage verification that bytes are actually compressed on S3)
 - `sdks/go/objectfs/client_test.go`: `TestIntegration_PutGetDeleteHead` (full + partial Get, Head metadata, Delete + confirmation), `TestIntegration_List` (prefix listing + limit + cleanup), `TestIntegration_Health`; helper functions `testBucket()` and `testRegion()` read from `$OBJECTFS_TEST_BUCKET` / `$AWS_REGION` instead of hard-coding; existing `TestNew_*` and `TestClose_NotMounted` updated to use the same helpers
 - `Makefile`: `test-aws` target runs the `aws_s3` suite and Go SDK integration tests with credential validation; `test-release-check` target combines unit tests and AWS integration as a pre-release gate
