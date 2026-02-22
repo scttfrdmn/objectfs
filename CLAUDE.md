@@ -72,11 +72,21 @@ Private module — set these for go get:
 GONOSUMDB="github.com/scttfrdmn/*" GOPRIVATE="github.com/scttfrdmn/*"
 ```
 
+### AWS Credentials
+
+AWS is available via the named profile `aws` in region `us-west-2`:
+
+```bash
+AWS_PROFILE=aws AWS_REGION=us-west-2 go test -race -tags=integration ./...
+```
+
+Use this profile when running integration tests that require real S3 access.
+
 ### Testing
 
 - All tests use `-race` flag
 - Table-driven tests with `t.Parallel()`
-- Integration tests hit real AWS S3 (no LocalStack)
+- Integration tests hit real AWS S3 (no LocalStack); use `AWS_PROFILE=aws AWS_REGION=us-west-2`
 - Coverage target: 80%+ per package
 
 ### Pre-commit
