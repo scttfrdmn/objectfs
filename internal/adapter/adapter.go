@@ -11,6 +11,7 @@ import (
 	"github.com/objectfs/objectfs/internal/cache"
 	"github.com/objectfs/objectfs/internal/config"
 	"github.com/objectfs/objectfs/internal/fuse"
+	"github.com/objectfs/objectfs/internal/health"
 	"github.com/objectfs/objectfs/internal/metrics"
 	"github.com/objectfs/objectfs/internal/storage/s3"
 )
@@ -27,12 +28,26 @@ type Adapter struct {
 	writeBuffer *buffer.WriteBuffer
 	mountMgr    fuse.PlatformFileSystem
 	metrics     *metrics.Collector
+	monitor     *health.Monitor
 
 	// Internal state
 	started    bool
 	bucketName string
 	s3Config   *s3.Config
 }
+
+// healthComponent adapts a closure to the health.HealthyComponent interface so
+// that adapter-owned components can be registered with the health monitor without
+// requiring them to implement the interface directly.
+type healthComponent struct {
+	name     string
+	compType string
+	fn       func(context.Context) error
+}
+
+func (h *healthComponent) HealthCheck(ctx context.Context) error { return h.fn(ctx) }
+func (h *healthComponent) GetComponentName() string              { return h.name }
+func (h *healthComponent) GetComponentType() string              { return h.compType }
 
 // New creates a new ObjectFS adapter instance
 func New(ctx context.Context, storageURI, mountPoint string, cfg *config.Configuration) (*Adapter, error) {
@@ -155,10 +170,75 @@ func (a *Adapter) Start(ctx context.Context) error {
 
 	a.mountMgr = fuse.CreatePlatformMountManager(a.backend, a.cache, a.writeBuffer, a.metrics, mountConfig)
 
-	// 7. Initialize health monitor (simplified for now)
-	// TODO: Implement proper health monitoring when components are ready
+	// 6. Initialize and start health monitor
+	if a.config.Monitoring.HealthChecks.Enabled {
+		monCfg := &health.MonitorConfig{
+			Enabled:          true,
+			MonitorInterval:  a.config.Monitoring.HealthChecks.Interval,
+			AlertingEnabled:  false,
+			AutoRecovery:     false,
+			ReportingEnabled: false,
+			HealthCheckConfig: &health.Config{
+				Enabled:       true,
+				CheckInterval: a.config.Monitoring.HealthChecks.Interval,
+				Timeout:       a.config.Monitoring.HealthChecks.Timeout,
+				MaxFailures:   3,
+				HTTPEnabled:   a.config.Global.HealthPort > 0,
+				HTTPPort:      a.config.Global.HealthPort,
+				HTTPPath:      "/health",
+			},
+		}
+		a.monitor, err = health.NewMonitor(monCfg)
+		if err != nil {
+			return fmt.Errorf("failed to initialize health monitor: %w", err)
+		}
 
-	// 8. Mount filesystem
+		// Register per-component health checks using the adapter's live references.
+		components := []health.HealthyComponent{
+			&healthComponent{
+				name:     "s3_backend",
+				compType: "storage",
+				fn: func(ctx context.Context) error {
+					if a.backend == nil {
+						return fmt.Errorf("s3 backend not initialized")
+					}
+					return nil
+				},
+			},
+			&healthComponent{
+				name:     "cache",
+				compType: "cache",
+				fn: func(ctx context.Context) error {
+					if a.cache == nil {
+						return fmt.Errorf("cache not initialized")
+					}
+					return nil
+				},
+			},
+			&healthComponent{
+				name:     "write_buffer",
+				compType: "storage",
+				fn: func(ctx context.Context) error {
+					if a.writeBuffer == nil {
+						return fmt.Errorf("write buffer not initialized")
+					}
+					return nil
+				},
+			},
+		}
+		for _, comp := range components {
+			if err := a.monitor.RegisterComponent(comp); err != nil {
+				log.Printf("Warning: failed to register %s health check: %v", comp.GetComponentName(), err)
+			}
+		}
+
+		if err := a.monitor.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start health monitor: %w", err)
+		}
+		log.Printf("Health monitor started on port %d", a.config.Global.HealthPort)
+	}
+
+	// 7. Mount filesystem
 	if err := a.mountMgr.Mount(ctx); err != nil {
 		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
@@ -206,10 +286,18 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 4. Clear cache (simplified)
+	// 4. Stop health monitor
+	if a.monitor != nil {
+		if err := a.monitor.Stop(); err != nil {
+			log.Printf("Error stopping health monitor: %v", err)
+			lastErr = err
+		}
+	}
+
+	// 5. Clear cache (simplified)
 	// TODO: Implement proper cache clearing when available
 
-	// 5. Stop metrics collection (simplified)
+	// 6. Stop metrics collection (simplified)
 	// TODO: Implement proper metrics stopping
 
 	a.started = false

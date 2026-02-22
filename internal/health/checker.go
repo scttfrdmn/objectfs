@@ -2,7 +2,11 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -463,8 +467,46 @@ func (c *Checker) updateStats() {
 }
 
 func (c *Checker) startHTTPServer() {
-	// This would start an HTTP server for health check endpoints
-	// Implementation omitted for brevity in this demo
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", c.config.HTTPPort))
+	if err != nil {
+		log.Printf("health: failed to bind HTTP server on port %d: %v", c.config.HTTPPort, err)
+		return
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(c.config.HTTPPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		status := c.GetStatus()
+		if c.IsHealthy() {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    status["overall_status"],
+			"timestamp": status["timestamp"],
+			"checks":    status["checks"],
+		}); err != nil {
+			log.Printf("health: error writing HTTP response: %v", err)
+		}
+	})
+
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-c.stopCh
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
+
+	log.Printf("health: HTTP server listening on %s", ln.Addr())
+	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+		log.Printf("health: HTTP server error: %v", err)
+	}
 }
 
 // Common health check functions

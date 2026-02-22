@@ -2,10 +2,12 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/objectfs/objectfs/internal/config"
+	"github.com/objectfs/objectfs/internal/health"
 )
 
 func TestValidateStorageURI(t *testing.T) {
@@ -508,6 +510,116 @@ func createTestConfig() *config.Configuration {
 			ReplicationFactor: 3,
 			ConsistencyLevel:  "eventual",
 		},
+	}
+}
+
+// Health monitor integration tests
+
+func TestAdapterHealthMonitor_InitiallyNil(t *testing.T) {
+	t.Parallel()
+	cfg := createTestConfig()
+	a, err := New(context.Background(), "s3://test-bucket", "/mnt/test", cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if a.monitor != nil {
+		t.Error("expected monitor to be nil immediately after New()")
+	}
+}
+
+func TestAdapterStop_NilMonitor_OK(t *testing.T) {
+	t.Parallel()
+	// Verify Stop() handles a nil monitor without panicking.
+	a := &Adapter{
+		config:     createTestConfig(),
+		bucketName: "test-bucket",
+		started:    true,
+		// monitor is nil — the nil guard must protect against this
+	}
+	if err := a.Stop(context.Background()); err != nil {
+		t.Errorf("Stop() with nil monitor returned unexpected error: %v", err)
+	}
+}
+
+func TestAdapterStop_StopsHealthMonitor(t *testing.T) {
+	t.Parallel()
+
+	// Build a real health.Monitor (no HTTP, no background checks firing quickly)
+	// and attach it to a manually constructed "started" adapter.
+	mon, err := health.NewMonitor(&health.MonitorConfig{
+		Enabled:          true,
+		MonitorInterval:  30 * time.Second,
+		AlertingEnabled:  false,
+		ReportingEnabled: false,
+		HealthCheckConfig: &health.Config{
+			Enabled:       true,
+			CheckInterval: 30 * time.Second,
+			Timeout:       5 * time.Second,
+			HTTPEnabled:   false, // don't bind a port in tests
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMonitor: %v", err)
+	}
+	if err := mon.Start(context.Background()); err != nil {
+		t.Fatalf("monitor.Start: %v", err)
+	}
+
+	a := &Adapter{
+		config:     createTestConfig(),
+		bucketName: "test-bucket",
+		started:    true,
+		monitor:    mon,
+	}
+
+	if err := a.Stop(context.Background()); err != nil {
+		t.Errorf("Stop() error = %v, want nil", err)
+	}
+	if a.started {
+		t.Error("adapter.started should be false after Stop()")
+	}
+}
+
+func TestHealthComponent_Interface(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	hc := &healthComponent{
+		name:     "test-component",
+		compType: "storage",
+		fn: func(_ context.Context) error {
+			called = true
+			return nil
+		},
+	}
+
+	if hc.GetComponentName() != "test-component" {
+		t.Errorf("GetComponentName() = %q, want %q", hc.GetComponentName(), "test-component")
+	}
+	if hc.GetComponentType() != "storage" {
+		t.Errorf("GetComponentType() = %q, want %q", hc.GetComponentType(), "storage")
+	}
+	if err := hc.HealthCheck(context.Background()); err != nil {
+		t.Errorf("HealthCheck() = %v, want nil", err)
+	}
+	if !called {
+		t.Error("expected health check function to be called")
+	}
+}
+
+func TestHealthComponent_Error(t *testing.T) {
+	t.Parallel()
+
+	hc := &healthComponent{
+		name:     "failing-component",
+		compType: "cache",
+		fn: func(_ context.Context) error {
+			return fmt.Errorf("component unavailable")
+		},
+	}
+
+	if err := hc.HealthCheck(context.Background()); err == nil {
+		t.Error("HealthCheck() should return an error for a failing component")
 	}
 }
 
