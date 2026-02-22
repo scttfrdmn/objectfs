@@ -1,19 +1,13 @@
 package archive
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/bzip2"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"path"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/klauspost/compress/zstd"
 	archivepkg "github.com/objectfs/objectfs/pkg/archive"
 	"github.com/objectfs/objectfs/pkg/types"
 )
@@ -214,7 +208,7 @@ func (v *VFS) Invalidate(archiveKey string) {
 // ── internal helpers ──────────────────────────────────────────────────────────
 
 // getIndex returns the cached ArchiveMetadata for archiveKey, loading it if
-// necessary.
+// necessary.  It delegates index construction to BuildIndex in index.go.
 func (v *VFS) getIndex(ctx context.Context, archiveKey string) (*archivepkg.ArchiveMetadata, error) {
 	v.indexMu.RLock()
 	meta, ok := v.indexCache[archiveKey]
@@ -223,12 +217,7 @@ func (v *VFS) getIndex(ctx context.Context, archiveKey string) (*archivepkg.Arch
 		return meta, nil
 	}
 
-	isArchive, format := archivepkg.IsArchive(archiveKey)
-	if !isArchive {
-		return nil, fmt.Errorf("not a known archive format: %q", archiveKey)
-	}
-
-	meta, err := v.buildIndex(ctx, archiveKey, format)
+	meta, err := BuildIndex(ctx, v.backend, archiveKey)
 	if err != nil {
 		return nil, err
 	}
@@ -238,73 +227,6 @@ func (v *VFS) getIndex(ctx context.Context, archiveKey string) (*archivepkg.Arch
 	v.indexMu.Unlock()
 
 	return meta, nil
-}
-
-// buildIndex downloads archiveKey from S3 and walks tar headers (without
-// retaining file data) to build an ArchiveIndex.
-func (v *VFS) buildIndex(ctx context.Context, archiveKey string, format archivepkg.ArchiveFormat) (*archivepkg.ArchiveMetadata, error) {
-	data, err := v.backend.GetObject(ctx, archiveKey, 0, 0)
-	if err != nil {
-		return nil, fmt.Errorf("loading archive %q: %w", archiveKey, err)
-	}
-
-	tr, closeFn, err := openTar(format, data)
-	if err != nil {
-		return nil, fmt.Errorf("opening archive %q: %w", archiveKey, err)
-	}
-	if closeFn != nil {
-		defer closeFn()
-	}
-
-	idx := archivepkg.NewArchiveIndex()
-	var totalSize int64
-	var decompressedOffset int64
-
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("parsing archive %q: %w", archiveKey, err)
-		}
-
-		name := path.Clean(hdr.Name)
-		if name == "." {
-			// Skip the synthetic root entry produced by some tar implementations.
-			continue
-		}
-
-		isDir := hdr.Typeflag == tar.TypeDir
-		entry := &archivepkg.ArchiveEntry{
-			Name:    path.Base(name),
-			Path:    name,
-			Size:    hdr.Size,
-			Mode:    uint32(hdr.Mode),
-			ModTime: hdr.ModTime,
-			IsDir:   isDir,
-			Offset:  decompressedOffset,
-		}
-		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
-			entry.Linkname = hdr.Linkname
-		}
-
-		idx.AddEntry(entry)
-		if !isDir {
-			totalSize += hdr.Size
-			decompressedOffset += hdr.Size
-		}
-	}
-
-	return &archivepkg.ArchiveMetadata{
-		Path:             archiveKey,
-		Format:           format,
-		Size:             int64(len(data)),
-		UncompressedSize: totalSize,
-		FileCount:        idx.TotalFiles,
-		LastModified:     time.Now(),
-		Index:            idx,
-	}, nil
 }
 
 // extractFile streams through the decompressed archive to extract a single
@@ -342,33 +264,6 @@ func (v *VFS) extractFile(ctx context.Context, archiveKey, innerPath string) ([]
 			}
 			return content, nil
 		}
-	}
-}
-
-// openTar wraps raw archive bytes in the appropriate decompressor and returns
-// a *tar.Reader plus an optional close function.
-func openTar(format archivepkg.ArchiveFormat, data []byte) (*tar.Reader, func(), error) {
-	r := bytes.NewReader(data)
-	switch format {
-	case archivepkg.FormatTarZstd:
-		d, err := zstd.NewReader(r)
-		if err != nil {
-			return nil, nil, err
-		}
-		return tar.NewReader(d), d.Close, nil
-
-	case archivepkg.FormatTarGzip:
-		g, err := gzip.NewReader(r)
-		if err != nil {
-			return nil, nil, err
-		}
-		return tar.NewReader(g), func() { _ = g.Close() }, nil
-
-	case archivepkg.FormatTarBzip2:
-		return tar.NewReader(bzip2.NewReader(r)), nil, nil
-
-	default:
-		return nil, nil, fmt.Errorf("unsupported archive format: %q", format)
 	}
 }
 

@@ -93,7 +93,7 @@ type ArchiveEntry struct {
 
 // IsArchive checks if a file path represents a known archive format.
 func IsArchive(path string) (bool, ArchiveFormat) {
-	if len(path) < 7 {
+	if len(path) < 5 {
 		return false, ""
 	}
 
