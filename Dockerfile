@@ -1,6 +1,6 @@
 # Multi-stage build for ObjectFS
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     ./cmd/objectfs
 
 # Runtime stage
-FROM alpine:3.18
+FROM alpine:3.21
 
 # Install runtime dependencies
 RUN apk add --no-cache \
