@@ -289,9 +289,9 @@ test-integration:
 #   - internal/storage/s3 aws_s3 tests  (basic ops, list, multipart, ZSTD compression)
 #   - sdks/go/objectfs integration tests (New, Get, Put, Delete, List, Head, Health)
 test-aws:
-	@if [ -z "$$AWS_ACCESS_KEY_ID" ]; then \
-		echo "$(COLOR_RED)Error: AWS_ACCESS_KEY_ID not set$(COLOR_RESET)"; \
-		echo "  Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and OBJECTFS_TEST_BUCKET"; \
+	@if [ -z "$$AWS_ACCESS_KEY_ID" ] && [ -z "$$AWS_PROFILE" ]; then \
+		echo "$(COLOR_RED)Error: no AWS credentials found$(COLOR_RESET)"; \
+		echo "  Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, or AWS_PROFILE"; \
 		exit 1; \
 	fi
 	@if [ -z "$$OBJECTFS_TEST_BUCKET" ]; then \

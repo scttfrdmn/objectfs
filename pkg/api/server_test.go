@@ -402,8 +402,8 @@ func TestHandleInfo(t *testing.T) {
 		t.Errorf("Expected service='ObjectFS API', got %v", response["service"])
 	}
 
-	if response["version"] != "0.4.0" {
-		t.Errorf("Expected version='0.4.0', got %v", response["version"])
+	if response["version"] != "0.5.0" {
+		t.Errorf("Expected version='0.5.0', got %v", response["version"])
 	}
 }
 
