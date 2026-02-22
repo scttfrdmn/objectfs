@@ -20,13 +20,15 @@ func (n *nopCodec) ContentEncoding() string               { return "" }
 
 // New returns a Codec for the requested algorithm at the given level.
 // Use level 0 (DefaultLevel) to select the algorithm's built-in default.
-// Supported algorithms: "none" / "", "zstd".
+// Supported algorithms: "none" / "", "zstd", "lz4".
 func New(algo comprpkg.Algorithm, level int) (comprpkg.Codec, error) {
 	switch algo {
 	case comprpkg.AlgorithmNone, "":
 		return &nopCodec{}, nil
 	case comprpkg.AlgorithmZstd:
 		return NewZstdCodec(level)
+	case comprpkg.AlgorithmLZ4:
+		return NewLZ4Codec(), nil
 	default:
 		return nil, fmt.Errorf("unsupported compression algorithm %q", algo)
 	}
