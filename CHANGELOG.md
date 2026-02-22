@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `internal/distributed`: real UDP networking for consensus (Raft-like leader election) and coordinator (operation routing) — `GossipProtocol` now dispatches 6 new message types (`request_vote`, `request_vote_resp`, `append_entries`, `append_entries_resp`, `node_operation`, `node_operation_resp`) plus `sendConsensusMsg` helper and `LocalAddr()` accessor; `ConsensusEngine` replaces goroutine-sleep simulations with real UDP `RequestVote`/`AppendEntries` RPCs and handlers; `Coordinator` routes operations to remote nodes over UDP with request/response correlation via `pendingOps` channels and a `simulateReplication` fire-and-forget path; pre-existing election-timer data race fixed in `electionLoop`; two-node loopback tests added (`TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader`, `TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp`, `TestCoordinator_ExecuteOperation_TwoNodes_RealUDP`) — closes #84
+
 ## [0.6.0] - 2026-02-22
 
 ### Added
