@@ -428,6 +428,90 @@ func TestMultipartStateManager(t *testing.T) {
 	}
 }
 
+// TestPartSlice verifies the pure partSlice helper used by uploadParts.
+func TestPartSlice(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = 16 * 1024 * 1024 // 16 MB
+
+	tests := []struct {
+		name          string
+		dataSize      int
+		chunkSize     int64
+		partNum       int
+		wantLen       int
+		wantFirstByte byte
+		wantLastByte  byte
+	}{
+		{
+			name:          "first full part",
+			dataSize:      64 * 1024 * 1024, // 64 MB, 4 parts
+			chunkSize:     chunkSize,
+			partNum:       1,
+			wantLen:       chunkSize,
+			wantFirstByte: 0,
+			wantLastByte:  byte((chunkSize - 1) % 256),
+		},
+		{
+			name:          "middle full part",
+			dataSize:      64 * 1024 * 1024,
+			chunkSize:     chunkSize,
+			partNum:       2,
+			wantLen:       chunkSize,
+			wantFirstByte: byte(chunkSize % 256),
+		},
+		{
+			name:      "last partial part",
+			dataSize:  50 * 1024 * 1024, // 50 MB: 3 full parts + 2 MB remainder
+			chunkSize: chunkSize,
+			partNum:   4,
+			wantLen:   2 * 1024 * 1024,
+		},
+		{
+			name:      "single-part file smaller than chunk",
+			dataSize:  1024,
+			chunkSize: chunkSize,
+			partNum:   1,
+			wantLen:   1024,
+		},
+		{
+			name:      "exactly one full chunk",
+			dataSize:  chunkSize,
+			chunkSize: chunkSize,
+			partNum:   1,
+			wantLen:   chunkSize,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Build test data where data[i] == byte(i % 256).
+			data := make([]byte, tt.dataSize)
+			for i := range data {
+				data[i] = byte(i % 256)
+			}
+
+			slice := partSlice(data, tt.chunkSize, tt.partNum)
+
+			if len(slice) != tt.wantLen {
+				t.Errorf("len(partSlice): got %d, want %d", len(slice), tt.wantLen)
+			}
+
+			// Verify the slice is a window into the right region of data.
+			startOffset := int64(tt.partNum-1) * tt.chunkSize
+			for i, b := range slice {
+				want := data[startOffset+int64(i)]
+				if b != want {
+					t.Errorf("partSlice[%d] = %d, want %d", i, b, want)
+					break
+				}
+			}
+		})
+	}
+}
+
 func TestMultipartUploadStatus(t *testing.T) {
 	tests := []struct {
 		status      MultipartUploadStatus
