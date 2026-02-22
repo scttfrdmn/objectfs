@@ -194,7 +194,11 @@ func (c *Coordinator) ExecuteOperation(ctx context.Context, op *DistributedOpera
 
 	// Generate operation ID if not provided
 	if op.ID == "" {
-		op.ID = fmt.Sprintf("op-%d-%s", time.Now().UnixNano(), c.cluster.GetNodeID()[:8])
+		nodeID := c.cluster.GetNodeID()
+		if len(nodeID) > 8 {
+			nodeID = nodeID[:8]
+		}
+		op.ID = fmt.Sprintf("op-%d-%s", time.Now().UnixNano(), nodeID)
 	}
 
 	// Set defaults

@@ -456,8 +456,9 @@ func (ce *ConsensusEngine) becomeLeader() {
 	ce.stats.CurrentLeader = ce.cluster.GetNodeID()
 	ce.stats.mu.Unlock()
 
-	// Send initial heartbeat
-	ce.sendHeartbeats()
+	// Send initial heartbeat (in a goroutine to avoid holding the lock while
+	// sendHeartbeats attempts to reacquire it for reading).
+	go ce.sendHeartbeats()
 
 	// Add leader election log entry
 	entry := &LogEntry{

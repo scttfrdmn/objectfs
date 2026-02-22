@@ -338,8 +338,9 @@ func (gp *GossipProtocol) handleJoinMessage(msg *GossipMessage) {
 	gp.stats.NodesDiscovered++
 	gp.stats.mu.Unlock()
 
-	// Send sync message back to the joining node
-	_ = gp.sendSyncMessage(joinMsg.Node.Address)
+	// Send sync message back to the joining node (in a goroutine to avoid
+	// holding the lock while sendSyncMessage attempts to reacquire it for reading).
+	go func() { _ = gp.sendSyncMessage(joinMsg.Node.Address) }()
 }
 
 func (gp *GossipProtocol) handleLeaveMessage(msg *GossipMessage) {
@@ -429,8 +430,11 @@ func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 	nodeID := suspectMsg.Node
 
 	if gossipNode, exists := gp.memberlist[nodeID]; exists {
-		// Only process if incarnation matches
-		if suspectMsg.Incarnation == gossipNode.Incarnation && gossipNode.State == StateAlive {
+		// Only process if incarnation matches and node has not already been
+		// declared dead. Accept both Alive and Suspect so that additional
+		// reporters can be appended to an existing Suspicion.
+		if suspectMsg.Incarnation == gossipNode.Incarnation &&
+			(gossipNode.State == StateAlive || gossipNode.State == StateSuspect) {
 			if gossipNode.Suspicion == nil {
 				gossipNode.Suspicion = &Suspicion{
 					Incarnation: suspectMsg.Incarnation,
