@@ -109,4 +109,4 @@ ObjectFS, or try our [Quick Start](/guide/getting-started) tutorial.
 
 ## License
 
-ObjectFS is released under the MIT License, making it free for both commercial and personal use.
+ObjectFS is released under the Apache License 2.0, making it free for both commercial and personal use.

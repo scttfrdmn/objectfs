@@ -3,8 +3,8 @@
 
 # Line length - allow longer lines for documentation URLs and component usage
 MD013:
-  # Allow longer lines in documentation
-  line_length: 120
+  # Allow longer lines in documentation (badges, URLs, tables)
+  line_length: 350
   # Ignore code blocks, tables, and headings
   code_blocks: false
   tables: false
@@ -21,3 +21,6 @@ MD040: false
 
 # Allow indented code blocks for structured documentation
 MD046: false
+
+# Allow emphasis (bold/italic) used as descriptive text, not headings
+MD036: false

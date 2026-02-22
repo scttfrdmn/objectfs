@@ -6,7 +6,7 @@
 [![CI Status](https://github.com/scttfrdmn/objectfs/workflows/CI/badge.svg)](https://github.com/scttfrdmn/objectfs/actions)
 
 [![Release](https://img.shields.io/github/v/release/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/scttfrdmn/objectfs)](go.mod)
 [![GitHub issues](https://img.shields.io/github/issues/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/issues)
 [![GitHub stars](https://img.shields.io/github/stars/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/stargazers)
@@ -18,6 +18,7 @@ ObjectFS provides a high-performance, cross-platform FUSE filesystem that makes 
 ## 🚀 What Makes ObjectFS Unique
 
 ObjectFS is **the only S3 filesystem** that combines:
+
 - **💰 Enterprise cost intelligence** - Institutional discount management & tier optimization
 - **🔬 Research-optimized workflows** - Purpose-built for genomics and computational biology  
 - **⚡ CargoShip performance** - 4.6x S3 throughput improvement over standard APIs
@@ -35,28 +36,34 @@ ObjectFS is **the only S3 filesystem** that combines:
 While several S3 filesystem projects exist ([s3fs](https://github.com/s3fs-fuse/s3fs-fuse), [goofys](https://github.com/kahing/goofys), [s3backer](https://github.com/archiecobbs/s3backer)), they all have significant limitations that make them unsuitable for **modern enterprise and research environments**:
 
 #### **💸 Cost Blindness**
+
 - **Existing solutions** treat all S3 operations equally, ignoring storage tier economics
 - **ObjectFS** provides **intelligent cost optimization** with enterprise pricing awareness, potentially saving **thousands of dollars monthly** for large-scale deployments
 
 #### **🔬 Research Workflow Mismatch**
+
 - **Existing solutions** assume generic file access patterns
 - **ObjectFS** is purpose-built for **genomics, computational biology, and data science** workflows with specialized caching and access patterns
 
 #### **🏢 Enterprise Integration Gap**
+
 - **Existing solutions** lack enterprise features like institutional discount management
 - **ObjectFS** provides **centralized pricing configuration** and **IT-managed discount distribution**
 
 #### **⚡ Performance Limitations**
+
 - **Existing solutions** use basic S3 APIs with limited optimization
 - **ObjectFS** integrates **CargoShip** for **4.6x performance improvements** and implements sophisticated multi-level caching
 
 #### **🌐 Cross-Platform Challenges**
+
 - **Existing solutions** are primarily Linux-focused with poor Windows/macOS support
 - **ObjectFS** provides **native cross-platform FUSE** implementation with platform-specific optimizations
 
 ### What ObjectFS Does Differently
 
 #### **🎯 Research-First Design**
+
 ```bash
 # Optimized for genomics workflows
 ls /mnt/s3/reference-genomes/        # Instant metadata access
@@ -65,6 +72,7 @@ cp /mnt/s3/results/*.vcf ./analysis/ # Intelligent tier selection for outputs
 ```
 
 #### **💰 Enterprise Cost Intelligence**
+
 ```yaml
 # Institutional discount configuration
 pricing_config:
@@ -75,6 +83,7 @@ pricing_config:
 ```
 
 #### **📊 Real-World Performance**
+
 | Operation | s3fs | goofys | **ObjectFS** | Improvement |
 |-----------|------|---------|--------------|-------------|
 | 1GB file read (first time) | ~120s | ~90s | **~45s** | **2-4.6x faster** |
@@ -83,6 +92,7 @@ pricing_config:
 | Small file writes | ~5s | ~2s | **~0.5s** | **4-10x faster** |
 
 #### **🔧 Production-Grade Enterprise Features**
+
 - **Institutional configuration management** - IT departments distribute standardized configs
 - **Multi-tier discount calculations** - Enterprise agreements, volume discounts, reserved capacity
 - **Access pattern analytics** - Intelligent recommendations for cost optimization
@@ -93,6 +103,7 @@ pricing_config:
 ## 🎯 Key Features
 
 ### 🚀 **High-Performance S3 Access**
+
 - **POSIX-compliant** filesystem operations on S3 objects
 - **Cross-platform FUSE support** (Linux, macOS, Windows)
 - **CargoShip integration** for 4.6x S3 performance optimization
@@ -100,6 +111,7 @@ pricing_config:
 - **Concurrent operations** with configurable parallelism
 
 ### 💰 **Enterprise Cost Management** ⭐
+
 - **Complete S3 storage tier support** with automatic constraint validation
 - **Enterprise pricing system** with multi-layered discount calculations
 - **Institutional configuration management** for standardized enterprise deployments
@@ -107,6 +119,7 @@ pricing_config:
 - **Volume discount tiers** and custom enterprise agreements support
 
 ### 🔧 **Production Ready**
+
 - **Zero-downtime deployments** with graceful configuration reloading
 - **Comprehensive monitoring** with metrics and health checks
 - **Security-first design** with credential management best practices
@@ -154,11 +167,11 @@ backends:
   s3:
     bucket: "your-enterprise-bucket"
     region: "us-west-2"
-    
+
     # Reference external discount configuration distributed by IT
     pricing_config:
       discount_config_file: "/shared/aws/institutional-discounts.yaml"
-      
+
     # Intelligent cost optimization
     cost_optimization:
       enabled: true
@@ -172,18 +185,21 @@ See [examples/DISCOUNT_CONFIG_README.md](examples/DISCOUNT_CONFIG_README.md) for
 ## 📊 Use Cases
 
 ### 🔬 **Research & Academia**
+
 - **Genomics data analysis** with seamless S3 access
 - **Large dataset processing** without local storage limitations
 - **Collaborative research** with shared S3 bucket access
 - **Cost-effective archival** with automatic tier optimization
 
 ### 🏢 **Enterprise & Organizations**
+
 - **Multi-department data sharing** with centralized S3 storage
 - **Compliance and governance** with audit trails and access controls
 - **Cost optimization** across multiple research groups and projects
 - **Hybrid cloud workflows** integrating S3 with local compute
 
 ### 🧬 **Computational Biology**
+
 - **Reference genome access** without local downloads
 - **Pipeline data staging** with automatic caching
 - **Result archival** with intelligent tier selection
@@ -205,16 +221,19 @@ See [examples/DISCOUNT_CONFIG_README.md](examples/DISCOUNT_CONFIG_README.md) for
 ### **Real-World Migration Examples**
 
 #### **🏥 Medical Research Lab (500TB genomics data)**
+
 - **Before** (s3fs): $2,400/month storage costs, 4-hour analysis startup
 - **After** (ObjectFS): $1,200/month (50% savings via IA tier), 30-minute startup
 - **Result**: $14,400/year savings + 8x faster workflows
 
 #### **🎓 University Bioinformatics Department (200 users)**
+
 - **Before** (goofys): Individual AWS configs, no cost visibility
 - **After** (ObjectFS): Centralized institutional discounts (20% off), usage analytics
 - **Result**: $50,000/year savings + simplified IT management
 
 #### **🧬 Genomics Startup (50TB+ datasets)**
+
 - **Before** (s3backer): Windows compatibility issues, manual tier management
 - **After** (ObjectFS): Cross-platform support, automatic archival to Glacier
 - **Result**: 100% team accessibility + 60% archival cost reduction
@@ -222,6 +241,7 @@ See [examples/DISCOUNT_CONFIG_README.md](examples/DISCOUNT_CONFIG_README.md) for
 ### **Migration Decision Matrix**
 
 **Choose ObjectFS if you have ANY of these:**
+
 - [ ] AWS Enterprise Agreement with volume discounts
 - [ ] Multi-TB genomics, proteomics, or scientific datasets  
 - [ ] Cross-platform development teams (Windows/macOS/Linux)
@@ -230,6 +250,7 @@ See [examples/DISCOUNT_CONFIG_README.md](examples/DISCOUNT_CONFIG_README.md) for
 - [ ] Performance-critical data analysis pipelines
 
 **Stick with alternatives if:**
+
 - [ ] Personal use with <10GB datasets
 - [ ] Linux-only environment with no cost concerns
 - [ ] Simple backup/sync use cases
@@ -267,6 +288,7 @@ ObjectFS delivers exceptional performance for S3-based workloads:
 - **Write buffering** with configurable flush strategies
 
 **Benchmark Results** (1GB genomics dataset):
+
 - First access: ~45s (S3 download + cache)
 - Subsequent access: ~2s (cache hit)
 - Write operations: ~12s (buffered + async upload)
@@ -278,6 +300,7 @@ ObjectFS delivers exceptional performance for S3-based workloads:
 ObjectFS supports comprehensive configuration for various deployment scenarios:
 
 ### Basic Research Setup
+
 ```yaml
 backends:
   s3:
@@ -287,13 +310,14 @@ backends:
 ```
 
 ### Enterprise Cost Optimization
+
 ```yaml
 backends:
   s3:
     pricing_config:
       discount_config_file: "enterprise-discounts.yaml"
       use_pricing_api: true
-    
+
     cost_optimization:
       enabled: true
       monitor_access_patterns: true
@@ -322,6 +346,7 @@ cd objectfs
 ### Development Workflow
 
 Every commit automatically runs:
+
 - 🔧 **Code formatting** (gofmt, goimports)
 - 🔍 **Linting** (golangci-lint)
 - 🧪 **Full test suite** (go test -race with coverage)
@@ -352,6 +377,7 @@ git commit --no-verify
 **Major enterprise-focused release** adding comprehensive AWS S3 storage tier support with intelligent cost optimization and institutional configuration management.
 
 #### 🎯 New in v0.2.0
+
 - **Complete S3 storage tier support** (Standard, Standard-IA, One Zone-IA, Glacier IR, Glacier, Deep Archive, Intelligent Tiering)
 - **Enterprise pricing system** with multi-layered discount calculations
 - **Institutional configuration management** for standardized enterprise deployments
@@ -359,10 +385,12 @@ git commit --no-verify
 - **External discount configuration files** for IT department distribution
 
 #### Migration from v0.1.0
+
 - **Fully backward compatible** - existing configurations work unchanged
 - Optional adoption of new pricing and tier management features
 
 ### Previous Releases
+
 - **[v0.1.0](https://github.com/scttfrdmn/objectfs/releases/tag/v0.1.0)** - Cross-Platform Research-Focused S3 Filesystem
 
 ---
@@ -383,7 +411,7 @@ We welcome contributions! Please see our [contributing guidelines](CONTRIBUTING.
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ---
 
