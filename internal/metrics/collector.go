@@ -291,6 +291,12 @@ func (c *Collector) GetMetrics() map[string]interface{} {
 	return metrics
 }
 
+// Gatherer returns the Prometheus Gatherer for this collector's registry.
+// Returns nil if the collector is disabled.
+func (c *Collector) Gatherer() prometheus.Gatherer {
+	return c.registry
+}
+
 // ResetMetrics resets all metrics
 func (c *Collector) ResetMetrics() {
 	c.mu.Lock()

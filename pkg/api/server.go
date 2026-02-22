@@ -11,6 +11,8 @@ import (
 
 	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/status"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server provides HTTP API endpoints for monitoring
@@ -18,6 +20,7 @@ type Server struct {
 	httpServer    *http.Server
 	statusTracker *status.Tracker
 	healthTracker *health.Tracker
+	gatherer      prometheus.Gatherer
 	config        ServerConfig
 }
 
@@ -54,11 +57,14 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
-// NewServer creates a new API server
-func NewServer(config ServerConfig, statusTracker *status.Tracker, healthTracker *health.Tracker) *Server {
+// NewServer creates a new API server. Pass a non-nil prometheus.Gatherer to
+// enable real Prometheus text-format output at /metrics; pass nil to keep the
+// endpoint returning an empty metric set.
+func NewServer(config ServerConfig, statusTracker *status.Tracker, healthTracker *health.Tracker, gatherer prometheus.Gatherer) *Server {
 	s := &Server{
 		statusTracker: statusTracker,
 		healthTracker: healthTracker,
+		gatherer:      gatherer,
 		config:        config,
 	}
 
@@ -342,7 +348,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, info)
 }
 
-// Metrics endpoint (placeholder)
+// Metrics endpoint
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -350,15 +356,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Placeholder for Prometheus-style metrics
-	// In production, this would integrate with a metrics library
-	w.Header().Set("Content-Type", "text/plain")
-	if _, err := fmt.Fprintf(w, "# ObjectFS Metrics\n"); err != nil {
-		log.Printf("Failed to write metrics header: %v", err)
+	if s.gatherer == nil {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
 	}
-	if _, err := fmt.Fprintf(w, "# Coming soon\n"); err != nil {
-		log.Printf("Failed to write metrics body: %v", err)
-	}
+
+	promhttp.HandlerFor(s.gatherer, promhttp.HandlerOpts{
+		ErrorLog:      log.Default(),
+		ErrorHandling: promhttp.HTTPErrorOnError,
+	}).ServeHTTP(w, r)
 }
 
 // Middleware

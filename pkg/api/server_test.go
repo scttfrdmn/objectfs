@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/objectfs/objectfs/pkg/errors"
 	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/status"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestNewServer(t *testing.T) {
@@ -19,7 +21,7 @@ func TestNewServer(t *testing.T) {
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 	healthTracker := health.NewTracker(health.DefaultConfig())
 
-	server := NewServer(config, statusTracker, healthTracker)
+	server := NewServer(config, statusTracker, healthTracker, nil)
 
 	if server == nil {
 		t.Fatal("NewServer returned nil")
@@ -427,7 +429,7 @@ func TestCORSMiddleware(t *testing.T) {
 	config := DefaultServerConfig()
 	config.EnableCORS = true
 
-	server := NewServer(config, nil, nil)
+	server := NewServer(config, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodOptions, "/health", nil)
 	w := httptest.NewRecorder()
@@ -448,7 +450,7 @@ func TestServerShutdown(t *testing.T) {
 	config.Address = "localhost:0" // Use random available port
 
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
-	server := NewServer(config, statusTracker, nil)
+	server := NewServer(config, statusTracker, nil, nil)
 
 	// Start server in background
 	server.StartBackground()
@@ -573,5 +575,114 @@ func TestHealthWithActualErrors(t *testing.T) {
 
 	if response["status"] != "read-only" {
 		t.Errorf("Expected status=read-only, got %v", response["status"])
+	}
+}
+
+// Metrics endpoint tests
+
+func TestHandleMetrics_NilGatherer(t *testing.T) {
+	t.Parallel()
+	server := &Server{
+		config:   DefaultServerConfig(),
+		gatherer: nil,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+
+	server.handleMetrics(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("Expected text/plain Content-Type, got %q", ct)
+	}
+}
+
+func TestHandleMetrics_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	server := &Server{
+		config:   DefaultServerConfig(),
+		gatherer: nil,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/metrics", nil)
+	w := httptest.NewRecorder()
+
+	server.handleMetrics(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected status 405, got %d", w.Code)
+	}
+}
+
+func TestHandleMetrics_WithGatherer(t *testing.T) {
+	t.Parallel()
+
+	// Build a test registry with known metrics.
+	reg := prometheus.NewRegistry()
+
+	opsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "objectfs",
+		Name:      "operations_total",
+		Help:      "Total operations",
+	}, []string{"operation", "status"})
+	cacheTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "objectfs",
+		Name:      "cache_requests_total",
+		Help:      "Total cache requests",
+	}, []string{"type", "source"})
+	errorsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "objectfs",
+		Name:      "errors_total",
+		Help:      "Total errors",
+	}, []string{"operation", "type"})
+
+	reg.MustRegister(opsTotal, cacheTotal, errorsTotal)
+
+	// Record some observations so the families appear in the output.
+	opsTotal.With(prometheus.Labels{"operation": "read", "status": "success"}).Inc()
+	cacheTotal.With(prometheus.Labels{"type": "hit", "source": "memory"}).Inc()
+	errorsTotal.With(prometheus.Labels{"operation": "write", "type": "timeout"}).Inc()
+
+	server := &Server{
+		config:   DefaultServerConfig(),
+		gatherer: reg,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+
+	server.handleMetrics(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+
+	// Verify Content-Type header contains text/plain
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("Expected text/plain Content-Type, got %q", ct)
+	}
+
+	// Verify the three core metric families are present.
+	for _, want := range []string{
+		"objectfs_operations_total",
+		"objectfs_cache_requests_total",
+		"objectfs_errors_total",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Expected metric %q in /metrics output; body:\n%s", want, body)
+		}
+	}
+
+	// Verify Prometheus text format: lines should contain HELP and TYPE comments.
+	if !strings.Contains(body, "# HELP") {
+		t.Error("Expected '# HELP' comment lines in Prometheus text output")
+	}
+	if !strings.Contains(body, "# TYPE") {
+		t.Error("Expected '# TYPE' comment lines in Prometheus text output")
 	}
 }
