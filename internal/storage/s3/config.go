@@ -47,6 +47,12 @@ type Config struct {
 
 	// Transparent object compression configuration
 	Compression CompressionConfig `yaml:"compression"`
+
+	// CongestionAlgorithm is the TCP congestion control algorithm to request
+	// for each S3 connection: "auto" (detect best), "bbr", "cubic", "reno".
+	// On non-Linux platforms the value is silently ignored.
+	// Default: "auto".
+	CongestionAlgorithm string `yaml:"congestion_algorithm"`
 }
 
 // CompressionConfig defines transparent compression settings for S3 objects.
@@ -254,6 +260,7 @@ func NewDefaultConfig() *Config {
 			Level:     3,     // fast level with good ratio (~60% savings for text/JSON)
 			MinSize:   "4KB", // skip compression for tiny objects
 		},
+		CongestionAlgorithm: "auto",
 		CostOptimization: CostOptimization{
 			EnableAutoTiering:     false,
 			LifecycleManagement:   false,

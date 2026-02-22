@@ -232,6 +232,7 @@ func (a *Adapter) buildS3Config() *s3.Config {
 			Level:     a.config.WriteBuffer.Compression.Level,
 			MinSize:   a.config.WriteBuffer.Compression.MinSize,
 		},
+		CongestionAlgorithm: a.config.Network.CongestionAlgorithm,
 	}
 }
 

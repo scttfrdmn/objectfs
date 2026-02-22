@@ -119,9 +119,10 @@ type CompressionConfig struct {
 
 // NetworkConfig represents network configuration
 type NetworkConfig struct {
-	Timeouts       TimeoutConfig        `yaml:"timeouts"`
-	Retry          RetryConfig          `yaml:"retry"`
-	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
+	Timeouts            TimeoutConfig        `yaml:"timeouts"`
+	Retry               RetryConfig          `yaml:"retry"`
+	CircuitBreaker      CircuitBreakerConfig `yaml:"circuit_breaker"`
+	CongestionAlgorithm string               `yaml:"congestion_algorithm"` // "auto", "bbr", "cubic", "reno"
 }
 
 // TimeoutConfig represents timeout settings
@@ -353,6 +354,7 @@ func NewDefault() *Configuration {
 				FailureThreshold: 5,
 				Timeout:          60 * time.Second,
 			},
+			CongestionAlgorithm: "auto",
 		},
 		Security: SecurityConfig{
 			Enabled:     false,

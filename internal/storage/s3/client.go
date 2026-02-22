@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/objectfs/objectfs/internal/network"
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 )
@@ -21,7 +24,8 @@ type ClientManager struct {
 	transporter        *cargoships3.Transporter
 	config             *Config
 	logger             *slog.Logger
-	accelerationActive bool // Tracks if acceleration is currently active
+	accelerationActive bool             // Tracks if acceleration is currently active
+	networkMonitor     *network.Monitor // Tracks bytes/connections for this client
 }
 
 // NewClientManager creates a new S3 client manager
@@ -34,10 +38,25 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		cfg = NewDefaultConfig()
 	}
 
+	// Build a congestion-aware HTTP transport for the AWS SDK.
+	algo := network.Algorithm(cfg.CongestionAlgorithm)
+	dialer := network.NewDialer(algo)
+	mon := network.NewMonitor(algo)
+	transport := &http.Transport{
+		DialContext:           mon.WrapDialContext(dialer.DialContext),
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   cfg.PoolSize,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	httpClient := &http.Client{Transport: transport}
+
 	// Load AWS configuration
 	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(cfg.Region),
 		config.WithRetryMaxAttempts(cfg.MaxRetries),
+		config.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
@@ -124,6 +143,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		config:             cfg,
 		logger:             logger,
 		accelerationActive: accelerationActive,
+		networkMonitor:     mon,
 	}, nil
 }
 
@@ -173,6 +193,12 @@ func (cm *ClientManager) HealthCheck(ctx context.Context, bucket string) error {
 	}
 
 	return nil
+}
+
+// GetNetworkMonitor returns the network monitor that tracks bytes and
+// connection counts for all S3 connections made through this client.
+func (cm *ClientManager) GetNetworkMonitor() *network.Monitor {
+	return cm.networkMonitor
 }
 
 // Close closes all client resources
