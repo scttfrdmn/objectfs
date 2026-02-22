@@ -7,6 +7,10 @@
 /objectfs
 objectfs-*
 
+# C SDK build artifacts
+sdks/c/tests/test_basic
+sdks/c/tests/test_mount
+
 # Test binary, built with `go test -c`
 *.test
 
