@@ -7,19 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Enhanced S3 features (Transfer Acceleration, Multipart optimization)
-- Advanced compression algorithms (Zstandard, LZ4)
-- Distributed cache with Redis backend
-- Multi-backend support (Google Cloud Storage, Azure Blob Storage)
-- CargoShip integration phases (shared components, archive-aware filesystem, unified workflows)
-- Web-based management interface
+### Changed
+- Upgraded `github.com/scttfrdmn/cargoship` v0.4.5 → v0.13.0 (DVC pipeline auto-discovery, archive filesystem shell, Glacier restore, incremental sync, deduplication)
+- Go toolchain bumped to 1.26.0 (pulled in by cargoship v0.13.0)
+- Transitive upgrades: `aws-sdk-go-v2` v1.39.2 → v1.41.0, `testify` v1.10.0 → v1.11.1
 
-### Competitive Analysis
-- **Amazon File Cache Alternative**: ObjectFS positioned as simpler, cost-effective solution to global namespace challenges
-- **Enterprise Positioning**: Cost analysis showing 260x savings vs Amazon File Cache ($1.33/GB-month → ~$0.005/GB-month)
-- **Simplified Architecture**: Multi-level caching approach eliminating Lustre complexity while maintaining performance
-- **Use Case Coverage**: Addressing 80%+ of global namespace requirements with standard S3 backing store
+### Fixed
+- License references updated from MIT to Apache 2.0 throughout README, SDKs, and docs
+- Copyright year updated to 2025-2026
+- Pre-commit `check-yaml` hook now uses `--unsafe` to handle MkDocs Python YAML tags
+- Markdownlint config: relax line-length limit and allow emphasis for README badge lines
 
 ## [0.1.0] - 2025-07-27
 
