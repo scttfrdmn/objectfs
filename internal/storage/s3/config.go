@@ -44,6 +44,25 @@ type Config struct {
 	TierConstraints  TierConstraints  `yaml:"tier_constraints"`  // Tier-specific constraints
 	CostOptimization CostOptimization `yaml:"cost_optimization"` // Cost optimization settings
 	PricingConfig    PricingConfig    `yaml:"pricing_config"`    // Custom pricing configuration
+
+	// Transparent object compression configuration
+	Compression CompressionConfig `yaml:"compression"`
+}
+
+// CompressionConfig defines transparent compression settings for S3 objects.
+// When Enabled is true, objects are compressed on upload (PutObject) and
+// decompressed on download (GetObject) using the configured algorithm.
+type CompressionConfig struct {
+	// Enabled turns transparent S3 compression on or off.
+	Enabled bool `yaml:"enabled"`
+	// Algorithm selects the codec: "zstd" (recommended), "gzip", "none".
+	Algorithm string `yaml:"algorithm"`
+	// Level is the codec-specific compression level (0 = built-in default).
+	// For ZSTD: 1 = fastest, 22 = best compression; 3 is a good default.
+	Level int `yaml:"level"`
+	// MinSize is the minimum object size to compress (e.g. "4KB").
+	// Objects smaller than MinSize are stored uncompressed.
+	MinSize string `yaml:"min_size"`
 }
 
 // GetOptimalChunkSize returns the optimal chunk size for a given file size
@@ -229,6 +248,12 @@ func NewDefaultConfig() *Config {
 		MultipartConcurrency:        8,                 // Match pool size for concurrent uploads
 		StorageTier:                 TierStandard,      // Default to Standard tier
 		TierConstraints:             TierConstraints{}, // Use tier defaults
+		Compression: CompressionConfig{
+			Enabled:   true,
+			Algorithm: "zstd",
+			Level:     3,     // fast level with good ratio (~60% savings for text/JSON)
+			MinSize:   "4KB", // skip compression for tiny objects
+		},
 		CostOptimization: CostOptimization{
 			EnableAutoTiering:     false,
 			LifecycleManagement:   false,

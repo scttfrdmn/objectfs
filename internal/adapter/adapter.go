@@ -226,6 +226,12 @@ func (a *Adapter) buildS3Config() *s3.Config {
 		Endpoint:       a.config.Storage.S3.Endpoint,
 		ForcePathStyle: a.config.Storage.S3.ForcePathStyle,
 		UseAccelerate:  a.config.Storage.S3.UseAcceleration,
+		Compression: s3.CompressionConfig{
+			Enabled:   a.config.WriteBuffer.Compression.Enabled,
+			Algorithm: a.config.WriteBuffer.Compression.Algorithm,
+			Level:     a.config.WriteBuffer.Compression.Level,
+			MinSize:   a.config.WriteBuffer.Compression.MinSize,
+		},
 	}
 }
 

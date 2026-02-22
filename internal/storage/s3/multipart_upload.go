@@ -42,19 +42,25 @@ type partResult struct {
 }
 
 // initiateMultipartUpload calls CreateMultipartUpload and returns the upload ID.
+// contentEncoding is the HTTP Content-Encoding token (e.g. "zstd") or "" if
+// no transparent compression was applied.
 func (b *Backend) initiateMultipartUpload(
 	ctx context.Context,
-	key, contentType string,
+	key, contentType, contentEncoding string,
 	storageClass s3types.StorageClass,
 ) (string, error) {
 	var uploadID string
 	err := b.executeWithAccelerationFallback(ctx, "CreateMultipartUpload", func(client *s3.Client) error {
-		result, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		input := &s3.CreateMultipartUploadInput{
 			Bucket:       aws.String(b.bucket),
 			Key:          aws.String(key),
 			ContentType:  aws.String(contentType),
 			StorageClass: storageClass,
-		})
+		}
+		if contentEncoding != "" {
+			input.ContentEncoding = aws.String(contentEncoding)
+		}
+		result, err := client.CreateMultipartUpload(ctx, input)
 		if err != nil {
 			b.metricsCollector.RecordError(err)
 			return b.translateError(err, "CreateMultipartUpload", key)

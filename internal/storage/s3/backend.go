@@ -16,6 +16,8 @@ import (
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
 	"github.com/objectfs/objectfs/internal/circuit"
+	"github.com/objectfs/objectfs/internal/compression"
+	internalcfg "github.com/objectfs/objectfs/internal/config"
 	"github.com/objectfs/objectfs/pkg/errors"
 	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/retry"
@@ -52,6 +54,9 @@ type Backend struct {
 
 	// Multipart upload management
 	multipartManager *MultipartStateManager
+
+	// Transparent object compression
+	compressor *compression.Compressor
 }
 
 // NewBackend creates a new S3 backend instance
@@ -105,6 +110,24 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 
 	// Initialize multipart upload manager
 	backend.multipartManager = NewMultipartStateManager()
+
+	// Initialize transparent compression
+	compressor, err := compression.NewCompressor(internalcfg.CompressionConfig{
+		Enabled:   cfg.Compression.Enabled,
+		Algorithm: cfg.Compression.Algorithm,
+		Level:     cfg.Compression.Level,
+		MinSize:   cfg.Compression.MinSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize compression: %w", err)
+	}
+	backend.compressor = compressor
+	if compressor.Enabled() {
+		logger.Info("S3 transparent compression enabled",
+			"algorithm", cfg.Compression.Algorithm,
+			"level", cfg.Compression.Level,
+			"min_size", cfg.Compression.MinSize)
+	}
 
 	// Initialize circuit breaker manager
 	circuitConfig := circuit.Config{
@@ -200,17 +223,26 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 
 	breaker := b.circuitManager.GetBreaker("s3-get")
 	var data []byte
+	var contentEncoding string
+
+	// When transparent compression is enabled, fetch the entire object so we
+	// can decompress it before applying any byte-range slice.  For uncompressed
+	// objects the behaviour is identical to before.
+	fetchOffset, fetchSize := offset, size
+	if b.compressor != nil && b.compressor.Enabled() {
+		fetchOffset, fetchSize = 0, 0
+	}
 
 	// Wrap with retry logic
 	err := b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
 		return breaker.ExecuteWithContext(retryCtx, func(ctx context.Context) error {
 			// Build range header if needed
 			var rangeHeader *string
-			if offset > 0 || size > 0 {
-				if size > 0 {
-					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+size-1))
+			if fetchOffset > 0 || fetchSize > 0 {
+				if fetchSize > 0 {
+					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-%d", fetchOffset, fetchOffset+fetchSize-1))
 				} else {
-					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-", offset))
+					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-", fetchOffset))
 				}
 			}
 
@@ -231,6 +263,10 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 				}
 				defer func() { _ = result.Body.Close() }()
 
+				if result.ContentEncoding != nil {
+					contentEncoding = aws.ToString(result.ContentEncoding)
+				}
+
 				data, err = io.ReadAll(result.Body)
 				if err != nil {
 					b.metricsCollector.RecordError(err)
@@ -250,6 +286,29 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Decompress if the object was stored with transparent compression.
+	if b.compressor != nil && contentEncoding != "" {
+		decompressed, decompErr := b.compressor.Decompress(data, contentEncoding)
+		if decompErr != nil {
+			return nil, fmt.Errorf("decompress object %q: %w", key, decompErr)
+		}
+		data = decompressed
+	}
+
+	// Apply byte-range slice after decompression (or directly for uncompressed).
+	// This handles the case where compression was active and we fetched the
+	// full object instead of issuing a range request to S3.
+	if (offset > 0 || size > 0) && (fetchOffset != offset || fetchSize != size) {
+		if offset >= int64(len(data)) {
+			return []byte{}, nil
+		}
+		end := offset + size
+		if size == 0 || end > int64(len(data)) {
+			end = int64(len(data))
+		}
+		data = data[offset:end]
 	}
 
 	// Record access pattern for cost optimization
@@ -296,17 +355,36 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 		}
 	}
 
+	// Apply transparent compression before upload.
+	uploadData := data
+	contentEncoding := ""
+	if b.compressor != nil {
+		compressed, wasCompressed, comprErr := b.compressor.Compress(data)
+		if comprErr != nil {
+			return fmt.Errorf("compress object %q: %w", key, comprErr)
+		}
+		if wasCompressed {
+			uploadData = compressed
+			contentEncoding = b.compressor.ContentEncoding()
+			b.logger.Debug("Object compressed for upload",
+				"key", key,
+				"original_size", len(data),
+				"compressed_size", len(uploadData),
+				"ratio", float64(len(uploadData))/float64(len(data)))
+		}
+	}
+
 	breaker := b.circuitManager.GetBreaker("s3-put")
 
 	err := breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
-		// Check if we should use multipart upload based on size threshold
-		dataSize := int64(len(data))
+		// Check if we should use multipart upload based on compressed size.
+		dataSize := int64(len(uploadData))
 		if dataSize >= b.config.MultipartThreshold {
 			b.logger.Debug("Using multipart upload for large object",
 				"key", key,
 				"size", dataSize,
 				"threshold", b.config.MultipartThreshold)
-			return b.putObjectMultipart(ctx, key, data, effectiveTier)
+			return b.putObjectMultipart(ctx, key, uploadData, effectiveTier, contentEncoding)
 		}
 
 		// Get storage class for effective tier
@@ -315,37 +393,44 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 		input := &s3.PutObjectInput{
 			Bucket:        aws.String(b.bucket),
 			Key:           aws.String(key),
-			Body:          bytes.NewReader(data),
-			ContentLength: aws.Int64(int64(len(data))),
+			Body:          bytes.NewReader(uploadData),
+			ContentLength: aws.Int64(int64(len(uploadData))),
 			ContentType:   aws.String(b.detectContentType(key)),
 			StorageClass:  storageClass,
+		}
+		if contentEncoding != "" {
+			input.ContentEncoding = aws.String(contentEncoding)
 		}
 
 		// Use CargoShip transporter if available for optimized uploads (4.6x performance)
 		if transporter := b.clientManager.GetTransporter(); transporter != nil {
 			// Use CargoShip's optimized upload with BBR/CUBIC algorithms
 			cargoStorageClass := ConvertTierToCargoShipStorageClass(effectiveTier)
+			cargoMeta := map[string]string{
+				"objectfs-upload": "true",
+				"content-type":    b.detectContentType(key),
+				"storage-tier":    effectiveTier,
+				"configured-tier": b.currentTier,
+			}
+			if contentEncoding != "" {
+				cargoMeta["content-encoding"] = contentEncoding
+			}
 			archive := cargoships3.Archive{
 				Key:          key,
-				Reader:       bytes.NewReader(data),
-				Size:         int64(len(data)),
+				Reader:       bytes.NewReader(uploadData),
+				Size:         int64(len(uploadData)),
 				StorageClass: cargoStorageClass,
-				Metadata: map[string]string{
-					"objectfs-upload": "true",
-					"content-type":    b.detectContentType(key),
-					"storage-tier":    effectiveTier,
-					"configured-tier": b.currentTier,
-				},
+				Metadata:     cargoMeta,
 			}
 
 			result, uploadErr := transporter.Upload(ctx, archive)
 			if uploadErr == nil {
 				b.logger.Debug("CargoShip optimized upload completed",
 					"key", key,
-					"size", len(data),
+					"size", len(uploadData),
 					"throughput", result.Throughput,
 					"duration", result.Duration)
-				b.metricsCollector.RecordBytesUploaded(int64(len(data)))
+				b.metricsCollector.RecordBytesUploaded(int64(len(uploadData)))
 				b.healthTracker.RecordSuccess("s3-writes")
 				return nil
 			}
@@ -363,7 +448,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 				return translatedErr
 			}
 
-			b.metricsCollector.RecordBytesUploaded(int64(len(data)))
+			b.metricsCollector.RecordBytesUploaded(int64(len(uploadData)))
 			b.healthTracker.RecordSuccess("s3-writes")
 			return nil
 		})
@@ -938,7 +1023,7 @@ func (b *Backend) executeWithAccelerationFallback(
 //   - uploadParts              – concurrent UploadPart fan-out
 //   - abortMultipartUpload     – AbortMultipartUpload on failure
 //   - completeMultipartUpload  – CompleteMultipartUpload on success
-func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier string) error {
+func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier, contentEncoding string) error {
 	dataSize := int64(len(data))
 	chunkSize := CalculateOptimalChunkSize(dataSize, b.config.MultipartThreshold, b.config.MultipartChunkSize)
 	storageClass := ConvertTierToStorageClass(tier)
@@ -947,7 +1032,7 @@ func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byt
 	b.logger.Debug("Starting multipart upload",
 		"key", key, "total_size", dataSize, "chunk_size", chunkSize, "tier", tier)
 
-	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, storageClass)
+	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, contentEncoding, storageClass)
 	if err != nil {
 		return fmt.Errorf("failed to initiate multipart upload: %w", err)
 	}
