@@ -16,6 +16,24 @@ func requireAWS(t *testing.T) {
 	}
 }
 
+// testBucket returns the integration-test bucket name from $OBJECTFS_TEST_BUCKET.
+// Falls back to a conventional name when the env var is unset (only for
+// connectivity-only tests that do not perform destructive operations).
+func testBucket() string {
+	if b := os.Getenv("OBJECTFS_TEST_BUCKET"); b != "" {
+		return b
+	}
+	return "objectfs-test-bucket" // fallback for New/Close-only tests
+}
+
+// testRegion returns the AWS region from $AWS_REGION, defaulting to us-east-1.
+func testRegion() string {
+	if r := os.Getenv("AWS_REGION"); r != "" {
+		return r
+	}
+	return "us-east-1"
+}
+
 // --- Option tests (no backend required) ---
 
 func TestDefaultOptions(t *testing.T) {
@@ -228,7 +246,7 @@ func TestSentinelErrors_Is(t *testing.T) {
 
 func TestNew_WithDefaults(t *testing.T) {
 	requireAWS(t)
-	c, err := New(context.Background(), "objectfs-test-bucket")
+	c, err := New(context.Background(), testBucket())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -243,25 +261,166 @@ func TestNew_WithDefaults(t *testing.T) {
 
 func TestNew_WithRegion(t *testing.T) {
 	requireAWS(t)
-	c, err := New(context.Background(), "objectfs-test-bucket",
-		WithRegion("us-west-2"),
-	)
+	region := testRegion()
+	c, err := New(context.Background(), testBucket(), WithRegion(region))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer c.Close() //nolint:errcheck
-	if c.opts.region != "us-west-2" {
-		t.Errorf("region: got %q, want %q", c.opts.region, "us-west-2")
+	if c.opts.region != region {
+		t.Errorf("region: got %q, want %q", c.opts.region, region)
 	}
 }
 
 func TestClose_NotMounted(t *testing.T) {
 	requireAWS(t)
-	c, err := New(context.Background(), "objectfs-test-bucket")
+	c, err := New(context.Background(), testBucket())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if err := c.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// --- Full CRUD integration tests (require OBJECTFS_TEST_BUCKET + AWS creds) ---
+
+// requireTestBucket skips unless both AWS creds and OBJECTFS_TEST_BUCKET are set.
+func requireTestBucket(t *testing.T) string {
+	t.Helper()
+	requireAWS(t)
+	bucket := os.Getenv("OBJECTFS_TEST_BUCKET")
+	if bucket == "" {
+		t.Skip("OBJECTFS_TEST_BUCKET not set; skipping CRUD integration test")
+	}
+	return bucket
+}
+
+func TestIntegration_PutGetDeleteHead(t *testing.T) {
+	bucket := requireTestBucket(t)
+	ctx := context.Background()
+
+	c, err := New(ctx, bucket, WithRegion(testRegion()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close() //nolint:errcheck
+
+	key := "sdk-integration-test/put-get-delete-head"
+	data := []byte("ObjectFS Go SDK integration test data — Put/Get/Delete/Head round-trip")
+
+	// Put
+	if err := c.Put(ctx, key, data); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Get — full object
+	got, err := c.Get(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("Get data mismatch: got %q, want %q", got, data)
+	}
+
+	// Get — partial read
+	partial, err := c.Get(ctx, key, 10, 7)
+	if err != nil {
+		t.Fatalf("Get (partial): %v", err)
+	}
+	if string(partial) != string(data[10:17]) {
+		t.Errorf("partial Get: got %q, want %q", partial, data[10:17])
+	}
+
+	// Head
+	info, err := c.Head(ctx, key)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if info.Key != key {
+		t.Errorf("Head key: got %q, want %q", info.Key, key)
+	}
+	if info.Size != int64(len(data)) {
+		t.Errorf("Head size: got %d, want %d", info.Size, len(data))
+	}
+
+	// Delete
+	if err := c.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Confirm deletion — Get should error
+	_, err = c.Get(ctx, key, 0, 0)
+	if err == nil {
+		t.Error("Get after Delete should return an error, got nil")
+	}
+}
+
+func TestIntegration_List(t *testing.T) {
+	bucket := requireTestBucket(t)
+	ctx := context.Background()
+
+	c, err := New(ctx, bucket, WithRegion(testRegion()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close() //nolint:errcheck
+
+	prefix := "sdk-integration-test/list/"
+	keys := []string{prefix + "a", prefix + "b", prefix + "c"}
+
+	// Upload test objects.
+	for _, k := range keys {
+		if err := c.Put(ctx, k, []byte("list-test-"+k)); err != nil {
+			t.Fatalf("Put %s: %v", k, err)
+		}
+	}
+	defer func() {
+		for _, k := range keys {
+			c.Delete(ctx, k) //nolint:errcheck
+		}
+	}()
+
+	// List with prefix.
+	results, err := c.List(ctx, prefix, 100)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(results) < len(keys) {
+		t.Errorf("List: got %d results, want at least %d", len(results), len(keys))
+	}
+
+	found := make(map[string]bool)
+	for _, obj := range results {
+		found[obj.Key] = true
+	}
+	for _, k := range keys {
+		if !found[k] {
+			t.Errorf("List: key %q not found in results", k)
+		}
+	}
+
+	// Limit parameter.
+	limited, err := c.List(ctx, prefix, 1)
+	if err != nil {
+		t.Fatalf("List (limit=1): %v", err)
+	}
+	if len(limited) > 1 {
+		t.Errorf("List limit=1: got %d results, want ≤1", len(limited))
+	}
+}
+
+func TestIntegration_Health(t *testing.T) {
+	bucket := requireTestBucket(t)
+	ctx := context.Background()
+
+	c, err := New(ctx, bucket, WithRegion(testRegion()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close() //nolint:errcheck
+
+	if err := c.Health(ctx); err != nil {
+		t.Errorf("Health: %v", err)
 	}
 }

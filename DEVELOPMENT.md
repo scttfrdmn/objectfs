@@ -1,7 +1,7 @@
 # ObjectFS Development Guide
 
-**Version:** 2.0 (Simplified for Solodev)
-**Last Updated:** October 15, 2025
+**Version:** 2.1
+**Last Updated:** February 2026
 
 ---
 
@@ -104,6 +104,127 @@ go test -v -run TestCacheGetPut ./internal/cache
 # Benchmarks
 go test -bench=. ./...
 ```
+
+---
+
+## v0.6.0 Pre-Release Integration Test Procedure
+
+Before cutting a release, run the full AWS integration suite to catch regressions
+introduced since the previous release.
+
+### 1. Prerequisites
+
+- AWS credentials with `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`,
+  `s3:ListObjectsV2`, `s3:HeadObject`, and `s3:HeadBucket` on the test bucket.
+- A dedicated test bucket (7-day lifecycle policy recommended to auto-expire objects):
+
+```bash
+# One-time bucket setup
+./scripts/setup-aws-test.sh --auto    # interactive; creates objectfs-test-$(whoami)
+# or manually:
+export OBJECTFS_TEST_BUCKET=objectfs-test-$(whoami)
+aws s3 mb s3://$OBJECTFS_TEST_BUCKET --region us-east-1
+```
+
+### 2. Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `AWS_ACCESS_KEY_ID` | Yes | — | AWS access key |
+| `AWS_SECRET_ACCESS_KEY` | Yes | — | AWS secret key |
+| `OBJECTFS_TEST_BUCKET` | Yes | — | Test bucket name |
+| `AWS_REGION` | No | `us-east-1` | Bucket region |
+| `AWS_PROFILE` | No | `default` | Named AWS profile (alternative to key vars) |
+
+### 3. Run the Full Suite
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export OBJECTFS_TEST_BUCKET=objectfs-test-$(whoami)
+export AWS_REGION=us-east-1
+
+# All AWS integration tests + unit tests (recommended before release)
+make test-release-check
+
+# AWS tests only
+make test-aws
+```
+
+`make test-aws` runs two test groups in sequence:
+
+**Group 1 — `internal/storage/s3` (`aws_s3` build tag):**
+
+| Test | What it covers |
+|---|---|
+| `TestBasicOperations` | PutObject, GetObject, HeadObject, DeleteObject |
+| `TestListObjects` | ListObjects with prefix, result count, limit parameter |
+| `TestMultipartUpload` | 6 MB upload with 5 MB threshold → explicit multipart path |
+| `TestZSTDCompression` | ZSTD round-trip, partial read, raw-storage verification |
+| `TestRangeRequests` | Partial GET at start, middle, and end of object |
+| `TestBatchOperations` | PutObjects/GetObjects with multiple keys |
+| `TestPerformanceBenchmark` | Throughput at 1 KB – 10 MB |
+| `TestHealthCheck` | S3 connectivity |
+
+**Group 2 — `sdks/go/objectfs` integration tests:**
+
+| Test | What it covers |
+|---|---|
+| `TestNew_WithDefaults` | Client construction, region default, IsMounted==false |
+| `TestNew_WithRegion` | `WithRegion` option applied |
+| `TestClose_NotMounted` | Close without mounting |
+| `TestIntegration_PutGetDeleteHead` | SDK Put/Get full + partial/Delete/Head round-trip |
+| `TestIntegration_List` | SDK List with prefix and limit |
+| `TestIntegration_Health` | SDK Health pass-through |
+
+### 4. FUSE Smoke Test (Linux only)
+
+FUSE tests require a Linux host with FUSE kernel support. Run on a Linux CI runner
+or an EC2 instance:
+
+```bash
+# Build and mount
+make build
+mkdir -p /tmp/objectfs-mnt
+./bin/objectfs mount \
+    --bucket "$OBJECTFS_TEST_BUCKET" \
+    --region "$AWS_REGION" \
+    /tmp/objectfs-mnt &
+
+# Basic smoke: ls / cat / cp
+sleep 2
+ls /tmp/objectfs-mnt
+echo "hello from fuse" | aws s3 cp - "s3://$OBJECTFS_TEST_BUCKET/fuse-smoke.txt"
+cat /tmp/objectfs-mnt/fuse-smoke.txt
+cp /tmp/objectfs-mnt/fuse-smoke.txt /tmp/fuse-round-trip.txt
+diff <(echo "hello from fuse") /tmp/fuse-round-trip.txt
+
+# Cleanup
+fusermount -u /tmp/objectfs-mnt
+aws s3 rm "s3://$OBJECTFS_TEST_BUCKET/fuse-smoke.txt"
+```
+
+Expected: `ls` lists bucket objects, `cat` returns correct content, `diff` exits 0.
+
+### 5. Post-Run Cleanup
+
+```bash
+# Remove all test objects written during the run
+./scripts/cleanup-aws-test.sh --bucket "$OBJECTFS_TEST_BUCKET"
+```
+
+### 6. Acceptance Checklist
+
+Before merging or tagging `v0.6.0`, verify:
+
+- [ ] `make test` passes (all unit tests, race detector clean)
+- [ ] `make test-aws` passes against `us-east-1` bucket
+- [ ] `TestMultipartUpload` — multipart path exercised (check backend log output)
+- [ ] `TestZSTDCompression` — raw stored bytes differ from plaintext (compression applied)
+- [ ] FUSE smoke test passes on Linux (ls / cat / cp all succeed)
+- [ ] No AWS credentials appear in test log output (`/tmp/objectfs-aws-s3.log`,
+  `/tmp/objectfs-sdk-go.log`)
+- [ ] All test objects cleaned up after the run
 
 ---
 

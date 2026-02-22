@@ -41,6 +41,7 @@ COLOR_RED = \033[31m
 .PHONY: docker docker-build docker-push package release
 .PHONY: coverage coverage-html coverage-report
 .PHONY: setup-hooks pre-commit-run pre-commit-all
+.PHONY: test-integration test-aws test-release-check
 .PHONY: help version
 
 # Default target - now includes hook setup
@@ -55,9 +56,11 @@ help:
 	@echo "  $(COLOR_GREEN)build-all$(COLOR_RESET)      Build binaries for all platforms"
 	@echo "  $(COLOR_GREEN)build-debug$(COLOR_RESET)    Build debug binary with symbols"
 	@echo "  $(COLOR_GREEN)build-race$(COLOR_RESET)     Build binary with race detection"
-	@echo "  $(COLOR_GREEN)test$(COLOR_RESET)           Run all tests"
-	@echo "  $(COLOR_GREEN)bench$(COLOR_RESET)          Run benchmarks"
-	@echo "  $(COLOR_GREEN)coverage$(COLOR_RESET)       Generate test coverage report"
+	@echo "  $(COLOR_GREEN)test$(COLOR_RESET)                Run all unit tests"
+	@echo "  $(COLOR_GREEN)test-aws$(COLOR_RESET)            Run AWS S3 integration tests (requires AWS creds + OBJECTFS_TEST_BUCKET)"
+	@echo "  $(COLOR_GREEN)test-release-check$(COLOR_RESET)  Unit + AWS integration tests (pre-release gate)"
+	@echo "  $(COLOR_GREEN)bench$(COLOR_RESET)               Run benchmarks"
+	@echo "  $(COLOR_GREEN)coverage$(COLOR_RESET)            Generate test coverage report"
 	@echo "  $(COLOR_GREEN)lint$(COLOR_RESET)           Run linters"
 	@echo "  $(COLOR_GREEN)fmt$(COLOR_RESET)            Format Go code"
 	@echo "  $(COLOR_GREEN)vet$(COLOR_RESET)            Run go vet"
@@ -272,6 +275,49 @@ release: clean check build-all package
 test-integration:
 	@echo "$(COLOR_BLUE)Running integration tests...$(COLOR_RESET)"
 	@go test -tags=integration -v ./test/integration/...
+
+# AWS S3 integration tests — requires real AWS credentials and a test bucket.
+#
+# Usage:
+#   export AWS_ACCESS_KEY_ID=...
+#   export AWS_SECRET_ACCESS_KEY=...
+#   export OBJECTFS_TEST_BUCKET=objectfs-test-<yourname>
+#   export AWS_REGION=us-east-1          # optional, defaults to us-east-1
+#   make test-aws
+#
+# Runs the full suite:
+#   - internal/storage/s3 aws_s3 tests  (basic ops, list, multipart, ZSTD compression)
+#   - sdks/go/objectfs integration tests (New, Get, Put, Delete, List, Head, Health)
+test-aws:
+	@if [ -z "$$AWS_ACCESS_KEY_ID" ]; then \
+		echo "$(COLOR_RED)Error: AWS_ACCESS_KEY_ID not set$(COLOR_RESET)"; \
+		echo "  Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and OBJECTFS_TEST_BUCKET"; \
+		exit 1; \
+	fi
+	@if [ -z "$$OBJECTFS_TEST_BUCKET" ]; then \
+		echo "$(COLOR_RED)Error: OBJECTFS_TEST_BUCKET not set$(COLOR_RESET)"; \
+		echo "  Example: export OBJECTFS_TEST_BUCKET=objectfs-test-$$(whoami)"; \
+		exit 1; \
+	fi
+	@echo "$(COLOR_BLUE)Running AWS S3 integration tests against bucket: $$OBJECTFS_TEST_BUCKET$(COLOR_RESET)"
+	@echo "$(COLOR_BLUE)  Region: $${AWS_REGION:-us-east-1}$(COLOR_RESET)"
+	@echo ""
+	@echo "$(COLOR_BOLD)[1/2] internal/storage/s3 (aws_s3 build tag)$(COLOR_RESET)"
+	@go test -race -tags=aws_s3 -v -count=1 -timeout=300s ./tests/... 2>&1 | tee /tmp/objectfs-aws-s3.log
+	@echo ""
+	@echo "$(COLOR_BOLD)[2/2] sdks/go/objectfs integration tests$(COLOR_RESET)"
+	@go test -race -v -count=1 -timeout=120s \
+		-run 'TestNew_WithDefaults|TestNew_WithRegion|TestClose_NotMounted|TestIntegration_' \
+		./sdks/go/objectfs/... 2>&1 | tee /tmp/objectfs-sdk-go.log
+	@echo ""
+	@echo "$(COLOR_GREEN)AWS integration test run complete. Logs:$(COLOR_RESET)"
+	@echo "  /tmp/objectfs-aws-s3.log"
+	@echo "  /tmp/objectfs-sdk-go.log"
+
+# Pre-release integration check for v0.6.0.
+# Runs test-aws plus the local unit test suite with the race detector.
+test-release-check: test test-aws
+	@echo "$(COLOR_GREEN)Release check complete — unit + AWS integration tests passed.$(COLOR_RESET)"
 
 # Performance benchmarks
 bench-performance:

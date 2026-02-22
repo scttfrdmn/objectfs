@@ -574,6 +574,166 @@ func (s *AWSS3TestSuite) TestHealthCheck() {
 	t.Logf("✅ Health check passed")
 }
 
+// TestListObjects verifies that ListObjects returns expected keys after put.
+func (s *AWSS3TestSuite) TestListObjects() {
+	t := s.T()
+
+	prefix := "objectfs-test/list-objects/"
+	keys := []string{
+		prefix + "alpha",
+		prefix + "beta",
+		prefix + "gamma",
+	}
+
+	// Upload three objects.
+	for _, key := range keys {
+		err := s.backend.PutObject(s.ctx, key, []byte("list-test-"+key))
+		require.NoError(t, err, "PutObject %s", key)
+	}
+
+	// List with the shared prefix.
+	results, err := s.backend.ListObjects(s.ctx, prefix, 100)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(results), len(keys),
+		"expected at least %d results, got %d", len(keys), len(results))
+
+	// Verify all uploaded keys appear in the listing.
+	listed := make(map[string]bool, len(results))
+	for _, obj := range results {
+		listed[obj.Key] = true
+	}
+	for _, key := range keys {
+		assert.True(t, listed[key], "key %q should appear in ListObjects", key)
+	}
+
+	// Verify limit parameter is respected.
+	limited, err := s.backend.ListObjects(s.ctx, prefix, 1)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(limited), 1, "limit=1 should return at most 1 result")
+
+	// Clean up.
+	for _, key := range keys {
+		s.backend.DeleteObject(s.ctx, key) //nolint:errcheck
+	}
+
+	t.Logf("✅ ListObjects test passed (%d objects)", len(results))
+}
+
+// TestMultipartUpload explicitly exercises the multipart upload code path by
+// configuring a 5 MB threshold and uploading a 6 MB object.
+func (s *AWSS3TestSuite) TestMultipartUpload() {
+	t := s.T()
+
+	// Build a backend with a 5 MB multipart threshold to ensure multipart is used.
+	mpCfg := &s3backend.Config{
+		Region:             s.region,
+		MaxRetries:         3,
+		ConnectTimeout:     10 * time.Second,
+		RequestTimeout:     120 * time.Second,
+		PoolSize:           4,
+		MultipartThreshold: 5 * 1024 * 1024, // 5 MB
+		MultipartChunkSize: 5 * 1024 * 1024, // 5 MB parts
+	}
+	mpBackend, err := s3backend.NewBackend(s.ctx, s.bucket, mpCfg)
+	require.NoError(t, err)
+	defer mpBackend.Close() //nolint:errcheck
+
+	key := "objectfs-test/multipart-6mb"
+	const size = 6 * 1024 * 1024 // 6 MB — above the 5 MB threshold
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i % 251) // prime-modulo pattern for easy verification
+	}
+
+	// Upload should use multipart path.
+	start := time.Now()
+	err = mpBackend.PutObject(s.ctx, key, data)
+	require.NoError(t, err)
+	t.Logf("Multipart upload: 6 MB in %v", time.Since(start))
+
+	// Download and verify full round-trip.
+	retrieved, err := mpBackend.GetObject(s.ctx, key, 0, 0)
+	require.NoError(t, err)
+	assert.Equal(t, size, len(retrieved))
+	assert.Equal(t, data, retrieved, "data integrity check failed after multipart upload")
+
+	// Partial read from a multipart-uploaded object.
+	partial, err := mpBackend.GetObject(s.ctx, key, 1024, 512)
+	require.NoError(t, err)
+	assert.Equal(t, data[1024:1024+512], partial, "partial read after multipart upload")
+
+	// Clean up.
+	mpBackend.DeleteObject(s.ctx, key) //nolint:errcheck
+
+	t.Logf("✅ Multipart upload test passed (6 MB object, 5 MB threshold)")
+}
+
+// TestZSTDCompression verifies that transparent ZSTD compression stores and
+// retrieves objects correctly, with byte-for-byte data integrity.
+func (s *AWSS3TestSuite) TestZSTDCompression() {
+	t := s.T()
+
+	// Build a backend with compression enabled.
+	zstdCfg := &s3backend.Config{
+		Region:         s.region,
+		MaxRetries:     3,
+		ConnectTimeout: 10 * time.Second,
+		RequestTimeout: 60 * time.Second,
+		PoolSize:       4,
+		Compression: s3backend.CompressionConfig{
+			Enabled:   true,
+			Algorithm: "zstd",
+			Level:     3,
+			MinSize:   "1KB",
+		},
+	}
+	zstdBackend, err := s3backend.NewBackend(s.ctx, s.bucket, zstdCfg)
+	require.NoError(t, err)
+	defer zstdBackend.Close() //nolint:errcheck
+
+	// Use compressible text data to ensure compression is actually applied.
+	key := "objectfs-test/zstd-compression"
+	// 32 KB of repeated text — compresses to ~200 bytes with zstd.
+	rawLine := []byte("ObjectFS transparent ZSTD compression integration test line.\n")
+	data := make([]byte, 0, 32*1024)
+	for len(data) < 32*1024 {
+		data = append(data, rawLine...)
+	}
+	data = data[:32*1024]
+
+	// Upload through the ZSTD-enabled backend.
+	err = zstdBackend.PutObject(s.ctx, key, data)
+	require.NoError(t, err)
+
+	// Download via the same ZSTD backend — should auto-decompress.
+	retrieved, err := zstdBackend.GetObject(s.ctx, key, 0, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(data), len(retrieved), "decompressed size mismatch")
+	assert.Equal(t, data, retrieved, "data integrity check failed after ZSTD round-trip")
+
+	// Partial read after ZSTD decompression.
+	partial, err := zstdBackend.GetObject(s.ctx, key, 100, 200)
+	require.NoError(t, err)
+	assert.Equal(t, data[100:300], partial, "partial read after ZSTD decompression")
+
+	// Confirm the object is NOT readable as raw bytes from a plain backend
+	// (i.e. verify it was actually stored compressed).
+	plainBackend, err := s3backend.NewBackend(s.ctx, s.bucket, &s3backend.Config{
+		Region: s.region, MaxRetries: 1,
+	})
+	require.NoError(t, err)
+	defer plainBackend.Close() //nolint:errcheck
+
+	raw, err := plainBackend.GetObject(s.ctx, key, 0, 0)
+	require.NoError(t, err)
+	assert.NotEqual(t, data, raw, "object stored on S3 should be compressed, not plain text")
+
+	// Clean up.
+	zstdBackend.DeleteObject(s.ctx, key) //nolint:errcheck
+
+	t.Logf("✅ ZSTD compression test passed: %d bytes → compressed → decompressed correctly", len(data))
+}
+
 // Helper function
 func strPtr(s string) *string {
 	return &s
