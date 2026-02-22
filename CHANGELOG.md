@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `internal/cache/redis`: Redis-backed distributed cache implementing `types.Cache` — `Cache` struct wraps `go-redis/v9`; `Get` uses `GETRANGE` for partial reads (offset/size support); `Put` stores full objects only (partial writes are silently dropped to maintain cache consistency); `Delete` removes a key; `Evict` increments the eviction counter and returns false (Redis manages eviction via its configured `maxmemory-policy`); `Size` reads `used_memory` from `INFO memory`; `Stats` returns atomic hit/miss/eviction counters and computed hit rate; `Close` closes the connection; `Client` exposes the underlying `*goredis.Client` for invalidation wiring; 13 unit tests using `miniredis/v2` cover connectivity, full/partial reads, partial-write rejection, delete, TTL expiry, namespace isolation, and stats
+- `internal/cache/redis`: `Invalidator` — pub/sub cache-invalidation broadcaster on channel `"objectfs:invalidation"`; `Publish(ctx, key)` sends `"<nodeID>:<key>"` messages; `Subscribe(ctx)` starts a goroutine that deletes received keys from the local cache, skipping messages originating from the same node; 3 unit tests cover publish, remote invalidation, and self-publish suppression
+- `internal/cache`: `NewFromConfig(cfg)` factory — returns a Redis `Cache` when `cfg.Cluster.Enabled && cfg.Cluster.Redis.Enabled`; falls back to `MultiLevelCache` with defaults otherwise; 3 unit tests cover all three routing paths
+- `internal/config`: `RedisConfig` struct with `Enabled`, `Address` (default `localhost:6379`), `Password`, `DB`, `KeyPrefix` (default `"objectfs"`), `TTL` (default 5 min), `MaxRetries` (default 3); `ClusterConfig.Redis RedisConfig` field; defaults wired into `NewDefault()`; `RedisConfig` re-exported via `pkg/types` alias (closes #63)
+
 ## [0.5.0] - 2026-02-22
 
 ### Added

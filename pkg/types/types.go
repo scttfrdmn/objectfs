@@ -151,5 +151,6 @@ type (
 	S3Config              = config.S3Config
 	S3CostOptimization    = config.S3CostOptimization
 	ClusterConfig         = config.ClusterConfig
+	RedisConfig           = config.RedisConfig
 	OpenTelemetryConfig   = config.OpenTelemetryConfig
 )

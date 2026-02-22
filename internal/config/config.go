@@ -250,13 +250,25 @@ type S3CostOptimization struct {
 
 // ClusterConfig represents distributed cluster settings
 type ClusterConfig struct {
-	Enabled           bool     `yaml:"enabled"`
-	NodeID            string   `yaml:"node_id"`
-	ListenAddr        string   `yaml:"listen_addr"`
-	AdvertiseAddr     string   `yaml:"advertise_addr"`
-	SeedNodes         []string `yaml:"seed_nodes"`
-	ReplicationFactor int      `yaml:"replication_factor"`
-	ConsistencyLevel  string   `yaml:"consistency_level"`
+	Enabled           bool        `yaml:"enabled"`
+	NodeID            string      `yaml:"node_id"`
+	ListenAddr        string      `yaml:"listen_addr"`
+	AdvertiseAddr     string      `yaml:"advertise_addr"`
+	SeedNodes         []string    `yaml:"seed_nodes"`
+	ReplicationFactor int         `yaml:"replication_factor"`
+	ConsistencyLevel  string      `yaml:"consistency_level"`
+	Redis             RedisConfig `yaml:"redis"`
+}
+
+// RedisConfig represents Redis distributed cache settings
+type RedisConfig struct {
+	Enabled    bool          `yaml:"enabled"`
+	Address    string        `yaml:"address"`
+	Password   string        `yaml:"password"`
+	DB         int           `yaml:"db"`
+	KeyPrefix  string        `yaml:"key_prefix"`
+	TTL        time.Duration `yaml:"ttl"`
+	MaxRetries int           `yaml:"max_retries"`
 }
 
 // NewDefault returns a configuration with sensible defaults
@@ -417,6 +429,15 @@ func NewDefault() *Configuration {
 			SeedNodes:         []string{},
 			ReplicationFactor: 3,
 			ConsistencyLevel:  "eventual",
+			Redis: RedisConfig{
+				Enabled:    false,
+				Address:    "localhost:6379",
+				Password:   "",
+				DB:         0,
+				KeyPrefix:  "objectfs",
+				TTL:        5 * time.Minute,
+				MaxRetries: 3,
+			},
 		},
 	}
 }
