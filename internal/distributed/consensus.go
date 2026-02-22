@@ -114,42 +114,30 @@ const (
 	ProposalStatusExpired  ProposalStatus = "expired"
 )
 
-// ConsensusMessage represents a message in the consensus protocol
-type ConsensusMessage struct {
-	Type      ConsensusMessageType `json:"type"`
-	Term      uint64               `json:"term"`
-	From      string               `json:"from"`
-	Data      json.RawMessage      `json:"data"`
-	Timestamp time.Time            `json:"timestamp"`
-}
-
-// ConsensusMessageType represents the type of consensus message
-type ConsensusMessageType string
-
-const (
-	MessageTypeRequestVote       ConsensusMessageType = "request_vote"
-	MessageTypeRequestVoteResp   ConsensusMessageType = "request_vote_response"
-	MessageTypeAppendEntries     ConsensusMessageType = "append_entries"
-	MessageTypeAppendEntriesResp ConsensusMessageType = "append_entries_response"
-	MessageTypeHeartbeat         ConsensusMessageType = "heartbeat"
-	MessageTypeProposal          ConsensusMessageType = "proposal"
-	MessageTypeProposalVote      ConsensusMessageType = "proposal_vote"
-)
-
 // RequestVoteMessage represents a vote request
 type RequestVoteMessage struct {
+	Term         uint64 `json:"term"`
 	CandidateID  string `json:"candidate_id"`
 	LastLogIndex uint64 `json:"last_log_index"`
 	LastLogTerm  uint64 `json:"last_log_term"`
 }
 
-// RequestVoteResponse represents a vote response
+// RequestVoteResponse represents a vote response (legacy; kept for compatibility)
 type RequestVoteResponse struct {
 	VoteGranted bool `json:"vote_granted"`
 }
 
-// AppendEntriesMessage represents a log replication message
+// RequestVoteRespMessage is the network-level vote response carrying term and
+// the voter's identity so the receiver can call handleVoteResponse.
+type RequestVoteRespMessage struct {
+	Term        uint64 `json:"term"`
+	VoteGranted bool   `json:"vote_granted"`
+	From        string `json:"from"`
+}
+
+// AppendEntriesMessage represents a log replication / heartbeat message
 type AppendEntriesMessage struct {
+	Term         uint64      `json:"term"`
 	LeaderID     string      `json:"leader_id"`
 	PrevLogIndex uint64      `json:"prev_log_index"`
 	PrevLogTerm  uint64      `json:"prev_log_term"`
@@ -294,12 +282,19 @@ func (ce *ConsensusEngine) ProposeChange(ctx context.Context, proposal *Consensu
 
 func (ce *ConsensusEngine) electionLoop(ctx context.Context) {
 	for {
+		// Snapshot the timer channel under the read lock to avoid a data race
+		// with resetElectionTimer, which writes ce.electionTimer under the
+		// write lock.
+		ce.mu.RLock()
+		timerCh := ce.electionTimer.C
+		ce.mu.RUnlock()
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-ce.stopCh:
 			return
-		case <-ce.electionTimer.C:
+		case <-timerCh:
 			ce.mu.Lock()
 			if ce.state != StateLeader {
 				log.Printf("Election timeout, starting new election")
@@ -375,6 +370,7 @@ func (ce *ConsensusEngine) sendVoteRequests() {
 	nodes := ce.cluster.GetNodes()
 
 	requestVote := &RequestVoteMessage{
+		Term:         ce.currentTerm,
 		CandidateID:  ce.cluster.GetNodeID(),
 		LastLogIndex: ce.getLastLogIndex(),
 		LastLogTerm:  ce.getLastLogTerm(),
@@ -388,21 +384,17 @@ func (ce *ConsensusEngine) sendVoteRequests() {
 }
 
 func (ce *ConsensusEngine) sendVoteRequest(nodeID string, req *RequestVoteMessage) {
-	// In a real implementation, this would send the message over the network
-	// For simulation, we'll just log and simulate responses
-	log.Printf("Sending vote request to %s for term %d", nodeID, ce.currentTerm)
+	log.Printf("Sending vote request to %s for term %d", nodeID, req.Term)
 
-	// Simulate response (in practice, this would come from the network)
-	go func() {
-		time.Sleep(50 * time.Millisecond) // Simulate network delay
+	nodes := ce.cluster.GetNodes()
+	node, exists := nodes[nodeID]
+	if !exists || node.Status != NodeStatusAlive {
+		return
+	}
 
-		// Simulate vote response based on some logic
-		nodes := ce.cluster.GetNodes()
-		if node, exists := nodes[nodeID]; exists && node.Status == NodeStatusAlive {
-			voteGranted := true // Simplified - in practice would check log consistency
-			ce.handleVoteResponse(nodeID, voteGranted)
-		}
-	}()
+	if err := ce.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeRequestVote, req); err != nil {
+		log.Printf("Failed to send vote request to %s: %v", nodeID, err)
+	}
 }
 
 func (ce *ConsensusEngine) handleVoteResponse(nodeID string, voteGranted bool) {
@@ -502,7 +494,18 @@ func (ce *ConsensusEngine) sendHeartbeats() {
 func (ce *ConsensusEngine) sendAppendEntries(nodeID string, isHeartbeat bool) {
 	ce.mu.RLock()
 
+	nodes := ce.cluster.GetNodes()
+	node, exists := nodes[nodeID]
+	if !exists || node.Status != NodeStatusAlive {
+		ce.mu.RUnlock()
+		return
+	}
+	addr := node.Address
+
 	nextIndex := ce.nextIndex[nodeID]
+	if nextIndex == 0 {
+		nextIndex = 1
+	}
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := uint64(0)
 
@@ -515,7 +518,8 @@ func (ce *ConsensusEngine) sendAppendEntries(nodeID string, isHeartbeat bool) {
 		entries = ce.log[nextIndex-1:]
 	}
 
-	_ = &AppendEntriesMessage{
+	msg := &AppendEntriesMessage{
+		Term:         ce.currentTerm,
 		LeaderID:     ce.cluster.GetNodeID(),
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
@@ -525,21 +529,11 @@ func (ce *ConsensusEngine) sendAppendEntries(nodeID string, isHeartbeat bool) {
 
 	ce.mu.RUnlock()
 
-	// In a real implementation, this would send over the network
 	log.Printf("Sending append entries to %s (heartbeat: %v)", nodeID, isHeartbeat)
 
-	// Simulate response
-	go func() {
-		time.Sleep(25 * time.Millisecond) // Simulate network delay
-
-		// Simulate successful response for demonstration
-		resp := &AppendEntriesResponse{
-			Success:    true,
-			MatchIndex: nextIndex + uint64(len(entries)) - 1,
-		}
-
-		ce.handleAppendEntriesResponse(nodeID, resp)
-	}()
+	if err := ce.cluster.gossip.sendConsensusMsg(addr, MessageTypeAppendEntries, msg); err != nil {
+		log.Printf("Failed to send append entries to %s: %v", nodeID, err)
+	}
 }
 
 func (ce *ConsensusEngine) handleAppendEntriesResponse(nodeID string, resp *AppendEntriesResponse) {
@@ -563,6 +557,148 @@ func (ce *ConsensusEngine) handleAppendEntriesResponse(nodeID string, resp *Appe
 		}
 		go ce.sendAppendEntries(nodeID, false)
 	}
+}
+
+// handleNetworkRequestVote processes an incoming RequestVote RPC from a peer.
+func (ce *ConsensusEngine) handleNetworkRequestVote(msg *GossipMessage) {
+	var req RequestVoteMessage
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		log.Printf("Failed to unmarshal RequestVoteMessage: %v", err)
+		return
+	}
+
+	ce.mu.Lock()
+
+	// Step down if we see a higher term.
+	if req.Term > ce.currentTerm {
+		ce.currentTerm = req.Term
+		ce.state = StateFollower
+		ce.votedFor = ""
+	}
+
+	voteGranted := false
+	if req.Term == ce.currentTerm &&
+		(ce.votedFor == "" || ce.votedFor == req.CandidateID) {
+		lastLogTerm := ce.getLastLogTerm()
+		lastLogIndex := ce.getLastLogIndex()
+		logUpToDate := req.LastLogTerm > lastLogTerm ||
+			(req.LastLogTerm == lastLogTerm && req.LastLogIndex >= lastLogIndex)
+		if logUpToDate {
+			voteGranted = true
+			ce.votedFor = req.CandidateID
+		}
+	}
+
+	currentTerm := ce.currentTerm
+	ce.mu.Unlock()
+
+	resp := &RequestVoteRespMessage{
+		Term:        currentTerm,
+		VoteGranted: voteGranted,
+		From:        ce.cluster.GetNodeID(),
+	}
+
+	nodes := ce.cluster.GetNodes()
+	node, exists := nodes[msg.From]
+	if !exists {
+		log.Printf("Cannot send vote response: node %s not found", msg.From)
+		return
+	}
+
+	log.Printf("Sending vote response to %s: granted=%v (term %d)", msg.From, voteGranted, currentTerm)
+
+	if err := ce.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeRequestVoteResp, resp); err != nil {
+		log.Printf("Failed to send vote response to %s: %v", msg.From, err)
+	}
+}
+
+// handleNetworkRequestVoteResp processes an incoming RequestVote response.
+func (ce *ConsensusEngine) handleNetworkRequestVoteResp(msg *GossipMessage) {
+	var resp RequestVoteRespMessage
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		log.Printf("Failed to unmarshal RequestVoteRespMessage: %v", err)
+		return
+	}
+
+	ce.mu.Lock()
+	if resp.Term > ce.currentTerm {
+		ce.currentTerm = resp.Term
+		ce.state = StateFollower
+		ce.votedFor = ""
+		ce.mu.Unlock()
+		return
+	}
+	ce.mu.Unlock()
+
+	ce.handleVoteResponse(resp.From, resp.VoteGranted)
+}
+
+// handleNetworkAppendEntries processes an incoming AppendEntries / heartbeat RPC.
+func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
+	var req AppendEntriesMessage
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		log.Printf("Failed to unmarshal AppendEntriesMessage: %v", err)
+		return
+	}
+
+	ce.mu.Lock()
+
+	success := false
+	if req.Term >= ce.currentTerm {
+		// Recognised leader — step down if needed and reset election timer.
+		if req.Term > ce.currentTerm {
+			ce.currentTerm = req.Term
+			ce.votedFor = ""
+		}
+		ce.state = StateFollower
+		ce.resetElectionTimer()
+		success = true
+
+		// Append any new entries (simplified; full consistency is future work).
+		for _, entry := range req.Entries {
+			if entry.Index > uint64(len(ce.log)) {
+				ce.log = append(ce.log, entry)
+			}
+		}
+
+		// Advance commit index.
+		if req.LeaderCommit > ce.commitIndex {
+			newCommit := req.LeaderCommit
+			if lastIdx := ce.getLastLogIndex(); lastIdx < newCommit {
+				newCommit = lastIdx
+			}
+			ce.commitIndex = newCommit
+		}
+	}
+
+	matchIndex := req.PrevLogIndex + uint64(len(req.Entries))
+	ce.mu.Unlock()
+
+	resp := &AppendEntriesResponse{
+		Success:    success,
+		MatchIndex: matchIndex,
+	}
+
+	nodes := ce.cluster.GetNodes()
+	node, exists := nodes[msg.From]
+	if !exists {
+		return
+	}
+
+	if err := ce.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeAppendEntriesResp, resp); err != nil {
+		log.Printf("Failed to send AppendEntries response to %s: %v", msg.From, err)
+	}
+}
+
+// handleNetworkAppendEntriesResp processes an incoming AppendEntries response.
+func (ce *ConsensusEngine) handleNetworkAppendEntriesResp(msg *GossipMessage) {
+	var resp AppendEntriesResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		log.Printf("Failed to unmarshal AppendEntriesResponse: %v", err)
+		return
+	}
+
+	ce.handleAppendEntriesResponse(msg.From, &resp)
 }
 
 func (ce *ConsensusEngine) updateCommitIndex() {

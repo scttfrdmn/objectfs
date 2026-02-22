@@ -70,6 +70,14 @@ const (
 	MessageTypeDead            MessageType = "dead"
 	MessageTypeSync            MessageType = "sync"
 	MessageTypeGossipHeartbeat MessageType = "gossip_heartbeat"
+
+	// Consensus and coordinator messages piggyback on the gossip UDP socket.
+	MessageTypeRequestVote       MessageType = "request_vote"
+	MessageTypeRequestVoteResp   MessageType = "request_vote_resp"
+	MessageTypeAppendEntries     MessageType = "append_entries"
+	MessageTypeAppendEntriesResp MessageType = "append_entries_resp"
+	MessageTypeNodeOperation     MessageType = "node_operation"
+	MessageTypeNodeOperationResp MessageType = "node_operation_resp"
 )
 
 // JoinMessage represents a join request
@@ -306,6 +314,34 @@ func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) 
 		gp.handleSyncMessage(&msg)
 	case MessageTypeGossipHeartbeat:
 		gp.handleHeartbeatMessage(&msg)
+
+	// Consensus messages
+	case MessageTypeRequestVote:
+		if gp.cluster.consensus != nil {
+			gp.cluster.consensus.handleNetworkRequestVote(&msg)
+		}
+	case MessageTypeRequestVoteResp:
+		if gp.cluster.consensus != nil {
+			gp.cluster.consensus.handleNetworkRequestVoteResp(&msg)
+		}
+	case MessageTypeAppendEntries:
+		if gp.cluster.consensus != nil {
+			gp.cluster.consensus.handleNetworkAppendEntries(&msg)
+		}
+	case MessageTypeAppendEntriesResp:
+		if gp.cluster.consensus != nil {
+			gp.cluster.consensus.handleNetworkAppendEntriesResp(&msg)
+		}
+
+	// Coordinator messages
+	case MessageTypeNodeOperation:
+		if gp.cluster.coordinator != nil {
+			gp.cluster.coordinator.handleNetworkOperation(&msg)
+		}
+	case MessageTypeNodeOperationResp:
+		if gp.cluster.coordinator != nil {
+			gp.cluster.coordinator.handleNetworkOperationResp(&msg)
+		}
 	}
 }
 
@@ -855,6 +891,31 @@ func (gp *GossipProtocol) generateMessageID() string {
 	bytes := make([]byte, 4)
 	_, _ = cryptorand.Read(bytes)
 	return hex.EncodeToString(bytes)
+}
+
+// sendConsensusMsg is a convenience helper that marshals payload into a
+// GossipMessage and sends it to addr over the gossip UDP socket.
+func (gp *GossipProtocol) sendConsensusMsg(addr string, msgType MessageType, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal consensus message: %w", err)
+	}
+	return gp.sendMessage(addr, &GossipMessage{
+		Type:      msgType,
+		From:      gp.localNode.ID,
+		Timestamp: time.Now(),
+		MessageID: gp.generateMessageID(),
+		Data:      data,
+	})
+}
+
+// LocalAddr returns the local UDP address the gossip socket is bound to.
+// Returns "" if the socket has not been started yet.
+func (gp *GossipProtocol) LocalAddr() string {
+	if gp.conn == nil {
+		return ""
+	}
+	return gp.conn.LocalAddr().String()
 }
 
 // GetStats returns gossip protocol statistics

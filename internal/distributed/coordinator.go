@@ -2,6 +2,7 @@ package distributed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -17,6 +18,23 @@ type Coordinator struct {
 	replicator   *CacheReplicator
 	loadBalancer *LoadBalancer
 	stopCh       chan struct{}
+
+	// pendingOps maps requestID → response channel for in-flight remote ops.
+	pendingOpsMu sync.Mutex
+	pendingOps   map[string]chan *NodeResult
+}
+
+// NodeOperationMessage is the on-wire request for a remote node execution.
+type NodeOperationMessage struct {
+	RequestID string                `json:"request_id"`
+	From      string                `json:"from"`
+	Operation *DistributedOperation `json:"operation"`
+}
+
+// NodeOperationRespMessage is the on-wire response for a remote node execution.
+type NodeOperationRespMessage struct {
+	RequestID string      `json:"request_id"`
+	Result    *NodeResult `json:"result"`
 }
 
 // DistributedOperation represents an operation to be executed across the cluster
@@ -146,6 +164,7 @@ func NewCoordinator(cluster *ClusterManager, config *ClusterConfig) (*Coordinato
 		cluster:    cluster,
 		config:     config,
 		operations: make(map[string]*ActiveOperation),
+		pendingOps: make(map[string]chan *NodeResult),
 		stopCh:     make(chan struct{}),
 	}
 
@@ -441,44 +460,166 @@ func (c *Coordinator) executeEventualConsistency(ctx context.Context, activeOp *
 	return operationResult, nil
 }
 
-// executeOnNode executes an operation on a specific node
+// executeOnNode executes an operation on a specific node. If nodeID is the
+// local node, or if the gossip socket has not been started, it falls back to
+// executeLocally so that unit tests without a running cluster still pass.
 func (c *Coordinator) executeOnNode(ctx context.Context, nodeID string, op *DistributedOperation) *NodeResult {
 	start := time.Now()
 
-	// In a real implementation, this would send the operation to the target node
-	// For now, we'll simulate the execution
-
-	result := &NodeResult{
-		NodeID:  nodeID,
-		Latency: time.Since(start),
+	// Local execution path.
+	if nodeID == c.cluster.GetNodeID() ||
+		c.cluster.gossip == nil || c.cluster.gossip.conn == nil {
+		return c.executeLocally(nodeID, op)
 	}
 
-	// Simulate operation execution
+	// Remote execution path — send the operation over UDP and wait for a reply.
+	nodes := c.cluster.GetNodes()
+	node, exists := nodes[nodeID]
+	if !exists || node.Status != NodeStatusAlive {
+		return &NodeResult{
+			NodeID:  nodeID,
+			Success: false,
+			Error:   fmt.Sprintf("node %s not found or not alive", nodeID),
+			Latency: time.Since(start),
+		}
+	}
+
+	requestID := op.ID + "-" + nodeID
+	ch := make(chan *NodeResult, 1)
+
+	c.pendingOpsMu.Lock()
+	c.pendingOps[requestID] = ch
+	c.pendingOpsMu.Unlock()
+
+	defer func() {
+		c.pendingOpsMu.Lock()
+		delete(c.pendingOps, requestID)
+		c.pendingOpsMu.Unlock()
+	}()
+
+	msg := &NodeOperationMessage{
+		RequestID: requestID,
+		From:      c.cluster.GetNodeID(),
+		Operation: op,
+	}
+
+	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperation, msg); err != nil {
+		return &NodeResult{
+			NodeID:  nodeID,
+			Success: false,
+			Error:   fmt.Sprintf("failed to send operation to %s: %v", nodeID, err),
+			Latency: time.Since(start),
+		}
+	}
+
+	timeout := op.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
+	select {
+	case result := <-ch:
+		result.Latency = time.Since(start)
+		return result
+	case <-ctx.Done():
+		return &NodeResult{
+			NodeID:  nodeID,
+			Success: false,
+			Error:   "context cancelled",
+			Latency: time.Since(start),
+		}
+	case <-time.After(timeout):
+		return &NodeResult{
+			NodeID:  nodeID,
+			Success: false,
+			Error:   "operation timed out waiting for remote response",
+			Latency: time.Since(start),
+		}
+	}
+}
+
+// executeLocally runs the operation in-process (placeholder for real backend
+// execution; the S3 backend wiring is tracked separately).
+func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *NodeResult {
+	start := time.Now()
+	result := &NodeResult{NodeID: nodeID}
+
 	switch op.Type {
 	case OpTypeGet:
-		// Simulate get operation
 		result.Success = true
 		result.Data = []byte(fmt.Sprintf("data-from-%s", nodeID))
-
 	case OpTypePut:
-		// Simulate put operation
 		result.Success = true
-
 	case OpTypeDelete:
-		// Simulate delete operation
 		result.Success = true
-
 	case OpTypeList:
-		// Simulate list operation
 		result.Success = true
 		result.Data = []byte(`[{"key":"key1","size":1024},{"key":"key2","size":2048}]`)
-
 	default:
 		result.Success = false
 		result.Error = fmt.Sprintf("unsupported operation type: %s", op.Type)
 	}
 
+	result.Latency = time.Since(start)
 	return result
+}
+
+// handleNetworkOperation processes an incoming NodeOperationMessage from a peer.
+func (c *Coordinator) handleNetworkOperation(msg *GossipMessage) {
+	var nm NodeOperationMessage
+	if err := json.Unmarshal(msg.Data, &nm); err != nil {
+		log.Printf("Failed to unmarshal NodeOperationMessage: %v", err)
+		return
+	}
+
+	result := c.executeLocally(c.cluster.GetNodeID(), nm.Operation)
+
+	resp := &NodeOperationRespMessage{
+		RequestID: nm.RequestID,
+		Result:    result,
+	}
+
+	// Send response back to the requesting node.
+	nodes := c.cluster.GetNodes()
+	senderID := msg.From
+	if senderID == "" {
+		senderID = nm.From
+	}
+	node, exists := nodes[senderID]
+	if !exists {
+		// Fall back to nm.From if msg.From was empty.
+		node, exists = nodes[nm.From]
+		if !exists {
+			log.Printf("Cannot send operation response: sender %s not found", senderID)
+			return
+		}
+	}
+
+	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperationResp, resp); err != nil {
+		log.Printf("Failed to send operation response to %s: %v", senderID, err)
+	}
+}
+
+// handleNetworkOperationResp delivers a NodeOperationRespMessage to the
+// waiting executeOnNode call via its pending channel.
+func (c *Coordinator) handleNetworkOperationResp(msg *GossipMessage) {
+	var resp NodeOperationRespMessage
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		log.Printf("Failed to unmarshal NodeOperationRespMessage: %v", err)
+		return
+	}
+
+	c.pendingOpsMu.Lock()
+	ch, exists := c.pendingOps[resp.RequestID]
+	c.pendingOpsMu.Unlock()
+
+	if exists {
+		select {
+		case ch <- resp.Result:
+		default:
+			log.Printf("Dropped duplicate response for request %s", resp.RequestID)
+		}
+	}
 }
 
 // replicateAsync asynchronously replicates data to target nodes
@@ -599,13 +740,35 @@ func (c *Coordinator) processReplicationTask(ctx context.Context, task *Replicat
 }
 
 func (c *Coordinator) simulateReplication(nodeID, key string, data []byte) bool {
-	// In a real implementation, this would send the data to the target node
-	// For simulation, we'll just return success most of the time
 	nodes := c.cluster.GetNodes()
-	if node, exists := nodes[nodeID]; exists && node.Status == NodeStatusAlive {
+	node, exists := nodes[nodeID]
+	if !exists || node.Status != NodeStatusAlive {
+		return false
+	}
+
+	// If gossip is not running fall back to a logical ACK.
+	if c.cluster.gossip == nil || c.cluster.gossip.conn == nil {
 		return true
 	}
-	return false
+
+	// Fire-and-forget: send a PUT operation to the target node; the response
+	// (if any) arrives on handleNetworkOperationResp and is silently discarded
+	// because no pending channel is registered for this requestID.
+	op := &DistributedOperation{
+		Type: OpTypePut,
+		Key:  key,
+		Data: data,
+	}
+	msg := &NodeOperationMessage{
+		RequestID: fmt.Sprintf("repl-%s-%d", key, time.Now().UnixNano()),
+		From:      c.cluster.GetNodeID(),
+		Operation: op,
+	}
+	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperation, msg); err != nil {
+		log.Printf("Failed to replicate key %s to %s: %v", key, nodeID, err)
+		return false
+	}
+	return true
 }
 
 func (c *Coordinator) updateLoadBalancerStats(ctx context.Context) {

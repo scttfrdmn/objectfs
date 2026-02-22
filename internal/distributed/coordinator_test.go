@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makeClusterWithNode returns a ClusterManager that has one alive node
@@ -303,6 +304,80 @@ func TestCoordinator_GetStats_Structure(t *testing.T) {
 		if _, ok := stats[key]; !ok {
 			t.Errorf("stats missing key %q", key)
 		}
+	}
+}
+
+// TestCoordinator_ExecuteOperation_TwoNodes_RealUDP verifies that an operation
+// targeted at a remote node travels over loopback UDP and returns a result
+// populated by the remote node's handler.
+func TestCoordinator_ExecuteOperation_TwoNodes_RealUDP(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg1 := testConfig("coord-node-a")
+	cfg2 := testConfig("coord-node-b")
+
+	cm1, err := NewClusterManager(cfg1)
+	if err != nil {
+		t.Fatalf("NewClusterManager cm1: %v", err)
+	}
+	cm2, err := NewClusterManager(cfg2)
+	if err != nil {
+		t.Fatalf("NewClusterManager cm2: %v", err)
+	}
+
+	if err := cm1.Start(ctx); err != nil {
+		t.Fatalf("cm1.Start: %v", err)
+	}
+	defer func() { _ = cm1.Stop() }()
+
+	if err := cm2.Start(ctx); err != nil {
+		t.Fatalf("cm2.Start: %v", err)
+	}
+	defer func() { _ = cm2.Stop() }()
+
+	// Cross-register with real UDP addresses.
+	addr1 := cm1.gossip.LocalAddr()
+	addr2 := cm2.gossip.LocalAddr()
+	if addr1 == "" || addr2 == "" {
+		t.Fatalf("could not get local addresses: %q %q", addr1, addr2)
+	}
+
+	cm1.UpdateNodeInfo("coord-node-b", &NodeInfo{
+		ID: "coord-node-b", Address: addr2, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+	cm2.UpdateNodeInfo("coord-node-a", &NodeInfo{
+		ID: "coord-node-a", Address: addr1, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+
+	// Execute a GET targeted explicitly at the remote node (coord-node-b).
+	result, err := cm1.coordinator.ExecuteOperation(ctx, &DistributedOperation{
+		Type:        OpTypeGet,
+		Key:         "remote-key",
+		Consistency: ConsistencyEventual,
+		Timeout:     5 * time.Second,
+		TargetNodes: []string{"coord-node-b"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteOperation: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("result.Success = false, error: %s", result.Error)
+	}
+
+	nr, ok := result.NodeResults["coord-node-b"]
+	if !ok {
+		t.Fatal("NodeResults should contain 'coord-node-b'")
+	}
+	if !nr.Success {
+		t.Errorf("NodeResult for coord-node-b not successful: %s", nr.Error)
+	}
+	// The remote handler calls executeLocally("coord-node-b", …) which returns
+	// "data-from-coord-node-b" for a GET operation.
+	want := "data-from-coord-node-b"
+	if string(nr.Data) != want {
+		t.Errorf("NodeResult data = %q, want %q", string(nr.Data), want)
 	}
 }
 

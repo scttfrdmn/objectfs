@@ -145,30 +145,61 @@ func TestConsensusEngine_TriggerElection_BecomesCandidate(t *testing.T) {
 }
 
 // TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader verifies that when
-// a peer node is present the simulated vote response makes the engine become
-// the leader (within 200 ms).
+// two ClusterManagers are connected over loopback UDP, triggering an election
+// causes the candidate to receive a real vote and become the leader.
 func TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("leader-elect"))
-	if err != nil {
-		t.Fatalf("NewClusterManager: %v", err)
-	}
-	// Register self and one peer so majority = 2 can be reached.
-	cm.UpdateNodeInfo("leader-elect", nodeAlive("leader-elect"))
-	cm.UpdateNodeInfo("peer-node", nodeAlive("peer-node"))
-	ce := cm.consensus
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if err := ce.TriggerElection(context.Background()); err != nil {
+	cfg1 := testConfig("node-a")
+	cfg2 := testConfig("node-b")
+
+	cm1, err := NewClusterManager(cfg1)
+	if err != nil {
+		t.Fatalf("NewClusterManager cm1: %v", err)
+	}
+	cm2, err := NewClusterManager(cfg2)
+	if err != nil {
+		t.Fatalf("NewClusterManager cm2: %v", err)
+	}
+
+	if err := cm1.Start(ctx); err != nil {
+		t.Fatalf("cm1.Start: %v", err)
+	}
+	defer func() { _ = cm1.Stop() }()
+
+	if err := cm2.Start(ctx); err != nil {
+		t.Fatalf("cm2.Start: %v", err)
+	}
+	defer func() { _ = cm2.Stop() }()
+
+	// Cross-register using the actual bound UDP addresses.
+	addr1 := cm1.gossip.LocalAddr()
+	addr2 := cm2.gossip.LocalAddr()
+	if addr1 == "" || addr2 == "" {
+		t.Fatalf("could not get local addresses: %q %q", addr1, addr2)
+	}
+
+	cm1.UpdateNodeInfo("node-b", &NodeInfo{
+		ID: "node-b", Address: addr2, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+	cm2.UpdateNodeInfo("node-a", &NodeInfo{
+		ID: "node-a", Address: addr1, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+
+	ce := cm1.consensus
+	if err := ce.TriggerElection(ctx); err != nil {
 		t.Fatalf("TriggerElection: %v", err)
 	}
 
-	// The simulated vote response fires after 50 ms; give it 300 ms.
-	deadline := time.Now().Add(300 * time.Millisecond)
+	// Allow up to 2 s for real loopback UDP round-trip.
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if ce.GetCurrentState() == StateLeader {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	if ce.GetCurrentState() != StateLeader {
@@ -180,33 +211,62 @@ func TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader(t *testing.T) {
 }
 
 // TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp verifies that calling
-// TriggerElection when already the leader does nothing.
+// TriggerElection when already the leader does nothing (term and state unchanged).
+// Uses two real ClusterManagers over loopback UDP to first win an election.
 func TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("already-leader"))
-	if err != nil {
-		t.Fatalf("NewClusterManager: %v", err)
-	}
-	cm.UpdateNodeInfo("already-leader", nodeAlive("already-leader"))
-	cm.UpdateNodeInfo("peer", nodeAlive("peer"))
-	ce := cm.consensus
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Win one election first.
-	_ = ce.TriggerElection(context.Background())
-	deadline := time.Now().Add(300 * time.Millisecond)
+	cfg1 := testConfig("leader-noop-a")
+	cfg2 := testConfig("leader-noop-b")
+
+	cm1, err := NewClusterManager(cfg1)
+	if err != nil {
+		t.Fatalf("NewClusterManager cm1: %v", err)
+	}
+	cm2, err := NewClusterManager(cfg2)
+	if err != nil {
+		t.Fatalf("NewClusterManager cm2: %v", err)
+	}
+
+	if err := cm1.Start(ctx); err != nil {
+		t.Fatalf("cm1.Start: %v", err)
+	}
+	defer func() { _ = cm1.Stop() }()
+
+	if err := cm2.Start(ctx); err != nil {
+		t.Fatalf("cm2.Start: %v", err)
+	}
+	defer func() { _ = cm2.Stop() }()
+
+	addr1 := cm1.gossip.LocalAddr()
+	addr2 := cm2.gossip.LocalAddr()
+	cm1.UpdateNodeInfo("leader-noop-b", &NodeInfo{
+		ID: "leader-noop-b", Address: addr2, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+	cm2.UpdateNodeInfo("leader-noop-a", &NodeInfo{
+		ID: "leader-noop-a", Address: addr1, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+
+	ce := cm1.consensus
+	_ = ce.TriggerElection(ctx)
+
+	// Wait for cm1 to win the election.
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if ce.GetCurrentState() == StateLeader {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 	if ce.GetCurrentState() != StateLeader {
 		t.Skip("could not become leader; skipping no-op test")
 	}
 
 	termBefore := ce.GetCurrentTerm()
-	_ = ce.TriggerElection(context.Background()) // should be no-op
-	time.Sleep(100 * time.Millisecond)
+	_ = ce.TriggerElection(ctx) // should be a no-op
+	time.Sleep(150 * time.Millisecond)
 
 	if ce.GetCurrentState() != StateLeader {
 		t.Error("state should remain Leader after no-op TriggerElection")
