@@ -141,21 +141,25 @@ func (m *Manager) Start(ctx context.Context) error {
 // Stop stops the buffer manager
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if !m.started {
+		m.mu.Unlock()
 		return fmt.Errorf("manager not started")
 	}
 
 	close(m.stopCh)
+	wb := m.writeBuffer
+	m.started = false
+	m.mu.Unlock()
 
-	if m.writeBuffer != nil {
-		if err := m.writeBuffer.Close(); err != nil {
+	// Close the write buffer outside the lock: flushLoop calls defaultFlushCallback
+	// which acquires m.mu.RLock(), so holding m.mu.Lock() here would deadlock.
+	if wb != nil {
+		if err := wb.Close(); err != nil {
 			return fmt.Errorf("failed to close write buffer: %w", err)
 		}
 	}
 
-	m.started = false
 	return nil
 }
 

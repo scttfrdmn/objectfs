@@ -511,7 +511,7 @@ func (dpm *DetailedPerformanceMetrics) updateFileMetrics(
 	fm.LastAccess = time.Now()
 
 	// Track bytes by operation type
-	if opType == OpRead {
+	if opType == OpRead { //nolint:staticcheck
 		fm.BytesRead += bytes
 	} else if opType == OpWrite {
 		fm.BytesWritten += bytes

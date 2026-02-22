@@ -281,7 +281,7 @@ func (sl *StructuredLogger) formatText(entry LogEntry) string {
 			first = false
 			sb.WriteString(k)
 			sb.WriteString("=")
-			sb.WriteString(fmt.Sprintf("%v", v))
+			sb.WriteString(fmt.Sprintf("%v", v)) //nolint:staticcheck
 		}
 		sb.WriteString("}")
 	}

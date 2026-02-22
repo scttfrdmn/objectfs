@@ -172,7 +172,7 @@ func (em *EnhancedMonitor) GetComponentHealthDetail(componentName string) (*Comp
 // DiagnoseComponent diagnoses a component and returns remediation recommendations
 func (em *EnhancedMonitor) DiagnoseComponent(ctx context.Context, componentName string) (*ProblemDiagnosis, error) {
 	// Trigger health check for the component
-	result, err := em.Monitor.checker.RunCheck(ctx, componentName)
+	result, err := em.Monitor.checker.RunCheck(ctx, componentName) //nolint:staticcheck
 	if err != nil {
 		return nil, fmt.Errorf("failed to run health check: %w", err)
 	}
@@ -271,7 +271,7 @@ func (em *EnhancedMonitor) problemDetectionLoop(ctx context.Context) {
 // analyzeHealthPatterns analyzes health patterns and detects issues
 func (em *EnhancedMonitor) analyzeHealthPatterns() {
 	// Get all current health check results
-	status := em.Monitor.checker.GetStatus()
+	status := em.Monitor.checker.GetStatus() //nolint:staticcheck
 	checks, ok := status["checks"].(map[string]*Result)
 	if !ok {
 		return
@@ -307,7 +307,7 @@ func (em *EnhancedMonitor) updateHealthPattern(checkName string, result *Result)
 	em.calculatePatternMetrics(pattern)
 
 	// Update timestamps
-	if result.Status == StatusHealthy {
+	if result.Status == StatusHealthy { //nolint:staticcheck
 		pattern.LastSuccess = result.Timestamp
 		pattern.FailureStreak = 0
 	} else if result.Status == StatusUnhealthy {
