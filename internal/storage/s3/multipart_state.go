@@ -17,8 +17,11 @@ type UploadPart struct {
 	Error        string    `json:"error,omitempty"` // Last error if any
 }
 
-// MultipartUploadState tracks the state of an in-progress multipart upload
+// MultipartUploadState tracks the state of an in-progress multipart upload.
+// All exported methods are safe for concurrent use.
 type MultipartUploadState struct {
+	mu sync.RWMutex // protects all fields below
+
 	UploadID       string                `json:"upload_id"`
 	Bucket         string                `json:"bucket"`
 	Key            string                `json:"key"`
@@ -69,8 +72,11 @@ func NewMultipartUploadState(uploadID, bucket, key string, totalSize, chunkSize 
 	}
 }
 
-// MarkPartCompleted marks a part as successfully uploaded
+// MarkPartCompleted marks a part as successfully uploaded.
 func (s *MultipartUploadState) MarkPartCompleted(partNumber int, size int64, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.Parts[partNumber] == nil {
 		s.Parts[partNumber] = &UploadPart{
 			PartNumber: partNumber,
@@ -90,8 +96,11 @@ func (s *MultipartUploadState) MarkPartCompleted(partNumber int, size int64, eta
 	s.Status = UploadStatusInProgress
 }
 
-// MarkPartFailed marks a part as failed
+// MarkPartFailed marks a part as failed.
 func (s *MultipartUploadState) MarkPartFailed(partNumber int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.Parts[partNumber] == nil {
 		s.Parts[partNumber] = &UploadPart{
 			PartNumber: partNumber,
@@ -107,21 +116,27 @@ func (s *MultipartUploadState) MarkPartFailed(partNumber int, err error) {
 	s.LastUpdatedAt = time.Now()
 }
 
-// IsComplete returns true if all parts have been uploaded
+// IsComplete returns true if all parts have been uploaded.
 func (s *MultipartUploadState) IsComplete() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.CompletedParts == s.TotalParts
 }
 
-// GetProgress returns the upload progress as a percentage (0-100)
+// GetProgress returns the upload progress as a percentage (0-100).
 func (s *MultipartUploadState) GetProgress() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.TotalParts == 0 {
 		return 0
 	}
 	return (float64(s.CompletedParts) / float64(s.TotalParts)) * 100
 }
 
-// GetRemainingParts returns a list of part numbers that still need to be uploaded
+// GetRemainingParts returns a list of part numbers that still need to be uploaded.
 func (s *MultipartUploadState) GetRemainingParts() []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	remaining := make([]int, 0)
 	for i := 1; i <= s.TotalParts; i++ {
 		part, exists := s.Parts[i]
@@ -132,8 +147,10 @@ func (s *MultipartUploadState) GetRemainingParts() []int {
 	return remaining
 }
 
-// GetCompletedParts returns a list of successfully uploaded parts
+// GetCompletedParts returns a list of successfully uploaded parts.
 func (s *MultipartUploadState) GetCompletedParts() []*UploadPart {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	completed := make([]*UploadPart, 0, s.CompletedParts)
 	for i := 1; i <= s.TotalParts; i++ {
 		if part, exists := s.Parts[i]; exists && part.Completed {

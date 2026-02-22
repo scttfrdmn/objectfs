@@ -188,6 +188,10 @@ type ReplicationPricing struct {
 	DestinationPutRequests float64 `yaml:"destination_put_requests"` // PUT request cost at destination
 }
 
+// s3MinPartSize is the minimum non-last part size enforced by S3.
+// Parts smaller than 5 MB (except the final part) are rejected with EntityTooSmall.
+const s3MinPartSize = 5 * 1024 * 1024 // 5 MB
+
 // CalculateOptimalChunkSize calculates the optimal chunk size based on file size and network conditions
 func CalculateOptimalChunkSize(fileSize int64, multipartThreshold int64, baseChunkSize int64) int64 {
 	// If file is below multipart threshold, use full file as single chunk
@@ -195,30 +199,32 @@ func CalculateOptimalChunkSize(fileSize int64, multipartThreshold int64, baseChu
 		return fileSize
 	}
 
+	var chunkSize int64
+
 	// For very small files just over threshold, use smaller chunks
 	if fileSize < multipartThreshold*2 {
-		return baseChunkSize / 2 // 8MB for default config
+		chunkSize = baseChunkSize / 2
+	} else if fileSize < 1024*1024*1024 {
+		// For medium files (up to 1GB), use base chunk size
+		chunkSize = baseChunkSize // 16MB for default config
+	} else if fileSize < 10*1024*1024*1024 {
+		// For large files (1GB - 10GB), use larger chunks
+		chunkSize = baseChunkSize * 2 // 32MB
+	} else if fileSize < 100*1024*1024*1024 {
+		// For very large files (10GB+), use even larger chunks
+		chunkSize = baseChunkSize * 4 // 64MB
+	} else {
+		// For massive files (100GB+), use maximum practical chunk size
+		// S3 allows up to 5GB per part, but 128MB is a good balance
+		chunkSize = baseChunkSize * 8 // 128MB
 	}
 
-	// For medium files (up to 1GB), use base chunk size
-	if fileSize < 1024*1024*1024 {
-		return baseChunkSize // 16MB for default config
+	// Enforce S3 minimum part size: all non-last parts must be >= 5 MB.
+	if chunkSize < s3MinPartSize {
+		chunkSize = s3MinPartSize
 	}
 
-	// For large files (1GB - 10GB), use larger chunks
-	if fileSize < 10*1024*1024*1024 {
-		return baseChunkSize * 2 // 32MB
-	}
-
-	// For very large files (10GB+), use even larger chunks
-	// This reduces the number of parts and improves efficiency
-	if fileSize < 100*1024*1024*1024 {
-		return baseChunkSize * 4 // 64MB
-	}
-
-	// For massive files (100GB+), use maximum practical chunk size
-	// S3 allows up to 5GB per part, but 128MB is a good balance
-	return baseChunkSize * 8 // 128MB
+	return chunkSize
 }
 
 // CalculatePartCount calculates the number of parts for a multipart upload

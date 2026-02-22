@@ -69,6 +69,19 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 		cfg = NewDefaultConfig()
 	}
 
+	// Apply defaults for zero-value critical fields so that partial configs
+	// (e.g. created with &Config{Region: "us-west-2"}) behave correctly.
+	defaults := NewDefaultConfig()
+	if cfg.MultipartThreshold == 0 {
+		cfg.MultipartThreshold = defaults.MultipartThreshold
+	}
+	if cfg.MultipartChunkSize == 0 {
+		cfg.MultipartChunkSize = defaults.MultipartChunkSize
+	}
+	if cfg.MultipartConcurrency == 0 {
+		cfg.MultipartConcurrency = defaults.MultipartConcurrency
+	}
+
 	// Set default storage tier if not specified
 	if cfg.StorageTier == "" {
 		cfg.StorageTier = TierStandard

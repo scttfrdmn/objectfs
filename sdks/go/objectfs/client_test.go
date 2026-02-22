@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// requireAWS skips the test unless AWS_ACCESS_KEY_ID is set.
-// Consistent with the project's pattern: integration tests require real AWS credentials.
+// requireAWS skips the test unless AWS credentials are available.
+// Accepts either AWS_ACCESS_KEY_ID (explicit keys) or AWS_PROFILE (named profile).
 func requireAWS(t *testing.T) {
 	t.Helper()
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
+	if os.Getenv("AWS_ACCESS_KEY_ID") == "" && os.Getenv("AWS_PROFILE") == "" {
 		t.Skip("AWS_ACCESS_KEY_ID not set; skipping integration test")
 	}
 }
@@ -246,14 +246,16 @@ func TestSentinelErrors_Is(t *testing.T) {
 
 func TestNew_WithDefaults(t *testing.T) {
 	requireAWS(t)
-	c, err := New(context.Background(), testBucket())
+	// Default region must be us-east-1; verify via defaultOptions (no S3 call needed).
+	if got := defaultOptions().region; got != "us-east-1" {
+		t.Errorf("default region: got %q, want %q", got, "us-east-1")
+	}
+	// Verify the client initialises successfully against the real test bucket.
+	c, err := New(context.Background(), testBucket(), WithRegion(testRegion()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer c.Close() //nolint:errcheck
-	if c.opts.region != "us-east-1" {
-		t.Errorf("region: got %q, want %q", c.opts.region, "us-east-1")
-	}
 	if c.IsMounted() {
 		t.Error("IsMounted should be false after New")
 	}
@@ -274,7 +276,7 @@ func TestNew_WithRegion(t *testing.T) {
 
 func TestClose_NotMounted(t *testing.T) {
 	requireAWS(t)
-	c, err := New(context.Background(), testBucket())
+	c, err := New(context.Background(), testBucket(), WithRegion(testRegion()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

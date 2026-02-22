@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -155,6 +156,13 @@ func (b *Backend) uploadParts(
 	if len(uploadErrors) > 0 {
 		return nil, 0, fmt.Errorf("%d parts failed: %w", len(uploadErrors), uploadErrors[0])
 	}
+
+	// S3 requires parts in ascending PartNumber order for CompleteMultipartUpload.
+	// Goroutines finish in completion order, so sort before returning.
+	sort.Slice(completedParts, func(i, j int) bool {
+		return aws.ToInt32(completedParts[i].PartNumber) < aws.ToInt32(completedParts[j].PartNumber)
+	})
+
 	return completedParts, totalBytes, nil
 }
 
