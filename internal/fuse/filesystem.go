@@ -2,7 +2,7 @@ package fuse
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"log"
 	"path/filepath"
 	"strings"
@@ -611,28 +611,32 @@ func (n *DirectoryNode) createDirectoryNode(name, path string) *fs.Inode {
 // Helper methods for FileSystem
 
 func (fs *FileSystem) getCachedInfo(path string) *types.ObjectInfo {
-	// Try to get metadata from cache
-	if fs.cache != nil {
-		// Use a special metadata key prefix
-		metaKey := "__meta__" + path
-		if cachedData := fs.cache.Get(metaKey, 0, 1024); cachedData != nil {
-			// TODO: Deserialize ObjectInfo from cached data
-			// For now, return nil to force backend lookup
-			_ = cachedData // Acknowledge the cached data variable
-		}
+	if fs.cache == nil {
+		return nil
 	}
-	return nil
+	metaKey := "__meta__" + path
+	// 8 KiB is generous for any realistic ObjectInfo JSON payload.
+	cachedData := fs.cache.Get(metaKey, 0, 8192)
+	if cachedData == nil {
+		return nil
+	}
+	var info types.ObjectInfo
+	if err := json.Unmarshal(cachedData, &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
 func (fs *FileSystem) cacheInfo(path string, info *types.ObjectInfo) {
-	if fs.cache != nil && info != nil {
-		// Use a special metadata key prefix
-		metaKey := "__meta__" + path
-		// In a real implementation, serialize ObjectInfo to bytes
-		// For now, just cache a placeholder
-		metaData := []byte(fmt.Sprintf("%d:%d", info.Size, info.LastModified.Unix()))
-		fs.cache.Put(metaKey, 0, metaData)
+	if fs.cache == nil || info == nil {
+		return
 	}
+	metaKey := "__meta__" + path
+	data, err := json.Marshal(info)
+	if err != nil {
+		return
+	}
+	fs.cache.Put(metaKey, 0, data)
 }
 
 func (fs *FileSystem) recordLookupTime(duration time.Duration) {

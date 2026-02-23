@@ -180,9 +180,10 @@ func (c *MockBaseCache) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Find and delete all entries for this key
-	for cacheKey := range c.data {
+	// Find and delete all entries for this key, updating size tracking.
+	for cacheKey, data := range c.data {
 		if len(cacheKey) > len(key) && cacheKey[:len(key)] == key && cacheKey[len(key)] == ':' {
+			c.stats.Size -= int64(len(data))
 			delete(c.data, cacheKey)
 		}
 	}

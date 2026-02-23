@@ -3,6 +3,8 @@ package cache
 import (
 	"testing"
 	"time"
+
+	"github.com/objectfs/objectfs/internal/analytics"
 )
 
 // TestNewMultiLevelCache tests cache creation with various configurations
@@ -927,5 +929,113 @@ func TestMultiLevelCache_DefaultPolicy(t *testing.T) {
 	retrieved := cache.Get("test", 0, 4)
 	if retrieved == nil {
 		t.Error("should be able to retrieve data with default policy")
+	}
+}
+
+// TestMultiLevelCache_PredictorRecordsAccesses verifies that Get and Put both
+// call RecordAccess on the injected analytics.Predictor.
+func TestMultiLevelCache_PredictorRecordsAccesses(t *testing.T) {
+	t.Parallel()
+
+	p := analytics.NewPredictor()
+	cfg := &MultiLevelConfig{
+		L1Config: &L1Config{
+			Enabled:    true,
+			Size:       16 * 1024 * 1024,
+			MaxEntries: 1000,
+			TTL:        time.Minute,
+			Prefetch:   false,
+		},
+		L2Config:  &L2Config{Enabled: false},
+		Policy:    "inclusive",
+		Predictor: p,
+	}
+
+	c, err := NewMultiLevelCache(cfg)
+	if err != nil {
+		t.Fatalf("NewMultiLevelCache: %v", err)
+	}
+
+	c.Put("obj/a", 0, []byte("hello"))
+	c.Get("obj/a", 0, 5)
+	c.Get("obj/missing", 0, 5)
+
+	stats := p.Stats()
+	// Put records 1 access, Get records 2 accesses (hit + miss) = 3 total.
+	if stats.TotalAccesses < 3 {
+		t.Errorf("expected >= 3 recorded accesses, got %d", stats.TotalAccesses)
+	}
+}
+
+// TestMultiLevelCache_ShouldPromoteToL2_PredictorStandard verifies that an
+// actively-accessed key (classified as Standard) is promoted to L2.
+func TestMultiLevelCache_ShouldPromoteToL2_PredictorStandard(t *testing.T) {
+	t.Parallel()
+
+	p := analytics.NewPredictor()
+	cfg := &MultiLevelConfig{
+		L1Config: &L1Config{
+			Enabled:    true,
+			Size:       64 * 1024 * 1024,
+			MaxEntries: 1000,
+			TTL:        time.Minute,
+			Prefetch:   false,
+		},
+		L2Config:  &L2Config{Enabled: false},
+		Policy:    "hybrid",
+		Predictor: p,
+	}
+
+	c, err := NewMultiLevelCache(cfg)
+	if err != nil {
+		t.Fatalf("NewMultiLevelCache: %v", err)
+	}
+
+	// Simulate frequent recent access to build Standard-tier pattern.
+	now := time.Now()
+	for i := 0; i < 20; i++ {
+		p.RecordAccessAt("hot-obj", now.Add(time.Duration(-i)*time.Minute), 4096)
+	}
+
+	// With high-frequency accesses, Recommend should return Standard.
+	rec := p.Recommend("hot-obj")
+	if rec.Confidence == 0 {
+		t.Skip("predictor has insufficient history; skipping L2-promotion assertion")
+	}
+
+	// shouldPromoteToL2 should honour the predictor recommendation.
+	promote := c.shouldPromoteToL2("hot-obj", make([]byte, 512)) // < 1 MiB fallback threshold
+	if rec.Tier == analytics.TierStandard || rec.Tier == analytics.TierStandardIA {
+		if !promote {
+			t.Errorf("expected L2 promotion for Standard-tier object %q (confidence=%.2f)", rec.Tier, rec.Confidence)
+		}
+	}
+}
+
+// TestMultiLevelCache_ShouldPromoteToL2_FallbackSize verifies the size-based
+// fallback when no predictor is configured.
+func TestMultiLevelCache_ShouldPromoteToL2_FallbackSize(t *testing.T) {
+	t.Parallel()
+
+	cfg := &MultiLevelConfig{
+		L1Config:  &L1Config{Enabled: true, Size: 64 * 1024 * 1024, MaxEntries: 100, TTL: time.Minute},
+		L2Config:  &L2Config{Enabled: false},
+		Policy:    "hybrid",
+		Predictor: nil, // no predictor
+	}
+
+	c, err := NewMultiLevelCache(cfg)
+	if err != nil {
+		t.Fatalf("NewMultiLevelCache: %v", err)
+	}
+
+	small := make([]byte, 512*1024)    // 512 KiB < 1 MiB → no promote
+	large := make([]byte, 2*1024*1024) // 2 MiB > 1 MiB → promote
+
+	if c.shouldPromoteToL2("k", small) {
+		t.Error("small object (<1 MiB) should not be promoted without predictor")
+	}
+	if !c.shouldPromoteToL2("k", large) {
+		t.Error("large object (>1 MiB) should be promoted by size fallback")
 	}
 }

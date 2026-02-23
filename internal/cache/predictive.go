@@ -846,9 +846,53 @@ func (pc *PredictiveCache) intelligentEvict(sizeNeeded int64) bool {
 }
 
 func (em *IntelligentEvictionManager) generateEvictionCandidates() []*EvictionCandidate {
-	// This would analyze cache contents and generate candidates
-	// For now, return empty slice as placeholder
-	return []*EvictionCandidate{}
+	em.predictor.mu.RLock()
+	defer em.predictor.mu.RUnlock()
+
+	now := time.Now()
+	oneHourAgo := now.Add(-time.Hour)
+
+	candidates := make([]*EvictionCandidate, 0, len(em.predictor.patterns))
+	for _, pattern := range em.predictor.patterns {
+		avgSize := int64(em.predictor.calculateAverageSize(pattern.AccessHistory))
+
+		// Compute recency directly so future timestamps and patterns with
+		// fewer than 2 accesses (where calculatePatternFeatures is a no-op)
+		// are handled correctly.
+		var recencyScore float64
+		if !pattern.LastAccess.IsZero() {
+			age := now.Sub(pattern.LastAccess)
+			if age < 0 {
+				age = 0 // clamp: treat future-timestamped entries as just-accessed
+			}
+			recencyScore = math.Exp(-age.Hours() / 24)
+		}
+
+		// Compute frequency: fraction of history within the last hour.
+		var frequencyScore float64
+		if n := len(pattern.AccessHistory); n > 0 {
+			recent := 0
+			for _, ev := range pattern.AccessHistory {
+				if ev.Timestamp.After(oneHourAgo) {
+					recent++
+				}
+			}
+			frequencyScore = float64(recent) / float64(n)
+		}
+
+		// Objects with low recency and low frequency should be evicted first.
+		evictionScore := (1.0 - recencyScore) * (1.0 - frequencyScore*0.5)
+
+		candidates = append(candidates, &EvictionCandidate{
+			Key:            pattern.Key,
+			Size:           avgSize,
+			LastAccess:     pattern.LastAccess,
+			AccessCount:    len(pattern.AccessHistory),
+			PredictedReuse: recencyScore,
+			EvictionScore:  evictionScore,
+		})
+	}
+	return candidates
 }
 
 // Rate Limiter Implementation

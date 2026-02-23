@@ -5,16 +5,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/objectfs/objectfs/internal/analytics"
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
 // MultiLevelCache implements a multi-level cache hierarchy
 type MultiLevelCache struct {
-	mu      sync.RWMutex
-	statsMu sync.Mutex
-	levels  []CacheLevel
-	config  *MultiLevelConfig
-	stats   MultiLevelStats
+	mu        sync.RWMutex
+	statsMu   sync.Mutex
+	levels    []CacheLevel
+	config    *MultiLevelConfig
+	stats     MultiLevelStats
+	predictor *analytics.Predictor // optional; used for promotion decisions
 }
 
 // CacheLevel represents a single level in the cache hierarchy
@@ -27,9 +29,10 @@ type CacheLevel struct {
 
 // MultiLevelConfig represents multi-level cache configuration
 type MultiLevelConfig struct {
-	L1Config *L1Config `yaml:"l1"`
-	L2Config *L2Config `yaml:"l2"`
-	Policy   string    `yaml:"policy"`
+	L1Config  *L1Config            `yaml:"l1"`
+	L2Config  *L2Config            `yaml:"l2"`
+	Policy    string               `yaml:"policy"`
+	Predictor *analytics.Predictor `yaml:"-"` // optional ML predictor for promotion decisions
 }
 
 // L1Config represents L1 (memory) cache configuration
@@ -82,7 +85,8 @@ func NewMultiLevelCache(config *MultiLevelConfig) (*MultiLevelCache, error) {
 	}
 
 	cache := &MultiLevelCache{
-		config: config,
+		config:    config,
+		predictor: config.Predictor,
 		stats: MultiLevelStats{
 			LevelStats: make(map[string]types.CacheStats),
 		},
@@ -100,6 +104,11 @@ func NewMultiLevelCache(config *MultiLevelConfig) (*MultiLevelCache, error) {
 func (c *MultiLevelCache) Get(key string, offset, size int64) []byte {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	// Record access for promotion and eviction decisions.
+	if c.predictor != nil {
+		c.predictor.RecordAccess(key, size)
+	}
 
 	// Try each level in order
 	for i, level := range c.levels {
@@ -130,6 +139,11 @@ func (c *MultiLevelCache) Get(key string, offset, size int64) []byte {
 func (c *MultiLevelCache) Put(key string, offset int64, data []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Record write access for promotion and eviction decisions.
+	if c.predictor != nil {
+		c.predictor.RecordAccess(key, int64(len(data)))
+	}
 
 	// Store in all enabled levels based on policy
 	switch c.config.Policy {
@@ -408,17 +422,24 @@ func (c *MultiLevelCache) hybridPut(key string, offset int64, data []byte) {
 }
 
 func (c *MultiLevelCache) shouldPromoteToL2(key string, data []byte) bool {
-	// Simple heuristic: promote larger files or frequently accessed files
-	// In practice, this would use access patterns, ML models, etc.
-
-	// Promote files larger than 1MB
-	if len(data) > 1024*1024 {
-		return true
+	// Use the analytics predictor when available.
+	if c.predictor != nil {
+		rec := c.predictor.Recommend(key)
+		if rec.Confidence > 0 {
+			// Actively-used objects (Standard / Standard-IA) benefit from L2 caching.
+			// Infrequently-used objects (Glacier tiers) do not.
+			switch rec.Tier {
+			case analytics.TierStandard, analytics.TierStandardIA:
+				return true
+			case analytics.TierGlacierIR, analytics.TierGlacier, analytics.TierDeepArchive:
+				return false
+			}
+		}
+		// confidence == 0 means no access history yet; fall through to size heuristic.
 	}
 
-	// Promote based on access frequency (placeholder logic)
-	// This would typically track access patterns over time
-	return false
+	// Fallback: promote objects larger than 1 MiB.
+	return len(data) > 1024*1024
 }
 
 func (c *MultiLevelCache) updateEfficiencyMetrics() {
