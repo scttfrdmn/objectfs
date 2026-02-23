@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ type FilesystemStats struct {
 
 // MountManager manages FUSE mount operations
 type MountManager struct {
+	mu            sync.Mutex
 	filesystem    *FileSystem
 	server        *fuse.Server
 	config        *MountConfig
@@ -121,9 +123,12 @@ func NewMountManagerWithTracker(filesystem *FileSystem, config *MountConfig, tra
 
 // Mount mounts the filesystem at the specified mount point
 func (m *MountManager) Mount(ctx context.Context) error {
+	m.mu.Lock()
 	if m.mounted {
+		m.mu.Unlock()
 		return fmt.Errorf("filesystem is already mounted")
 	}
+	m.mu.Unlock()
 
 	// Start tracking the mount operation
 	metadata := map[string]interface{}{
@@ -132,7 +137,9 @@ func (m *MountManager) Mount(ctx context.Context) error {
 		"read_only":   m.config.Options.ReadOnly,
 	}
 	op, opCtx := m.statusTracker.StartOperation(ctx, "mount", metadata)
+	m.mu.Lock()
 	m.currentOpID = op.ID
+	m.mu.Unlock()
 
 	// Phase 1: Validate mount point
 	if err := m.statusTracker.SetPhase(op.ID, "validating"); err != nil {
@@ -175,8 +182,10 @@ func (m *MountManager) Mount(ctx context.Context) error {
 		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
 
+	m.mu.Lock()
 	m.server = server
 	m.mounted = true
+	m.mu.Unlock()
 
 	// Phase 4: Complete
 	if err := m.statusTracker.SetPhase(op.ID, "complete"); err != nil {
@@ -192,14 +201,18 @@ func (m *MountManager) Mount(ctx context.Context) error {
 	if err := m.statusTracker.CompleteOperation(op.ID); err != nil {
 		log.Printf("Warning: failed to complete operation tracking: %v", err)
 	}
+	m.mu.Lock()
 	m.currentOpID = ""
+	m.mu.Unlock()
 
 	// Start serving in background
 	go func() {
 		log.Printf("Starting FUSE server...")
 		m.server.Wait()
 		log.Printf("FUSE server stopped")
+		m.mu.Lock()
 		m.mounted = false
+		m.mu.Unlock()
 	}()
 
 	// Use operation context to ensure proper cancellation
@@ -210,11 +223,16 @@ func (m *MountManager) Mount(ctx context.Context) error {
 
 // Unmount unmounts the filesystem
 func (m *MountManager) Unmount() error {
-	if !m.mounted {
+	m.mu.Lock()
+	mounted := m.mounted
+	server := m.server
+	m.mu.Unlock()
+
+	if !mounted {
 		return fmt.Errorf("filesystem is not mounted")
 	}
 
-	if m.server == nil {
+	if server == nil {
 		return fmt.Errorf("no active server to unmount")
 	}
 
@@ -242,7 +260,7 @@ func (m *MountManager) Unmount() error {
 		log.Printf("Warning: failed to set message: %v", err)
 	}
 
-	err := m.server.Unmount()
+	err := server.Unmount()
 	if err != nil {
 		// Try force unmount
 		if err := m.statusTracker.SetPhase(op.ID, "force-unmounting"); err != nil {
@@ -261,8 +279,10 @@ func (m *MountManager) Unmount() error {
 		}
 	}
 
+	m.mu.Lock()
 	m.mounted = false
 	m.server = nil
+	m.mu.Unlock()
 
 	// Complete the operation
 	if err := m.statusTracker.SetMessage(op.ID, "Filesystem unmounted successfully"); err != nil {
@@ -278,8 +298,10 @@ func (m *MountManager) Unmount() error {
 	return nil
 }
 
-// IsMount() checks if the filesystem is currently mounted
+// IsMounted checks if the filesystem is currently mounted.
 func (m *MountManager) IsMounted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.mounted
 }
 
@@ -321,10 +343,13 @@ func (m *MountManager) GetStatusTracker() *status.Tracker {
 
 // GetCurrentOperation returns the current operation being tracked (if any)
 func (m *MountManager) GetCurrentOperation() (*status.Operation, error) {
-	if m.currentOpID == "" {
+	m.mu.Lock()
+	opID := m.currentOpID
+	m.mu.Unlock()
+	if opID == "" {
 		return nil, nil
 	}
-	return m.statusTracker.GetOperation(m.currentOpID)
+	return m.statusTracker.GetOperation(opID)
 }
 
 // GetOperationHistory returns the operation history
@@ -339,9 +364,11 @@ func (m *MountManager) SubscribeToOperation(opID string) (<-chan status.Operatio
 
 // Remount remounts the filesystem with new options
 func (m *MountManager) Remount(newConfig *MountConfig) error {
-	wasUnmounted := !m.mounted
+	m.mu.Lock()
+	wasMounted := m.mounted
+	m.mu.Unlock()
 
-	if m.mounted {
+	if wasMounted {
 		if err := m.Unmount(); err != nil {
 			return fmt.Errorf("failed to unmount for remount: %w", err)
 		}
@@ -353,7 +380,7 @@ func (m *MountManager) Remount(newConfig *MountConfig) error {
 	}
 
 	// Only remount if it was previously mounted
-	if !wasUnmounted {
+	if wasMounted {
 		return m.Mount(context.Background())
 	}
 
@@ -536,7 +563,7 @@ func (w *MountWatcher) run() {
 
 func (w *MountWatcher) checkMount() {
 	expectedMounted := w.manager.IsMounted()
-	actuallyMounted := !w.manager.isAlreadyMounted()
+	actuallyMounted := w.manager.isAlreadyMounted()
 
 	if expectedMounted != actuallyMounted {
 		if expectedMounted {

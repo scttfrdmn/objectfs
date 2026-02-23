@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-02-23
+
+### Fixed
+- `internal/fuse/mount.go`: `MountManager` gains a `sync.Mutex` field (`mu`) protecting the `mounted`, `currentOpID`, and `server` fields, which were previously accessed without synchronisation from `Mount()`, `Unmount()`, a background goroutine, `IsMounted()`, `GetCurrentOperation()`, and `Remount()` — eliminates data race detected by `-race` (#98)
+- `internal/fuse/mount.go`: `MountWatcher.checkMount()` removed spurious `!` operator from `actuallyMounted := !w.manager.isAlreadyMounted()` (should be `isAlreadyMounted()`, not its negation) — prevents permanent false "unexpected unmount" log warnings on every watcher tick; `Remount()` double-negation also cleaned up (#99)
+- `internal/adapter/adapter.go`: write buffer `MaxBufferSize` and `FlushThreshold` now use the configured `MaxMemory` value directly instead of dividing by 100 and 200 — the placeholder divisions reduced a 512 MB configured buffer to ~5 MiB, degrading write throughput by ~100× (#100)
+
 ## [0.7.0] - 2026-02-23
 
 ### Added

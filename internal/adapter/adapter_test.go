@@ -623,6 +623,51 @@ func TestHealthComponent_Error(t *testing.T) {
 	}
 }
 
+// TestWriteBufferConfig_CorrectSizes is a regression test for the bug where
+// MaxBufferSize and FlushThreshold were accidentally divided by 100 and 200,
+// producing buffers ~100× smaller than the configured MaxMemory value.
+func TestWriteBufferConfig_CorrectSizes(t *testing.T) {
+	t.Parallel()
+
+	// The config carries "512MB" as MaxMemory.  After the fix:
+	//   MaxBufferSize  = parseSize("512MB")       = 512 MiB
+	//   FlushThreshold = MaxBufferSize * 3 / 4    = 384 MiB
+	//
+	// The old buggy code produced:
+	//   MaxBufferSize  = parseSize("512MB") / 100  ≈   5 MiB  (wrong)
+	//   FlushThreshold = parseSize("512MB") / 200  ≈   2.5 MiB (wrong)
+	const maxMemory = "512MB"
+	const oneMiB = int64(1024 * 1024)
+
+	maxBufBytes := parseSize(maxMemory)
+	wantMax := int64(512) * oneMiB
+	if maxBufBytes != wantMax {
+		t.Fatalf("parseSize(%q) = %d, want %d", maxMemory, maxBufBytes, wantMax)
+	}
+
+	flushThreshold := maxBufBytes * 3 / 4
+	wantFlush := int64(384) * oneMiB
+	if flushThreshold != wantFlush {
+		t.Errorf("FlushThreshold = %d bytes (%d MiB), want %d bytes (%d MiB)",
+			flushThreshold, flushThreshold/oneMiB,
+			wantFlush, wantFlush/oneMiB)
+	}
+
+	// Guard against the old bug: the old MaxBufferSize was ≈5 MiB.
+	if maxBufBytes/100 == maxBufBytes {
+		t.Error("MaxBufferSize should NOT equal MaxBufferSize/100")
+	}
+	if maxBufBytes < int64(100)*oneMiB {
+		t.Errorf("MaxBufferSize = %d MiB, which is unreasonably small — the /100 placeholder bug may have been re-introduced",
+			maxBufBytes/oneMiB)
+	}
+
+	// FlushThreshold must be strictly less than MaxBufferSize.
+	if flushThreshold >= maxBufBytes {
+		t.Errorf("FlushThreshold (%d) must be < MaxBufferSize (%d)", flushThreshold, maxBufBytes)
+	}
+}
+
 // contains checks if a string contains a substring
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||

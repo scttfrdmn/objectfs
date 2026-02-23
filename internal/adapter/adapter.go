@@ -138,10 +138,13 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 
-	// 4. Initialize write buffer - use simple WriteBuffer for now
+	// 4. Initialize write buffer.
+	// MaxBufferSize is the per-file buffer capacity; FlushThreshold triggers a
+	// proactive flush when the buffer reaches 75 % of capacity.
+	maxBufBytes := parseSize(a.config.WriteBuffer.MaxMemory)
 	writeBufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  parseSize(a.config.WriteBuffer.MaxMemory) / 100, // Reasonable default
-		FlushThreshold: parseSize(a.config.WriteBuffer.MaxMemory) / 200,
+		MaxBufferSize:  maxBufBytes,
+		FlushThreshold: maxBufBytes * 3 / 4,
 		AsyncFlush:     true,
 		MaxWriteDelay:  a.config.WriteBuffer.FlushInterval,
 	}
