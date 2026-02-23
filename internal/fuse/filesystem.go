@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -134,8 +135,8 @@ type Stats struct {
 func NewFileSystem(backend types.Backend, cache types.Cache, buffer types.WriteBuffer, metrics types.MetricsCollector, config *Config) *FileSystem {
 	if config == nil {
 		config = &Config{
-			DefaultUID:  1000,
-			DefaultGID:  1000,
+			DefaultUID:  safeIntToUint32(os.Getuid()),
+			DefaultGID:  safeIntToUint32(os.Getgid()),
 			DefaultMode: 0644,
 			CacheTTL:    5 * time.Minute,
 			ReadAhead:   128 * 1024,

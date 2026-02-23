@@ -5,7 +5,7 @@ package fuse
 
 import (
 	"context"
-	"fmt"
+	"os"
 
 	"github.com/objectfs/objectfs/pkg/types"
 )
@@ -20,11 +20,22 @@ type CgoFuseMountManager struct {
 func NewCgoFuseMountManager(backend types.Backend, cache types.Cache, writeBuffer types.WriteBuffer,
 	metrics types.MetricsCollector, config *MountConfig) *CgoFuseMountManager {
 
+	uid := safeIntToUint32(os.Getuid())
+	gid := safeIntToUint32(os.Getgid())
+	if config.Permissions != nil {
+		if config.Permissions.UID != 0 {
+			uid = config.Permissions.UID
+		}
+		if config.Permissions.GID != 0 {
+			gid = config.Permissions.GID
+		}
+	}
+
 	fuseConfig := &Config{
 		MountPoint:  config.MountPoint,
 		ReadOnly:    false,
-		DefaultUID:  1000, // TODO: Make configurable
-		DefaultGID:  1000, // TODO: Make configurable
+		DefaultUID:  uid,
+		DefaultGID:  gid,
 		DefaultMode: 0644,
 		CacheTTL:    config.Options.MaxRead, // Reuse for TTL
 	}

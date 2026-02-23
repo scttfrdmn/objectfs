@@ -6,6 +6,7 @@ package fuse
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -603,5 +604,67 @@ func TestCgoFuseFS_HandlesAreUnique(t *testing.T) {
 			t.Errorf("duplicate file handle: %d", fh)
 		}
 		seen[fh] = true
+	}
+}
+
+// ─── UID/GID configurability (#78) ───────────────────────────────────────────
+
+func TestNewCgoFuseMountManager_UsesPermissions(t *testing.T) {
+	t.Parallel()
+
+	cfg := &MountConfig{
+		MountPoint: "/tmp/test-objectfs",
+		Options:    &MountOptions{MaxRead: 128 * 1024},
+		Permissions: &Permissions{
+			UID: 42,
+			GID: 43,
+		},
+	}
+	m := NewCgoFuseMountManager(newMockBackend(), newMockCache(), newMockWriteBuffer(), &mockMetrics{}, cfg)
+
+	if m.filesystem.config.DefaultUID != 42 {
+		t.Errorf("DefaultUID: got %d, want 42", m.filesystem.config.DefaultUID)
+	}
+	if m.filesystem.config.DefaultGID != 43 {
+		t.Errorf("DefaultGID: got %d, want 43", m.filesystem.config.DefaultGID)
+	}
+}
+
+func TestNewCgoFuseMountManager_NilPermissions_DefaultsToProcess(t *testing.T) {
+	t.Parallel()
+
+	cfg := &MountConfig{
+		MountPoint:  "/tmp/test-objectfs",
+		Options:     &MountOptions{MaxRead: 128 * 1024},
+		Permissions: nil,
+	}
+	m := NewCgoFuseMountManager(newMockBackend(), newMockCache(), newMockWriteBuffer(), &mockMetrics{}, cfg)
+
+	wantUID := safeIntToUint32(os.Getuid())
+	if m.filesystem.config.DefaultUID != wantUID {
+		t.Errorf("DefaultUID: got %d, want %d (process uid)", m.filesystem.config.DefaultUID, wantUID)
+	}
+
+	wantGID := safeIntToUint32(os.Getgid())
+	if m.filesystem.config.DefaultGID != wantGID {
+		t.Errorf("DefaultGID: got %d, want %d (process gid)", m.filesystem.config.DefaultGID, wantGID)
+	}
+}
+
+func TestNewCgoFuseMountManager_ZeroPermissionsUID_DefaultsToProcess(t *testing.T) {
+	t.Parallel()
+
+	// UID=0 and GID=0 in Permissions are treated as "not set" and fall back
+	// to the process identity (root is not a useful sentinel in this context).
+	cfg := &MountConfig{
+		MountPoint:  "/tmp/test-objectfs",
+		Options:     &MountOptions{MaxRead: 128 * 1024},
+		Permissions: &Permissions{UID: 0, GID: 0},
+	}
+	m := NewCgoFuseMountManager(newMockBackend(), newMockCache(), newMockWriteBuffer(), &mockMetrics{}, cfg)
+
+	wantUID := safeIntToUint32(os.Getuid())
+	if m.filesystem.config.DefaultUID != wantUID {
+		t.Errorf("DefaultUID: got %d, want %d (process uid) for zero-value Permissions", m.filesystem.config.DefaultUID, wantUID)
 	}
 }

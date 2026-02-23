@@ -1,6 +1,7 @@
 package fuse
 
 import (
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -163,5 +164,21 @@ func TestCacheInfo_Overwrite(t *testing.T) {
 	}
 	if got.ETag != `"new"` {
 		t.Errorf("expected overwritten ETag, got %q", got.ETag)
+	}
+}
+
+func TestNewFileSystem_NilConfig_DefaultsToProcessUID(t *testing.T) {
+	t.Parallel()
+
+	fs := NewFileSystem(nil, nil, nil, nil, nil)
+
+	wantUID := safeIntToUint32(os.Getuid())
+	if fs.config.DefaultUID != wantUID {
+		t.Errorf("DefaultUID: got %d, want %d (process uid)", fs.config.DefaultUID, wantUID)
+	}
+
+	wantGID := safeIntToUint32(os.Getgid())
+	if fs.config.DefaultGID != wantGID {
+		t.Errorf("DefaultGID: got %d, want %d (process gid)", fs.config.DefaultGID, wantGID)
 	}
 }
