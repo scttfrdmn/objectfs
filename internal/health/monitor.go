@@ -3,9 +3,17 @@ package health
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
+
+// Recoverable is implemented by components that can attempt self-recovery
+// after a health-check failure.  The Monitor calls Recover when AutoRecovery
+// is enabled and a check reports StatusUnhealthy.
+type Recoverable interface {
+	Recover(ctx context.Context) error
+}
 
 // Monitor provides system-wide health monitoring for ObjectFS
 type Monitor struct {
@@ -410,17 +418,56 @@ func (m *Monitor) processResultsForAlerts(results map[string]*Result) {
 }
 
 func (m *Monitor) attemptAutoRecovery(results map[string]*Result) {
-	// Auto-recovery logic would be implemented here
-	// This is a simplified placeholder
+	maxAttempts := m.config.RecoveryAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	delay := m.config.RecoveryDelay
+
 	for checkName, result := range results {
-		if result.Status == StatusUnhealthy {
-			// Attempt recovery for the failed component
-			m.mu.RLock()
-			if component, exists := m.components[checkName]; exists {
-				// Could call a recovery method on the component
-				_ = component // Placeholder
+		if result.Status != StatusUnhealthy {
+			continue
+		}
+
+		m.mu.RLock()
+		component, exists := m.components[checkName]
+		m.mu.RUnlock()
+
+		if !exists {
+			continue
+		}
+
+		recoverable, ok := component.(Recoverable)
+		if !ok {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if err := recoverable.Recover(ctx); err != nil {
+				lastErr = err
+				slog.Warn("auto-recovery attempt failed",
+					"component", checkName,
+					"attempt", attempt,
+					"max_attempts", maxAttempts,
+					"error", err)
+				if attempt < maxAttempts && delay > 0 {
+					time.Sleep(delay)
+				}
+			} else {
+				lastErr = nil
+				slog.Info("auto-recovery succeeded", "component", checkName, "attempt", attempt)
+				break
 			}
-			m.mu.RUnlock()
+		}
+		cancel()
+
+		if lastErr != nil {
+			slog.Error("auto-recovery exhausted all attempts",
+				"component", checkName,
+				"max_attempts", maxAttempts,
+				"error", lastErr)
 		}
 	}
 }

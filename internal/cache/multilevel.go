@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ type MultiLevelCache struct {
 	config    *MultiLevelConfig
 	stats     MultiLevelStats
 	predictor *analytics.Predictor // optional; used for promotion decisions
+	backend   types.Backend        // optional; used by Warmup to pre-populate cache
 }
 
 // CacheLevel represents a single level in the cache hierarchy
@@ -33,6 +36,7 @@ type MultiLevelConfig struct {
 	L2Config  *L2Config            `yaml:"l2"`
 	Policy    string               `yaml:"policy"`
 	Predictor *analytics.Predictor `yaml:"-"` // optional ML predictor for promotion decisions
+	Backend   types.Backend        `yaml:"-"` // optional backend for cache warmup
 }
 
 // L1Config represents L1 (memory) cache configuration
@@ -87,6 +91,7 @@ func NewMultiLevelCache(config *MultiLevelConfig) (*MultiLevelCache, error) {
 	cache := &MultiLevelCache{
 		config:    config,
 		predictor: config.Predictor,
+		backend:   config.Backend,
 		stats: MultiLevelStats{
 			LevelStats: make(map[string]types.CacheStats),
 		},
@@ -281,10 +286,35 @@ func (c *MultiLevelCache) GetLevelStats(levelName string) (types.CacheStats, err
 	return types.CacheStats{}, fmt.Errorf("cache level %s not found or not enabled", levelName)
 }
 
-// Warmup preloads frequently accessed data
+// SetBackend sets the storage backend used by Warmup to pre-populate the cache.
+// It may be called any time before Warmup is invoked.
+func (c *MultiLevelCache) SetBackend(b types.Backend) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.backend = b
+}
+
+// Warmup preloads the named keys into the cache hierarchy by fetching them
+// from the configured backend. Keys that cannot be fetched are skipped with
+// a warning. Warmup is a no-op when no backend has been configured.
 func (c *MultiLevelCache) Warmup(keys []string) error {
-	// This would typically be implemented with knowledge of the backend
-	// For now, this is a placeholder
+	c.mu.RLock()
+	backend := c.backend
+	c.mu.RUnlock()
+
+	if backend == nil {
+		return nil
+	}
+
+	ctx := context.Background()
+	for _, key := range keys {
+		data, err := backend.GetObject(ctx, key, 0, -1)
+		if err != nil {
+			slog.Warn("cache warmup: failed to fetch key", "key", key, "error", err)
+			continue
+		}
+		c.Put(key, 0, data)
+	}
 	return nil
 }
 
@@ -517,4 +547,18 @@ func (c *MultiLevelCache) ClearLevel(levelName string) error {
 // CacheClearer interface for caches that support clearing
 type CacheClearer interface {
 	Clear()
+}
+
+// Clear evicts all entries from every enabled cache level.
+func (c *MultiLevelCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, level := range c.levels {
+		if level.Enabled {
+			if clearer, ok := level.Cache.(CacheClearer); ok {
+				clearer.Clear()
+			}
+		}
+	}
 }

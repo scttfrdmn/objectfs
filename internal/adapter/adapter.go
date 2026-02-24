@@ -297,11 +297,18 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 5. Clear cache (simplified)
-	// TODO: Implement proper cache clearing when available
+	// 5. Clear cache
+	if a.cache != nil {
+		a.cache.Clear()
+	}
 
-	// 6. Stop metrics collection (simplified)
-	// TODO: Implement proper metrics stopping
+	// 6. Stop metrics collection
+	if a.metrics != nil {
+		if err := a.metrics.Stop(ctx); err != nil {
+			slog.Error("error stopping metrics collector", "error", err)
+			lastErr = err
+		}
+	}
 
 	a.started = false
 	slog.Info("ObjectFS adapter stopped successfully")

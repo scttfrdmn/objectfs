@@ -2,9 +2,14 @@ package s3
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // Access Frequency Constants
@@ -300,18 +305,26 @@ func (co *CostOptimizer) calculateConfidence(pattern *AccessPattern) float64 {
 	return math.Min(confidence, 1.0)
 }
 
-// applyOptimization applies a tier optimization (placeholder for S3 API integration)
+// applyOptimization applies a tier optimization by calling S3 CopyObject with
+// the target storage class.  The object is copied in-place (same bucket and
+// key) so only its storage class changes; no data is moved.
 func (co *CostOptimizer) applyOptimization(ctx context.Context, opt TierOptimization) error {
-	// In a real implementation, this would use S3 API to change object storage class
-	// For now, just log the optimization
-	co.logger.Info("Would apply tier optimization",
-		"object", opt.ObjectKey,
-		"from_tier", opt.FromTier,
-		"to_tier", opt.ToTier,
-		"savings", opt.EstimatedMonthlySavings,
-		"confidence", opt.ConfidenceLevel)
+	client := co.backend.clientManager.GetPooledClient()
+	defer co.backend.clientManager.ReturnPooledClient(client)
 
-	// Update local tracking
+	copySource := fmt.Sprintf("%s/%s", co.backend.bucket, opt.ObjectKey)
+	_, err := client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:            aws.String(co.backend.bucket),
+		CopySource:        aws.String(copySource),
+		Key:               aws.String(opt.ObjectKey),
+		StorageClass:      s3types.StorageClass(opt.ToTier),
+		MetadataDirective: s3types.MetadataDirectiveCopy,
+	})
+	if err != nil {
+		return fmt.Errorf("CopyObject for tier transition %s→%s: %w", opt.FromTier, opt.ToTier, err)
+	}
+
+	// Update local access-pattern tracking to reflect the new tier.
 	if pattern, exists := co.accessPatterns[opt.ObjectKey]; exists {
 		pattern.CurrentTier = opt.ToTier
 		pattern.EstimatedCost = co.calculateObjectCost(pattern.ObjectSize, opt.ToTier)

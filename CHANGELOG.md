@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-02-23
+
+### Added
+- `pkg/api/server.go`: `MountManager` interface and four REST endpoints (`POST /api/v1/mounts`, `DELETE /api/v1/mounts/{point}`, `GET /api/v1/mounts`, `GET /api/v1/mounts/{point}`) for remote mount/unmount operations; existing deployments without a `MountManager` receive `501 Not Implemented` (#123)
+- `pkg/api/server.go`: `ServerConfig.Version` field; `GET /info` now reports the version supplied at construction time instead of a hardcoded `"0.6.0"` string; falls back to `"unknown"` when the field is empty (#118)
+- `internal/cache/multilevel.go`: `MultiLevelCache.SetBackend(types.Backend)` setter and a working `Warmup([]string) error` implementation that fetches each key from the configured backend and populates all enabled cache levels; no-op when backend is nil (#120)
+- `internal/fuse/cgofuse_filesystem.go`: Nine `sync/atomic.Int64` counter fields (`statsLookups`, `statsOpens`, `statsReads`, `statsWrites`, `statsBytesRead`, `statsBytesWritten`, `statsCacheHits`, `statsCacheMisses`, `statsErrors`) incremented on every operation; `GetStats()` now loads real values instead of returning zeros (#121)
+- `internal/health/monitor.go`: `Recoverable` interface (`Recover(ctx context.Context) error`); `attemptAutoRecovery` now calls `Recover` on any registered component that implements it, retrying up to `MonitorConfig.RecoveryAttempts` times with `RecoveryDelay` between attempts and logging success/failure (#122)
+- `internal/cache/multilevel_bench_test.go`: Four benchmarks (`Get_HotPath`, `Get_Miss`, `Set_Eviction`, `Warmup_10keys`) plus parallel Get — run with `go test -bench=. ./internal/cache/...` (#125)
+- `internal/buffer/buffer_bench_test.go`: Five benchmarks (`Write_1KB`, `Write_1MB`, `Flush_1MB`, `Concurrent_Write`, `FlushAll`) — run with `go test -bench=. ./internal/buffer/...` (#125)
+- `internal/adapter/adapter_bench_test.go`: Seven benchmarks covering `parseSize` and `validateStorageURI` under serial and parallel load — run with `go test -bench=. ./internal/adapter/...` (#125)
+- `internal/filesystem/filesystem_test.go`: `mockFilesystem` and `mockFileHandle` stubs implementing all 28 methods of `FilesystemInterface`; compile-time satisfaction assertion (`var _ FilesystemInterface = (*mockFilesystem)(nil)`) plus 11 table-driven tests covering all method groups and helper utilities (#126)
+
+### Changed
+- `internal/storage/s3/cost_optimizer.go`: `applyOptimization` now calls `s3.CopyObject` in-place (same bucket and key) with the target `StorageClass`, replacing the previous log-only stub; updates local access-pattern tracking on success (#119)
+- `internal/adapter/adapter.go`: `Stop()` now calls `a.cache.Clear()` and `a.metrics.Stop(ctx)`, replacing the two `// TODO` placeholder comments (#124)
+- `sdks/go/objectfs/client.go`: `Client` gains a `sync.RWMutex` field; `Mount`, `Unmount`, `IsMounted`, and `Close` use the mutex to guard the `mounted` bool and `adptr` pointer — makes the SDK fully safe for concurrent use (#127)
+
 ## [0.8.0] - 2026-02-23
 
 ### Added

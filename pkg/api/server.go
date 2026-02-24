@@ -8,6 +8,8 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/objectfs/objectfs/pkg/health"
@@ -15,6 +17,28 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// MountManager handles mount/unmount operations.
+type MountManager interface {
+	Mount(mountPoint string, opts MountOptions) error
+	Unmount(mountPoint string) error
+	IsMounted(mountPoint string) bool
+	ListMounts() []MountInfo
+}
+
+// MountOptions contains options for mounting a filesystem.
+type MountOptions struct {
+	StorageURI string `json:"storage_uri"`
+	ReadOnly   bool   `json:"read_only,omitempty"`
+}
+
+// MountInfo contains information about a mounted filesystem.
+type MountInfo struct {
+	MountPoint string `json:"mount_point"`
+	StorageURI string `json:"storage_uri"`
+	ReadOnly   bool   `json:"read_only"`
+	MountedAt  string `json:"mounted_at,omitempty"`
+}
 
 // Server provides HTTP API endpoints for monitoring
 type Server struct {
@@ -44,6 +68,13 @@ type ServerConfig struct {
 
 	// EnableMetrics enables Prometheus-style metrics endpoint
 	EnableMetrics bool `yaml:"enable_metrics" json:"enable_metrics"`
+
+	// Version is the application version reported by the /info endpoint.
+	Version string `yaml:"version" json:"version"`
+
+	// MountManager handles mount/unmount operations via the REST API.
+	// When nil, mount-related endpoints return 501 Not Implemented.
+	MountManager MountManager `yaml:"-" json:"-"`
 }
 
 // DefaultServerConfig returns default server configuration
@@ -87,6 +118,10 @@ func NewServer(config ServerConfig, statusTracker *status.Tracker, healthTracker
 	if config.EnableMetrics {
 		mux.HandleFunc("/metrics", s.handleMetrics)
 	}
+
+	// Mount endpoints
+	mux.HandleFunc("/api/v1/mounts", s.handleMounts)
+	mux.HandleFunc("/api/v1/mounts/", s.handleMount)
 
 	// Info endpoint
 	mux.HandleFunc("/info", s.handleInfo)
@@ -325,9 +360,14 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	version := s.config.Version
+	if version == "" {
+		version = "unknown"
+	}
+
 	info := map[string]interface{}{
 		"service":   "ObjectFS API",
-		"version":   "0.6.0",
+		"version":   version,
 		"timestamp": time.Now(),
 		"endpoints": []string{
 			"/health",
@@ -338,6 +378,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"/status/operations",
 			"/status/operations/{id}",
 			"/status/history",
+			"/api/v1/mounts",
+			"/api/v1/mounts/{point}",
 			"/info",
 		},
 	}
@@ -369,6 +411,96 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}).ServeHTTP(w, r)
 }
 
+// Mount endpoint handlers
+
+// handleMounts handles GET /api/v1/mounts (list) and POST /api/v1/mounts (mount).
+func (s *Server) handleMounts(w http.ResponseWriter, r *http.Request) {
+	if s.config.MountManager == nil {
+		s.respondError(w, http.StatusNotImplemented, "Mount management not configured")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		mounts := s.config.MountManager.ListMounts()
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"mounts":    mounts,
+			"count":     len(mounts),
+			"timestamp": time.Now(),
+		})
+
+	case http.MethodPost:
+		var req struct {
+			MountPoint string       `json:"mount_point"`
+			Options    MountOptions `json:"options"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+			return
+		}
+		if req.MountPoint == "" {
+			s.respondError(w, http.StatusBadRequest, "mount_point is required")
+			return
+		}
+		if err := s.config.MountManager.Mount(req.MountPoint, req.Options); err != nil {
+			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("Mount failed: %v", err))
+			return
+		}
+		s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+			"mount_point": req.MountPoint,
+			"mounted":     true,
+			"timestamp":   time.Now(),
+		})
+
+	default:
+		s.respondError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+// handleMount handles GET/DELETE /api/v1/mounts/{point}.
+func (s *Server) handleMount(w http.ResponseWriter, r *http.Request) {
+	if s.config.MountManager == nil {
+		s.respondError(w, http.StatusNotImplemented, "Mount management not configured")
+		return
+	}
+
+	// Extract and URL-decode the mount point from the path.
+	rawPoint := strings.TrimPrefix(r.URL.Path, "/api/v1/mounts/")
+	if rawPoint == "" {
+		s.respondError(w, http.StatusBadRequest, "Mount point required")
+		return
+	}
+	mountPoint, err := url.PathUnescape(rawPoint)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid mount point encoding")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		mounted := s.config.MountManager.IsMounted(mountPoint)
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"mount_point": mountPoint,
+			"mounted":     mounted,
+			"timestamp":   time.Now(),
+		})
+
+	case http.MethodDelete:
+		if err := s.config.MountManager.Unmount(mountPoint); err != nil {
+			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("Unmount failed: %v", err))
+			return
+		}
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"mount_point": mountPoint,
+			"mounted":     false,
+			"timestamp":   time.Now(),
+		})
+
+	default:
+		s.respondError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
 // Middleware
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
@@ -383,7 +515,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 		if r.Method == http.MethodOptions {

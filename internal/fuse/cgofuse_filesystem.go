@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
@@ -35,6 +35,17 @@ type CgoFuseFS struct {
 	nextHandle uint64
 	host       *fuse.FileSystemHost
 	mounted    bool
+
+	// Atomic operation counters (lock-free, safe for concurrent FUSE calls)
+	statsLookups      atomic.Int64
+	statsOpens        atomic.Int64
+	statsReads        atomic.Int64
+	statsWrites       atomic.Int64
+	statsBytesRead    atomic.Int64
+	statsBytesWritten atomic.Int64
+	statsCacheHits    atomic.Int64
+	statsCacheMisses  atomic.Int64
+	statsErrors       atomic.Int64
 }
 
 // OpenFile represents an open file handle
@@ -136,6 +147,7 @@ func (fs *CgoFuseFS) IsMounted() bool {
 
 // Getattr gets file attributes
 func (fs *CgoFuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
+	fs.statsLookups.Add(1)
 	defer fs.recordOperation("getattr", time.Now())
 
 	// Handle root directory
@@ -177,6 +189,7 @@ func (fs *CgoFuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 // Open opens a file
 func (fs *CgoFuseFS) Open(path string, flags int) (int, uint64) {
+	fs.statsOpens.Add(1)
 	defer fs.recordOperation("open", time.Now())
 
 	key := strings.TrimPrefix(path, "/")
@@ -196,6 +209,7 @@ func (fs *CgoFuseFS) Open(path string, flags int) (int, uint64) {
 
 // Read reads from a file
 func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
+	fs.statsReads.Add(1)
 	start := time.Now()
 	defer fs.recordOperation("read", start)
 
@@ -203,6 +217,8 @@ func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 
 	// Try cache first
 	if cached := fs.cache.Get(key, ofst, int64(len(buff))); cached != nil {
+		fs.statsCacheHits.Add(1)
+		fs.statsBytesRead.Add(int64(len(cached)))
 		fs.metrics.RecordCacheHit(key, int64(len(cached)))
 		copy(buff, cached)
 		return len(cached)
@@ -212,8 +228,12 @@ func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	ctx := context.Background()
 	data, err := fs.backend.GetObject(ctx, key, ofst, int64(len(buff)))
 	if err != nil {
+		fs.statsErrors.Add(1)
 		return -fuse.EIO
 	}
+
+	fs.statsCacheMisses.Add(1)
+	fs.statsBytesRead.Add(int64(len(data)))
 
 	// Cache the data
 	fs.cache.Put(key, ofst, data)
@@ -225,6 +245,7 @@ func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 
 // Write writes to a file
 func (fs *CgoFuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
+	fs.statsWrites.Add(1)
 	defer fs.recordOperation("write", time.Now())
 
 	key := strings.TrimPrefix(path, "/")
@@ -232,9 +253,11 @@ func (fs *CgoFuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int 
 	// Write to buffer
 	err := fs.writeBuffer.Write(key, ofst, buff)
 	if err != nil {
+		fs.statsErrors.Add(1)
 		return -fuse.EIO
 	}
 
+	fs.statsBytesWritten.Add(int64(len(buff)))
 	return len(buff)
 }
 
@@ -332,17 +355,17 @@ func (fs *CgoFuseFS) recordOperation(op string, start time.Time) {
 	}
 }
 
-// GetStats returns filesystem statistics
+// GetStats returns filesystem statistics.
 func (fs *CgoFuseFS) GetStats() *FilesystemStats {
 	return &FilesystemStats{
-		Lookups:      0, // TODO: implement proper stats
-		Opens:        0,
-		Reads:        0,
-		Writes:       0,
-		BytesRead:    0,
-		BytesWritten: 0,
-		CacheHits:    0,
-		CacheMisses:  0,
-		Errors:       0,
+		Lookups:      fs.statsLookups.Load(),
+		Opens:        fs.statsOpens.Load(),
+		Reads:        fs.statsReads.Load(),
+		Writes:       fs.statsWrites.Load(),
+		BytesRead:    fs.statsBytesRead.Load(),
+		BytesWritten: fs.statsBytesWritten.Load(),
+		CacheHits:    fs.statsCacheHits.Load(),
+		CacheMisses:  fs.statsCacheMisses.Load(),
+		Errors:       fs.statsErrors.Load(),
 	}
 }

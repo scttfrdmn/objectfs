@@ -3,6 +3,7 @@ package objectfs
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/objectfs/objectfs/internal/adapter"
 	"github.com/objectfs/objectfs/internal/config"
@@ -24,6 +25,7 @@ type Client struct {
 	bucket  string
 	opts    clientOptions
 	backend *s3.Backend
+	mu      sync.RWMutex
 	adptr   *adapter.Adapter
 	mounted bool
 }
@@ -139,6 +141,9 @@ func (c *Client) Head(ctx context.Context, key string) (*types.ObjectInfo, error
 // if the client is already mounted. Object operations (Get, Put, etc.) continue
 // to work after mounting.
 func (c *Client) Mount(ctx context.Context, mountPoint string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.mounted {
 		return pkgerrors.NewError(pkgerrors.ErrCodeAlreadyStarted, "filesystem already mounted").
 			WithComponent("objectfs-sdk").
@@ -167,6 +172,9 @@ func (c *Client) Mount(ctx context.Context, mountPoint string) error {
 //
 // Returns ErrNotMounted if the client is not currently mounted.
 func (c *Client) Unmount() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if !c.mounted {
 		return pkgerrors.NewError(pkgerrors.ErrCodeNotInitialized, "filesystem not mounted").
 			WithComponent("objectfs-sdk").
@@ -185,6 +193,8 @@ func (c *Client) Unmount() error {
 
 // IsMounted reports whether the FUSE filesystem is currently mounted.
 func (c *Client) IsMounted() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.mounted
 }
 
@@ -202,7 +212,9 @@ func (c *Client) Metrics() s3.BackendMetrics {
 //
 // Close should always be called when the client is no longer needed.
 func (c *Client) Close() error {
-	if c.mounted {
+	// Unmount calls Lock internally; check IsMounted (RLock) first to avoid
+	// calling Unmount when not needed.
+	if c.IsMounted() {
 		if err := c.Unmount(); err != nil {
 			return fmt.Errorf("unmount during close: %w", err)
 		}

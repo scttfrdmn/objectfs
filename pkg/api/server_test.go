@@ -382,31 +382,48 @@ func TestHandleHistory(t *testing.T) {
 }
 
 func TestHandleInfo(t *testing.T) {
-	server := &Server{
-		config: DefaultServerConfig(),
-	}
+	t.Run("version from config", func(t *testing.T) {
+		t.Parallel()
+		cfg := DefaultServerConfig()
+		cfg.Version = "0.9.0"
+		server := &Server{config: cfg}
 
-	req := httptest.NewRequest(http.MethodGet, "/info", nil)
-	w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/info", nil)
+		w := httptest.NewRecorder()
+		server.handleInfo(w, req)
 
-	server.handleInfo(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
 
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if response["service"] != "ObjectFS API" {
+			t.Errorf("Expected service='ObjectFS API', got %v", response["service"])
+		}
+		if response["version"] != "0.9.0" {
+			t.Errorf("Expected version='0.9.0', got %v", response["version"])
+		}
+	})
 
-	var response map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
+	t.Run("version defaults to unknown when not set", func(t *testing.T) {
+		t.Parallel()
+		server := &Server{config: DefaultServerConfig()} // Version is ""
 
-	if response["service"] != "ObjectFS API" {
-		t.Errorf("Expected service='ObjectFS API', got %v", response["service"])
-	}
+		req := httptest.NewRequest(http.MethodGet, "/info", nil)
+		w := httptest.NewRecorder()
+		server.handleInfo(w, req)
 
-	if response["version"] != "0.6.0" {
-		t.Errorf("Expected version='0.6.0', got %v", response["version"])
-	}
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if response["version"] != "unknown" {
+			t.Errorf("Expected version='unknown', got %v", response["version"])
+		}
+	})
 }
 
 func TestMethodNotAllowed(t *testing.T) {
@@ -684,5 +701,201 @@ func TestHandleMetrics_WithGatherer(t *testing.T) {
 	}
 	if !strings.Contains(body, "# TYPE") {
 		t.Error("Expected '# TYPE' comment lines in Prometheus text output")
+	}
+}
+
+// ─── Mount endpoint tests ─────────────────────────────────────────────────────
+
+// mockMountManager is a test double for MountManager.
+type mockMountManager struct {
+	mounts map[string]MountInfo
+}
+
+func newMockMountManager() *mockMountManager {
+	return &mockMountManager{mounts: make(map[string]MountInfo)}
+}
+
+func (m *mockMountManager) Mount(mountPoint string, opts MountOptions) error {
+	m.mounts[mountPoint] = MountInfo{
+		MountPoint: mountPoint,
+		StorageURI: opts.StorageURI,
+		ReadOnly:   opts.ReadOnly,
+	}
+	return nil
+}
+
+func (m *mockMountManager) Unmount(mountPoint string) error {
+	delete(m.mounts, mountPoint)
+	return nil
+}
+
+func (m *mockMountManager) IsMounted(mountPoint string) bool {
+	_, ok := m.mounts[mountPoint]
+	return ok
+}
+
+func (m *mockMountManager) ListMounts() []MountInfo {
+	list := make([]MountInfo, 0, len(m.mounts))
+	for _, mi := range m.mounts {
+		list = append(list, mi)
+	}
+	return list
+}
+
+func TestHandleMounts_NoMountManager(t *testing.T) {
+	t.Parallel()
+	server := &Server{config: DefaultServerConfig()} // MountManager is nil
+
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/api/v1/mounts", strings.NewReader("{}"))
+			w := httptest.NewRecorder()
+			server.handleMounts(w, req)
+			if w.Code != http.StatusNotImplemented {
+				t.Errorf("%s: expected 501, got %d", method, w.Code)
+			}
+		})
+	}
+}
+
+func TestHandleMounts_List(t *testing.T) {
+	t.Parallel()
+	mm := newMockMountManager()
+	_ = mm.Mount("/mnt/bucket1", MountOptions{StorageURI: "s3://bucket1"})
+
+	cfg := DefaultServerConfig()
+	cfg.MountManager = mm
+	server := &Server{config: cfg}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mounts", nil)
+	w := httptest.NewRecorder()
+	server.handleMounts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if count := int(response["count"].(float64)); count != 1 {
+		t.Errorf("Expected count=1, got %d", count)
+	}
+}
+
+func TestHandleMounts_Post(t *testing.T) {
+	t.Parallel()
+	mm := newMockMountManager()
+	cfg := DefaultServerConfig()
+	cfg.MountManager = mm
+	server := &Server{config: cfg}
+
+	body := `{"mount_point":"/mnt/test","options":{"storage_uri":"s3://my-bucket"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mounts", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.handleMounts(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("Expected 201, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !mm.IsMounted("/mnt/test") {
+		t.Error("Expected /mnt/test to be mounted")
+	}
+}
+
+func TestHandleMounts_Post_MissingMountPoint(t *testing.T) {
+	t.Parallel()
+	mm := newMockMountManager()
+	cfg := DefaultServerConfig()
+	cfg.MountManager = mm
+	server := &Server{config: cfg}
+
+	body := `{"options":{"storage_uri":"s3://bucket"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mounts", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.handleMounts(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleMount_GetStatus(t *testing.T) {
+	t.Parallel()
+	mm := newMockMountManager()
+	_ = mm.Mount("/mnt/bucket", MountOptions{StorageURI: "s3://bucket"})
+
+	cfg := DefaultServerConfig()
+	cfg.MountManager = mm
+	server := &Server{config: cfg}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mounts//mnt/bucket", nil)
+	req.URL.Path = "/api/v1/mounts//mnt/bucket"
+	w := httptest.NewRecorder()
+	server.handleMount(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	var response map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if mounted, _ := response["mounted"].(bool); !mounted {
+		t.Error("Expected mounted=true")
+	}
+}
+
+func TestHandleMount_Delete(t *testing.T) {
+	t.Parallel()
+	mm := newMockMountManager()
+	_ = mm.Mount("/mnt/bucket", MountOptions{StorageURI: "s3://bucket"})
+
+	cfg := DefaultServerConfig()
+	cfg.MountManager = mm
+	server := &Server{config: cfg}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/mounts//mnt/bucket", nil)
+	req.URL.Path = "/api/v1/mounts//mnt/bucket"
+	w := httptest.NewRecorder()
+	server.handleMount(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if mm.IsMounted("/mnt/bucket") {
+		t.Error("Expected /mnt/bucket to be unmounted")
+	}
+}
+
+func TestHandleMount_NoMountManager(t *testing.T) {
+	t.Parallel()
+	server := &Server{config: DefaultServerConfig()} // MountManager is nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mounts//mnt/foo", nil)
+	req.URL.Path = "/api/v1/mounts//mnt/foo"
+	w := httptest.NewRecorder()
+	server.handleMount(w, req)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("Expected 501, got %d", w.Code)
+	}
+}
+
+func TestHandleMount_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	mm := newMockMountManager()
+	cfg := DefaultServerConfig()
+	cfg.MountManager = mm
+	server := &Server{config: cfg}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/mounts//mnt/foo", nil)
+	req.URL.Path = "/api/v1/mounts//mnt/foo"
+	w := httptest.NewRecorder()
+	server.handleMount(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405, got %d", w.Code)
 	}
 }
