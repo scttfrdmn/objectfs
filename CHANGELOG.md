@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-02-23
+
+### Fixed
+- `internal/distributed/consensus.go`: `resetElectionTimer` now uses `time.NewTimer` instead of `time.AfterFunc` — `time.AfterFunc` returns a `*time.Timer` with a nil `.C` channel, so the election loop blocked forever on a nil channel and elections never fired (#101)
+- `internal/distributed/gossip.go`: `receiveMessages` no longer busy-loops when `conn == nil` (10 ms sleep) and no longer blocks indefinitely in `ReadFromUDP` (100 ms `SetReadDeadline`); stop channels are checked at the top of each iteration so the goroutine exits cleanly on shutdown (#102)
+- `internal/cache/persistent.go`: `Clear()` now captures `len(c.index)` before resetting the map; previously the count was read after the reset and always returned 0, so eviction stats were never updated (#103)
+- `internal/cache/predictive.go`: `IntelligentPrefetcher` updates `stats.JobsQueued` and `stats.JobsCompleted` via `sync/atomic.AddUint64` instead of unprotected increments — eliminates data race under concurrent worker goroutines (#104)
+- `internal/fuse/optimizations.go`: `performPrefetch` now captures `fetchStart := time.Now()` before calling `GetObject`; the previous `time.Since(time.Now())` evaluated to ~0 on every call, making prefetch latency metrics useless (#106)
+- `internal/fuse/filesystem.go`: `OpenFile` gains an `accessMu sync.Mutex` field protecting `lastAccess` and `accessCount`; both `Read` and `Write` paths now acquire the lock before updating these fields — eliminates data race under concurrent FUSE I/O (#107)
+
 ## [0.7.1] - 2026-02-23
 
 ### Fixed

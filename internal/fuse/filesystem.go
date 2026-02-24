@@ -97,7 +97,9 @@ type OpenFile struct {
 	modified bool
 	dirty    bool
 
-	// Access tracking
+	// Access tracking — guarded by accessMu because FUSE delivers concurrent
+	// Read calls for the same open file descriptor (#105).
+	accessMu    sync.Mutex
 	lastAccess  time.Time
 	accessCount int64
 }
@@ -439,9 +441,11 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	fh.fs.stats.Reads++
 	fh.fs.stats.mu.Unlock()
 
-	// Update access tracking
+	// Update access tracking under the per-file mutex (#105).
+	fh.file.accessMu.Lock()
 	fh.file.lastAccess = time.Now()
 	fh.file.accessCount++
+	fh.file.accessMu.Unlock()
 
 	// Try cache first
 	if cachedData := fh.fs.cache.Get(fh.file.path, off, int64(len(dest))); cachedData != nil {
@@ -503,9 +507,11 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 	fh.fs.stats.mu.Unlock()
 
 	// Update file info
+	fh.file.accessMu.Lock()
 	fh.file.modified = true
 	fh.file.dirty = true
 	fh.file.lastAccess = time.Now()
+	fh.file.accessMu.Unlock()
 
 	// Try write coalescing first
 	coalesced := false

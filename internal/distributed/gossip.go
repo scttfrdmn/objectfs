@@ -260,26 +260,39 @@ func (gp *GossipProtocol) receiveMessages(ctx context.Context) {
 	buffer := make([]byte, gp.config.MaxGossipPacket)
 
 	for {
+		// Check stop conditions without blocking before each receive.
+		// This ensures the goroutine exits promptly when Stop() is called,
+		// even if ReadFromUDP is about to block (#102).
 		select {
 		case <-ctx.Done():
 			return
 		case <-gp.stopCh:
 			return
 		default:
-			if gp.conn == nil {
-				continue
-			}
-
-			n, addr, err := gp.conn.ReadFromUDP(buffer)
-			if err != nil {
-				gp.stats.mu.Lock()
-				gp.stats.NetworkErrors++
-				gp.stats.mu.Unlock()
-				continue
-			}
-
-			gp.handleIncomingMessage(buffer[:n], addr)
 		}
+
+		if gp.conn == nil {
+			// Connection not yet established; wait briefly before retrying
+			// rather than spinning in a tight loop.
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		// Set a short read deadline so ReadFromUDP does not block
+		// indefinitely.  On expiry we loop back to check the stop channels.
+		_ = gp.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, addr, err := gp.conn.ReadFromUDP(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // deadline expired; re-check stop channels
+			}
+			gp.stats.mu.Lock()
+			gp.stats.NetworkErrors++
+			gp.stats.mu.Unlock()
+			continue
+		}
+
+		gp.handleIncomingMessage(buffer[:n], addr)
 	}
 }
 

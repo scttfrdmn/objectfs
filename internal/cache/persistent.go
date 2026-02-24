@@ -303,10 +303,12 @@ func (c *PersistentCache) Clear() {
 		_ = os.Remove(item.FilePath) // Ignore error on cleanup
 	}
 
-	// Clear index
+	// Capture count before resetting the map; len(c.index) would be 0 after
+	// the reset and always record zero evictions (#103).
+	count := uint64(len(c.index))
 	c.index = make(map[string]*persistentItem)
 	c.currentSize = 0
-	c.stats.Evictions += uint64(len(c.index))
+	c.stats.Evictions += count
 }
 
 // Close stops background goroutines and syncs the index

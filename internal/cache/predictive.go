@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/objectfs/objectfs/pkg/types"
@@ -757,8 +758,7 @@ func (pc *PredictiveCache) triggerPrefetch(candidates []types.PrefetchCandidate)
 
 	select {
 	case pc.prefetcher.prefetchQueue <- job:
-		// Note: In production, this would need proper synchronization
-		pc.prefetcher.stats.JobsQueued++
+		atomic.AddUint64(&pc.prefetcher.stats.JobsQueued, 1)
 	default:
 		// Queue full, drop job
 	}
@@ -810,8 +810,7 @@ func (pc *PredictiveCache) processPrefetchJob(job *PrefetchJob) {
 
 	job.CompletedAt = time.Now()
 
-	// Note: In production, this would need proper synchronization
-	pc.prefetcher.stats.JobsCompleted++
+	atomic.AddUint64(&pc.prefetcher.stats.JobsCompleted, 1)
 }
 
 // Intelligent Eviction Implementation

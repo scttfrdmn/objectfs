@@ -155,6 +155,7 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 	}
 
 	// Fetch data from backend
+	fetchStart := time.Now()
 	data, err := ram.fs.backend.GetObject(ctx, req.path, req.offset, req.size)
 	if err != nil {
 		return // Prefetch failed, not critical
@@ -163,9 +164,11 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 	// Store in cache
 	ram.fs.cache.Put(req.path, req.offset, data)
 
-	// Record metrics
+	// Record metrics using the captured start time (#104).
+	// time.Since(time.Now()) always evaluates to ~0 because time.Now() is
+	// evaluated at the point of the call, not at fetch start.
 	if ram.fs.metrics != nil {
-		ram.fs.metrics.RecordOperation("prefetch", time.Since(time.Now()), req.size, true)
+		ram.fs.metrics.RecordOperation("prefetch", time.Since(fetchStart), req.size, true)
 	}
 }
 

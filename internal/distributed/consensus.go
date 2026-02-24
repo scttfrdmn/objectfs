@@ -841,9 +841,13 @@ func (ce *ConsensusEngine) resetElectionTimer() {
 		timeout = ce.config.ElectionTimeout + time.Duration(rand.Intn(int(ce.config.ElectionTimeout.Milliseconds())))
 	}
 
-	ce.electionTimer = time.AfterFunc(timeout, func() {
-		// Timer callback handled in electionLoop
-	})
+	// Use time.NewTimer (not time.AfterFunc) so that the .C channel is
+	// populated.  time.AfterFunc leaves .C == nil, which caused electionLoop
+	// to block on a nil channel and never fire (#101).
+	if ce.electionTimer != nil {
+		ce.electionTimer.Stop()
+	}
+	ce.electionTimer = time.NewTimer(timeout)
 }
 
 func (ce *ConsensusEngine) getLastLogIndex() uint64 {
