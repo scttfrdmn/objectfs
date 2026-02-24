@@ -97,8 +97,8 @@ type OpenFile struct {
 	modified bool
 	dirty    bool
 
-	// Access tracking — guarded by accessMu because FUSE delivers concurrent
-	// Read calls for the same open file descriptor (#105).
+	// The following fields are guarded by accessMu because FUSE delivers
+	// concurrent Read and Write calls for the same open file descriptor (#107).
 	accessMu    sync.Mutex
 	lastAccess  time.Time
 	accessCount int64
@@ -506,13 +506,6 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 	fh.fs.stats.BytesWritten += int64(len(data))
 	fh.fs.stats.mu.Unlock()
 
-	// Update file info
-	fh.file.accessMu.Lock()
-	fh.file.modified = true
-	fh.file.dirty = true
-	fh.file.lastAccess = time.Now()
-	fh.file.accessMu.Unlock()
-
 	// Try write coalescing first
 	coalesced := false
 	if fh.fs.writeCoalescer != nil {
@@ -532,18 +525,29 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 		}
 	}
 
-	// Update file size if we wrote past the end
-	newSize := off + int64(len(data))
-	if newSize > fh.file.size {
+	// Update file metadata under accessMu: dirty, modified, lastAccess, and size
+	// must all be mutated together so concurrent Write/Flush/Read calls see a
+	// consistent view (#107).
+	fh.file.accessMu.Lock()
+	fh.file.modified = true
+	fh.file.dirty = true
+	fh.file.lastAccess = time.Now()
+	if newSize := off + int64(len(data)); newSize > fh.file.size {
 		fh.file.size = newSize
 	}
+	fh.file.accessMu.Unlock()
 
 	return safeIntToUint32(len(data)), 0
 }
 
 // Flush flushes any pending writes
 func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
-	if !fh.file.dirty {
+	// Read dirty under accessMu: Write sets it under the same lock (#107).
+	fh.file.accessMu.Lock()
+	dirty := fh.file.dirty
+	fh.file.accessMu.Unlock()
+
+	if !dirty {
 		return 0
 	}
 
@@ -557,7 +561,9 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 
+	fh.file.accessMu.Lock()
 	fh.file.dirty = false
+	fh.file.accessMu.Unlock()
 	return 0
 }
 

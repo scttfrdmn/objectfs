@@ -657,6 +657,11 @@ func (gp *GossipProtocol) performGossip() {
 	gp.mu.RLock()
 	nodes := make([]*GossipNode, 0, len(gp.memberlist))
 	for _, node := range gp.memberlist {
+		// Guard against nodes whose Info was never populated (e.g. added via a
+		// sync message with a nil Info field) to prevent a nil dereference (#113).
+		if node.Info == nil {
+			continue
+		}
 		if node.Info.ID != gp.localNode.ID && node.State != StateDead && node.State != StateLeft {
 			nodes = append(nodes, node)
 		}
@@ -797,16 +802,10 @@ func (gp *GossipProtocol) updateStats(ctx context.Context) {
 }
 
 func (gp *GossipProtocol) calculateStats() {
-	gp.stats.mu.Lock()
-	defer gp.stats.mu.Unlock()
-
-	// Calculate average message latency (simplified)
-	if gp.stats.MessagesReceived > 0 {
-		timeSinceLastMessage := time.Since(gp.stats.LastMessageReceived)
-		if timeSinceLastMessage < time.Minute {
-			gp.stats.AvgMessageLatency = timeSinceLastMessage
-		}
-	}
+	// AvgMessageLatency is not instrumented with per-round-trip timing.
+	// The previous implementation stored time.Since(LastMessageReceived) which
+	// is idle time (grows when the cluster is quiet), not latency. Leave the
+	// field at its zero value until real per-message timing is added (#108).
 }
 
 // Helper methods

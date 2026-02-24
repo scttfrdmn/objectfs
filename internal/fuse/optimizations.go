@@ -14,6 +14,7 @@ type ReadAheadManager struct {
 	config        *ReadAheadConfig
 	prefetchQueue chan *PrefetchRequest
 	stopCh        chan struct{}
+	stopOnce      sync.Once
 }
 
 // ReadAheadConfig configures read-ahead behavior
@@ -200,9 +201,11 @@ func (ram *ReadAheadManager) cleanup() {
 	}
 }
 
-// Stop stops the read-ahead manager
+// Stop stops the read-ahead manager. Safe to call multiple times (#104).
 func (ram *ReadAheadManager) Stop() {
-	close(ram.stopCh)
+	ram.stopOnce.Do(func() {
+		close(ram.stopCh)
+	})
 }
 
 // WriteCoalescer optimizes write operations by coalescing small writes

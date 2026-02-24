@@ -190,12 +190,17 @@ func (m *MultipartStateManager) GetUploadState(uploadID string) (*MultipartUploa
 	return state, exists
 }
 
-// UpdatePartStatus updates the status of a specific part
+// UpdatePartStatus updates the status of a specific part.
+// The manager lock is released before calling MarkPartCompleted / MarkPartFailed
+// because those methods acquire the state's own mutex (state.mu). Holding the
+// manager write lock while calling them creates a two-lock nesting chain that can
+// deadlock if any concurrent goroutine holds state.mu and then tries to acquire
+// m.mu (e.g. via GetInProgressUploads).
 func (m *MultipartStateManager) UpdatePartStatus(uploadID string, partNumber int, size int64, etag string, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	state, exists := m.uploads[uploadID]
+	m.mu.RUnlock()
+
 	if !exists {
 		return
 	}

@@ -219,6 +219,8 @@ func (wb *WriteBuffer) Sync(ctx context.Context) error {
 		select {
 		case <-timeout.C:
 			return fmt.Errorf("sync timeout")
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 			wb.mu.RLock()
 			pendingCount := len(wb.buffers)
@@ -461,8 +463,17 @@ func (wb *WriteBuffer) flushStaleBuffers(callback FlushCallback) {
 	now := time.Now()
 
 	for key, buf := range wb.buffers {
-		if buf.dirty && !buf.flushing {
-			if now.Sub(buf.lastWrite) > wb.config.FlushInterval {
+		// Per-buffer fields (dirty, flushing, lastWrite) are written under
+		// buf.mu by flushBuffer and appendToBuffer. Read them under buf.mu to
+		// avoid a data race with concurrent flushBuffer calls (#112).
+		buf.mu.RLock()
+		dirty := buf.dirty
+		flushing := buf.flushing
+		lastWrite := buf.lastWrite
+		buf.mu.RUnlock()
+
+		if dirty && !flushing {
+			if now.Sub(lastWrite) > wb.config.FlushInterval {
 				staleKeys = append(staleKeys, key)
 			}
 		}

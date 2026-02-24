@@ -191,20 +191,22 @@ func (c *MultiLevelCache) Evict(size int64) bool {
 
 	totalEvicted := int64(0)
 
-	// Try to evict from each level
+	// Try to evict from each level.
+	// Measure size before and after to count bytes actually freed; the previous
+	// code accumulated levelStats.Size (total level occupancy) which could
+	// report success even when nothing was freed (#114).
 	for _, level := range c.levels {
 		if !level.Enabled {
 			continue
 		}
 
+		before := level.Cache.Size()
 		if level.Cache.Evict(size - totalEvicted) {
 			totalEvicted = size
 			break
 		}
-
-		// If partial eviction, continue with remaining size
-		levelStats := level.Cache.Stats()
-		totalEvicted += levelStats.Size
+		after := level.Cache.Size()
+		totalEvicted += before - after
 	}
 
 	return totalEvicted >= size

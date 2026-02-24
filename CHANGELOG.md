@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-02-23
+
+### Fixed
+- `internal/storage/s3/multipart_state.go`: `UpdatePartStatus` now uses `m.mu.RLock()` and releases it before calling `state.MarkPartCompleted`/`state.MarkPartFailed`; previously held the manager write lock while those methods acquired the state lock — two-lock nesting chain that can deadlock under concurrent part uploads (#108)
+- `internal/fuse/filesystem.go`: `FileHandle.Write` now updates `fh.file.size` inside the `accessMu` critical section alongside `dirty`, `modified`, and `lastAccess` — eliminates data race on `OpenFile.size` under concurrent FUSE writes (#109)
+- `internal/fuse/filesystem.go`: `FileHandle.Flush` now reads and resets `fh.file.dirty` under `accessMu` — eliminates data race with concurrent `Write` calls that set `dirty` under the same lock (#110)
+- `internal/fuse/optimizations.go`: `ReadAheadManager.Stop()` now uses `sync.Once` to prevent a panic on second call (`close of closed channel`) from defensive teardown paths (#111)
+- `internal/buffer/writebuffer.go`: `WriteBuffer.Sync()` now checks `ctx.Done()` in its polling loop — the previous implementation ignored context cancellation, blocking the caller for the full `MaxWriteDelay * 2` timeout even after the context was cancelled (#112)
+- `internal/buffer/writebuffer.go`: `flushStaleBuffers` now acquires `buf.mu.RLock()` before reading `buf.flushing`, `buf.dirty`, and `buf.lastWrite` — eliminates data race with concurrent `flushBuffer` calls that set `buf.flushing` under `buf.mu` (#113)
+- `internal/distributed/cluster.go`: `performHealthChecks` now accepts and threads the cluster lifecycle context; `TriggerElection` is called with that context instead of `context.Background()`, so election goroutines exit cleanly when the manager is stopped (#114)
+- `internal/distributed/gossip.go`: `performGossip` now skips member-list entries where `node.Info == nil` — previously dereferenced `node.Info.ID` unconditionally, panicking on nodes added via sync messages with a nil Info field (#115)
+- `internal/distributed/gossip.go`: `calculateStats` no longer writes `time.Since(LastMessageReceived)` to `AvgMessageLatency`; that value measured cluster idle time (grows when quiet), not message round-trip latency; the field stays zero until real per-message timing is instrumented (#116)
+- `internal/cache/multilevel.go`: `MultiLevelCache.Evict` now measures `level.Cache.Size()` before and after each level eviction and accumulates the difference — the previous code accumulated `levelStats.Size` (total level occupancy), which could falsely report `totalEvicted >= size` when nothing was freed (#117)
+
 ## [0.7.2] - 2026-02-23
 
 ### Fixed

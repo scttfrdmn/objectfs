@@ -446,12 +446,12 @@ func (cm *ClusterManager) monitorCluster(ctx context.Context) {
 		case <-cm.stopCh:
 			return
 		case <-ticker.C:
-			cm.performHealthChecks()
+			cm.performHealthChecks(ctx)
 		}
 	}
 }
 
-func (cm *ClusterManager) performHealthChecks() {
+func (cm *ClusterManager) performHealthChecks(ctx context.Context) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -483,7 +483,9 @@ func (cm *ClusterManager) performHealthChecks() {
 					cm.leader = ""
 					cm.isLeader = false
 					go func() {
-						_ = cm.consensus.TriggerElection(context.Background())
+						// Use the cluster lifecycle context so the election
+						// goroutine exits cleanly when the manager stops (#110).
+						_ = cm.consensus.TriggerElection(ctx)
 					}()
 				}
 			}
