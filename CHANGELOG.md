@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-02-23
+
+### Added
+- `internal/storage/s3/config.go`: Three new `Config` fields — `ParallelReadThreshold` (default 64 MB), `ReadChunkSize` (default 16 MB), `ParallelReadConcurrency` (default 0 = inherit `MultipartConcurrency`) — control parallel range GET fan-out for large objects (#128)
+- `internal/storage/s3/backend.go`: `parallelGetObject()` — fans out a large read into N concurrent range GETs bounded by `ParallelReadConcurrency`, assembles results in order; used automatically when the object/read size exceeds `ParallelReadThreshold` and compression is inactive (#128)
+- `internal/config/config.go`: `ParallelReadConfig` struct and `PerformanceConfig.ParallelRead` field for YAML/env configuration of the parallel-read feature (#128)
+- `internal/storage/s3/backend.go`, `multipart_upload.go`: Content SHA-256 stored as `objectfs-sha256` in S3 user metadata on every `PutObject` (standard, CargoShip, and multipart paths); always computed from the uncompressed canonical content so the hash is stable regardless of storage encoding (#129)
+- `internal/storage/s3/backend.go`: `HeadObject` now populates `ObjectInfo.Checksum` from the `objectfs-sha256` metadata key; returns empty string for objects written before v0.10.0 (backward compatible) (#129)
+
+### Changed
+- `internal/fuse/filesystem.go`, `cgofuse_filesystem.go`: Cache population after a backend read now splits large results into 16 MB chunks so future partial reads hit the cache instead of fetching from S3 again (#130)
+
 ## [0.9.0] - 2026-02-23
 
 ### Added

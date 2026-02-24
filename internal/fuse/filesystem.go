@@ -474,8 +474,21 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	fh.fs.stats.BytesRead += int64(len(data))
 	fh.fs.stats.mu.Unlock()
 
-	// Cache the data
-	fh.fs.cache.Put(fh.file.path, off, data)
+	// Cache at chunk granularity so partial hits avoid redundant S3 fetches.
+	// Chunk size matches the S3 parallel-read chunk size (default 16 MB).
+	// Single-entry put for reads smaller than the chunk boundary.
+	const cacheChunkSize = 16 * 1024 * 1024 // 16 MB — mirrors ReadChunkSize default
+	if int64(len(data)) > cacheChunkSize {
+		for chunkOff := int64(0); chunkOff < int64(len(data)); chunkOff += cacheChunkSize {
+			end := chunkOff + cacheChunkSize
+			if end > int64(len(data)) {
+				end = int64(len(data))
+			}
+			fh.fs.cache.Put(fh.file.path, off+chunkOff, data[chunkOff:end])
+		}
+	} else {
+		fh.fs.cache.Put(fh.file.path, off, data)
+	}
 
 	// Record metrics
 	if fh.fs.metrics != nil {

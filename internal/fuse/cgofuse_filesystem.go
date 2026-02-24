@@ -235,8 +235,19 @@ func (fs *CgoFuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	fs.statsCacheMisses.Add(1)
 	fs.statsBytesRead.Add(int64(len(data)))
 
-	// Cache the data
-	fs.cache.Put(key, ofst, data)
+	// Cache at chunk granularity to enable partial hits for future range reads.
+	const cacheChunkSize = 16 * 1024 * 1024 // 16 MB — mirrors ReadChunkSize default
+	if int64(len(data)) > cacheChunkSize {
+		for chunkOff := int64(0); chunkOff < int64(len(data)); chunkOff += cacheChunkSize {
+			end := chunkOff + cacheChunkSize
+			if end > int64(len(data)) {
+				end = int64(len(data))
+			}
+			fs.cache.Put(key, ofst+chunkOff, data[chunkOff:end])
+		}
+	} else {
+		fs.cache.Put(key, ofst, data)
+	}
 	fs.metrics.RecordCacheMiss(key, int64(len(data)))
 
 	copy(buff, data)

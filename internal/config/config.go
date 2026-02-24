@@ -42,16 +42,24 @@ type GlobalConfig struct {
 
 // PerformanceConfig represents performance-related settings
 type PerformanceConfig struct {
-	CacheSize          string          `yaml:"cache_size"`
-	WriteBufferSize    string          `yaml:"write_buffer_size"`
-	MaxConcurrency     int             `yaml:"max_concurrency"`
-	ReadAheadSize      string          `yaml:"read_ahead_size"`
-	CompressionEnabled bool            `yaml:"compression_enabled"`
-	ConnectionPoolSize int             `yaml:"connection_pool_size"`
-	PredictiveCaching  bool            `yaml:"predictive_caching"`
-	MLModelPath        string          `yaml:"ml_model_path"`
-	MultilevelCaching  bool            `yaml:"multilevel_caching"`
-	ReadAhead          ReadAheadConfig `yaml:"read_ahead"` // Advanced read-ahead configuration
+	CacheSize          string             `yaml:"cache_size"`
+	WriteBufferSize    string             `yaml:"write_buffer_size"`
+	MaxConcurrency     int                `yaml:"max_concurrency"`
+	ReadAheadSize      string             `yaml:"read_ahead_size"`
+	CompressionEnabled bool               `yaml:"compression_enabled"`
+	ConnectionPoolSize int                `yaml:"connection_pool_size"`
+	PredictiveCaching  bool               `yaml:"predictive_caching"`
+	MLModelPath        string             `yaml:"ml_model_path"`
+	MultilevelCaching  bool               `yaml:"multilevel_caching"`
+	ReadAhead          ReadAheadConfig    `yaml:"read_ahead"`    // Advanced read-ahead configuration
+	ParallelRead       ParallelReadConfig `yaml:"parallel_read"` // Parallel range GET configuration
+}
+
+// ParallelReadConfig controls fan-out of large object reads into concurrent range GETs.
+type ParallelReadConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Threshold string `yaml:"threshold"`  // e.g. "64MB"
+	ChunkSize string `yaml:"chunk_size"` // e.g. "16MB"
 }
 
 // CacheConfig represents cache configuration
@@ -327,6 +335,11 @@ func NewDefault() *Configuration {
 				MetricsEnabled:         true,
 				StatisticsInterval:     "30s",
 				ModelUpdateInterval:    "5m",
+			},
+			ParallelRead: ParallelReadConfig{
+				Enabled:   true,
+				Threshold: "64MB",
+				ChunkSize: "16MB",
 			},
 		},
 		Cache: CacheConfig{

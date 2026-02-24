@@ -3,6 +3,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	stderr "errors"
 	"fmt"
 	"io"
@@ -80,6 +82,9 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	}
 	if cfg.MultipartConcurrency == 0 {
 		cfg.MultipartConcurrency = defaults.MultipartConcurrency
+	}
+	if cfg.ReadChunkSize == 0 {
+		cfg.ReadChunkSize = defaults.ReadChunkSize
 	}
 
 	// Set default storage tier if not specified
@@ -246,6 +251,23 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		fetchOffset, fetchSize = 0, 0
 	}
 
+	// Parallel range GET fast-path: fan out large reads into concurrent chunks.
+	// Skipped when transparent compression is active (whole-object decompress
+	// path must remain intact) or when the threshold is disabled.
+	threshold := b.config.ParallelReadThreshold
+	if threshold > 0 && (b.compressor == nil || !b.compressor.Enabled()) {
+		readSize := size
+		if readSize <= 0 {
+			// Need the object size to calculate chunk count — one HEAD call.
+			if info, headErr := b.HeadObject(ctx, key); headErr == nil {
+				readSize = info.Size - offset
+			}
+		}
+		if readSize > threshold {
+			return b.parallelGetObject(ctx, key, offset, readSize)
+		}
+	}
+
 	// Wrap with retry logic
 	err := b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
 		return breaker.ExecuteWithContext(retryCtx, func(ctx context.Context) error {
@@ -368,6 +390,11 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 		}
 	}
 
+	// Compute SHA-256 of the uncompressed canonical content before any
+	// encoding so the hash is stable regardless of storage format.
+	rawHash := sha256.Sum256(data)
+	checksumHex := hex.EncodeToString(rawHash[:])
+
 	// Apply transparent compression before upload.
 	uploadData := data
 	contentEncoding := ""
@@ -410,6 +437,9 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 			ContentLength: aws.Int64(int64(len(uploadData))),
 			ContentType:   aws.String(b.detectContentType(key)),
 			StorageClass:  storageClass,
+			Metadata: map[string]string{
+				"objectfs-sha256": checksumHex,
+			},
 		}
 		if contentEncoding != "" {
 			input.ContentEncoding = aws.String(contentEncoding)
@@ -424,6 +454,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 				"content-type":    b.detectContentType(key),
 				"storage-tier":    effectiveTier,
 				"configured-tier": b.currentTier,
+				"objectfs-sha256": checksumHex,
 			}
 			if contentEncoding != "" {
 				cargoMeta["content-encoding"] = contentEncoding
@@ -545,6 +576,12 @@ func (b *Backend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo
 	// Copy metadata
 	for k, v := range result.Metadata {
 		info.Metadata[k] = v
+	}
+
+	// Populate Checksum from objectfs-sha256 metadata key (set on upload).
+	// Empty string for objects written before this feature — backward compatible.
+	if v, ok := result.Metadata["objectfs-sha256"]; ok {
+		info.Checksum = v
 	}
 
 	return info, nil
@@ -700,6 +737,79 @@ func (b *Backend) Close() error {
 }
 
 // Helper methods
+
+// parallelGetObject fans out a large read into N concurrent range GETs bounded
+// by ParallelReadConcurrency (defaults to MultipartConcurrency when 0).
+// All chunks are assembled in order before returning.
+func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, totalSize int64) ([]byte, error) {
+	chunkSize := b.config.ReadChunkSize
+	if chunkSize <= 0 {
+		chunkSize = 16 * 1024 * 1024
+	}
+	concurrency := b.config.ParallelReadConcurrency
+	if concurrency <= 0 {
+		concurrency = b.config.MultipartConcurrency
+	}
+	if concurrency <= 0 {
+		concurrency = 8
+	}
+
+	numChunks := (totalSize + chunkSize - 1) / chunkSize
+
+	type chunkResult struct {
+		index int
+		data  []byte
+		err   error
+	}
+	resultCh := make(chan chunkResult, numChunks)
+	semaphore := make(chan struct{}, concurrency)
+
+	for i := int64(0); i < numChunks; i++ {
+		go func(idx int64) {
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			start := offset + idx*chunkSize
+			end := start + chunkSize
+			if end > offset+totalSize {
+				end = offset + totalSize
+			}
+			rangeHdr := aws.String(fmt.Sprintf("bytes=%d-%d", start, end-1))
+
+			var chunk []byte
+			err := b.executeWithAccelerationFallback(ctx, "GetObject", func(c *s3.Client) error {
+				res, e := c.GetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String(b.bucket),
+					Key:    aws.String(key),
+					Range:  rangeHdr,
+				})
+				if e != nil {
+					return b.translateError(e, "GetObject", key)
+				}
+				defer func() { _ = res.Body.Close() }()
+				var readErr error
+				chunk, readErr = io.ReadAll(res.Body)
+				if readErr == nil {
+					b.metricsCollector.RecordBytesDownloaded(int64(len(chunk)))
+				}
+				return readErr
+			})
+			resultCh <- chunkResult{index: int(idx), data: chunk, err: err}
+		}(i)
+	}
+
+	chunks := make([][]byte, numChunks)
+	for i := int64(0); i < numChunks; i++ {
+		r := <-resultCh
+		if r.err != nil {
+			return nil, r.err
+		}
+		chunks[r.index] = r.data
+	}
+
+	b.costOptimizer.RecordAccess(key, totalSize)
+	return bytes.Join(chunks, nil), nil
+}
 
 func (b *Backend) translateError(err error, operation, key string) error {
 	// Check for specific S3 error types and create rich error objects
@@ -1042,10 +1152,14 @@ func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byt
 	storageClass := ConvertTierToStorageClass(tier)
 	contentType := b.detectContentType(key)
 
+	// Compute SHA-256 of the uncompressed content before multipart initiation.
+	rawHash := sha256.Sum256(data)
+	checksumHex := hex.EncodeToString(rawHash[:])
+
 	b.logger.Debug("Starting multipart upload",
 		"key", key, "total_size", dataSize, "chunk_size", chunkSize, "tier", tier)
 
-	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, contentEncoding, storageClass)
+	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, contentEncoding, checksumHex, storageClass)
 	if err != nil {
 		return fmt.Errorf("failed to initiate multipart upload: %w", err)
 	}

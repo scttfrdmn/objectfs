@@ -39,6 +39,11 @@ type Config struct {
 	MultipartChunkSize   int64 `yaml:"multipart_chunk_size"`  // Chunk size for multipart uploads (bytes)
 	MultipartConcurrency int   `yaml:"multipart_concurrency"` // Number of concurrent part uploads
 
+	// Parallel read configuration — fan out large object reads into concurrent range GETs.
+	ParallelReadThreshold   int64 `yaml:"parallel_read_threshold"`   // bytes; 0 = disabled
+	ReadChunkSize           int64 `yaml:"read_chunk_size"`           // bytes per range GET
+	ParallelReadConcurrency int   `yaml:"parallel_read_concurrency"` // 0 = MultipartConcurrency
+
 	// S3 Storage Tier Configuration
 	StorageTier      string           `yaml:"storage_tier"`      // "STANDARD", "STANDARD_IA", "ONEZONE_IA", etc.
 	TierConstraints  TierConstraints  `yaml:"tier_constraints"`  // Tier-specific constraints
@@ -258,6 +263,9 @@ func NewDefaultConfig() *Config {
 		MultipartThreshold:          32 * 1024 * 1024,  // 32MB - trigger multipart for larger files
 		MultipartChunkSize:          16 * 1024 * 1024,  // 16MB - optimal chunk size for performance
 		MultipartConcurrency:        8,                 // Match pool size for concurrent uploads
+		ParallelReadThreshold:       64 * 1024 * 1024,  // 64MB - fan out reads above this size
+		ReadChunkSize:               16 * 1024 * 1024,  // 16MB - matches MultipartChunkSize
+		ParallelReadConcurrency:     0,                 // 0 = inherit MultipartConcurrency (8)
 		StorageTier:                 TierStandard,      // Default to Standard tier
 		TierConstraints:             TierConstraints{}, // Use tier defaults
 		Compression: CompressionConfig{
