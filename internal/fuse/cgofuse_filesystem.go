@@ -6,7 +6,7 @@ package fuse
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path"
 	"strings"
@@ -92,7 +92,7 @@ func (fs *CgoFuseFS) Mount(ctx context.Context) error {
 	go func() {
 		ret := fs.host.Mount(fs.config.MountPoint, options)
 		if ret != 0 {
-			log.Printf("Mount failed with code: %d", ret)
+			slog.Error("mount failed", "code", ret)
 		}
 	}()
 
@@ -100,7 +100,7 @@ func (fs *CgoFuseFS) Mount(ctx context.Context) error {
 	time.Sleep(100 * time.Millisecond)
 
 	fs.mounted = true
-	log.Printf("ObjectFS mounted at: %s", fs.config.MountPoint)
+	slog.Info("ObjectFS mounted", "mount_point", fs.config.MountPoint)
 	return nil
 }
 
@@ -121,7 +121,7 @@ func (fs *CgoFuseFS) Unmount() error {
 	}
 
 	fs.mounted = false
-	log.Printf("ObjectFS unmounted from: %s", fs.config.MountPoint)
+	slog.Info("ObjectFS unmounted", "mount_point", fs.config.MountPoint)
 	return nil
 }
 

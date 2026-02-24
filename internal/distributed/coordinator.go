@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/objectfs/objectfs/pkg/types"
 )
 
 // Coordinator manages distributed operations across cluster nodes
@@ -18,6 +20,7 @@ type Coordinator struct {
 	replicator   *CacheReplicator
 	loadBalancer *LoadBalancer
 	stopCh       chan struct{}
+	backend      types.Backend
 
 	// pendingOps maps requestID → response channel for in-flight remote ops.
 	pendingOpsMu sync.Mutex
@@ -158,14 +161,17 @@ type LoadBalancerStats struct {
 	Imbalance       float64          `json:"imbalance"`
 }
 
-// NewCoordinator creates a new distributed operations coordinator
-func NewCoordinator(cluster *ClusterManager, config *ClusterConfig) (*Coordinator, error) {
+// NewCoordinator creates a new distributed operations coordinator.
+// backend may be nil; inject a real backend via ClusterManager.SetBackend before
+// executing operations that require S3 access.
+func NewCoordinator(cluster *ClusterManager, config *ClusterConfig, backend types.Backend) (*Coordinator, error) {
 	c := &Coordinator{
 		cluster:    cluster,
 		config:     config,
 		operations: make(map[string]*ActiveOperation),
 		pendingOps: make(map[string]chan *NodeResult),
 		stopCh:     make(chan struct{}),
+		backend:    backend,
 	}
 
 	// Initialize cache replicator
@@ -190,7 +196,7 @@ func NewCoordinator(cluster *ClusterManager, config *ClusterConfig) (*Coordinato
 
 // Start starts the coordinator
 func (c *Coordinator) Start(ctx context.Context) error {
-	log.Printf("Starting distributed operations coordinator")
+	slog.Info("starting distributed operations coordinator")
 
 	// Start background tasks
 	go c.cleanupOperations(ctx)
@@ -203,7 +209,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 // Stop stops the coordinator
 func (c *Coordinator) Stop() error {
 	close(c.stopCh)
-	log.Printf("Distributed operations coordinator stopped")
+	slog.Info("distributed operations coordinator stopped")
 	return nil
 }
 
@@ -538,25 +544,56 @@ func (c *Coordinator) executeOnNode(ctx context.Context, nodeID string, op *Dist
 	}
 }
 
-// executeLocally runs the operation in-process (placeholder for real backend
-// execution; the S3 backend wiring is tracked separately).
+// executeLocally runs the operation in-process using the configured S3 backend.
+// When no backend is configured it returns an error result so callers can detect
+// the misconfiguration rather than silently returning placeholder data.
 func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *NodeResult {
 	start := time.Now()
 	result := &NodeResult{NodeID: nodeID}
 
+	if c.backend == nil {
+		result.Error = "no backend configured"
+		result.Latency = time.Since(start)
+		return result
+	}
+
+	timeout := op.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	switch op.Type {
 	case OpTypeGet:
-		result.Success = true
-		result.Data = []byte(fmt.Sprintf("data-from-%s", nodeID))
+		data, err := c.backend.GetObject(ctx, op.Key, op.Offset, op.Size)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Success = true
+			result.Data = data
+		}
 	case OpTypePut:
-		result.Success = true
+		if err := c.backend.PutObject(ctx, op.Key, op.Data); err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Success = true
+		}
 	case OpTypeDelete:
-		result.Success = true
+		if err := c.backend.DeleteObject(ctx, op.Key); err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Success = true
+		}
 	case OpTypeList:
-		result.Success = true
-		result.Data = []byte(`[{"key":"key1","size":1024},{"key":"key2","size":2048}]`)
+		objs, err := c.backend.ListObjects(ctx, op.Key, 0)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Success = true
+			result.Data, _ = json.Marshal(objs)
+		}
 	default:
-		result.Success = false
 		result.Error = fmt.Sprintf("unsupported operation type: %s", op.Type)
 	}
 
@@ -568,7 +605,7 @@ func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *N
 func (c *Coordinator) handleNetworkOperation(msg *GossipMessage) {
 	var nm NodeOperationMessage
 	if err := json.Unmarshal(msg.Data, &nm); err != nil {
-		log.Printf("Failed to unmarshal NodeOperationMessage: %v", err)
+		slog.Warn("failed to unmarshal NodeOperationMessage", "error", err)
 		return
 	}
 
@@ -590,13 +627,13 @@ func (c *Coordinator) handleNetworkOperation(msg *GossipMessage) {
 		// Fall back to nm.From if msg.From was empty.
 		node, exists = nodes[nm.From]
 		if !exists {
-			log.Printf("Cannot send operation response: sender %s not found", senderID)
+			slog.Warn("cannot send operation response: sender not found", "sender_id", senderID)
 			return
 		}
 	}
 
 	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperationResp, resp); err != nil {
-		log.Printf("Failed to send operation response to %s: %v", senderID, err)
+		slog.Warn("failed to send operation response", "sender_id", senderID, "error", err)
 	}
 }
 
@@ -605,7 +642,7 @@ func (c *Coordinator) handleNetworkOperation(msg *GossipMessage) {
 func (c *Coordinator) handleNetworkOperationResp(msg *GossipMessage) {
 	var resp NodeOperationRespMessage
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		log.Printf("Failed to unmarshal NodeOperationRespMessage: %v", err)
+		slog.Warn("failed to unmarshal NodeOperationRespMessage", "error", err)
 		return
 	}
 
@@ -617,7 +654,7 @@ func (c *Coordinator) handleNetworkOperationResp(msg *GossipMessage) {
 		select {
 		case ch <- resp.Result:
 		default:
-			log.Printf("Dropped duplicate response for request %s", resp.RequestID)
+			slog.Info("dropped duplicate response for request", "request_id", resp.RequestID)
 		}
 	}
 }
@@ -668,7 +705,7 @@ func (c *Coordinator) performOperationCleanup() {
 	now := time.Now()
 	for opID, activeOp := range c.operations {
 		if now.After(activeOp.Deadline) {
-			log.Printf("Cleaning up expired operation: %s", opID)
+			slog.Info("cleaning up expired operation", "op_id", opID)
 			delete(c.operations, opID)
 		}
 	}
@@ -765,7 +802,7 @@ func (c *Coordinator) simulateReplication(nodeID, key string, data []byte) bool 
 		Operation: op,
 	}
 	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperation, msg); err != nil {
-		log.Printf("Failed to replicate key %s to %s: %v", key, nodeID, err)
+		slog.Warn("failed to replicate key", "key", key, "node_id", nodeID, "error", err)
 		return false
 	}
 	return true

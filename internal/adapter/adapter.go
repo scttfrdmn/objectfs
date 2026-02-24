@@ -3,7 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"strings"
 
@@ -88,11 +88,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("adapter already started")
 	}
 
-	log.Printf("Starting ObjectFS adapter...")
-	log.Printf("Storage URI: %s", a.storageURI)
-	log.Printf("Mount Point: %s", a.mountPoint)
-	log.Printf("Cache Size: %s", a.config.Performance.CacheSize)
-	log.Printf("Max Concurrency: %d", a.config.Performance.MaxConcurrency)
+	slog.Info("starting ObjectFS adapter")
+	slog.Info("adapter configuration", "storage_uri", a.storageURI, "mount_point", a.mountPoint, "cache_size", a.config.Performance.CacheSize, "max_concurrency", a.config.Performance.MaxConcurrency)
 
 	// 1. Initialize metrics collector
 	var err error
@@ -107,7 +104,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 
 	// 2. Initialize S3 backend
 	a.s3Config = a.buildS3Config()
-	log.Printf("S3 Region: %s", a.s3Config.Region)
+	slog.Info("S3 backend", "region", a.s3Config.Region)
 
 	a.backend, err = s3.NewBackend(ctx, a.bucketName, a.s3Config)
 	if err != nil {
@@ -234,14 +231,14 @@ func (a *Adapter) Start(ctx context.Context) error {
 		}
 		for _, comp := range components {
 			if err := a.monitor.RegisterComponent(comp); err != nil {
-				log.Printf("Warning: failed to register %s health check: %v", comp.GetComponentName(), err)
+				slog.Warn("failed to register health check", "component", comp.GetComponentName(), "error", err)
 			}
 		}
 
 		if err := a.monitor.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start health monitor: %w", err)
 		}
-		log.Printf("Health monitor started on port %d", a.config.Global.HealthPort)
+		slog.Info("health monitor started", "port", a.config.Global.HealthPort)
 	}
 
 	// 7. Mount filesystem
@@ -250,7 +247,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}
 
 	a.started = true
-	log.Printf("ObjectFS adapter started successfully")
+	slog.Info("ObjectFS adapter started successfully")
 	return nil
 }
 
@@ -260,14 +257,14 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		return fmt.Errorf("adapter not started")
 	}
 
-	log.Printf("Stopping ObjectFS adapter...")
+	slog.Info("stopping ObjectFS adapter")
 
 	var lastErr error
 
 	// 1. Unmount filesystem
 	if a.mountMgr != nil && a.mountMgr.IsMounted() {
 		if err := a.mountMgr.Unmount(); err != nil {
-			log.Printf("Error unmounting filesystem: %v", err)
+			slog.Error("error unmounting filesystem", "error", err)
 			lastErr = err
 		}
 	}
@@ -275,11 +272,11 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	// 2. Flush write buffers
 	if a.writeBuffer != nil {
 		if err := a.writeBuffer.FlushAll(); err != nil {
-			log.Printf("Error flushing write buffers: %v", err)
+			slog.Error("error flushing write buffers", "error", err)
 			lastErr = err
 		}
 		if err := a.writeBuffer.Close(); err != nil {
-			log.Printf("Error closing write buffer: %v", err)
+			slog.Error("error closing write buffer", "error", err)
 			lastErr = err
 		}
 	}
@@ -287,7 +284,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	// 3. Close backend connections
 	if a.backend != nil {
 		if err := a.backend.Close(); err != nil {
-			log.Printf("Error closing backend: %v", err)
+			slog.Error("error closing backend", "error", err)
 			lastErr = err
 		}
 	}
@@ -295,7 +292,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	// 4. Stop health monitor
 	if a.monitor != nil {
 		if err := a.monitor.Stop(); err != nil {
-			log.Printf("Error stopping health monitor: %v", err)
+			slog.Error("error stopping health monitor", "error", err)
 			lastErr = err
 		}
 	}
@@ -307,7 +304,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	// TODO: Implement proper metrics stopping
 
 	a.started = false
-	log.Printf("ObjectFS adapter stopped successfully")
+	slog.Info("ObjectFS adapter stopped successfully")
 	return lastErr
 }
 

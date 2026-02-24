@@ -4,8 +4,9 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -26,6 +27,8 @@ type ClusterManager struct {
 	stats       *ClusterStats
 	stopCh      chan struct{}
 	stopped     chan struct{}
+	backend     types.Backend
+	cache       types.Cache
 }
 
 // ClusterConfig represents cluster configuration
@@ -220,7 +223,7 @@ func NewClusterManager(config *ClusterConfig) (*ClusterManager, error) {
 
 	// Initialize components
 	var err error
-	cm.coordinator, err = NewCoordinator(cm, config)
+	cm.coordinator, err = NewCoordinator(cm, config, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create coordinator: %w", err)
 	}
@@ -243,7 +246,7 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	log.Printf("Starting cluster manager for node %s", cm.nodeID)
+	slog.Info("starting cluster manager", "node_id", cm.nodeID)
 
 	// Add self to nodes
 	cm.nodes[cm.nodeID] = &NodeInfo{
@@ -277,7 +280,7 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 	go cm.monitorCluster(ctx)
 	go cm.updateStats(ctx)
 
-	log.Printf("Cluster manager started successfully")
+	slog.Info("cluster manager started successfully")
 	return nil
 }
 
@@ -297,7 +300,7 @@ func (cm *ClusterManager) Stop() error {
 	}
 
 	close(cm.stopped)
-	log.Printf("Cluster manager stopped")
+	slog.Info("cluster manager stopped")
 	return nil
 }
 
@@ -421,18 +424,18 @@ func (cm *ClusterManager) joinCluster(ctx context.Context) {
 			continue // Don't try to join ourselves
 		}
 
-		log.Printf("Attempting to join cluster via seed node: %s", seedAddr)
+		slog.Info("attempting to join cluster via seed node", "seed_addr", seedAddr)
 
 		if err := cm.gossip.JoinNode(ctx, seedAddr); err != nil {
-			log.Printf("Failed to join via %s: %v", seedAddr, err)
+			slog.Warn("failed to join via seed node", "seed_addr", seedAddr, "error", err)
 			continue
 		}
 
-		log.Printf("Successfully joined cluster via %s", seedAddr)
+		slog.Info("successfully joined cluster", "seed_addr", seedAddr)
 		return
 	}
 
-	log.Printf("Failed to join cluster via any seed node")
+	slog.Warn("failed to join cluster via any seed node")
 }
 
 func (cm *ClusterManager) monitorCluster(ctx context.Context) {
@@ -471,12 +474,12 @@ func (cm *ClusterManager) performHealthChecks(ctx context.Context) {
 		case NodeStatusAlive:
 			if timeSinceLastSeen > deadlineTimeout {
 				node.Status = NodeStatusSuspect
-				log.Printf("Node %s marked as suspect (last seen: %v ago)", nodeID, timeSinceLastSeen)
+				slog.Info("node marked as suspect", "node_id", nodeID, "last_seen_ago", timeSinceLastSeen)
 			}
 		case NodeStatusSuspect:
 			if timeSinceLastSeen > deadlineTimeout*2 {
 				node.Status = NodeStatusDead
-				log.Printf("Node %s marked as dead (last seen: %v ago)", nodeID, timeSinceLastSeen)
+				slog.Info("node marked as dead", "node_id", nodeID, "last_seen_ago", timeSinceLastSeen)
 
 				// If the dead node was the leader, trigger election
 				if nodeID == cm.leader {
@@ -550,6 +553,7 @@ func (cm *ClusterManager) calculateClusterStats() {
 	if aliveNodesCount > 0 {
 		cm.stats.CacheHitRate = totalCacheHitRate / float64(aliveNodesCount)
 	}
+	_ = totalCacheSize
 }
 
 // Helper method to update node information
@@ -590,7 +594,7 @@ func (cm *ClusterManager) SetLeader(nodeID string) {
 	defer cm.mu.Unlock()
 
 	if cm.leader != nodeID {
-		log.Printf("Leadership changed from %s to %s", cm.leader, nodeID)
+		slog.Info("leadership changed", "from", cm.leader, "to", nodeID)
 		cm.leader = nodeID
 		cm.isLeader = (nodeID == cm.nodeID)
 
@@ -609,7 +613,7 @@ func (cm *ClusterManager) RemoveNode(nodeID string) {
 
 	if _, exists := cm.nodes[nodeID]; exists {
 		delete(cm.nodes, nodeID)
-		log.Printf("Node %s removed from cluster", nodeID)
+		slog.Info("node removed from cluster", "node_id", nodeID)
 
 		// If the removed node was the leader, clear leadership
 		if nodeID == cm.leader {
@@ -617,6 +621,50 @@ func (cm *ClusterManager) RemoveNode(nodeID string) {
 			cm.isLeader = false
 		}
 	}
+}
+
+// SetBackend injects the S3 backend used by executeLocally for real object
+// operations.  Must be called before any distributed operations are executed.
+func (cm *ClusterManager) SetBackend(b types.Backend) {
+	cm.mu.Lock()
+	cm.backend = b
+	if cm.coordinator != nil {
+		cm.coordinator.backend = b
+	}
+	cm.mu.Unlock()
+}
+
+// SetCache injects the cache instance for distributed invalidation.
+// When set, cache-invalidate gossip messages received from peers will call
+// cache.Delete on the local cache.
+func (cm *ClusterManager) SetCache(c types.Cache) {
+	cm.mu.Lock()
+	cm.cache = c
+	cm.mu.Unlock()
+}
+
+// InvalidateCacheKey broadcasts a cache-invalidate message to all alive peers,
+// causing each peer to evict the given key from its local cache.
+func (cm *ClusterManager) InvalidateCacheKey(key string) {
+	cm.mu.RLock()
+	gossip := cm.gossip
+	nodeID := cm.nodeID
+	cm.mu.RUnlock()
+
+	if gossip == nil {
+		return
+	}
+	payload, err := json.Marshal(CacheInvalidateMessage{Key: key, From: nodeID})
+	if err != nil {
+		return
+	}
+	_ = gossip.broadcastMessage(&GossipMessage{
+		Type:      MessageTypeCacheInvalidate,
+		From:      nodeID,
+		Timestamp: time.Now(),
+		MessageID: gossip.generateMessageID(),
+		Data:      payload,
+	})
 }
 
 // GetCoordinator returns the operation coordinator

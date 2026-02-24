@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -78,7 +78,17 @@ const (
 	MessageTypeAppendEntriesResp MessageType = "append_entries_resp"
 	MessageTypeNodeOperation     MessageType = "node_operation"
 	MessageTypeNodeOperationResp MessageType = "node_operation_resp"
+
+	// MessageTypeCacheInvalidate requests that peers evict a key from their
+	// local cache.  The payload is a CacheInvalidateMessage.
+	MessageTypeCacheInvalidate MessageType = "cache_invalidate"
 )
+
+// CacheInvalidateMessage is the payload for MessageTypeCacheInvalidate.
+type CacheInvalidateMessage struct {
+	Key  string `json:"key"`
+	From string `json:"from"`
+}
 
 // JoinMessage represents a join request
 type JoinMessage struct {
@@ -182,7 +192,7 @@ func (gp *GossipProtocol) Start(ctx context.Context) error {
 
 	gp.conn = conn
 
-	log.Printf("Gossip protocol listening on %s", gp.config.ListenAddr)
+	slog.Info("gossip protocol listening", "addr", gp.config.ListenAddr)
 
 	// Start background goroutines
 	go gp.receiveMessages(ctx)
@@ -201,7 +211,7 @@ func (gp *GossipProtocol) Stop() error {
 		_ = gp.conn.Close()
 	}
 
-	log.Printf("Gossip protocol stopped")
+	slog.Info("gossip protocol stopped")
 	return nil
 }
 
@@ -299,7 +309,7 @@ func (gp *GossipProtocol) receiveMessages(ctx context.Context) {
 func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) {
 	var msg GossipMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		log.Printf("Failed to unmarshal gossip message: %v", err)
+		slog.Warn("failed to unmarshal gossip message", "error", err)
 		return
 	}
 
@@ -355,13 +365,22 @@ func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) 
 		if gp.cluster.coordinator != nil {
 			gp.cluster.coordinator.handleNetworkOperationResp(&msg)
 		}
+
+	// Cache invalidation
+	case MessageTypeCacheInvalidate:
+		if gp.cluster.cache != nil {
+			var m CacheInvalidateMessage
+			if err := json.Unmarshal(msg.Data, &m); err == nil && m.Key != "" {
+				gp.cluster.cache.Delete(m.Key)
+			}
+		}
 	}
 }
 
 func (gp *GossipProtocol) handleJoinMessage(msg *GossipMessage) {
 	var joinMsg JoinMessage
 	if err := json.Unmarshal(msg.Data, &joinMsg); err != nil {
-		log.Printf("Failed to unmarshal join message: %v", err)
+		slog.Warn("failed to unmarshal join message", "error", err)
 		return
 	}
 
@@ -381,7 +400,7 @@ func (gp *GossipProtocol) handleJoinMessage(msg *GossipMessage) {
 	// Update cluster manager
 	gp.cluster.UpdateNodeInfo(nodeID, joinMsg.Node)
 
-	log.Printf("Node %s joined the cluster", nodeID)
+	slog.Info("node joined the cluster", "node_id", nodeID)
 
 	gp.stats.mu.Lock()
 	gp.stats.NodesDiscovered++
@@ -395,7 +414,7 @@ func (gp *GossipProtocol) handleJoinMessage(msg *GossipMessage) {
 func (gp *GossipProtocol) handleLeaveMessage(msg *GossipMessage) {
 	var leaveData map[string]string
 	if err := json.Unmarshal(msg.Data, &leaveData); err != nil {
-		log.Printf("Failed to unmarshal leave message: %v", err)
+		slog.Warn("failed to unmarshal leave message", "error", err)
 		return
 	}
 
@@ -418,14 +437,14 @@ func (gp *GossipProtocol) handleLeaveMessage(msg *GossipMessage) {
 			gp.mu.Unlock()
 		}()
 
-		log.Printf("Node %s left the cluster", nodeID)
+		slog.Info("node left the cluster", "node_id", nodeID)
 	}
 }
 
 func (gp *GossipProtocol) handleAliveMessage(msg *GossipMessage) {
 	var aliveMsg AliveMessage
 	if err := json.Unmarshal(msg.Data, &aliveMsg); err != nil {
-		log.Printf("Failed to unmarshal alive message: %v", err)
+		slog.Warn("failed to unmarshal alive message", "error", err)
 		return
 	}
 
@@ -469,7 +488,7 @@ func (gp *GossipProtocol) handleAliveMessage(msg *GossipMessage) {
 func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 	var suspectMsg SuspectMessage
 	if err := json.Unmarshal(msg.Data, &suspectMsg); err != nil {
-		log.Printf("Failed to unmarshal suspect message: %v", err)
+		slog.Warn("failed to unmarshal suspect message", "error", err)
 		return
 	}
 
@@ -493,7 +512,7 @@ func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 				gossipNode.State = StateSuspect
 				gossipNode.StateChange = time.Now()
 
-				log.Printf("Node %s marked as suspect by %s", nodeID, suspectMsg.From)
+				slog.Info("node marked as suspect", "node_id", nodeID, "reported_by", suspectMsg.From)
 
 				gp.stats.mu.Lock()
 				gp.stats.SuspicionEvents++
@@ -524,7 +543,7 @@ func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 func (gp *GossipProtocol) handleDeadMessage(msg *GossipMessage) {
 	var deadMsg DeadMessage
 	if err := json.Unmarshal(msg.Data, &deadMsg); err != nil {
-		log.Printf("Failed to unmarshal dead message: %v", err)
+		slog.Warn("failed to unmarshal dead message", "error", err)
 		return
 	}
 
@@ -540,7 +559,7 @@ func (gp *GossipProtocol) handleDeadMessage(msg *GossipMessage) {
 			gossipNode.StateChange = time.Now()
 			gossipNode.Suspicion = nil
 
-			log.Printf("Node %s marked as dead by %s", nodeID, deadMsg.From)
+			slog.Info("node marked as dead", "node_id", nodeID, "reported_by", deadMsg.From)
 
 			gp.stats.mu.Lock()
 			gp.stats.DeathEvents++
@@ -558,7 +577,7 @@ func (gp *GossipProtocol) handleDeadMessage(msg *GossipMessage) {
 func (gp *GossipProtocol) handleSyncMessage(msg *GossipMessage) {
 	var syncMsg SyncMessage
 	if err := json.Unmarshal(msg.Data, &syncMsg); err != nil {
-		log.Printf("Failed to unmarshal sync message: %v", err)
+		slog.Warn("failed to unmarshal sync message", "error", err)
 		return
 	}
 
@@ -607,7 +626,7 @@ func (gp *GossipProtocol) handleSyncMessage(msg *GossipMessage) {
 func (gp *GossipProtocol) handleHeartbeatMessage(msg *GossipMessage) {
 	var heartbeatMsg HeartbeatMessage
 	if err := json.Unmarshal(msg.Data, &heartbeatMsg); err != nil {
-		log.Printf("Failed to unmarshal heartbeat message: %v", err)
+		slog.Warn("failed to unmarshal heartbeat message", "error", err)
 		return
 	}
 
@@ -752,7 +771,7 @@ func (gp *GossipProtocol) checkSuspicions() {
 				gossipNode.StateChange = now
 				gossipNode.Suspicion = nil
 
-				log.Printf("Node %s suspicion timeout, marking as dead", nodeID)
+				slog.Info("node suspicion timeout, marking as dead", "node_id", nodeID)
 
 				// Broadcast dead message
 				deadMsg := &DeadMessage{

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-02-23
+
+### Added
+- `internal/distributed/cluster.go`, `internal/distributed/coordinator.go`: `ClusterManager.SetBackend` and `Coordinator.backend` wire the `types.Backend` S3 backend into `executeLocally`, replacing the in-process stub with real `GetObject`/`PutObject`/`DeleteObject`/`ListObjects` calls; nil backend returns a descriptive error instead of phantom data (#85)
+- `internal/distributed/gossip.go`, `internal/distributed/cluster.go`: Distributed cache invalidation broadcast — new `MessageTypeCacheInvalidate` gossip message type, `ClusterManager.SetCache` / `InvalidateCacheKey` methods, and `handleIncomingMessage` dispatch that calls `cache.Delete(key)` on all peers within one gossip round-trip (#86)
+- `internal/storage/s3/backend_bench_test.go`: Eight new S3 backend benchmarks (GetObject 1 KB / 1 MB / 10 MB, PutObject 1 KB / 1 MB, ListObjects 100 / 1000 entries, concurrent Get) using an in-process stub; run with `go test -bench=. ./internal/storage/s3/...` (#88)
+- `scripts/pjdfstest.sh`: Shell harness that mounts ObjectFS against a test bucket and runs pjdfstest for POSIX compliance validation; `make test-posix` target added to Makefile (#89)
+- `sdks/java/`: Java 17 SDK scaffold — `ObjectFSClient`, `ObjectFSConfig`, `ObjectInfo`, `MountOptions`, `ObjectFSException`, `NotFoundException`, Maven pom.xml, and unit tests using MockWebServer (#90)
+
+### Changed
+- `internal/distributed/coordinator.go`, `internal/distributed/gossip.go`, `internal/distributed/cluster.go`, `internal/distributed/consensus.go`, `internal/health/checker.go`, `internal/health/remediation.go`, `internal/fuse/cgofuse_filesystem.go`, `internal/fuse/filesystem.go`, `internal/fuse/mount.go`, `internal/adapter/adapter.go`, `internal/cache/redis/invalidation.go`, `pkg/profiling/memory.go`: All `log.Printf` calls migrated to structured `slog.Info`/`slog.Warn`/`slog.Error` with key-value attributes (#87)
+
 ## [0.7.3] - 2026-02-23
 
 ### Fixed

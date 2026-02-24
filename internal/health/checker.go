@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -469,7 +469,7 @@ func (c *Checker) updateStats() {
 func (c *Checker) startHTTPServer() {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", c.config.HTTPPort))
 	if err != nil {
-		log.Printf("health: failed to bind HTTP server on port %d: %v", c.config.HTTPPort, err)
+		slog.Error("health: failed to bind HTTP server", "port", c.config.HTTPPort, "error", err)
 		return
 	}
 
@@ -487,7 +487,7 @@ func (c *Checker) startHTTPServer() {
 			"timestamp": status["timestamp"],
 			"checks":    status["checks"],
 		}); err != nil {
-			log.Printf("health: error writing HTTP response: %v", err)
+			slog.Error("health: error writing HTTP response", "error", err)
 		}
 	})
 
@@ -503,9 +503,9 @@ func (c *Checker) startHTTPServer() {
 		_ = server.Shutdown(ctx)
 	}()
 
-	log.Printf("health: HTTP server listening on %s", ln.Addr())
+	slog.Info("health: HTTP server listening", "addr", ln.Addr())
 	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Printf("health: HTTP server error: %v", err)
+		slog.Error("health: HTTP server error", "error", err)
 	}
 }
 

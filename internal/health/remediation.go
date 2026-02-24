@@ -3,7 +3,7 @@ package health
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -335,7 +335,7 @@ func (re *RemediationEngine) registerDefaultRules() {
 				AutoFix: func(ctx context.Context) error {
 					// S3 client reference is not available inside the remediation engine.
 					// A full fix requires dependency injection of the S3 backend.
-					log.Printf("health: s3_restart_connection: S3 client reference not available in remediation engine; restart the objectfs process to reset the connection pool")
+					slog.Info("health: s3_restart_connection: S3 client reference not available; restart the objectfs process to reset the connection pool")
 					return nil
 				},
 				EstimatedTime: 30 * time.Second,
@@ -364,7 +364,7 @@ func (re *RemediationEngine) registerDefaultRules() {
 				AutoFix: func(ctx context.Context) error {
 					// Cache reference is not available inside the remediation engine.
 					// A full fix requires dependency injection of the cache layer.
-					log.Printf("health: cache_clear: cache reference not available in remediation engine; configure cache eviction policy or restart objectfs")
+					slog.Info("health: cache_clear: cache reference not available; configure cache eviction policy or restart objectfs")
 					return nil
 				},
 				EstimatedTime: 10 * time.Second,
@@ -409,12 +409,11 @@ func (re *RemediationEngine) registerDefaultRules() {
 				AutoFix: func(ctx context.Context) error {
 					var memBefore, memAfter runtime.MemStats
 					runtime.ReadMemStats(&memBefore)
-					log.Printf("health: memory_force_gc: before GC: HeapAlloc=%d bytes", memBefore.HeapAlloc)
+					slog.Info("health: memory_force_gc: before GC", "heap_alloc_bytes", memBefore.HeapAlloc)
 					runtime.GC()
 					debug.FreeOSMemory()
 					runtime.ReadMemStats(&memAfter)
-					log.Printf("health: memory_force_gc: after GC: HeapAlloc=%d bytes (freed ~%d bytes)",
-						memAfter.HeapAlloc, int64(memBefore.HeapAlloc)-int64(memAfter.HeapAlloc))
+					slog.Info("health: memory_force_gc: after GC", "heap_alloc_bytes", memAfter.HeapAlloc, "freed_bytes", int64(memBefore.HeapAlloc)-int64(memAfter.HeapAlloc))
 					return nil
 				},
 				EstimatedTime: 5 * time.Second,
@@ -436,7 +435,7 @@ func (re *RemediationEngine) registerDefaultRules() {
 				AutoFix: func(ctx context.Context) error {
 					// Cache reference is not available inside the remediation engine.
 					// A full fix requires dependency injection of the cache layer.
-					log.Printf("health: memory_reduce_cache: cache reference not available in remediation engine; configure cache_size in objectfs config to reduce memory usage")
+					slog.Info("health: memory_reduce_cache: cache reference not available; configure cache_size in objectfs config to reduce memory usage")
 					return nil
 				},
 				EstimatedTime: 30 * time.Second,
@@ -469,7 +468,7 @@ func (re *RemediationEngine) registerDefaultRules() {
 					entries, err := os.ReadDir(logDir)
 					if err != nil {
 						if os.IsNotExist(err) {
-							log.Printf("health: disk_clean_logs: log directory %s does not exist, nothing to clean", logDir)
+							slog.Info("health: disk_clean_logs: log directory does not exist, nothing to clean", "log_dir", logDir)
 							return nil
 						}
 						return fmt.Errorf("disk_clean_logs: reading log directory: %w", err)
@@ -486,13 +485,13 @@ func (re *RemediationEngine) registerDefaultRules() {
 						if info.ModTime().Before(cutoff) {
 							path := filepath.Join(logDir, entry.Name())
 							if removeErr := os.Remove(path); removeErr != nil {
-								log.Printf("health: disk_clean_logs: failed to remove %s: %v", path, removeErr)
+								slog.Warn("health: disk_clean_logs: failed to remove file", "path", path, "error", removeErr)
 								continue
 							}
 							removed++
 						}
 					}
-					log.Printf("health: disk_clean_logs: removed %d log files older than 30 days from %s", removed, logDir)
+					slog.Info("health: disk_clean_logs: removed log files older than 30 days", "count", removed, "log_dir", logDir)
 					return nil
 				},
 				EstimatedTime: 1 * time.Minute,
@@ -517,7 +516,7 @@ func (re *RemediationEngine) registerDefaultRules() {
 					entries, err := os.ReadDir(cacheDir)
 					if err != nil {
 						if os.IsNotExist(err) {
-							log.Printf("health: disk_clean_cache: cache directory %s does not exist, nothing to clean", cacheDir)
+							slog.Info("health: disk_clean_cache: cache directory does not exist, nothing to clean", "cache_dir", cacheDir)
 							return nil
 						}
 						return fmt.Errorf("disk_clean_cache: reading cache directory: %w", err)
@@ -534,13 +533,13 @@ func (re *RemediationEngine) registerDefaultRules() {
 						if info.ModTime().Before(cutoff) {
 							path := filepath.Join(cacheDir, entry.Name())
 							if removeErr := os.Remove(path); removeErr != nil {
-								log.Printf("health: disk_clean_cache: failed to remove %s: %v", path, removeErr)
+								slog.Warn("health: disk_clean_cache: failed to remove file", "path", path, "error", removeErr)
 								continue
 							}
 							removed++
 						}
 					}
-					log.Printf("health: disk_clean_cache: removed %d cache files older than 7 days from %s", removed, cacheDir)
+					slog.Info("health: disk_clean_cache: removed cache files older than 7 days", "count", removed, "cache_dir", cacheDir)
 					return nil
 				},
 				EstimatedTime: 2 * time.Minute,
@@ -578,13 +577,13 @@ func (re *RemediationEngine) registerDefaultRules() {
 						if info.ModTime().Before(cutoff) {
 							path := filepath.Join(tmpDir, entry.Name())
 							if removeErr := os.Remove(path); removeErr != nil {
-								log.Printf("health: disk_clean_temp: failed to remove %s: %v", path, removeErr)
+								slog.Warn("health: disk_clean_temp: failed to remove file", "path", path, "error", removeErr)
 								continue
 							}
 							removed++
 						}
 					}
-					log.Printf("health: disk_clean_temp: removed %d temp files matching objectfs-* older than 24h from %s", removed, tmpDir)
+					slog.Info("health: disk_clean_temp: removed temp files matching objectfs-* older than 24h", "count", removed, "tmp_dir", tmpDir)
 					return nil
 				},
 				EstimatedTime: 1 * time.Minute,
@@ -611,10 +610,10 @@ func (re *RemediationEngine) registerDefaultRules() {
 				},
 				Automated: true,
 				AutoFix: func(ctx context.Context) error {
-					log.Printf("health: network_retry: waiting 5 seconds before signaling retry")
+					slog.Info("health: network_retry: waiting 5 seconds before signaling retry")
 					select {
 					case <-time.After(5 * time.Second):
-						log.Printf("health: network_retry: wait complete, connection retry signaled")
+						slog.Info("health: network_retry: wait complete, connection retry signaled")
 						return nil
 					case <-ctx.Done():
 						return ctx.Err()

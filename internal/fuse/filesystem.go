@@ -3,7 +3,7 @@ package fuse
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,7 +261,7 @@ func (n *DirectoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 		n.fs.stats.Errors++
 		n.fs.stats.mu.Unlock()
 
-		log.Printf("Readdir failed for %s: %v", n.path, err)
+		slog.Error("readdir failed", "path", n.path, "error", err)
 		return nil, syscall.EIO
 	}
 
@@ -310,7 +310,7 @@ func (n *DirectoryNode) Mkdir(ctx context.Context, name string, mode uint32, out
 		n.fs.stats.Errors++
 		n.fs.stats.mu.Unlock()
 
-		log.Printf("Mkdir failed for %s: %v", childPath, err)
+		slog.Error("mkdir failed", "path", childPath, "error", err)
 		return nil, syscall.EIO
 	}
 
@@ -332,7 +332,7 @@ func (n *DirectoryNode) Create(ctx context.Context, name string, flags uint32, m
 		n.fs.stats.Errors++
 		n.fs.stats.mu.Unlock()
 
-		log.Printf("Create failed for %s: %v", childPath, err)
+		slog.Error("create failed", "path", childPath, "error", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
@@ -465,7 +465,7 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		fh.fs.stats.CacheMisses++
 		fh.fs.stats.mu.Unlock()
 
-		log.Printf("Read failed for %s at offset %d: %v", fh.file.path, off, err)
+		slog.Error("read failed", "path", fh.file.path, "offset", off, "error", err)
 		return nil, syscall.EIO
 	}
 
@@ -520,7 +520,7 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 			fh.fs.stats.Errors++
 			fh.fs.stats.mu.Unlock()
 
-			log.Printf("Write failed for %s at offset %d: %v", fh.file.path, off, err)
+			slog.Error("write failed", "path", fh.file.path, "offset", off, "error", err)
 			return 0, syscall.EIO
 		}
 	}
@@ -557,7 +557,7 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 		fh.fs.stats.Errors++
 		fh.fs.stats.mu.Unlock()
 
-		log.Printf("Flush failed for %s: %v", fh.file.path, err)
+		slog.Error("flush failed", "path", fh.file.path, "error", err)
 		return syscall.EIO
 	}
 

@@ -2,7 +2,7 @@ package redis
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strings"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -56,7 +56,7 @@ func (inv *Invalidator) Subscribe(ctx context.Context) {
 func (inv *Invalidator) handle(payload string) {
 	idx := strings.IndexByte(payload, ':')
 	if idx < 0 {
-		log.Printf("redis invalidation: malformed message %q", payload)
+		slog.Warn("redis invalidation: malformed message", "payload", payload)
 		return
 	}
 	senderID := payload[:idx]

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -109,7 +110,7 @@ func NewServer(config ServerConfig, statusTracker *status.Tracker, healthTracker
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	log.Printf("Starting API server on %s", s.config.Address)
+	slog.Info("starting API server", "address", s.config.Address)
 	return s.httpServer.ListenAndServe()
 }
 
@@ -117,14 +118,14 @@ func (s *Server) Start() error {
 func (s *Server) StartBackground() {
 	go func() {
 		if err := s.Start(); err != nil && err != http.ErrServerClosed {
-			log.Printf("API server error: %v", err)
+			slog.Error("API server error", "error", err)
 		}
 	}()
 }
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
-	log.Printf("Shutting down API server...")
+	slog.Info("shutting down API server")
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -373,9 +374,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("API: %s %s", r.Method, r.URL.Path)
+		slog.Info("API request", "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
-		log.Printf("API: %s %s completed in %v", r.Method, r.URL.Path, time.Since(start))
+		slog.Info("API request completed", "method", r.Method, "path", r.URL.Path, "duration", time.Since(start))
 	})
 }
 
@@ -401,7 +402,7 @@ func (s *Server) respondJSON(w http.ResponseWriter, statusCode int, data interfa
 	w.WriteHeader(statusCode)
 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("Error encoding JSON response: %v", err)
+		slog.Error("error encoding JSON response", "error", err)
 	}
 }
 

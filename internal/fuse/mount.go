@@ -3,7 +3,7 @@ package fuse
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -143,41 +143,41 @@ func (m *MountManager) Mount(ctx context.Context) error {
 
 	// Phase 1: Validate mount point
 	if err := m.statusTracker.SetPhase(op.ID, "validating"); err != nil {
-		log.Printf("Warning: failed to set phase: %v", err)
+		slog.Warn("failed to set phase", "error", err)
 	}
 	if err := m.statusTracker.SetMessage(op.ID, "Validating mount point..."); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
 	if err := m.validateMountPoint(); err != nil {
 		if trackErr := m.statusTracker.FailOperation(op.ID, fmt.Errorf("invalid mount point: %w", err)); trackErr != nil {
-			log.Printf("Warning: failed to track operation failure: %v", trackErr)
+			slog.Warn("failed to track operation failure", "error", trackErr)
 		}
 		return fmt.Errorf("invalid mount point: %w", err)
 	}
 
 	// Phase 2: Build FUSE options
 	if err := m.statusTracker.SetPhase(op.ID, "configuring"); err != nil {
-		log.Printf("Warning: failed to set phase: %v", err)
+		slog.Warn("failed to set phase", "error", err)
 	}
 	if err := m.statusTracker.SetMessage(op.ID, "Building FUSE options..."); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
 	opts := m.buildFUSEOptions()
 
 	// Phase 3: Create the FUSE server
 	if err := m.statusTracker.SetPhase(op.ID, "mounting"); err != nil {
-		log.Printf("Warning: failed to set phase: %v", err)
+		slog.Warn("failed to set phase", "error", err)
 	}
 	if err := m.statusTracker.SetMessage(op.ID, fmt.Sprintf("Mounting filesystem at %s...", m.config.MountPoint)); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
 	server, err := fs.Mount(m.config.MountPoint, m.filesystem.Root(), opts)
 	if err != nil {
 		if trackErr := m.statusTracker.FailOperation(op.ID, fmt.Errorf("failed to mount filesystem: %w", err)); trackErr != nil {
-			log.Printf("Warning: failed to track operation failure: %v", trackErr)
+			slog.Warn("failed to track operation failure", "error", trackErr)
 		}
 		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
@@ -189,17 +189,17 @@ func (m *MountManager) Mount(ctx context.Context) error {
 
 	// Phase 4: Complete
 	if err := m.statusTracker.SetPhase(op.ID, "complete"); err != nil {
-		log.Printf("Warning: failed to set phase: %v", err)
+		slog.Warn("failed to set phase", "error", err)
 	}
 	if err := m.statusTracker.SetMessage(op.ID, "Filesystem mounted successfully"); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
-	log.Printf("ObjectFS mounted at %s", m.config.MountPoint)
+	slog.Info("ObjectFS mounted", "mount_point", m.config.MountPoint)
 
 	// Complete the operation
 	if err := m.statusTracker.CompleteOperation(op.ID); err != nil {
-		log.Printf("Warning: failed to complete operation tracking: %v", err)
+		slog.Warn("failed to complete operation tracking", "error", err)
 	}
 	m.mu.Lock()
 	m.currentOpID = ""
@@ -207,9 +207,9 @@ func (m *MountManager) Mount(ctx context.Context) error {
 
 	// Start serving in background
 	go func() {
-		log.Printf("Starting FUSE server...")
+		slog.Info("starting FUSE server")
 		m.server.Wait()
-		log.Printf("FUSE server stopped")
+		slog.Info("FUSE server stopped")
 		m.mu.Lock()
 		m.mounted = false
 		m.mu.Unlock()
@@ -244,36 +244,36 @@ func (m *MountManager) Unmount() error {
 
 	// Phase 1: Prepare for unmount
 	if err := m.statusTracker.SetPhase(op.ID, "preparing"); err != nil {
-		log.Printf("Warning: failed to set phase: %v", err)
+		slog.Warn("failed to set phase", "error", err)
 	}
 	if err := m.statusTracker.SetMessage(op.ID, "Preparing to unmount filesystem..."); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
-	log.Printf("Unmounting filesystem at %s", m.config.MountPoint)
+	slog.Info("unmounting filesystem", "mount_point", m.config.MountPoint)
 
 	// Phase 2: Unmount the filesystem
 	if err := m.statusTracker.SetPhase(op.ID, "unmounting"); err != nil {
-		log.Printf("Warning: failed to set phase: %v", err)
+		slog.Warn("failed to set phase", "error", err)
 	}
 	if err := m.statusTracker.SetMessage(op.ID, fmt.Sprintf("Unmounting filesystem at %s...", m.config.MountPoint)); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
 	err := server.Unmount()
 	if err != nil {
 		// Try force unmount
 		if err := m.statusTracker.SetPhase(op.ID, "force-unmounting"); err != nil {
-			log.Printf("Warning: failed to set phase: %v", err)
+			slog.Warn("failed to set phase", "error", err)
 		}
 		if err := m.statusTracker.SetMessage(op.ID, "Normal unmount failed, trying force unmount..."); err != nil {
-			log.Printf("Warning: failed to set message: %v", err)
+			slog.Warn("failed to set message", "error", err)
 		}
 
-		log.Printf("Normal unmount failed, trying force unmount: %v", err)
+		slog.Warn("normal unmount failed, trying force unmount", "error", err)
 		if forceErr := m.forceUnmount(); forceErr != nil {
 			if trackErr := m.statusTracker.FailOperation(op.ID, fmt.Errorf("unmount failed: %w (force unmount also failed: %v)", err, forceErr)); trackErr != nil {
-				log.Printf("Warning: failed to track operation failure: %v", trackErr)
+				slog.Warn("failed to track operation failure", "error", trackErr)
 			}
 			return fmt.Errorf("unmount failed: %w (force unmount also failed: %v)", err, forceErr)
 		}
@@ -286,13 +286,13 @@ func (m *MountManager) Unmount() error {
 
 	// Complete the operation
 	if err := m.statusTracker.SetMessage(op.ID, "Filesystem unmounted successfully"); err != nil {
-		log.Printf("Warning: failed to set message: %v", err)
+		slog.Warn("failed to set message", "error", err)
 	}
 
-	log.Printf("Filesystem unmounted successfully")
+	slog.Info("filesystem unmounted successfully")
 
 	if err := m.statusTracker.CompleteOperation(op.ID); err != nil {
-		log.Printf("Warning: failed to complete operation tracking: %v", err)
+		slog.Warn("failed to complete operation tracking", "error", err)
 	}
 
 	return nil
@@ -415,7 +415,7 @@ func (m *MountManager) validateMountPoint() error {
 	}
 
 	if len(entries) > 0 {
-		log.Printf("Warning: mount point %s is not empty", m.config.MountPoint)
+		slog.Warn("mount point is not empty", "mount_point", m.config.MountPoint)
 	}
 
 	// Check if already mounted
@@ -567,10 +567,10 @@ func (w *MountWatcher) checkMount() {
 
 	if expectedMounted != actuallyMounted {
 		if expectedMounted {
-			log.Printf("Warning: filesystem should be mounted but appears unmounted")
+			slog.Warn("filesystem should be mounted but appears unmounted")
 			// Could trigger remount here
 		} else {
-			log.Printf("Warning: filesystem should be unmounted but appears mounted")
+			slog.Warn("filesystem should be unmounted but appears mounted")
 		}
 	}
 }

@@ -4,7 +4,7 @@ package profiling
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/pprof"
 	"runtime"
@@ -192,7 +192,7 @@ func (m *MemoryMonitor) Start(ctx context.Context) error {
 	// Start GC monitoring
 	go m.gcMonitor(ctx)
 
-	log.Printf("Memory monitoring started on :%d", m.config.Port)
+	slog.Info("memory monitoring started", "port", m.config.Port)
 	return nil
 }
 
@@ -285,19 +285,19 @@ type MemoryStats struct {
 
 // ForceGC triggers garbage collection
 func (m *MemoryMonitor) ForceGC() {
-	log.Println("Forcing garbage collection...")
+	slog.Info("forcing garbage collection")
 	beforeHeap := m.GetCurrentSample().HeapAlloc
 	runtime.GC()
 	afterHeap := m.GetCurrentSample().HeapAlloc
 	freed := beforeHeap - afterHeap
-	log.Printf("GC completed: freed %d MB", freed/(1024*1024))
+	slog.Info("GC completed", "freed_mb", freed/(1024*1024))
 }
 
 // FreeOSMemory returns memory to the OS
 func (m *MemoryMonitor) FreeOSMemory() {
-	log.Println("Returning memory to OS...")
+	slog.Info("returning memory to OS")
 	debug.FreeOSMemory()
-	log.Println("Memory returned to OS")
+	slog.Info("memory returned to OS")
 }
 
 // GetGoroutineCount returns current goroutine count
@@ -313,7 +313,7 @@ func (m *MemoryMonitor) takeBaseline() {
 	m.baselineHeap = sample.HeapAlloc
 	m.peakHeap = sample.HeapAlloc
 	m.addSample(sample)
-	log.Printf("Memory baseline: %.2f MB", float64(m.baselineHeap)/(1024*1024))
+	slog.Info("memory baseline set", "heap_mb", float64(m.baselineHeap)/(1024*1024))
 }
 
 func (m *MemoryMonitor) sampleLoop(ctx context.Context) {
@@ -441,7 +441,7 @@ func (m *MemoryMonitor) checkAlerts(sample MemorySample) {
 }
 
 func (m *MemoryMonitor) triggerAlert(alert Alert) {
-	log.Printf("[%s] Memory Alert: %s - %s", alert.Level, alert.Type, alert.Message)
+	slog.Warn("memory alert", "level", alert.Level, "type", alert.Type, "message", alert.Message)
 
 	m.mu.RLock()
 	callbacks := make([]AlertCallback, len(m.alertCallbacks))
@@ -486,7 +486,7 @@ func (m *MemoryMonitor) startPprofServer() error {
 
 	go func() {
 		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Memory profiling server error: %v", err)
+			slog.Error("memory profiling server error", "error", err)
 		}
 	}()
 
@@ -526,7 +526,7 @@ func (m *MemoryMonitor) handleMemoryStats(w http.ResponseWriter, r *http.Request
 		stats.AllocationRate/(1024*1024),
 		stats.SampleCount,
 	); err != nil {
-		log.Printf("Failed to write memory stats: %v", err)
+		slog.Error("failed to write memory stats", "error", err)
 	}
 }
 
@@ -535,14 +535,14 @@ func (m *MemoryMonitor) handleMemorySamples(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := fmt.Fprintf(w, `{"samples": [`); err != nil {
-		log.Printf("Failed to write samples header: %v", err)
+		slog.Error("failed to write samples header", "error", err)
 		return
 	}
 
 	for i, sample := range samples {
 		if i > 0 {
 			if _, err := fmt.Fprintf(w, ","); err != nil {
-				log.Printf("Failed to write sample separator: %v", err)
+				slog.Error("failed to write sample separator", "error", err)
 				return
 			}
 		}
@@ -554,14 +554,14 @@ func (m *MemoryMonitor) handleMemorySamples(w http.ResponseWriter, r *http.Reque
   }`, sample.Timestamp.Format(time.RFC3339),
 			float64(sample.HeapAlloc)/(1024*1024),
 			sample.NumGoroutine); err != nil {
-			log.Printf("Failed to write sample: %v", err)
+			slog.Error("failed to write sample", "error", err)
 			return
 		}
 	}
 
 	if _, err := fmt.Fprintf(w, `
 ], "count": %d}`, len(samples)); err != nil {
-		log.Printf("Failed to write samples footer: %v", err)
+		slog.Error("failed to write samples footer", "error", err)
 	}
 }
 
@@ -574,7 +574,7 @@ func (m *MemoryMonitor) handleForceGC(w http.ResponseWriter, r *http.Request) {
 	m.ForceGC()
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := fmt.Fprintf(w, `{"status": "gc_triggered"}`); err != nil {
-		log.Printf("Failed to write GC response: %v", err)
+		slog.Error("failed to write GC response", "error", err)
 	}
 }
 
@@ -587,6 +587,6 @@ func (m *MemoryMonitor) handleFreeMemory(w http.ResponseWriter, r *http.Request)
 	m.FreeOSMemory()
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := fmt.Fprintf(w, `{"status": "memory_freed"}`); err != nil {
-		log.Printf("Failed to write free memory response: %v", err)
+		slog.Error("failed to write free memory response", "error", err)
 	}
 }

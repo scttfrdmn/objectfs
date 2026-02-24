@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
@@ -203,7 +203,7 @@ func NewConsensusEngine(cluster *ClusterManager, config *ClusterConfig) (*Consen
 
 // Start starts the consensus engine
 func (ce *ConsensusEngine) Start(ctx context.Context) error {
-	log.Printf("Starting consensus engine for node %s", ce.cluster.GetNodeID())
+	slog.Info("starting consensus engine", "node_id", ce.cluster.GetNodeID())
 
 	// Reset election timer
 	ce.resetElectionTimer()
@@ -225,7 +225,7 @@ func (ce *ConsensusEngine) Stop() error {
 		ce.electionTimer.Stop()
 	}
 
-	log.Printf("Consensus engine stopped")
+	slog.Info("consensus engine stopped")
 	return nil
 }
 
@@ -239,7 +239,7 @@ func (ce *ConsensusEngine) TriggerElection(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("Triggering leader election")
+	slog.Info("triggering leader election")
 	ce.startElection()
 
 	return nil
@@ -274,7 +274,7 @@ func (ce *ConsensusEngine) ProposeChange(ctx context.Context, proposal *Consensu
 	ce.stats.ProposalsReceived++
 	ce.stats.mu.Unlock()
 
-	log.Printf("Proposed change: %s (type: %s)", proposal.ID, proposal.Type)
+	slog.Info("proposed change", "proposal_id", proposal.ID, "type", proposal.Type)
 	return nil
 }
 
@@ -297,7 +297,7 @@ func (ce *ConsensusEngine) electionLoop(ctx context.Context) {
 		case <-timerCh:
 			ce.mu.Lock()
 			if ce.state != StateLeader {
-				log.Printf("Election timeout, starting new election")
+				slog.Info("election timeout, starting new election")
 				ce.startElection()
 			}
 			ce.mu.Unlock()
@@ -353,7 +353,7 @@ func (ce *ConsensusEngine) startElection() {
 
 	ce.resetElectionTimer()
 
-	log.Printf("Starting election for term %d", ce.currentTerm)
+	slog.Info("starting election", "term", ce.currentTerm)
 
 	ce.stats.mu.Lock()
 	ce.stats.ElectionsStarted++
@@ -384,7 +384,7 @@ func (ce *ConsensusEngine) sendVoteRequests() {
 }
 
 func (ce *ConsensusEngine) sendVoteRequest(nodeID string, req *RequestVoteMessage) {
-	log.Printf("Sending vote request to %s for term %d", nodeID, req.Term)
+	slog.Info("sending vote request", "node_id", nodeID, "term", req.Term)
 
 	nodes := ce.cluster.GetNodes()
 	node, exists := nodes[nodeID]
@@ -393,7 +393,7 @@ func (ce *ConsensusEngine) sendVoteRequest(nodeID string, req *RequestVoteMessag
 	}
 
 	if err := ce.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeRequestVote, req); err != nil {
-		log.Printf("Failed to send vote request to %s: %v", nodeID, err)
+		slog.Warn("failed to send vote request", "node_id", nodeID, "error", err)
 	}
 }
 
@@ -407,7 +407,7 @@ func (ce *ConsensusEngine) handleVoteResponse(nodeID string, voteGranted bool) {
 
 	if voteGranted {
 		ce.voteCount++
-		log.Printf("Received vote from %s (total: %d)", nodeID, ce.voteCount)
+		slog.Info("received vote", "from", nodeID, "total_votes", ce.voteCount)
 	}
 
 	// Check if we have majority
@@ -426,7 +426,7 @@ func (ce *ConsensusEngine) handleVoteResponse(nodeID string, voteGranted bool) {
 }
 
 func (ce *ConsensusEngine) becomeLeader() {
-	log.Printf("Became leader for term %d", ce.currentTerm)
+	slog.Info("became leader", "term", ce.currentTerm)
 
 	ce.state = StateLeader
 	ce.cluster.SetLeader(ce.cluster.GetNodeID())
@@ -529,10 +529,10 @@ func (ce *ConsensusEngine) sendAppendEntries(nodeID string, isHeartbeat bool) {
 
 	ce.mu.RUnlock()
 
-	log.Printf("Sending append entries to %s (heartbeat: %v)", nodeID, isHeartbeat)
+	slog.Info("sending append entries", "node_id", nodeID, "heartbeat", isHeartbeat)
 
 	if err := ce.cluster.gossip.sendConsensusMsg(addr, MessageTypeAppendEntries, msg); err != nil {
-		log.Printf("Failed to send append entries to %s: %v", nodeID, err)
+		slog.Warn("failed to send append entries", "node_id", nodeID, "error", err)
 	}
 }
 
@@ -563,7 +563,7 @@ func (ce *ConsensusEngine) handleAppendEntriesResponse(nodeID string, resp *Appe
 func (ce *ConsensusEngine) handleNetworkRequestVote(msg *GossipMessage) {
 	var req RequestVoteMessage
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		log.Printf("Failed to unmarshal RequestVoteMessage: %v", err)
+		slog.Warn("failed to unmarshal RequestVoteMessage", "error", err)
 		return
 	}
 
@@ -601,14 +601,14 @@ func (ce *ConsensusEngine) handleNetworkRequestVote(msg *GossipMessage) {
 	nodes := ce.cluster.GetNodes()
 	node, exists := nodes[msg.From]
 	if !exists {
-		log.Printf("Cannot send vote response: node %s not found", msg.From)
+		slog.Warn("cannot send vote response: node not found", "node_id", msg.From)
 		return
 	}
 
-	log.Printf("Sending vote response to %s: granted=%v (term %d)", msg.From, voteGranted, currentTerm)
+	slog.Info("sending vote response", "node_id", msg.From, "granted", voteGranted, "term", currentTerm)
 
 	if err := ce.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeRequestVoteResp, resp); err != nil {
-		log.Printf("Failed to send vote response to %s: %v", msg.From, err)
+		slog.Warn("failed to send vote response", "node_id", msg.From, "error", err)
 	}
 }
 
@@ -616,7 +616,7 @@ func (ce *ConsensusEngine) handleNetworkRequestVote(msg *GossipMessage) {
 func (ce *ConsensusEngine) handleNetworkRequestVoteResp(msg *GossipMessage) {
 	var resp RequestVoteRespMessage
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		log.Printf("Failed to unmarshal RequestVoteRespMessage: %v", err)
+		slog.Warn("failed to unmarshal RequestVoteRespMessage", "error", err)
 		return
 	}
 
@@ -637,7 +637,7 @@ func (ce *ConsensusEngine) handleNetworkRequestVoteResp(msg *GossipMessage) {
 func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 	var req AppendEntriesMessage
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		log.Printf("Failed to unmarshal AppendEntriesMessage: %v", err)
+		slog.Warn("failed to unmarshal AppendEntriesMessage", "error", err)
 		return
 	}
 
@@ -686,7 +686,7 @@ func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 	}
 
 	if err := ce.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeAppendEntriesResp, resp); err != nil {
-		log.Printf("Failed to send AppendEntries response to %s: %v", msg.From, err)
+		slog.Warn("failed to send AppendEntries response", "node_id", msg.From, "error", err)
 	}
 }
 
@@ -694,7 +694,7 @@ func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 func (ce *ConsensusEngine) handleNetworkAppendEntriesResp(msg *GossipMessage) {
 	var resp AppendEntriesResponse
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		log.Printf("Failed to unmarshal AppendEntriesResponse: %v", err)
+		slog.Warn("failed to unmarshal AppendEntriesResponse", "error", err)
 		return
 	}
 
@@ -737,7 +737,7 @@ func (ce *ConsensusEngine) updateCommitIndex() {
 }
 
 func (ce *ConsensusEngine) applyLogEntry(entry *LogEntry) {
-	log.Printf("Applying log entry: index=%d, type=%s", entry.Index, entry.Type)
+	slog.Info("applying log entry", "index", entry.Index, "type", entry.Type)
 
 	switch entry.Type {
 	case EntryTypeLeaderElection:
@@ -753,7 +753,7 @@ func (ce *ConsensusEngine) applyLogEntry(entry *LogEntry) {
 
 func (ce *ConsensusEngine) broadcastProposal(proposal *ConsensusProposal) {
 	// In a real implementation, this would broadcast to all nodes
-	log.Printf("Broadcasting proposal %s to cluster", proposal.ID)
+	slog.Info("broadcasting proposal to cluster", "proposal_id", proposal.ID)
 
 	// For simulation, automatically accept our own proposals after a delay
 	go func() {
@@ -803,10 +803,10 @@ func (ce *ConsensusEngine) voteOnProposal(proposalID string, accept bool) {
 		ce.stats.ProposalsAccepted++
 		ce.stats.mu.Unlock()
 
-		log.Printf("Proposal %s accepted (%d/%d votes)", proposalID, acceptVotes, totalVotes)
+		slog.Info("proposal accepted", "proposal_id", proposalID, "accept_votes", acceptVotes, "total_votes", totalVotes)
 	} else if totalVotes-acceptVotes > aliveNodes-majority {
 		proposal.Status = ProposalStatusRejected
-		log.Printf("Proposal %s rejected (%d/%d votes)", proposalID, acceptVotes, totalVotes)
+		slog.Info("proposal rejected", "proposal_id", proposalID, "accept_votes", acceptVotes, "total_votes", totalVotes)
 	}
 }
 
@@ -814,15 +814,15 @@ func (ce *ConsensusEngine) executeProposal(proposal *ConsensusProposal) {
 	switch proposal.Type {
 	case ProposalTypeLeadershipChange:
 		newLeader := string(proposal.Data)
-		log.Printf("Executing leadership change to %s", newLeader)
+		slog.Info("executing leadership change", "new_leader", newLeader)
 		ce.cluster.SetLeader(newLeader)
 
 	case ProposalTypeConfigChange:
-		log.Printf("Executing configuration change")
+		slog.Info("executing configuration change")
 		// Apply configuration change
 
 	case ProposalTypeOperation:
-		log.Printf("Executing operation proposal")
+		slog.Info("executing operation proposal")
 		// Execute operation
 	}
 }
@@ -873,7 +873,7 @@ func (ce *ConsensusEngine) cleanupExpiredProposals() {
 		if proposal.Status == ProposalStatusPending && now.Sub(proposal.Timestamp) > 30*time.Second {
 			proposal.Status = ProposalStatusExpired
 			delete(ce.proposals, proposalID)
-			log.Printf("Proposal %s expired", proposalID)
+			slog.Info("proposal expired", "proposal_id", proposalID)
 		}
 	}
 }

@@ -319,6 +319,13 @@ test-aws:
 test-release-check: test test-aws
 	@echo "$(COLOR_GREEN)Release check complete — unit + AWS integration tests passed.$(COLOR_RESET)"
 
+# POSIX compliance test using pjdfstest.
+# Requires: pjdfstest in PATH, OBJECTFS_TEST_BUCKET set, and a running mount.
+# Run `make build` first.
+test-posix: build
+	@echo "$(COLOR_BLUE)Running pjdfstest POSIX compliance suite...$(COLOR_RESET)"
+	@scripts/pjdfstest.sh
+
 # Performance benchmarks
 bench-performance:
 	@echo "$(COLOR_BLUE)Running performance benchmarks...$(COLOR_RESET)"
