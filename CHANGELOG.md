@@ -18,7 +18,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 - `internal/storage/s3/config.go`: `pricing_config.use_pricing_api` no longer has any effect. Setting it logs a deprecation warning at startup. Use `pricing_config.custom_pricing` to override rates per tier (#161)
 
-## [0.10.0] - 2026-02-23
+## [0.10.0] - 2026-02-23 — WITHDRAWN
+
+**This release is withdrawn and must not be used.** A deep audit found defects that prevent the
+shipped default configuration from mounting and that silently lose or corrupt user data. Fixes are
+landing in `[Unreleased]` for v0.10.1.
+
+- **Cannot mount on the default configuration.** `internal/config/config.go` defaults
+  `compression.algorithm` to `gzip`, but `internal/compression/codec.go` implements only `none`,
+  `zstd`, and `lz4`. Every code path that reads config treats `gzip` as valid — only the codec
+  factory disagrees — so `objectfs s3://bucket /mnt` exits with `Failed to start adapter`.
+- **Offset writes truncate the object.** The write-buffer flush callback in
+  `internal/adapter/adapter.go` receives `(key, data, offset)` and calls
+  `backend.PutObject(ctx, key, data)`, discarding the offset. Because `PutObject` is a
+  whole-object replace, appending one byte to a 1 MiB file leaves a 1-byte object. Non-contiguous
+  writes (SQLite, mmap writeback, `tar`, HDF5) return `EIO` instead. Flush errors are recorded to
+  a stats counter and not returned, so `close(2)` reports success after a failed upload.
+- **Read amplification on every object when compression is enabled.**
+  `internal/storage/s3/backend.go` decides whole-object-versus-ranged fetch from the compression
+  *configuration* rather than from the object being read, so a ranged read of any object — including
+  objects never compressed and objects written by other tools — downloads the whole object and
+  disables parallel reads bucket-wide. Measured against real S3 with a fixed 4 KiB read: 15.6× on a
+  16 MiB object, 43× at 64 MiB, 216× at 256 MiB. A 4 KiB read of a 10 GiB object transfers 10 GiB.
+- **Silent corruption when the codec configuration changes.** `Decompress` in
+  `internal/compression/s3_integration.go` returns the payload unchanged when the stored
+  `Content-Encoding` does not match the configured codec, so an object written with zstd and read
+  after switching to lz4 emits the raw compressed frame with exit status 0. The
+  `objectfs-sha256` metadata this release added is written and never read, so nothing catches it.
+- **The read cache cannot hit and is never invalidated.** The cache key includes the requested
+  *length*, so the `Lookup` metadata cache never hits, short reads at EOF are uncacheable, and the
+  16 MB chunked cache population added in this release is unreachable. There are no `cache.Delete`
+  calls in `internal/fuse`, so a read after a write on the same descriptor returns pre-write bytes
+  for up to the 5-minute TTL.
+- **The headline feature of this release is inactive in production.** `buildS3Config` maps 6 of
+  roughly 30 `s3.Config` fields and does not map `ParallelReadThreshold`; `NewBackend` does not
+  backfill it. The parallel range GET path is gated on `threshold > 0`, so it never runs on a real
+  mount. `PoolSize` is likewise unmapped, leaving a zero-capacity semaphore that blocks forever in
+  `GetObjects`/`PutObjects`.
+- **`rm` and `rmdir` reported success without deleting** (fixed in `[Unreleased]`, see #163).
+- **Windows is not supported.** The `cgofuse` build tag has never compiled.
 
 ### Added
 - `internal/storage/s3/config.go`: Three new `Config` fields — `ParallelReadThreshold` (default 64 MB), `ReadChunkSize` (default 16 MB), `ParallelReadConcurrency` (default 0 = inherit `MultipartConcurrency`) — control parallel range GET fan-out for large objects (#128)

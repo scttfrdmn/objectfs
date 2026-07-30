@@ -11,6 +11,29 @@
 [![GitHub issues](https://img.shields.io/github/issues/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/issues)
 [![GitHub stars](https://img.shields.io/github/stars/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/stargazers)
 
+> ## ⚠️ v0.10.0 is withdrawn — do not use it
+>
+> A deep audit of v0.10.0 found defects that lose or corrupt user data. **v0.10.1 is in progress.**
+> Until it is released, no tagged version of ObjectFS should be used for data you care about.
+>
+> The three that matter most:
+>
+> | | Defect | Effect |
+> |---|---|---|
+> | **C1** | The shipped default configuration selects a compression algorithm the codec factory rejects | `objectfs s3://bucket /mnt` **cannot mount** — it exits with `Failed to start adapter` |
+> | **H7** | The write-buffer flush callback discards the write offset and issues a whole-object `PutObject` | **Silent data loss.** Appending one byte to a 1 MiB file leaves a 1-byte object |
+> | **C4** | Read amplification is keyed off the compression *config*, not the object, so a ranged read fetches the entire object | A 4 KiB read of a 10 GiB object transfers 10 GiB. Measured 216× penalty on a 256 MiB object |
+>
+> Also in scope for v0.10.1: reading an object whose stored `Content-Encoding` does not match the
+> configured codec returns raw compressed bytes with exit status 0 instead of failing; the read cache
+> is keyed on request *length* so it structurally cannot hit and is never invalidated on write; and
+> `rm` reports success while the S3 object survives. Windows is **not** supported — the `cgofuse`
+> build tag has never compiled, so claims of Windows support elsewhere in this README are wrong and
+> are being removed.
+>
+> Track progress: [issues](https://github.com/scttfrdmn/objectfs/issues) ·
+> [v0.10.1 milestone](https://github.com/scttfrdmn/objectfs/milestones)
+
 **Enterprise-grade POSIX-compliant filesystem for AWS S3 with intelligent cost optimization**
 
 ObjectFS provides a high-performance, cross-platform FUSE filesystem that makes AWS S3 buckets accessible as local directories, specifically optimized for research workloads and enterprise deployments with comprehensive cost management.
