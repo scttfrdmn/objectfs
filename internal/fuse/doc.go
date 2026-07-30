@@ -1,101 +1,69 @@
 /*
-Package fuse provides cross-platform FUSE filesystem implementation for ObjectFS.
+Package fuse translates POSIX filesystem operations into object storage operations.
 
-This package implements POSIX-compliant filesystem operations that translate standard
-file and directory operations into object storage operations. It supports multiple
-FUSE implementations through build constraints, providing optimal performance and
-compatibility across Linux, macOS, and Windows platforms.
+# Platform support
 
-# Architecture Overview
+Linux and macOS only. Every file in this package carries a `//go:build linux || darwin`
+constraint.
 
-The FUSE layer acts as the bridge between POSIX applications and object storage:
+Windows is not supported. A `cgofuse` build tag existed through v0.10.0 and never compiled —
+`filesystem.go` carried no build constraint of its own, so under the tag `OpenFile` was declared
+twice, and the resulting duplicate-symbol error was masked by a missing `fuse.h`. It was removed
+in v0.10.1 along with the `github.com/winfsp/cgofuse` dependency. It was also a silently divergent
+382-line subset of this package's 727 lines: it never received the Unlink/Rmdir fix, so under that
+tag `rm` reported success while the S3 object survived.
+
+If Windows support is wanted, the path is a second thin shim over `internal/vfs` — not a fork of
+this package. See the README.
+
+macOS requires macFUSE (`brew install --cask macfuse`). This is not a consequence of the binding
+choice: go-fuse's darwin mount execs
+`/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse`, and cgofuse needed the same
+headers. The two had identical macOS requirements.
+
+# Architecture
 
 	┌─────────────────────────────────────────────┐
 	│              User Applications              │
-	│        (ls, cat, cp, vim, databases)       │
+	│        (ls, cat, cp, vim, databases)        │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│              Kernel VFS Layer              │
-	│           (POSIX System Calls)             │
+	│               Kernel VFS Layer              │
+	│            (POSIX System Calls)             │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│               FUSE Driver                   │
-	│          (Platform-specific)               │
+	│      FUSE Driver (kernel / macFUSE)         │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│            ObjectFS FUSE Layer              │  ← This Package
-	│  ┌─────────────────────────────────────────┐  │
-	│  │        Cross-Platform Abstraction      │  │
-	│  │  ┌─────────────┐ ┌─────────────────┐   │  │
-	│  │  │ go-fuse     │ │ cgofuse         │   │  │
-	│  │  │ (Linux)     │ │ (macOS/Windows) │   │  │
-	│  │  └─────────────┘ └─────────────────┘   │  │
-	│  └─────────────────────────────────────────┘  │
-	│                     │                       │
-	│  ┌─────────────────────────────────────────┐  │
-	│  │         POSIX Operation Layer          │  │
-	│  │  • File Operations  • Directory Ops   │  │
-	│  │  • Metadata Ops     • Permission Mgmt │  │
-	│  └─────────────────────────────────────────┘  │
+	│  github.com/hanwen/go-fuse/v2               │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│             Object Storage Backend          │
-	│         (S3, GCS, Azure, etc.)            │
+	│            ObjectFS FUSE shim               │  ← This package
+	│   go-fuse types ⇄ vfs calls, errno mapping  │
+	└─────────────────────────────────────────────┘
+	                      │
+	┌─────────────────────────────────────────────┐
+	│               internal/vfs                  │
+	│  inodes, attributes, handles, dirty ranges  │
+	└─────────────────────────────────────────────┘
+	                      │
+	┌─────────────────────────────────────────────┐
+	│         pkg/types.Backend (S3, …)           │
 	└─────────────────────────────────────────────┘
 
-# Platform Support
+POSIX semantics live in `internal/vfs`, which depends on `pkg/types.Backend` and nothing FUSE, so
+it is testable without a mount. This package is the translation shim above it.
 
-Multi-platform FUSE implementation with build constraints:
+# Implemented operations
 
-Default Build (go-fuse):
-- Target: Linux (primary platform)
-- Implementation: github.com/hanwen/go-fuse/v2
-- Performance: Optimal for Linux environments
-- Features: Full POSIX compliance, high performance
-
-CGO Build (cgofuse):
-- Target: macOS, Windows, Linux (fallback)
-- Implementation: github.com/billziss-gh/cgofuse
-- Performance: Cross-platform compatibility
-- Features: Broader OS support, consistent behavior
-
-Build Selection:
-
-	// Linux with high performance
-	go build -tags default ./...
-
-	// Cross-platform compatibility
-	go build -tags cgofuse ./...
-
-# FileSystem Operations
-
-Complete POSIX filesystem operation support:
-
-File Operations:
-- open(), read(), write(), close() - Standard file I/O
-- lseek(), truncate() - File positioning and size management
-- fsync(), fdatasync() - Data synchronization
-- lock(), unlock() - File locking support
-
-Directory Operations:
-- opendir(), readdir(), closedir() - Directory enumeration
-- mkdir(), rmdir() - Directory creation and removal
-- rename() - File and directory renaming
-
-Metadata Operations:
-- stat(), fstat(), lstat() - File metadata retrieval
-- chmod(), chown() - Permission and ownership changes
-- utimes(), utime() - Timestamp modification
-- link(), symlink(), readlink() - Link management
-
-Extended Attributes:
-- getxattr(), setxattr() - Custom attribute management
-- listxattr(), removexattr() - Attribute enumeration and removal
-- Support for object storage metadata mapping
+For the authoritative list of which POSIX operations work, which fail by design, and which are not
+implemented, see the supported-operations table in the README. Do not infer support from the
+presence of a method on `FilesystemInterface` — `internal/filesystem/interface.go` declares the
+full surface and its only implementation is a test mock.
 
 # Configuration
 
@@ -190,162 +158,43 @@ Directory operations:
 			info.ModTime())
 	}
 
-# Performance Optimizations
+# Object storage mapping
 
-Multiple performance optimization strategies:
+	File path       → object key
+	File content    → object data
+	Directory path  → object key prefix
+	Directory list  → prefix-based ListObjects
+	Empty directory → zero-byte marker object at "<prefix>/"
 
-Intelligent Caching:
-- Metadata caching with configurable TTL
-- Directory entry caching for fast lookups
-- Negative caching for non-existent files
-- Write-through and write-back caching modes
+Special files are not supported. Device nodes, named pipes, symlinks, and hard links have no
+representation in S3 and none is synthesised — hard links never will be, since S3 has no such
+concept. Symlink support, if added, will store the target in object metadata; that is not
+implemented today.
 
-Read-Ahead:
-- Sequential read pattern detection
-- Predictive data prefetching
-- Configurable read-ahead buffer sizes
-- Background prefetching workers
+# Permissions
 
-Write Optimization:
-- Write buffering and batching
-- Delayed write synchronization
-- Compression for suitable content types
-- Multipart upload for large files
+Ownership and mode are not persisted. Every entry reports the configured `DefaultUID`,
+`DefaultGID`, and `DefaultMode` from `MountConfig.Permissions`. `chmod` and `chown` are not
+implemented, so their effects do not survive a remount.
 
-Connection Management:
-- Connection pooling for concurrent operations
-- Keep-alive connection reuse
-- Automatic retry with exponential backoff
-- Health monitoring and failover
+Access control is enforced by the S3 credentials the process holds, not by the reported mode bits.
+A mode of 0644 on a mount whose credentials grant `s3:PutObject` to everything does not make the
+data read-only.
 
-# Object Storage Mapping
+# Error handling
 
-Translation between POSIX and object storage concepts:
+Backend errors are mapped to errno: network and unclassified failures to EIO, permission failures
+to EACCES, absent objects to ENOENT. Retry and circuit breaking happen in the backend
+(`internal/storage/s3`), not here.
 
-Files to Objects:
-- File path → Object key
-- File content → Object data
-- File metadata → Object metadata/tags
-- File permissions → Mapped to metadata
+Where an operation is not implemented, this package returns an explicit error rather than the
+go-fuse default. That default is *success* for several operations, which is how `rm` came to report
+deletions that never happened through v0.10.0.
 
-Directories to Virtual Structure:
-- Directory paths → Object key prefixes
-- Directory listings → Prefix-based object enumeration
-- Directory metadata → Synthetic metadata generation
-- Empty directories → Zero-byte marker objects
+# Thread safety
 
-Special Files:
-- Symbolic links → Stored as object metadata
-- Hard links → Reference counting in metadata
-- Device files → Not supported (returns appropriate errors)
-- Named pipes → Not supported (returns appropriate errors)
-
-# Permission Model
-
-POSIX permission mapping to object storage:
-
-Permission Storage:
-- POSIX permissions stored in object metadata
-- ACLs mapped to object storage ACLs where supported
-- Ownership information preserved in metadata
-- Permission inheritance for new files/directories
-
-Default Behavior:
-- Configurable default UID/GID for all operations
-- Consistent permission model across platforms
-- Support for umask-style permission masking
-- Administrative override capabilities
-
-Security Considerations:
-- Object storage credential-based access control
-- FUSE-level permission enforcement
-- Configurable access restrictions (allow_other, allow_root)
-- Secure credential handling and rotation
-
-# Error Handling
-
-Comprehensive error handling and translation:
-
-POSIX Error Mapping:
-- Object storage errors → Standard errno values
-- Network errors → EIO (I/O error)
-- Permission errors → EACCES (Permission denied)
-- Not found errors → ENOENT (No such file or directory)
-
-Retry Logic:
-- Transient error automatic retry
-- Exponential backoff strategies
-- Circuit breaker for persistent failures
-- Graceful degradation modes
-
-Error Recovery:
-- Connection failure recovery
-- Partial operation cleanup
-- Consistent state maintenance
-- User notification strategies
-
-# Statistics and Monitoring
-
-Comprehensive operation monitoring:
-
-Operation Metrics:
-- File operation counters (reads, writes, opens, closes)
-- Throughput measurements (bytes/second)
-- Latency distributions (operation duration)
-- Error rate tracking
-
-Cache Metrics:
-- Cache hit/miss ratios
-- Cache utilization statistics
-- Eviction rates and patterns
-- Cache effectiveness analysis
-
-Performance Metrics:
-- Concurrent operation tracking
-- Queue depth monitoring
-- Resource utilization (memory, connections)
-- Background operation progress
-
-Health Monitoring:
-- Mount status verification
-- Backend connectivity checks
-- Performance threshold monitoring
-- Automated health recovery
-
-# Thread Safety
-
-Designed for high-concurrency operation:
-
-- All FUSE operations are inherently concurrent
-- Thread-safe internal data structures
-- Proper synchronization for shared resources
-- Lock-free data paths where possible
-- Connection pool thread safety
-
-# Platform-Specific Features
-
-Optimizations for different operating systems:
-
-Linux Optimizations:
-- Direct I/O support for large files
-- Advanced caching strategies
-- Memory-mapped file support
-- Efficient directory iteration
-
-macOS Optimizations:
-- FSEvents integration for change monitoring
-- Spotlight metadata compatibility
-- Resource fork handling
-- macOS-specific permission models
-
-Windows Optimizations:
-- Windows file attribute mapping
-- NTFS stream support where applicable
-- Windows-specific error code mapping
-- Integration with Windows Security Model
-
-This package provides the critical bridge between standard POSIX applications
-and modern object storage systems, enabling transparent, high-performance
-access to cloud storage through familiar filesystem interfaces.
+FUSE delivers concurrent Read and Write calls against the same open file descriptor, so per-handle
+mutable state (`dirty`, `modified`, `size`, access tracking) is guarded by `OpenFile.accessMu` and
+the handle table by `FileSystem.mu`. All exported entry points are safe for concurrent use.
 */
 package fuse

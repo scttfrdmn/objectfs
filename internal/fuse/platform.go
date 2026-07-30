@@ -1,5 +1,4 @@
-//go:build !cgofuse
-// +build !cgofuse
+//go:build linux || darwin
 
 package fuse
 

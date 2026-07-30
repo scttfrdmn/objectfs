@@ -15,7 +15,6 @@ require (
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/scttfrdmn/cargoship v0.13.0
 	github.com/stretchr/testify v1.11.1
-	github.com/winfsp/cgofuse v1.5.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
