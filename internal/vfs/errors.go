@@ -1,0 +1,59 @@
+package vfs
+
+import "errors"
+
+// Sentinel errors returned by this package. Callers translate these into whatever their binding
+// requires — an errno for FUSE, an NTSTATUS for WinFsp, an NFS status code — which is why nothing
+// here imports syscall.
+//
+// Match with errors.Is. Implementations wrap these with %w and add context; do not compare with ==.
+var (
+	// ErrNotFound reports that no file or directory exists at the given path.
+	//
+	// This must be returned only when absence is established. A backend error whose cause is
+	// unknown — a throttle, a permission failure, a network timeout — is not absence, and reporting
+	// it as such is how v0.10.0 came to overwrite intact objects: Lookup collapsed every
+	// HeadObject error to ENOENT, and Create then wrote an empty object over a file that was
+	// merely temporarily unreachable.
+	ErrNotFound = errors.New("vfs: not found")
+
+	// ErrExist reports that a file or directory already exists at the given path.
+	ErrExist = errors.New("vfs: already exists")
+
+	// ErrNotDir reports that a path component used as a directory is not one.
+	ErrNotDir = errors.New("vfs: not a directory")
+
+	// ErrIsDir reports that a directory was used where a file was required.
+	ErrIsDir = errors.New("vfs: is a directory")
+
+	// ErrNotEmpty reports that a directory being removed still has entries.
+	ErrNotEmpty = errors.New("vfs: directory not empty")
+
+	// ErrReadOnly reports that the filesystem, or this handle, is not writable.
+	ErrReadOnly = errors.New("vfs: read-only")
+
+	// ErrNotSupported reports an operation this implementation does not provide.
+	//
+	// Returning this is always preferable to returning success. Several go-fuse node interfaces
+	// default an unimplemented operation to *success*, which is how rm and rmdir came to report
+	// deletions that never happened through v0.10.0 — the kernel dropped the inode while the S3
+	// object survived and kept billing.
+	ErrNotSupported = errors.New("vfs: operation not supported")
+
+	// ErrInvalid reports a malformed argument: a negative offset, an out-of-range length, a path
+	// that escapes the root.
+	ErrInvalid = errors.New("vfs: invalid argument")
+
+	// ErrIntegrity reports that stored data could not be verified against its recorded checksum,
+	// or that its storage encoding is not one this build can decode.
+	//
+	// This is deliberately distinct from a generic I/O error. Integrity failures must fail closed:
+	// v0.10.0 returned raw compressed bytes with exit status 0 when an object's Content-Encoding
+	// did not match the configured codec, which is worse than any error, because the caller cannot
+	// tell that it happened.
+	ErrIntegrity = errors.New("vfs: integrity check failed")
+
+	// ErrBackend reports a storage-backend failure whose cause is not otherwise classified.
+	// It explicitly does not mean the object is absent — see ErrNotFound.
+	ErrBackend = errors.New("vfs: backend failure")
+)
