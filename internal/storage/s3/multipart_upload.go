@@ -45,11 +45,13 @@ type partResult struct {
 // initiateMultipartUpload calls CreateMultipartUpload and returns the upload ID.
 // contentEncoding is the HTTP Content-Encoding token (e.g. "zstd") or "" if
 // no transparent compression was applied.
-// checksumHex is the hex-encoded SHA-256 of the uncompressed content, stored
-// as "objectfs-sha256" in S3 user metadata.
+// objectMeta is the S3 user metadata to attach: the SHA-256 of the uncompressed
+// content under "objectfs-sha256", plus "objectfs-original-size" when the payload
+// was compressed.
 func (b *Backend) initiateMultipartUpload(
 	ctx context.Context,
-	key, contentType, contentEncoding, checksumHex string,
+	key, contentType, contentEncoding string,
+	objectMeta map[string]string,
 	storageClass s3types.StorageClass,
 ) (string, error) {
 	var uploadID string
@@ -59,9 +61,7 @@ func (b *Backend) initiateMultipartUpload(
 			Key:          aws.String(key),
 			ContentType:  aws.String(contentType),
 			StorageClass: storageClass,
-			Metadata: map[string]string{
-				"objectfs-sha256": checksumHex,
-			},
+			Metadata:     objectMeta,
 		}
 		if contentEncoding != "" {
 			input.ContentEncoding = aws.String(contentEncoding)

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `internal/storage/s3/backend.go`: `PutObject` now records the uncompressed byte length as `objectfs-original-size` in S3 user metadata whenever transparent compression actually compressed the object, and `HeadObject` reports that value as `ObjectInfo.Size`. Previously `HeadObject` returned the *compressed* `ContentLength`, which the FUSE layer cached and handed to the kernel as the file size — truncating every read of a compressed file at the compressed length. A 40 MB object reported 4,556 bytes and a 64 KB object reported 87 bytes, making over 99.99% of the data unreachable. Objects written before this change fall back to `ContentLength` as before (#170)
+- `internal/storage/s3/backend.go`, `multipart_upload.go`: The multipart upload path no longer recomputes `objectfs-sha256` from the post-compression bytes. `putObjectMultipart` and `initiateMultipartUpload` now receive the same metadata map the single-part path builds, so the checksum always describes the uncompressed content on both paths. Previously the two paths stored hashes of different byte streams under the same key, so a checksum written by one path could never be verified against the other (#170)
+- `internal/fuse/filesystem.go`: `DirectoryNode` now implements `Unlink` and `Rmdir`, returning `EROFS` and logging a warning. go-fuse's `NodeUnlinker`/`NodeRmdirer` defaults return **success** for unimplemented operations, so `rm` and `rmdir` previously reported that files had been deleted while the S3 objects remained — and a subsequent `ls` showed them again. Deleting through a mount now fails loudly instead of silently lying. Full implementations are tracked separately (#163)
+
+### Removed
+- `internal/storage/s3/pricing_manager.go`: The AWS Pricing API integration (`fetchFromPricingAPI`, `parsePricingData`, `mapTierToStorageClass`, `extractStorageCost`, `extractRetrievalCost`, and the `AWSPricingResponse`/`AWSProduct` types). The parser matched products on human-readable storage-class names that do not appear in the Pricing API payload, and both cost extractors ignored their arguments to return hardcoded constants — so enabling `use_pricing_api` fetched a multi-megabyte JSON document over HTTP and then discarded it in favour of `0.023`/`0.01` per GB. `GetTierPricing` now goes straight to the default rate table derived from `StorageTiers`, which is what the old path effectively returned anyway (#161)
+
+### Deprecated
+- `internal/storage/s3/config.go`: `pricing_config.use_pricing_api` no longer has any effect. Setting it logs a deprecation warning at startup. Use `pricing_config.custom_pricing` to override rates per tier (#161)
+
 ## [0.10.0] - 2026-02-23
 
 ### Added

@@ -123,7 +123,11 @@ type ObjectFilter struct {
 
 // PricingConfig defines custom pricing configuration for S3 costs
 type PricingConfig struct {
-	UsePricingAPI      bool                   `yaml:"use_pricing_api"`      // Fetch current AWS pricing via API
+	// Deprecated: the AWS Pricing API integration was removed in v0.10.1 — it
+	// downloaded the ~100 MB S3 offer index and then returned hardcoded
+	// us-east-1 constants for every tier. Setting this now logs a warning and
+	// has no other effect. Use CustomPricing for exact or negotiated rates.
+	UsePricingAPI      bool                   `yaml:"use_pricing_api"`
 	Region             string                 `yaml:"region"`               // Pricing region (may differ from bucket region)
 	CustomPricing      map[string]TierPricing `yaml:"custom_pricing"`       // Override pricing per tier
 	DiscountConfig     DiscountConfig         `yaml:"discount_config"`      // Volume discounts and enterprise rates

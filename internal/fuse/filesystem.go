@@ -364,6 +364,28 @@ func (n *DirectoryNode) Create(ctx context.Context, name string, flags uint32, m
 	return node, fh, fuseFlags, errno
 }
 
+// Unlink reports that file removal is not implemented.
+//
+// This is a deliberate interim stub, not the final implementation (tracked in
+// issue #163). go-fuse defaults an unimplemented NodeUnlinker to *success*, so
+// without this method `rm` exits 0 and the kernel drops the inode while the S3
+// object survives — the user believes the file is deleted when it is still
+// present and still billing. Returning EROFS fails loudly instead, which is
+// strictly safer than a silent false success.
+func (n *DirectoryNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	slog.Warn("unlink is not implemented; refusing to report a delete that did not happen",
+		"path", n.joinPath(name), "issue", 163)
+	return syscall.EROFS
+}
+
+// Rmdir reports that directory removal is not implemented.
+// See Unlink: go-fuse also defaults NodeRmdirer to success.
+func (n *DirectoryNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	slog.Warn("rmdir is not implemented; refusing to report a delete that did not happen",
+		"path", n.joinPath(name)+"/", "issue", 163)
+	return syscall.EROFS
+}
+
 // FileNode represents a file in the filesystem
 type FileNode struct {
 	fs.Inode

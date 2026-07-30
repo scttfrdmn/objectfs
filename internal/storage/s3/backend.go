@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,19 @@ import (
 	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/retry"
 	"github.com/objectfs/objectfs/pkg/types"
+)
+
+// S3 user-metadata keys written by ObjectFS on upload.
+const (
+	// metaChecksum holds the hex-encoded SHA-256 of the *uncompressed* content.
+	// Stable across storage formats, so it survives a change of compression codec.
+	metaChecksum = "objectfs-sha256"
+
+	// metaOriginalSize holds the decimal byte length of the *uncompressed*
+	// content, written only when transparent compression actually compressed the
+	// object. Without it, HeadObject would report the compressed ContentLength as
+	// the file size and the kernel would truncate every read at that length.
+	metaOriginalSize = "objectfs-original-size"
 )
 
 // Backend implements the S3 storage backend with CargoShip optimization
@@ -398,20 +412,30 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 	// Apply transparent compression before upload.
 	uploadData := data
 	contentEncoding := ""
+	compressed := false
 	if b.compressor != nil {
-		compressed, wasCompressed, comprErr := b.compressor.Compress(data)
+		compressedData, wasCompressed, comprErr := b.compressor.Compress(data)
 		if comprErr != nil {
 			return fmt.Errorf("compress object %q: %w", key, comprErr)
 		}
 		if wasCompressed {
-			uploadData = compressed
+			uploadData = compressedData
 			contentEncoding = b.compressor.ContentEncoding()
+			compressed = true
 			b.logger.Debug("Object compressed for upload",
 				"key", key,
 				"original_size", len(data),
 				"compressed_size", len(uploadData),
 				"ratio", float64(len(uploadData))/float64(len(data)))
 		}
+	}
+
+	// Build the user metadata common to every upload path. The original size is
+	// recorded only for compressed objects, so HeadObject can report the size the
+	// kernel needs for reads rather than the compressed ContentLength.
+	objectMeta := map[string]string{metaChecksum: checksumHex}
+	if compressed {
+		objectMeta[metaOriginalSize] = strconv.FormatInt(int64(len(data)), 10)
 	}
 
 	breaker := b.circuitManager.GetBreaker("s3-put")
@@ -424,7 +448,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 				"key", key,
 				"size", dataSize,
 				"threshold", b.config.MultipartThreshold)
-			return b.putObjectMultipart(ctx, key, uploadData, effectiveTier, contentEncoding)
+			return b.putObjectMultipart(ctx, key, uploadData, effectiveTier, contentEncoding, objectMeta)
 		}
 
 		// Get storage class for effective tier
@@ -437,9 +461,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 			ContentLength: aws.Int64(int64(len(uploadData))),
 			ContentType:   aws.String(b.detectContentType(key)),
 			StorageClass:  storageClass,
-			Metadata: map[string]string{
-				"objectfs-sha256": checksumHex,
-			},
+			Metadata:      objectMeta,
 		}
 		if contentEncoding != "" {
 			input.ContentEncoding = aws.String(contentEncoding)
@@ -454,7 +476,9 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 				"content-type":    b.detectContentType(key),
 				"storage-tier":    effectiveTier,
 				"configured-tier": b.currentTier,
-				"objectfs-sha256": checksumHex,
+			}
+			for k, v := range objectMeta {
+				cargoMeta[k] = v
 			}
 			if contentEncoding != "" {
 				cargoMeta["content-encoding"] = contentEncoding
@@ -580,11 +604,35 @@ func (b *Backend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo
 
 	// Populate Checksum from objectfs-sha256 metadata key (set on upload).
 	// Empty string for objects written before this feature — backward compatible.
-	if v, ok := result.Metadata["objectfs-sha256"]; ok {
+	if v, ok := result.Metadata[metaChecksum]; ok {
 		info.Checksum = v
 	}
 
+	// For compressed objects ContentLength is the *compressed* length, which is
+	// not the file size a POSIX caller expects — the kernel would truncate reads
+	// at that offset. Prefer the recorded uncompressed size when present.
+	info.Size = originalSize(result.Metadata, info.Size, key, b.logger)
+
 	return info, nil
+}
+
+// originalSize returns the uncompressed object size recorded in metadata, falling
+// back to contentLength when the key is absent (objects written before
+// objectfs-original-size existed, or uncompressed objects) or unparseable.
+func originalSize(metadata map[string]string, contentLength int64, key string, logger *slog.Logger) int64 {
+	v, ok := metadata[metaOriginalSize]
+	if !ok {
+		return contentLength
+	}
+	size, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || size < 0 {
+		logger.Warn("Ignoring malformed objectfs-original-size metadata; falling back to ContentLength",
+			"key", key,
+			"value", v,
+			"content_length", contentLength)
+		return contentLength
+	}
+	return size
 }
 
 // GetObjects retrieves multiple objects in batch with CargoShip optimization
@@ -706,6 +754,13 @@ func (b *Backend) ListObjects(ctx context.Context, prefix string, limit int) ([]
 		return nil, b.translateError(err, "ListObjects", prefix)
 	}
 
+	// NOTE: Size here is the *stored* length from the list response. For compressed
+	// objects that is the compressed size — ListObjectsV2 returns no user metadata,
+	// so objectfs-original-size is unavailable without a HeadObject per entry. This
+	// only affects sizes shown in directory listings; the kernel sizes reads from
+	// Lookup → HeadObject, which does report the uncompressed size. Adding a
+	// HeadObject fan-out here would cost one request per entry and is deliberately
+	// not done.
 	objects := make([]types.ObjectInfo, 0, len(result.Contents))
 	for _, obj := range result.Contents {
 		info := types.ObjectInfo{
@@ -1146,20 +1201,20 @@ func (b *Backend) executeWithAccelerationFallback(
 //   - uploadParts              – concurrent UploadPart fan-out
 //   - abortMultipartUpload     – AbortMultipartUpload on failure
 //   - completeMultipartUpload  – CompleteMultipartUpload on success
-func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier, contentEncoding string) error {
+// objectMeta carries the S3 user metadata built by the caller (checksum over the
+// uncompressed content, plus the original size when compressed). It must not be
+// recomputed here: data is the post-compression payload, so hashing it would
+// store a checksum of the compressed bytes and diverge from the single-part path.
+func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier, contentEncoding string, objectMeta map[string]string) error {
 	dataSize := int64(len(data))
 	chunkSize := CalculateOptimalChunkSize(dataSize, b.config.MultipartThreshold, b.config.MultipartChunkSize)
 	storageClass := ConvertTierToStorageClass(tier)
 	contentType := b.detectContentType(key)
 
-	// Compute SHA-256 of the uncompressed content before multipart initiation.
-	rawHash := sha256.Sum256(data)
-	checksumHex := hex.EncodeToString(rawHash[:])
-
 	b.logger.Debug("Starting multipart upload",
 		"key", key, "total_size", dataSize, "chunk_size", chunkSize, "tier", tier)
 
-	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, contentEncoding, checksumHex, storageClass)
+	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, contentEncoding, objectMeta, storageClass)
 	if err != nil {
 		return fmt.Errorf("failed to initiate multipart upload: %w", err)
 	}
