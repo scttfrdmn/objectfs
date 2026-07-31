@@ -120,8 +120,16 @@ func bucketNameFor(t *testing.T) string {
 // Path-style addressing is required: virtual-host style would resolve
 // bucket.localhost:port, which does not exist.
 func (ts *TestServer) Config() *s3.Config {
-	cfg := s3.NewDefaultConfig()
+	cfg := baseConfig()
 	cfg.Endpoint = ts.URL
+
+	return cfg
+}
+
+// baseConfig is the emulator-facing part of a backend config, shared by [TestServer.Config] and
+// [SharedServer.Config] so the two cannot drift. The caller sets the endpoint.
+func baseConfig() *s3.Config {
+	cfg := s3.NewDefaultConfig()
 	cfg.ForcePathStyle = true
 	cfg.Region = DefaultRegion
 	cfg.AccessKeyID = AccessKeyID
@@ -159,6 +167,17 @@ func (ts *TestServer) Backend(mutate ...func(*s3.Config)) *s3.Backend {
 func (ts *TestServer) Client() *awss3.Client {
 	ts.t.Helper()
 
+	client, err := newClient(ts.URL)
+	if err != nil {
+		ts.t.Fatalf("testaws: %v", err)
+	}
+
+	return client
+}
+
+// newClient builds a raw SDK client against an emulator endpoint. It returns an error rather than
+// calling t.Fatalf so [SharedServer], which has no *testing.T by design, can use it too.
+func newClient(endpoint string) (*awss3.Client, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithRegion(DefaultRegion),
 		awsconfig.WithCredentialsProvider(
@@ -166,13 +185,13 @@ func (ts *TestServer) Client() *awss3.Client {
 		),
 	)
 	if err != nil {
-		ts.t.Fatalf("testaws: load AWS config: %v", err)
+		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 
 	return awss3.NewFromConfig(awsCfg, func(o *awss3.Options) {
-		o.BaseEndpoint = aws.String(ts.URL)
+		o.BaseEndpoint = aws.String(endpoint)
 		o.UsePathStyle = true
-	})
+	}), nil
 }
 
 // PutObject writes an object directly, bypassing ObjectFS. Use it to establish what a read test

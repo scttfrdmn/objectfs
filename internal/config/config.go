@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/objectfs/objectfs/internal/awsname"
 	"github.com/objectfs/objectfs/internal/compression"
 	"github.com/objectfs/objectfs/pkg/utils"
 	"gopkg.in/yaml.v2"
@@ -675,6 +676,19 @@ func (c *Configuration) Validate() error {
 
 	if err := validateCompressionConfig(c.WriteBuffer.Compression); err != nil {
 		return fmt.Errorf("write_buffer.compression configuration invalid: %w", err)
+	}
+
+	// The region is checked here, at load, because nothing downstream checks it at all.
+	//
+	// FuzzConfigConstructsBackend found this: a region containing a space, a newline, or a slash
+	// passed Validate, passed buildS3Config, built an AWS client, and then failed inside NewBackend's
+	// health check — with "501 NotImplemented", "exceeded maximum number of attempts", or "resolve
+	// auth scheme: resolve endpoint: endpoint rule error", none of which mentions the region. Against
+	// real S3 in us-west-2, "US-WEST-2" returns 400 and "us west 2" fails endpoint resolution. It is
+	// audit finding C1's exact shape in a second setting: accepted by every layer that reads
+	// configuration, rejected only by the layer that acts on it, after a mount has been attempted.
+	if err := awsname.ValidateRegion(c.Storage.S3.Region); err != nil {
+		return fmt.Errorf("storage.s3 configuration invalid: %w", err)
 	}
 
 	return nil

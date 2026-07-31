@@ -19,6 +19,7 @@ import (
 	"github.com/aws/smithy-go"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
+	"github.com/objectfs/objectfs/internal/awsname"
 	"github.com/objectfs/objectfs/internal/circuit"
 	"github.com/objectfs/objectfs/internal/compression"
 	"github.com/objectfs/objectfs/pkg/errors"
@@ -83,6 +84,17 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 
 	if cfg == nil {
 		cfg = NewDefaultConfig()
+	}
+
+	// Reject a malformed region before building a client from it.
+	//
+	// internal/config validates this too, and the duplication is deliberate: this constructor is
+	// public API that the Go SDK reaches with a hand-built &Config{Region: ...}, never passing
+	// through the config loader. Validating only at the loader would leave the SDK path with the
+	// behaviour FuzzConfigConstructsBackend found — a space in the region producing "exceeded maximum
+	// number of attempts" several layers below anything that could name the cause.
+	if err := awsname.ValidateRegion(cfg.Region); err != nil {
+		return nil, fmt.Errorf("invalid S3 configuration: %w", err)
 	}
 
 	// Apply defaults for zero-value critical fields so that partial configs
@@ -403,6 +415,12 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 // expression panicked — "slice bounds out of range [100:99]" — taking the mount process down and
 // unmounting under every open fd. A size of 0 or less is treated as "to the end", matching the range
 // header the fetch would have sent.
+//
+// The end is derived by subtraction rather than by addition, and that is not a stylistic preference.
+// `offset+size < end` is the C3 panic again by another route: the sum overflows for a large size, wraps
+// negative, compares below end, and produces `data[1:-9223372036854775808]`. FuzzSliceRange found it in
+// the fixed code. Subtracting cannot overflow here, because offset is already clamped into
+// [0, len(data)) above, so len(data)-offset is positive and no larger than len(data).
 func sliceRange(data []byte, offset, size int64) []byte {
 	if offset < 0 {
 		offset = 0
@@ -413,7 +431,7 @@ func sliceRange(data []byte, offset, size int64) []byte {
 	}
 
 	end := int64(len(data))
-	if size > 0 && offset+size < end {
+	if size > 0 && size < end-offset {
 		end = offset + size
 	}
 
@@ -1254,6 +1272,16 @@ func isCompressed(metadata map[string]string) bool {
 	}
 
 	return false
+}
+
+// Bucket returns the bucket this backend operates on.
+//
+// The bucket is fixed at construction and already appears in every log line and error this backend
+// produces, so exposing it reveals nothing new. It is here because a caller holding a backend
+// otherwise has no way to name the bucket it is using — which a second backend over the same objects,
+// configured differently, needs in order to be constructed at all.
+func (b *Backend) Bucket() string {
+	return b.bucket
 }
 
 // GetCurrentTier returns the current storage tier information

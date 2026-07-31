@@ -51,6 +51,16 @@ type ClientManager struct {
 	logger             *slog.Logger
 	accelerationActive bool             // Tracks if acceleration is currently active
 	networkMonitor     *network.Monitor // Tracks bytes/connections for this client
+
+	// transport is retained so Close can release the sockets it is holding idle.
+	//
+	// Without this the manager had no reference to it: the transport went into an http.Client, the
+	// client into the AWS SDK config, and Close drained the ConnectionPool — which pools *SDK
+	// clients*, not TCP connections. The actual sockets live here, up to MaxIdleConns of them per
+	// manager, and nothing released them. Measured against the emulator: 40 create-and-Close cycles
+	// left 80 sockets open, and a fuzz run doing it in a loop exhausted the ephemeral port range and
+	// failed with "can't assign requested address".
+	transport *http.Transport
 }
 
 // NewClientManager creates a new S3 client manager
@@ -167,6 +177,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		logger:             logger,
 		accelerationActive: accelerationActive,
 		networkMonitor:     mon,
+		transport:          transport,
 	}, nil
 }
 
@@ -230,9 +241,29 @@ func (cm *ClientManager) GetNetworkMonitor() *network.Monitor {
 }
 
 // Close closes all client resources
+// Close releases the manager's pooled SDK clients and the TCP sockets its transport holds idle.
+//
+// Both halves are needed, and only the first used to happen. The ConnectionPool holds *s3.Client
+// values, which are cheap structs sharing one transport; draining it frees no sockets at all. The
+// sockets are the transport's idle connections — up to MaxIdleConns of them, kept for
+// IdleConnTimeout, which is 90 seconds. A process that builds and closes backends in a loop
+// therefore accumulated file descriptors until it ran out: measured at 2 leaked sockets per cycle
+// against a local endpoint, and reported by a fuzz run as "can't assign requested address" after the
+// ephemeral port range filled.
+//
+// CloseIdleConnections rather than anything more forceful: it closes connections not currently in
+// use and leaves an in-flight request alone to finish. A caller closing a backend while still using
+// it has a bug this cannot fix, and cutting the request short would turn it into a confusing I/O
+// error instead.
 func (cm *ClientManager) Close() error {
 	// CargoShip transporter doesn't require explicit cleanup
-	return cm.pool.Close()
+	err := cm.pool.Close()
+
+	if cm.transport != nil {
+		cm.transport.CloseIdleConnections()
+	}
+
+	return err
 }
 
 // GetStats returns connection pool statistics
