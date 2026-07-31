@@ -1496,3 +1496,37 @@ func BenchmarkExtentListAddSparse(b *testing.B) {
 		}
 	}
 }
+
+// TestUncoveredEndOfAnEmptyRange pins the degenerate case.
+//
+// A read whose computed range is empty — hi at or before lo — has nothing to fetch, and the answer has
+// to be lo rather than hi. Returning hi would hand [Node.ReadRange] a range running backwards, which
+// becomes a negative length at the backend, and a negative length is the C3 panic: `data[offset:end]`
+// with end < offset kills the mount process and unmounts under every open descriptor.
+func TestUncoveredEndOfAnEmptyRange(t *testing.T) {
+	t.Parallel()
+
+	var l ExtentList
+	if err := l.Add(0, []byte("covered")); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		lo, hi int64
+	}{
+		{"hi equals lo", 4, 4},
+		{"hi before lo", 8, 4},
+		{"both zero", 0, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := l.UncoveredEnd(tc.lo, tc.hi); got != tc.lo {
+				t.Errorf("UncoveredEnd(%d, %d) = %d, want %d", tc.lo, tc.hi, got, tc.lo)
+			}
+		})
+	}
+}

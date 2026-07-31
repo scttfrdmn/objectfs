@@ -60,8 +60,7 @@ type FileSystem struct {
 	stats *Stats
 
 	// Performance optimizations
-	readAhead      *ReadAheadManager
-	writeCoalescer *WriteCoalescer
+	readAhead *ReadAheadManager
 }
 
 // Config represents FUSE filesystem configuration
@@ -160,9 +159,15 @@ func NewFileSystem(backend types.Backend, cache types.Cache, buffer types.WriteB
 		stats:      &Stats{},
 	}
 
-	// Initialize performance optimizations
+	// Initialize performance optimizations.
+	//
+	// There is no write coalescer. One existed and was removed: it merged writes before handing them
+	// to the buffer, and its merge guarded the overlay with "is the new end past the current end", so
+	// shorter new content over longer old content kept the old content — `echo NEW > f` over a file
+	// holding OLD left the file reading OLD. It also discarded the buffer's write errors. The write
+	// path now coalesces adjacent and overlapping ranges itself, last-writer-wins, in the one place
+	// that owns the dirty state; see internal/vfs.ExtentList.Add.
 	filesystem.readAhead = NewReadAheadManager(filesystem, nil)
-	filesystem.writeCoalescer = NewWriteCoalescer(filesystem, nil)
 
 	return filesystem
 }
@@ -540,23 +545,15 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 	fh.fs.stats.BytesWritten += int64(len(data))
 	fh.fs.stats.mu.Unlock()
 
-	// Try write coalescing first
-	coalesced := false
-	if fh.fs.writeCoalescer != nil {
-		coalesced = fh.fs.writeCoalescer.CoalesceWrite(fh.file.path, off, data)
-	}
+	// Buffer the write as a dirty byte range. Nothing is uploaded here: an object store has no way to
+	// modify part of an object, so the write is recorded and the read-modify-write happens at flush.
+	if err := fh.fs.buffer.Write(fh.file.path, off, data); err != nil {
+		fh.fs.stats.mu.Lock()
+		fh.fs.stats.Errors++
+		fh.fs.stats.mu.Unlock()
 
-	if !coalesced {
-		// Use write buffer for efficiency
-		err := fh.fs.buffer.Write(fh.file.path, off, data)
-		if err != nil {
-			fh.fs.stats.mu.Lock()
-			fh.fs.stats.Errors++
-			fh.fs.stats.mu.Unlock()
-
-			slog.Error("write failed", "path", fh.file.path, "offset", off, "error", err)
-			return 0, syscall.EIO
-		}
+		slog.Error("write failed", "path", fh.file.path, "offset", off, "error", err)
+		return 0, syscall.EIO
 	}
 
 	// Update file metadata under accessMu: dirty, modified, lastAccess, and size
@@ -574,17 +571,15 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 	return safeIntToUint32(len(data)), 0
 }
 
-// Flush flushes any pending writes
+// Flush flushes any pending writes for the file.
+//
+// It asks the write path unconditionally rather than checking fh.file.dirty first. The write path
+// owns the dirty state and answers cheaply for a clean file — an unbuffered key is a no-op and a
+// buffered-but-clean one takes the flush plan's Noop arm without uploading. Gating on the handle's
+// own bool would mean two sources of truth for "does this need writing", and the handle's is the one
+// that cannot see a truncation, a chmod, or a write made through a different descriptor on the same
+// path. A missed flush is data loss; a redundant one costs a map lookup.
 func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
-	// Read dirty under accessMu: Write sets it under the same lock (#107).
-	fh.file.accessMu.Lock()
-	dirty := fh.file.dirty
-	fh.file.accessMu.Unlock()
-
-	if !dirty {
-		return 0
-	}
-
 	err := fh.fs.buffer.Flush(fh.file.path)
 	if err != nil {
 		fh.fs.stats.mu.Lock()
@@ -601,24 +596,23 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// Release releases the file handle
+// Release releases the file handle, flushing anything still pending.
+//
+// The flush error is returned rather than discarded. Release is the last chance to report that a
+// file's contents never reached storage, and the kernel surfaces the errno to close(2) — which is
+// where POSIX says a program should look for exactly this failure. v0.10.0 wrote `_ = fh.Flush(ctx)`
+// here, so an AccessDenied on the final upload was invisible to the process that wrote the data.
+//
+// The handle is removed from the open-files map either way: a failed flush must not also leak the
+// handle, and the buffered data is still held by the write path, which reports it again at unmount.
 func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
-	// Flush any coalesced writes first
-	if fh.fs.writeCoalescer != nil {
-		fh.fs.writeCoalescer.FlushAll()
-	}
+	errno := fh.Flush(ctx)
 
-	// Flush any pending writes
-	if fh.file.dirty {
-		_ = fh.Flush(ctx)
-	}
-
-	// Remove from open files map
 	fh.fs.mu.Lock()
 	delete(fh.fs.openFiles, fh.handle)
 	fh.fs.mu.Unlock()
 
-	return 0
+	return errno
 }
 
 // Helper methods for DirectoryNode

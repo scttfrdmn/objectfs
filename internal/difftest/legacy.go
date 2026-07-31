@@ -5,76 +5,92 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/objectfs/objectfs/internal/buffer"
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
 // Legacy is the write path ObjectFS v0.10.0 shipped, wired to a real backend exactly as
-// internal/adapter wires it.
+// internal/adapter wired it.
 //
-// It exists so the oracle can be shown to catch the defects it was built for, on the real code that
+// It exists so the oracle can be shown to catch the defects it was built for, on the behavior that
 // had them, before it is trusted to guard anything. A harness whose teeth are asserted rather than
 // demonstrated is how 32,680 lines of tests came to miss forty-five defects.
 //
-// The one line that matters is in the flush callback, reproduced verbatim from
-// internal/adapter/adapter.go:153-155:
+// # Why this is a copy and not a call
 //
-//	flushCallback := func(key string, data []byte, offset int64) error {
-//	    return a.backend.PutObject(context.Background(), key, data)
-//	}
+// This type once wired up the real internal/buffer.WriteBuffer. That package is now deleted, and
+// reaching for it is no longer possible — but even while it existed, depending on it made the fixture
+// track the code it was supposed to be frozen against. A regression fixture that follows its subject
+// is not a fixture. The three behaviors reproduced below are therefore transcribed, with the
+// original line numbers, and will not change again:
 //
-// PutObject replaces the whole object, so discarding the offset truncates the file to just the bytes
-// written. Appending one byte to a 1 MiB file leaves a 1-byte object and reports success.
+//   - the flush callback took the offset and discarded it (adapter.go:153-155), so PutObject replaced
+//     the whole object and an offset write truncated the file to just the bytes written;
+//   - canBufferWrite (writebuffer.go:271-290) refused any write that did not continue the single
+//     contiguous run, returning "buffer full or write cannot be buffered" — EIO to the caller;
+//   - reads went to the backend without consulting the buffer (H5), and Getattr took the size from
+//     the object's metadata for the same reason.
 //
-// Legacy is deleted along with the write path it models. Until then it is the regression fixture that
-// keeps the oracle honest: [TestOracleCatchesLegacyDefects] asserts these divergences are *found*, so
-// a change that blinds the harness fails there rather than silently passing everything.
+// [TestOracleCatchesLegacyDefects] asserts these divergences are *found*, so a change that blinds the
+// harness fails there rather than silently passing everything.
 type Legacy struct {
 	backend types.Backend
 	key     string
-	wb      *buffer.WriteBuffer
+
+	// buf and bufOffset are v0.10.0's entire per-file write state: one contiguous run of bytes and
+	// the offset it starts at. That is the representation from which every write-path defect follows.
+	// It cannot express two disjoint dirty ranges, so a filesystem built on it must either refuse the
+	// second write or lose the first.
+	buf       []byte
+	bufOffset int64
 }
 
-// NewLegacy wires a WriteBuffer to backend under key, with the flush callback the adapter used.
+// legacyMaxBufferSize is the MaxBufferSize the adapter configured, in bytes. A write that would take
+// the run past it was refused rather than flushed.
+const legacyMaxBufferSize = 64 * 1024 * 1024
+
+// NewLegacy wires the v0.10.0 write path to backend under key.
+//
+// The original ran with AsyncFlush disabled here so that a flush is synchronous and the comparison is
+// deterministic. This is the generous reading of the legacy path: with async on, the oracle would also
+// be racing the background flush loop, and a divergence could be dismissed as a timing artifact rather
+// than the data loss it is.
 func NewLegacy(backend types.Backend, key string) (*Legacy, error) {
-	l := &Legacy{backend: backend, key: key}
-
-	// Verbatim from internal/adapter/adapter.go: the offset parameter is accepted and dropped.
-	flushCallback := func(key string, data []byte, _ int64) error {
-		return backend.PutObject(context.Background(), key, data)
+	if backend == nil {
+		return nil, fmt.Errorf("difftest: legacy needs a backend")
 	}
-
-	// AsyncFlush off so a flush is synchronous and the comparison is deterministic. This is the
-	// generous reading of the legacy path: with async on, the oracle would also be racing the
-	// background flush loop, and a divergence could be dismissed as a timing artifact rather than the
-	// data loss it is.
-	wb, err := buffer.NewWriteBuffer(&buffer.WriteBufferConfig{
-		MaxBufferSize:  64 * 1024 * 1024,
-		MaxBuffers:     16,
-		FlushInterval:  time.Hour,
-		FlushThreshold: 64 * 1024 * 1024,
-		AsyncFlush:     false,
-		BatchSize:      1 << 20,
-		SyncOnClose:    false,
-	}, flushCallback)
-	if err != nil {
-		return nil, fmt.Errorf("difftest: create legacy write buffer: %w", err)
-	}
-	l.wb = wb
-
-	return l, nil
+	return &Legacy{backend: backend, key: key}, nil
 }
 
-// WriteAt implements [FS].
+// WriteAt implements [FS] with v0.10.0's canBufferWrite, transcribed from
+// internal/buffer/writebuffer.go:271-290:
+//
+//	if len(buf.data) > 0 {
+//	    expectedOffset := buf.offset + int64(len(buf.data))
+//	    if req.Offset != expectedOffset {
+//	        return false // Non-contiguous write
+//	    }
+//	}
+//
+// A refusal became `fmt.Errorf("buffer full or write cannot be buffered")`, which the FUSE layer
+// turned into EIO. That is defect H8, and the access pattern it rejects is the one SQLite, mmap
+// writeback, tar, and HDF5 all use.
 func (l *Legacy) WriteAt(_ context.Context, offset int64, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if err := l.wb.Write(l.key, offset, data); err != nil {
-		return fmt.Errorf("difftest: legacy write at %d: %w", offset, err)
+
+	if int64(len(l.buf))+int64(len(data)) > legacyMaxBufferSize {
+		return fmt.Errorf("difftest: legacy write at %d: buffer full or write cannot be buffered", offset)
 	}
+	if len(l.buf) > 0 && offset != l.bufOffset+int64(len(l.buf)) {
+		return fmt.Errorf("difftest: legacy write at %d: buffer full or write cannot be buffered", offset)
+	}
+
+	if len(l.buf) == 0 {
+		l.bufOffset = offset
+	}
+	l.buf = append(l.buf, data...)
 	return nil
 }
 
@@ -103,26 +119,36 @@ func (l *Legacy) Truncate(_ context.Context, size int64) error {
 	return fmt.Errorf("difftest: legacy path cannot truncate to %d: v0.10.0 implemented no Setattr or Truncate", size)
 }
 
-// Flush implements [FS].
-func (l *Legacy) Flush(_ context.Context) error {
-	if err := l.wb.FlushAll(); err != nil {
+// Flush implements [FS] with the adapter's flush callback, transcribed verbatim from
+// internal/adapter/adapter.go:153-155:
+//
+//	flushCallback := func(key string, data []byte, offset int64) error {
+//	    return a.backend.PutObject(context.Background(), key, data)
+//	}
+//
+// The offset parameter is accepted and dropped, and PutObject replaces the whole object. So appending
+// one byte to a 1 MiB file leaves a 1-byte object — and reports success, because the callback returned
+// nil and flushBuffer then deleted the buffer as flushed.
+func (l *Legacy) Flush(ctx context.Context) error {
+	if len(l.buf) == 0 {
+		return nil
+	}
+
+	// The offset is in scope and unused, exactly as it was.
+	if err := l.backend.PutObject(ctx, l.key, l.buf); err != nil {
 		return fmt.Errorf("difftest: legacy flush: %w", err)
 	}
+
+	l.buf = nil
+	l.bufOffset = 0
 	return nil
 }
 
 // Reopen implements [FS]. The buffer is discarded without flushing, which is what losing in-memory
 // state means.
 func (l *Legacy) Reopen(_ context.Context) error {
-	if err := l.wb.Close(); err != nil {
-		return fmt.Errorf("difftest: legacy close on reopen: %w", err)
-	}
-
-	next, err := NewLegacy(l.backend, l.key)
-	if err != nil {
-		return err
-	}
-	l.wb = next.wb
+	l.buf = nil
+	l.bufOffset = 0
 	return nil
 }
 
@@ -150,11 +176,9 @@ func (l *Legacy) Durable(ctx context.Context) ([]byte, error) {
 	return data, nil
 }
 
-// Close implements [FS].
+// Close implements [FS]. SyncOnClose was off, so the buffer is dropped rather than flushed.
 func (l *Legacy) Close() error {
-	if err := l.wb.Close(); err != nil {
-		return fmt.Errorf("difftest: legacy close: %w", err)
-	}
+	l.buf = nil
 	return nil
 }
 

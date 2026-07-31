@@ -118,15 +118,16 @@ defer cache.Close()  // Ensures cleanup goroutine stops
 monitor.TrackObject("cache-items", 100000)
 ```
 
-### Write Buffer Monitoring
+### Write Path Monitoring
 
 ```go
-// Write buffer tracks pending writes
-wb, err := buffer.NewWriteBuffer(config, flushCallback)
-defer wb.Close()  // Flushes and stops goroutines
+// The write path holds pending writes as dirty byte ranges per path.
+w, err := vfs.NewWriter(mountCtx, backend)
+defer w.Close()  // Flushes what is pending and reports what it could not
 
-// Track buffer usage
-monitor.TrackObject("write-buffers", 1000)
+// Size() is the total dirty bytes across every path; Count() is how many paths hold any.
+monitor.TrackObject("dirty-bytes", int(w.Size()))
+monitor.TrackObject("dirty-paths", w.Count())
 ```
 
 ## Best Practices
@@ -150,19 +151,17 @@ monitor.TrackObject("write-buffers", 1000)
 - Properly track evictions count before clearing
 - Iterate and delete items individually to help GC
 
-### Write Buffer (internal/buffer/writebuffer.go)
+### Write Path (internal/vfs)
 
-**Status**: Already properly implemented with:
-- Goroutine cleanup on Close()
-- Proper flush on shutdown
-- Channel closure for signal propagation
+The `internal/buffer` package this section used to describe is gone, along with the byte pool that
+sat beside it. It held one contiguous `[]byte` plus an offset per file, which is why its memory
+profile was simple and also why it could not represent an offset write; `internal/vfs` replaced it.
 
-### Byte Pool (internal/buffer/pool.go)
-
-**Status**: Already optimal with:
-- Buffer zeroing before return to pool
-- Proper capacity-based pooling
-- sync.Pool for automatic memory management
+Pending writes are now an interval list per path, so the memory a file holds is the sum of its dirty
+ranges rather than one buffer sized to the largest of them. `Writer.Size()` reports the total across
+every path and `Writer.Count()` the number of paths holding any, which are the two figures to watch:
+dirty bytes are freed by a flush, so a total that climbs without a flush draining it is the shape of
+a leak here.
 
 ## Analyzing Profiles
 

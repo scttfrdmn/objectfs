@@ -102,6 +102,25 @@ type Node struct {
 	handles int
 }
 
+// NewNode returns a node for path whose stored state is described by attr and storedSize.
+//
+// Most callers get nodes from [HandleTable.Open], which is the path a mount takes: a node with no
+// handle open on it cannot be found by the invalidation or shutdown paths. This constructor is for
+// owners that track nodes themselves, [Writer] being the one — its keys are not open descriptors.
+func NewNode(path string, attr Attr, storedSize int64) *Node {
+	return &Node{Path: path, attr: attr, storedSize: storedSize}
+}
+
+// DirtyBytes returns the number of buffered bytes not yet in the object store.
+//
+// It is a memory-accounting figure, not a durability one: a node with zero dirty bytes can still need
+// a flush, because a truncation changes the file without dirtying a byte. Ask [Node.Dirty] for that.
+func (n *Node) DirtyBytes() int64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.pending.Bytes()
+}
+
 // Attr returns a snapshot of the node's attributes, with Size reflecting pending writes.
 func (n *Node) Attr() Attr {
 	n.mu.Lock()
@@ -215,6 +234,9 @@ func (n *Node) Truncate(size int64) error {
 //
 // A read that pending writes fully cover needs no fetch, which is what makes read-after-write both
 // correct and free. Callers pass the fetched bytes to [Node.ReadInto].
+//
+// The range is trimmed at both ends but only narrowed at the tail: see [ExtentList.UncoveredEnd] for
+// why the head is left alone, and what it costs.
 func (n *Node) ReadRange(offset int64, length int) (Range, bool, error) {
 	if offset < 0 {
 		return Range{}, false, fmt.Errorf("%w: negative read offset %d", ErrInvalid, offset)
@@ -230,6 +252,14 @@ func (n *Node) ReadRange(offset int64, length int) (Range, bool, error) {
 	if end <= offset {
 		return Range{}, false, nil
 	}
+
+	// Drop the part of the tail the pending writes already answer. A write that covers the whole
+	// request makes this the entire range, and the read touches no network at all.
+	end = n.pending.UncoveredEnd(offset, end)
+	if end <= offset {
+		return Range{}, false, nil
+	}
+
 	return Range{Offset: offset, Length: end - offset}, true, nil
 }
 

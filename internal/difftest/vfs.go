@@ -17,20 +17,11 @@ import (
 // shows the harness finds the v0.10.0 defects, and the fuzz target over this shows the replacement
 // does not have them.
 //
-// It also serves as the executable specification of the flush protocol the adapter must follow, in
-// the order that matters:
-//
-//  1. capture [vfs.Node.Generation]
-//  2. ask for a [vfs.FlushPlan]
-//  3. fetch the plan's ReadRanges from the object store
-//  4. [vfs.Node.Splice] them with the pending writes
-//  5. upload
-//  6. [vfs.Node.MarkFlushed] with the generation from step 1
-//
-// Step 6 is why step 1 exists. A write that lands between steps 2 and 5 is not in the body that was
-// uploaded, so clearing the pending state would discard it — which is exactly the v0.10.0 path where
-// a write concurrent with a flush was dropped and accounted as flushed. MarkFlushed refuses when the
-// generation has moved, and this type loops rather than reporting a success it did not achieve.
+// The flush protocol it drives is [vfs.Flusher]'s, called rather than reimplemented. That is the
+// point: this type once carried its own copy of the six-step sequence, which meant the oracle and the
+// fuzzer proved the protocol was sound without proving the shipping code implemented it. A second
+// implementation in the harness is the same class of mistake as the second FUSE binding that drifted
+// until `rm` reported deletions that never happened.
 //
 // The kernel is not modeled here: no page cache, no readahead, no writeback ordering. This drives
 // vfs directly, because a divergence has to be attributable to vfs or to the backend rather than to
@@ -38,6 +29,7 @@ import (
 type VFS struct {
 	backend types.Backend
 	key     string
+	flusher *vfs.Flusher
 
 	table  *vfs.HandleTable
 	handle *vfs.Handle
@@ -48,7 +40,12 @@ type VFS struct {
 // The object need not exist; an absent object is a zero-length file, which is what the local
 // reference is after open(2) creates it.
 func NewVFS(ctx context.Context, backend types.Backend, key string) (*VFS, error) {
-	v := &VFS{backend: backend, key: key}
+	f, err := vfs.NewFlusher(backend)
+	if err != nil {
+		return nil, fmt.Errorf("difftest: %w", err)
+	}
+
+	v := &VFS{backend: backend, key: key, flusher: f}
 	if err := v.open(ctx); err != nil {
 		return nil, err
 	}
@@ -75,17 +72,11 @@ func (v *VFS) open(ctx context.Context) error {
 
 // storedSize reports the length of the object as it exists in storage, treating absence as zero.
 func (v *VFS) storedSize(ctx context.Context) (int64, error) {
-	info, err := v.backend.HeadObject(ctx, v.key)
+	size, err := v.flusher.StoredSize(ctx, v.key)
 	if err != nil {
-		if isNotFound(err) {
-			return 0, nil
-		}
 		return 0, fmt.Errorf("difftest: vfs head %q: %w", v.key, err)
 	}
-	if info.Size < 0 {
-		return 0, fmt.Errorf("difftest: vfs head %q reported a negative size %d", v.key, info.Size)
-	}
-	return info.Size, nil
+	return size, nil
 }
 
 // WriteAt implements [FS].
@@ -150,76 +141,16 @@ func (v *VFS) Truncate(_ context.Context, size int64) error {
 	return nil
 }
 
-// Flush implements [FS], following the protocol documented on [VFS].
+// Flush implements [FS] by calling [vfs.Flusher], which is the production flush path.
 //
-// It loops while MarkFlushed reports a lost race. A bounded loop rather than an unbounded one: a
-// generation that keeps moving means a writer this harness does not have, so exhausting the attempts
-// is a harness bug worth reporting rather than something to spin on. Nothing here reports success
-// without a MarkFlushed that took.
+// Delegating rather than reimplementing is what makes the oracle's verdict mean something about
+// shipping code. When this function held its own copy of the six-step protocol, a defect in
+// vfs.Flusher would have left every differential test and every fuzz iteration green.
 func (v *VFS) Flush(ctx context.Context) error {
-	const attempts = 8
-
-	for range attempts {
-		node := v.handle.Node
-
-		// Before the plan, not after: a write landing between these two calls must invalidate the
-		// upload, and it can only do that if the generation was read first.
-		gen := node.Generation()
-
-		plan, _, err := node.FlushPlan()
-		if err != nil {
-			return fmt.Errorf("difftest: vfs flush plan %q: %w", v.key, err)
-		}
-		if plan.Noop {
-			return nil
-		}
-
-		var base []vfs.Extent
-		for _, r := range plan.ReadRanges {
-			data, err := v.fetch(ctx, r)
-			if err != nil {
-				return err
-			}
-			if len(data) == 0 {
-				continue
-			}
-			base = append(base, vfs.Extent{Offset: r.Offset, Data: data})
-		}
-
-		body, err := node.Splice(plan.Size, base)
-		if err != nil {
-			return fmt.Errorf("difftest: vfs splice %q: %w", v.key, err)
-		}
-		if int64(len(body)) != plan.Size {
-			return fmt.Errorf("difftest: vfs splice %q produced %d bytes, plan said %d",
-				v.key, len(body), plan.Size)
-		}
-
-		if err := v.backend.PutObject(ctx, v.key, body); err != nil {
-			return fmt.Errorf("difftest: vfs put %q (%d bytes): %w", v.key, len(body), err)
-		}
-
-		// Read the stored size back rather than trusting the length that was sent. A backend that
-		// stores fewer bytes than it was handed is silent corruption, and it is the one failure a
-		// write path cannot detect by looking at itself — v0.10.0's compressed-upload path stored
-		// objects that HeadObject then described with a different size entirely.
-		stored, err := v.storedSize(ctx)
-		if err != nil {
-			return err
-		}
-		if stored != plan.Size {
-			return fmt.Errorf("difftest: vfs flush %q uploaded %d bytes but the object is %d",
-				v.key, plan.Size, stored)
-		}
-
-		if node.MarkFlushed(gen, stored, "") {
-			return nil
-		}
-		// The node changed during the upload. The bytes that were sent are stale; go round again.
+	if err := v.flusher.Flush(ctx, v.handle.Node); err != nil {
+		return fmt.Errorf("difftest: vfs flush %q: %w", v.key, err)
 	}
-
-	return fmt.Errorf("difftest: vfs flush %q did not converge in %d attempts: the node is being "+
-		"mutated concurrently, which this harness has no writer to do", v.key, attempts)
+	return nil
 }
 
 // Reopen implements [FS] by discarding all in-memory state and re-establishing it from storage.

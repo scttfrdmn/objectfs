@@ -6,8 +6,8 @@
 #   ./scripts/coverage-gate.sh coverage.out .coverage-floors
 #
 # Why per-package and not repo-wide. A repo-wide number lets a well-tested package pay for an
-# untested one, and the aggregate is the figure that looks acceptable: this repo sits at 69.3%
-# overall while internal/fuse — the layer every POSIX operation passes through — is at 24.1%.
+# untested one, and the aggregate is the figure that looks acceptable: this repo sits near 70%
+# overall while internal/fuse — the layer every POSIX operation passes through — is at 17.7%.
 # Averaging those two produces a number that hides exactly the thing worth knowing.
 #
 # Why a floors file and not one global threshold. A single threshold across a repo with a real

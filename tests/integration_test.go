@@ -3,10 +3,8 @@ package tests
 import (
 	"context"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -14,11 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/objectfs/objectfs/internal/buffer"
 	"github.com/objectfs/objectfs/internal/cache"
 	"github.com/objectfs/objectfs/internal/config"
 	"github.com/objectfs/objectfs/internal/metrics"
 	"github.com/objectfs/objectfs/internal/storage/s3"
+	"github.com/objectfs/objectfs/internal/vfs"
+	"github.com/objectfs/objectfs/pkg/types"
 )
 
 // IntegrationTestSuite contains all integration tests
@@ -200,131 +199,76 @@ func (suite *IntegrationTestSuite) TestCacheIntegration() {
 	assert.NotNil(t, l2Stats)
 }
 
-// Test Write Buffer Integration
+// TestWriteBufferIntegration exercises the write path against a backend, asserting on what ends up
+// stored rather than on what a flush callback was handed.
+//
+// The distinction is the whole point. v0.10.0's version of this test captured the callback's data into
+// a map and compared it against the bytes written, which passed while the flush was replacing whole
+// objects with fragments — the callback never saw the offset, so the test could not check it.
 func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 	t := suite.T()
 
-	// Create write buffer configuration
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  1024 * 1024, // 1MB
-		MaxBuffers:     100,
-		FlushInterval:  time.Second,
-		FlushThreshold: 10 * 1024, // 10KB - small threshold to trigger flush quickly
-		AsyncFlush:     true,
-		BatchSize:      5,
-		MaxWriteDelay:  5 * time.Second,
-		SyncOnClose:    true,
-		MaxRetries:     3,
-		RetryDelay:     100 * time.Millisecond,
-	}
-
-	// Track flushed data
-	var flushedDataMu sync.RWMutex
-	flushedData := make(map[string][]byte)
-	flushCallback := func(key string, data []byte, offset int64) error {
-		flushedDataMu.Lock()
-		defer flushedDataMu.Unlock()
-		flushedData[key] = make([]byte, len(data))
-		copy(flushedData[key], data)
-		return nil
-	}
-
-	// Create write buffer
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, flushCallback)
+	backend := NewMockBackend()
+	writeBuffer, err := vfs.NewWriter(suite.ctx, backend)
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
-	// Test buffered writes
-	testKey := "buffer-test-key"
-	testData := []byte("Write buffer test data")
+	// A file written in two disjoint pieces. v0.10.0 refused the second write outright (H8: any write
+	// that did not continue the single contiguous run returned EIO), and had it accepted it, the flush
+	// would have stored only one piece.
+	const key = "buffer-test-key"
+	head := []byte("Write buffer test data")
+	tail := []byte("data past a hole")
+	require.NoError(t, writeBuffer.Write(key, 0, head))
+	require.NoError(t, writeBuffer.Write(key, 4096, tail))
 
-	req := &buffer.WriteRequest{
-		Key:    testKey,
-		Offset: 0,
-		Data:   testData,
-		Sync:   false,
-	}
+	assert.True(t, writeBuffer.Dirty(key), "pending writes must be visible as dirty before a flush")
+	assert.Positive(t, writeBuffer.Size())
 
-	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
-	assert.NoError(t, err)
+	// Nothing reaches storage until a flush is asked for.
+	_, err = backend.HeadObject(suite.ctx, key)
+	require.Error(t, err, "a buffered write must not be uploaded before it is flushed")
 
-	// Test buffer statistics
-	stats := writeBuffer.GetStats()
-	assert.Positive(t, stats.TotalWrites)
+	require.NoError(t, writeBuffer.FlushAll())
+	assert.False(t, writeBuffer.Dirty(key))
 
-	// Wait for potential async flush
-	time.Sleep(50 * time.Millisecond)
-
-	// Test synchronous flush with a different key
-	testKey2 := "buffer-test-key-2"
-	testData2 := []byte("Write buffer test data 2")
-	req2 := &buffer.WriteRequest{
-		Key:    testKey2,
-		Data:   testData2,
-		Offset: 0,
-		Sync:   true,
-	}
-	err = writeBuffer.Write(req2.Key, req2.Offset, req2.Data)
-	assert.NoError(t, err)
-
-	// Force flush before checking
-	err = writeBuffer.FlushAll()
-	assert.NoError(t, err)
-
-	// Wait for flush to complete
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify data was flushed (at least one of the keys should be flushed)
-	flushedDataMu.RLock()
-	flushedDataLen := len(flushedData)
-	flushedDataMu.RUnlock()
-	assert.Positive(t, flushedDataLen, "Expected at least one flush to occur")
-
-	// Check if either key was flushed
-	flushedDataMu.RLock()
-	data1, ok1 := flushedData[testKey]
-	data2, ok2 := flushedData[testKey2]
-	flushedDataCopy := make(map[string][]byte)
-	maps.Copy(flushedDataCopy, flushedData)
-	flushedDataMu.RUnlock()
-
-	if ok1 {
-		assert.Equal(t, testData, data1)
-	} else if ok2 {
-		assert.Equal(t, testData2, data2)
-	} else {
-		t.Fatalf("Neither test key was found in flushed data: %v", flushedDataCopy)
-	}
-
-	// Test buffer manager
-	managerConfig := &buffer.ManagerConfig{
-		WriteBufferConfig: bufferConfig,
-		EnableMetrics:     true,
-		MetricsInterval:   time.Second,
-	}
-
-	manager, err := buffer.NewManager(managerConfig)
+	stored, err := backend.GetObject(suite.ctx, key, 0, 0)
 	require.NoError(t, err)
+	require.Len(t, stored, 4096+len(tail), "the object must span the hole, not just the last write")
+	assert.Equal(t, head, stored[:len(head)])
+	assert.Equal(t, tail, stored[4096:])
+	// The hole reads as zeros, which is what a sparse file does on a local filesystem.
+	assert.Equal(t, make([]byte, 4096-len(head)), stored[len(head):4096])
 
-	// Register callback
-	manager.RegisterFlushCallback("*", flushCallback)
+	// A second key flushed independently, and a write that modifies the middle of an existing object
+	// rather than replacing it — the read-modify-write case that gives an offset write its meaning.
+	const key2 = "buffer-test-key-2"
+	require.NoError(t, writeBuffer.Write(key2, 0, []byte("AAAABBBBCCCC")))
+	require.NoError(t, writeBuffer.Flush(key2))
+	require.NoError(t, writeBuffer.Write(key2, 4, []byte("xxxx")))
+	require.NoError(t, writeBuffer.Flush(key2))
 
-	err = manager.Start(suite.ctx)
+	stored2, err := backend.GetObject(suite.ctx, key2, 0, 0)
 	require.NoError(t, err)
-	defer func() { _ = manager.Stop() }()
+	assert.Equal(t, []byte("AAAAxxxxCCCC"), stored2,
+		"an offset write must modify those bytes and leave the rest; v0.10.0 left a 4-byte object here")
 
-	// Test manager operations
-	err = manager.Write(suite.ctx, "manager-test", 0, []byte("manager test data"), false)
-	assert.NoError(t, err)
+	// Reading through the write path sees pending writes, not just stored bytes (H5: v0.10.0's read
+	// path went straight to the backend, so a read after a write on the same descriptor returned
+	// pre-write content).
+	require.NoError(t, writeBuffer.Write(key2, 0, []byte("ZZZZ")))
+	buf := make([]byte, 12)
+	n, err := writeBuffer.ReadAt(suite.ctx, key2, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("ZZZZxxxxCCCC"), buf[:n], "a read must observe writes that have not flushed")
 
-	managerStats := manager.GetStats()
-	assert.Positive(t, managerStats.TotalOperations)
+	size, err := writeBuffer.FileSize(suite.ctx, key2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(12), size)
 
-	// Check if manager is healthy (it should be after just being started)
-	isHealthy := manager.IsHealthy()
-	if !isHealthy {
-		t.Logf("Manager health check failed, but continuing test")
-	}
+	require.NoError(t, writeBuffer.FlushAll())
+	assert.Zero(t, writeBuffer.Size(), "no dirty bytes may remain after a successful flush")
+	assert.Zero(t, writeBuffer.Count())
 }
 
 // Test Metrics Collection Integration
@@ -528,39 +472,54 @@ func (suite *IntegrationTestSuite) TestErrorHandlingAndRecovery() {
 	_, err := cache.NewMultiLevelCache(invalidCacheConfig)
 	assert.Error(t, err) // Should fail to create cache with invalid directory
 
-	// Test write buffer with callback that fails
-	errorCallback := func(key string, data []byte, offset int64) error {
-		return fmt.Errorf("simulated flush error")
-	}
+	// A backend that rejects uploads must produce a flush error, and the data must stay pending.
+	//
+	// This is defect M22. v0.10.0 recorded a failed flush by incrementing stats.Errors and returning
+	// nil, and its version of this test asserted `stats.Errors >= 0` — a comparison that is true of
+	// every uint64 ever produced, including the zero it got. So the one behavior that makes close(2)
+	// mean something went untested by a test named for it.
+	backend := &failingPutBackend{MockBackend: NewMockBackend(), err: fmt.Errorf("simulated flush error")}
 
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  1024,
-		FlushThreshold: 512,
-		MaxRetries:     1,
-	}
-
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, errorCallback)
+	writeBuffer, err := vfs.NewWriter(suite.ctx, backend)
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
-	// Write data that will trigger flush
-	req := &buffer.WriteRequest{
-		Key:    "error-test",
-		Offset: 0,
-		Data:   make([]byte, 600), // Exceeds flush threshold
-		Sync:   true,
-	}
+	require.NoError(t, writeBuffer.Write("error-test", 0, make([]byte, 600)),
+		"a write is buffered locally, so it succeeds even when the backend will not accept uploads")
 
-	err = writeBuffer.Write(req.Key, req.Offset, req.Data)
-	// Should handle the error gracefully (may return error)
-	// Error is expected due to simulated flush error
-	_ = err
+	err = writeBuffer.Flush("error-test")
+	require.Error(t, err, "a rejected upload must be reported, not counted and discarded")
+	require.ErrorContains(t, err, "simulated flush error",
+		"the error must name the backend failure, not be flattened to a generic sync timeout")
 
-	// Check that error statistics are updated
-	stats := writeBuffer.GetStats()
-	// In a real implementation, this would track flush errors
-	assert.GreaterOrEqual(t, stats.Errors, uint64(0))
+	assert.True(t, writeBuffer.Dirty("error-test"),
+		"a failed flush must leave the data pending so unmount can try again; dropping it is the "+
+			"silent loss this assertion exists to prevent")
+
+	// FlushAll reports the same failure rather than succeeding because it ran out of keys to try.
+	require.Error(t, writeBuffer.FlushAllContext(suite.ctx))
 }
+
+// failingPutBackend is a [types.Backend] that stores nothing and rejects every upload.
+//
+// Reads are inherited from MockBackend, so the read-modify-write half of a flush behaves normally and
+// the failure is isolated to the PUT — otherwise a test could pass because the GET failed first, for a
+// reason that says nothing about error propagation.
+type failingPutBackend struct {
+	*MockBackend
+	err error
+}
+
+func (b *failingPutBackend) PutObject(ctx context.Context, key string, data []byte) error {
+	return b.err
+}
+
+func (b *failingPutBackend) PutObjects(ctx context.Context, objects map[string][]byte) error {
+	return b.err
+}
+
+// verify at compile time that the override still satisfies the backend contract.
+var _ types.Backend = (*failingPutBackend)(nil)
 
 // Helper methods
 
@@ -623,18 +582,13 @@ func BenchmarkCacheOperations(b *testing.B) {
 	})
 }
 
+// BenchmarkWriteBuffer measures buffering a write, not flushing one.
+//
+// No flush happens here and that is deliberate: a flush is dominated by the backend round trip, so
+// including it would measure the mock and hide the cost this benchmark exists to track — recording a
+// dirty range, which is on the path of every write(2) the filesystem serves.
 func BenchmarkWriteBuffer(b *testing.B) {
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  10 * 1024 * 1024, // 10MB
-		FlushThreshold: 1024 * 1024,      // 1MB
-		AsyncFlush:     true,
-	}
-
-	callback := func(key string, data []byte, offset int64) error {
-		return nil // No-op for benchmark
-	}
-
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, callback)
+	writeBuffer, err := vfs.NewWriter(context.Background(), NewMockBackend())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -646,13 +600,11 @@ func BenchmarkWriteBuffer(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			req := &buffer.WriteRequest{
-				Key:    fmt.Sprintf("bench-key-%d", i%100),
-				Offset: int64(i * 1024),
-				Data:   testData,
-				Sync:   false,
+			key := fmt.Sprintf("bench-key-%d", i%100)
+			if err := writeBuffer.Write(key, int64(i)*1024, testData); err != nil {
+				b.Error(err)
+				return
 			}
-			_ = writeBuffer.Write(req.Key, req.Offset, req.Data)
 			i++
 		}
 	})

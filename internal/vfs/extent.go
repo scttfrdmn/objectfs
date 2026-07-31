@@ -239,6 +239,40 @@ func (l *ExtentList) ReadAt(buf []byte, offset, storedSize int64) (int, error) {
 	return valid, nil
 }
 
+// UncoveredEnd returns the smallest end offset in [lo, hi] such that every byte from it to hi is
+// already held by a pending write.
+//
+// It answers "how much of this read must actually be fetched", and returning lo means none of it: the
+// pending writes cover the whole range, so the read is served from memory and issues no request. That
+// is what makes read-after-write on one descriptor both correct and free — v0.10.0 had neither,
+// consulting the cache and the backend but never the write buffer, so a read after a write returned
+// pre-write bytes for up to the cache's five-minute TTL.
+//
+// Only the tail is trimmed, not the head, and the asymmetry is deliberate rather than an oversight.
+// [Node.ReadInto] places the fetched bytes at the read's start offset, so a range that began later
+// would be spliced at the wrong position — silent corruption, and of the kind a test with uniform
+// fill bytes would not notice. Narrowing the head needs ReadInto to be told where the bytes begin,
+// which is a signature change belonging with the read-path work, not smuggled in here. The cost of
+// not doing it is fetching bytes that are about to be overwritten in the buffer: wasteful, never
+// wrong.
+func (l *ExtentList) UncoveredEnd(lo, hi int64) int64 {
+	if hi <= lo {
+		return lo
+	}
+
+	// Extents are sorted, disjoint, and never adjacent, so at most one extent can cover the byte
+	// before hi, and stepping back to its start lands in a gap. The loop is for the invariant's
+	// benefit, not because a second iteration is expected.
+	for hi > lo {
+		i := sort.Search(len(l.extents), func(i int) bool { return l.extents[i].End() > hi-1 })
+		if i == len(l.extents) || l.extents[i].Offset > hi-1 {
+			return hi
+		}
+		hi = max(lo, l.extents[i].Offset)
+	}
+	return lo
+}
+
 // FlushPlan describes how to make an ExtentList durable against an object of a known size.
 type FlushPlan struct {
 	// Noop is true when there is nothing to write: no dirty bytes, no size change, and no stored

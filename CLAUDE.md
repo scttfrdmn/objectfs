@@ -37,16 +37,21 @@ User apps → Kernel VFS → FUSE (go-fuse/cgofuse) → Adapter → S3 Backend �
 Key internal packages:
 
 - `internal/adapter/` — central coordinator
-- `internal/fuse/` — POSIX filesystem operations
+- `internal/vfs/` — POSIX-semantics core: attributes, handle table, dirty ranges, read-modify-write flush. Depends on nothing FUSE and is testable without a mount
+- `internal/fuse/` — go-fuse binding: kernel types ⇄ `vfs` calls, error mapping
 - `internal/storage/s3/` — AWS S3 backend + pricing
 - `internal/cache/` — LRU + persistent + predictive cache
-- `internal/buffer/` — write buffering with compression
 - `internal/config/` — YAML + env configuration
 - `internal/circuit/` — circuit breaker
 - `internal/health/` — health monitoring
 - `internal/distributed/` — multi-node coordination (experimental)
 - `pkg/archive/` — archive format metadata (tar.zst, tar.gz, tar.bz2)
 - `pkg/types/` — core interfaces
+
+Test infrastructure:
+
+- `internal/testaws/` — the real S3 backend against an in-process [substrate](https://github.com/scttfrdmn/substrate) endpoint over real HTTP: no network, no credentials, no AWS account. Prefer this to a hand-written mock — a mock on the far side of a seam agrees with the caller by construction, which is why 32,680 lines of tests missed ~45 defects
+- `internal/difftest/` — differential oracle: one operation sequence run against ObjectFS and against the local OS filesystem, asserting they agree on reads, sizes, and durable bytes
 
 ## Related Projects
 

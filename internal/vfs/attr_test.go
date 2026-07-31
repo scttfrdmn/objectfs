@@ -645,3 +645,19 @@ func FuzzAttrFromMetadata(f *testing.F) {
 		}
 	})
 }
+
+// TestMetadataWarningsOnAValidOriginalSize covers the arm where the stored size parses and is
+// non-negative, so nothing is warned about.
+//
+// Worth a case of its own because the surrounding validator warns on both an unparseable value and a
+// negative one; without this, the accepting path is never taken and a regression that warned about
+// every well-formed object would pass.
+func TestMetadataWarningsOnAValidOriginalSize(t *testing.T) {
+	t.Parallel()
+
+	for _, size := range []string{"0", "1", "12000", "9007199254740992"} {
+		if warns := MetadataWarnings(map[string]string{metaOriginalSize: size}); len(warns) != 0 {
+			t.Errorf("original-size %q warned: %v", size, warns)
+		}
+	}
+}

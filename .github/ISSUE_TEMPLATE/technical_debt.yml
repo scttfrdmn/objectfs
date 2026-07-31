@@ -36,12 +36,11 @@ body:
     label: Component
     description: Which part of the codebase?
     options:
-    - Core (internal/core)
+    - POSIX Core (internal/vfs)
     - FUSE Layer (internal/fuse)
     - S3 Backend (internal/storage/s3)
     - Cache System (internal/cache)
-    - Write Buffer (internal/buffer)
-    - Metadata (internal/metadata)
+    - Test Harness (internal/testaws, internal/difftest)
     - Metrics (internal/metrics)
     - Health (internal/health)
     - Config (internal/config)

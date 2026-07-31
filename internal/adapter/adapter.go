@@ -7,13 +7,13 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/objectfs/objectfs/internal/buffer"
 	"github.com/objectfs/objectfs/internal/cache"
 	"github.com/objectfs/objectfs/internal/config"
 	"github.com/objectfs/objectfs/internal/fuse"
 	"github.com/objectfs/objectfs/internal/health"
 	"github.com/objectfs/objectfs/internal/metrics"
 	"github.com/objectfs/objectfs/internal/storage/s3"
+	"github.com/objectfs/objectfs/internal/vfs"
 )
 
 // Adapter represents the main ObjectFS adapter
@@ -25,10 +25,20 @@ type Adapter struct {
 	// Core components
 	backend     *s3.Backend
 	cache       *cache.MultiLevelCache
-	writeBuffer *buffer.WriteBuffer
+	writeBuffer *vfs.Writer
 	mountMgr    fuse.PlatformFileSystem
 	metrics     *metrics.Collector
 	monitor     *health.Monitor
+
+	// mountCtx bounds work that outlives the call that started it — a flush runs when the kernel
+	// decides to, which is typically long after Start has returned. Start's own ctx is the wrong
+	// lifetime for that: cmd/objectfs cancels it on shutdown before Stop finishes flushing.
+	//
+	// v0.10.0 hit this and worked around it by hardcoding context.Background() inside the flush
+	// callback (#100), which made a flush uncancelable — an unmount could not interrupt one, and a
+	// hung PUT hung the unmount.
+	mountCtx    context.Context
+	cancelMount context.CancelFunc
 
 	// Internal state
 	started    bool
@@ -135,28 +145,27 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 
-	// 4. Initialize write buffer.
-	// MaxBufferSize is the per-file buffer capacity; FlushThreshold triggers a
-	// proactive flush when the buffer reaches 75 % of capacity.
-	maxBufBytes := parseSize(a.config.WriteBuffer.MaxMemory)
-	writeBufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  maxBufBytes,
-		FlushThreshold: maxBufBytes * 3 / 4,
-		AsyncFlush:     true,
-		MaxWriteDelay:  a.config.WriteBuffer.FlushInterval,
-	}
+	// 4. Initialize the write path.
+	//
+	// vfs.Writer tracks dirty byte ranges per path and flushes by read-modify-write: fetch the parts
+	// of the object the pending writes do not cover, splice, then PUT the whole result. That is what
+	// makes an offset write mean "modify these bytes" rather than "replace the object".
+	//
+	// It replaces internal/buffer.WriteBuffer, whose flush callback took the offset and dropped it:
+	//
+	//	flushCallback := func(key string, data []byte, offset int64) error {
+	//	    return a.backend.PutObject(context.Background(), key, data)
+	//	}
+	//
+	// PutObject replaces the whole object, so appending one byte to a 1 MiB file left a 1-byte object
+	// and reported success. See internal/vfs for the other five defects that representation caused.
+	//
+	// The context is the mount's, not Start's: see the mountCtx field.
+	a.mountCtx, a.cancelMount = context.WithCancel(context.WithoutCancel(ctx))
 
-	// Create a simple flush callback that writes to S3.
-	// Use context.Background() rather than the Start() ctx: the flush
-	// callback runs asynchronously long after Start() returns, and the
-	// caller's ctx is typically canceled at that point (#100).
-	flushCallback := func(key string, data []byte, offset int64) error {
-		return a.backend.PutObject(context.Background(), key, data)
-	}
-
-	a.writeBuffer, err = buffer.NewWriteBuffer(writeBufferConfig, flushCallback)
+	a.writeBuffer, err = vfs.NewWriter(a.mountCtx, a.backend)
 	if err != nil {
-		return fmt.Errorf("failed to initialize write buffer: %w", err)
+		return fmt.Errorf("failed to initialize write path: %w", err)
 	}
 
 	// 5. Initialize platform-specific FUSE filesystem
@@ -269,19 +278,33 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 2. Flush write buffers
+	// 2. Flush the write path.
+	//
+	// This is the last point at which unflushed data can still be saved, so it runs with the caller's
+	// ctx — a shutdown that is given a deadline should honor it — and before the mount context is
+	// canceled. Closing the backend first, or canceling first, would turn every pending write into
+	// silent loss.
+	//
+	// Close flushes too, but FlushAllContext is called explicitly so the error is attributed to
+	// flushing rather than to closing, and so ctx is used rather than the mount's.
 	if a.writeBuffer != nil {
-		if err := a.writeBuffer.FlushAll(); err != nil {
-			slog.Error("error flushing write buffers", "error", err)
+		if err := a.writeBuffer.FlushAllContext(ctx); err != nil {
+			slog.Error("error flushing write path; data may not be durable", "error", err)
 			lastErr = err
 		}
 		if err := a.writeBuffer.Close(); err != nil {
-			slog.Error("error closing write buffer", "error", err)
+			slog.Error("error closing write path", "error", err)
 			lastErr = err
 		}
 	}
 
-	// 3. Close backend connections
+	// 3. Cancel the mount context, releasing anything still blocked on a backend call. Only after the
+	// flush above: canceling first would abort the flush it exists to permit.
+	if a.cancelMount != nil {
+		a.cancelMount()
+	}
+
+	// 4. Close backend connections
 	if a.backend != nil {
 		if err := a.backend.Close(); err != nil {
 			slog.Error("error closing backend", "error", err)
@@ -289,7 +312,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 4. Stop health monitor
+	// 5. Stop health monitor
 	if a.monitor != nil {
 		if err := a.monitor.Stop(); err != nil {
 			slog.Error("error stopping health monitor", "error", err)
@@ -297,12 +320,12 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 5. Clear cache
+	// 6. Clear cache
 	if a.cache != nil {
 		a.cache.Clear()
 	}
 
-	// 6. Stop metrics collection
+	// 7. Stop metrics collection
 	if a.metrics != nil {
 		if err := a.metrics.Stop(ctx); err != nil {
 			slog.Error("error stopping metrics collector", "error", err)

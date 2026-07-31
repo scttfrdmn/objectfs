@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/objectfs/objectfs/internal/buffer"
 	"github.com/objectfs/objectfs/internal/cache"
 	"github.com/objectfs/objectfs/internal/fuse"
 	"github.com/objectfs/objectfs/internal/metrics"
+	"github.com/objectfs/objectfs/internal/vfs"
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
@@ -158,19 +158,7 @@ func TestFUSEOptimizations(t *testing.T) {
 	mlCache, err := cache.NewMultiLevelCache(cacheConfig)
 	require.NoError(t, err)
 
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  1024 * 1024,
-		FlushThreshold: 64 * 1024,
-		AsyncFlush:     false, // Synchronous for testing
-	}
-
-	var flushedData sync.Map
-	flushCallback := func(key string, data []byte, offset int64) error {
-		flushedData.Store(key, data)
-		return backend.PutObject(context.Background(), key, data)
-	}
-
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, flushCallback)
+	writeBuffer, err := vfs.NewWriter(context.Background(), backend)
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
@@ -346,17 +334,7 @@ func TestFUSEFileOperations(t *testing.T) {
 	mlCache, err := cache.NewMultiLevelCache(cacheConfig)
 	require.NoError(t, err)
 
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  512 * 1024,
-		FlushThreshold: 32 * 1024,
-		AsyncFlush:     false,
-	}
-
-	flushCallback := func(key string, data []byte, offset int64) error {
-		return backend.PutObject(context.Background(), key, data)
-	}
-
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, flushCallback)
+	writeBuffer, err := vfs.NewWriter(context.Background(), backend)
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
@@ -435,15 +413,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		},
 	})
 
-	writeBuffer, _ := buffer.NewWriteBuffer(&buffer.WriteBufferConfig{
-		MaxBufferSize:  10 * 1024 * 1024, // 10MB buffer
-		FlushThreshold: 1024 * 1024,      // 1MB threshold
-		MaxBuffers:     1000,             // More buffers
-		AsyncFlush:     false,
-	}, func(key string, data []byte, offset int64) error {
-		return backend.PutObject(context.Background(), key, data)
-	})
-
+	writeBuffer, _ := vfs.NewWriter(context.Background(), backend)
 	defer func() { _ = writeBuffer.Close() }()
 
 	collector, _ := metrics.NewCollector(&metrics.Config{Enabled: false})
