@@ -33,11 +33,15 @@ write_buffer:
   flush_interval: 30s              # Automatic flush interval
   max_buffers: 1000               # Maximum number of write buffers
   max_memory: 512MB               # Maximum memory for write buffers
+  # Transparent object compression. Off by default, and worth understanding before
+  # turning on: a compressed object is an opaque frame to `aws s3 cp`, boto3, and
+  # every other S3 client, and a ranged read of one must fetch the whole object
+  # because a compression frame cannot be sliced.
   compression:
-    enabled: true                  # Enable compression for write buffers
-    min_size: 1KB                 # Minimum size to compress
-    algorithm: gzip               # gzip, lz4, zstd
-    level: 6                      # Compression level (1-9)
+    enabled: false                # Enable transparent compression
+    min_size: 4KB                 # Objects smaller than this are stored as-is
+    algorithm: zstd               # none, zstd, lz4, gzip
+    level: 3                      # zstd accepts 0-22, gzip 0-9; 0 = codec default
 
 # Network configuration
 network:

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/objectfs/objectfs/internal/compression"
 	"github.com/objectfs/objectfs/pkg/utils"
 	"gopkg.in/yaml.v2"
 )
@@ -356,11 +357,19 @@ func NewDefault() *Configuration {
 			FlushInterval: 30 * time.Second,
 			MaxBuffers:    1000,
 			MaxMemory:     "512MB",
+			// Compression is off by default. It is a storage-format decision, not a performance
+			// knob: a compressed object is an opaque frame to `aws s3 cp`, boto3, and every other
+			// S3 client, so enabling it by default would silently revoke the "my data is just
+			// objects in S3" property that most users assume. It also makes a ranged read fetch the
+			// whole object, since a zstd frame cannot be sliced. Opt in when the tradeoff is wanted.
+			//
+			// The algorithm is named even though compression is disabled, so that flipping Enabled
+			// to true does not also have to supply an algorithm.
 			Compression: CompressionConfig{
-				Enabled:   true,
-				MinSize:   "1KB",
-				Algorithm: "gzip",
-				Level:     6,
+				Enabled:   false,
+				MinSize:   "4KB",
+				Algorithm: "zstd",
+				Level:     3,
 			},
 		},
 		Network: NetworkConfig{
@@ -662,6 +671,43 @@ func (c *Configuration) Validate() error {
 	// Validate read-ahead configuration
 	if err := c.validateReadAheadConfig(); err != nil {
 		return fmt.Errorf("read_ahead configuration invalid: %w", err)
+	}
+
+	if err := validateCompressionConfig(c.WriteBuffer.Compression); err != nil {
+		return fmt.Errorf("write_buffer.compression configuration invalid: %w", err)
+	}
+
+	return nil
+}
+
+// validateCompressionConfig rejects a compression configuration no codec can be built from.
+//
+// This check is the seam that produced the worst defect in v0.10.0. The algorithm was defaulted to
+// "gzip" here, pkg/compression declared AlgorithmGzip, internal/storage/s3's config comment listed
+// it, and two shipped example config files set it — while internal/compression's codec factory had
+// no gzip case. Every layer that read config agreed the value was valid, so the disagreement only
+// surfaced inside NewBackend, by which point the user had asked for a mount and got
+// "Failed to start adapter" with no indication which setting was at fault.
+//
+// It validates by *building the codec* rather than by comparing against a list of names. A list here
+// would be a second authority, free to drift from the factory exactly as the first one did, and it
+// could not catch a level that is out of range for the chosen algorithm at all — zstd accepts 0-22
+// and gzip only 0-9, so "level: 12" is valid for one and not the other. Construction is cheap and it
+// is the same call the backend will make.
+func validateCompressionConfig(cfg CompressionConfig) error {
+	if !cfg.Enabled {
+		// A disabled block is not consulted, and rejecting a stale algorithm in it would refuse to
+		// start over a setting that has no effect.
+		return nil
+	}
+
+	if _, err := compression.NewCompressor(compression.Settings{
+		Enabled:   true,
+		Algorithm: cfg.Algorithm,
+		Level:     cfg.Level,
+		MinSize:   cfg.MinSize,
+	}); err != nil {
+		return err
 	}
 
 	return nil

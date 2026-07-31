@@ -66,10 +66,14 @@ type Config struct {
 type CompressionConfig struct {
 	// Enabled turns transparent S3 compression on or off.
 	Enabled bool `yaml:"enabled"`
-	// Algorithm selects the codec: "zstd" (recommended), "gzip", "none".
+	// Algorithm selects the codec: "none", "zstd" (recommended), "lz4", or "gzip".
+	// The authoritative list is pkg/compression.SupportedAlgorithms; this comment
+	// is a convenience, and a value it disagrees with is a bug in the comment.
 	Algorithm string `yaml:"algorithm"`
-	// Level is the codec-specific compression level (0 = built-in default).
-	// For ZSTD: 1 = fastest, 22 = best compression; 3 is a good default.
+	// Level is the codec-specific compression level (0 = the codec's default).
+	// The valid range differs per algorithm: zstd accepts 0-22 (3 is a good
+	// default), gzip only 0-9. A level valid for one is often invalid for the
+	// other, so changing Algorithm may require changing Level.
 	Level int `yaml:"level"`
 	// MinSize is the minimum object size to compress (e.g. "4KB").
 	// Objects smaller than MinSize are stored uncompressed.

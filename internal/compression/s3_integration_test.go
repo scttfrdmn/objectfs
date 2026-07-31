@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/config"
 	comprpkg "github.com/objectfs/objectfs/pkg/compression"
 )
 
-func makeConfig(enabled bool, algo, minSize string, level int) config.CompressionConfig {
-	return config.CompressionConfig{
+func makeConfig(enabled bool, algo, minSize string, level int) Settings {
+	return Settings{
 		Enabled:   enabled,
 		Algorithm: algo,
 		MinSize:   minSize,

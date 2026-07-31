@@ -21,7 +21,6 @@ import (
 
 	"github.com/objectfs/objectfs/internal/circuit"
 	"github.com/objectfs/objectfs/internal/compression"
-	internalcfg "github.com/objectfs/objectfs/internal/config"
 	"github.com/objectfs/objectfs/pkg/errors"
 	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/retry"
@@ -145,7 +144,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	backend.multipartManager = NewMultipartStateManager()
 
 	// Initialize transparent compression
-	compressor, err := compression.NewCompressor(internalcfg.CompressionConfig{
+	compressor, err := compression.NewCompressor(compression.Settings{
 		Enabled:   cfg.Compression.Enabled,
 		Algorithm: cfg.Compression.Algorithm,
 		Level:     cfg.Compression.Level,
