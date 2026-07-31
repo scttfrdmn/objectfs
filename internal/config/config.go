@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -467,7 +468,31 @@ func NewDefault() *Configuration {
 	}
 }
 
-// LoadFromFile loads configuration from a YAML file
+// LoadFromFile loads configuration from a YAML file.
+//
+// Decoding is strict: a key the schema does not define is an error, not a silent omission. This
+// is audit finding P-10, and it is a deliberate breaking change from v0.10.0 and earlier.
+//
+// What non-strict decoding cost. `configs/example.yaml` — the file the README told users to copy
+// and the file scripts/postinstall.sh installed as /etc/objectfs/config.yaml — was 162 lines of
+// commented settings of which, measured against NewDefault, exactly *one* field differed from the
+// built-in default, and nothing read that field. It opened with a top-level `s3:` block where the
+// schema has `storage.s3`, so `region: us-west-2` loaded as `us-east-1`. Every one of its
+// `mount:`, `buffer:`, `compression:`, `metrics:`, `health:`, `logging:`, `archive:` and `cost:`
+// blocks was discarded in silence. That is also why the compression block documented `enable`,
+// `zstd_level` and `min_file_size` against the real `enabled`, `level` and `min_size` and nobody
+// noticed for four releases: the whole block was already being thrown away, so correcting the
+// names would not have changed the behavior either.
+//
+// A config file that is rejected costs a user a minute. A config file that is ignored lets them
+// believe they configured a 100 GB cache in us-west-2 while running a 1 GB cache in us-east-1,
+// and nothing anywhere will ever tell them otherwise. For a filesystem whose first job is to be
+// trusted with data, the second failure mode is not acceptable and the first one is.
+//
+// The migration cost is real and it is bounded: a deployment whose config has a key this schema
+// does not define was already not getting that setting, so nothing it relied on stops working —
+// it starts being told. The error names the offending key and line, and this method appends the
+// schema's top-level keys so the fix does not require reading the source.
 func (c *Configuration) LoadFromFile(filename string) error {
 	// Validate file path to prevent directory traversal
 	if err := utils.ValidatePath(filename, true); err != nil {
@@ -480,11 +505,54 @@ func (c *Configuration) LoadFromFile(filename string) error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Two passes, and they are not redundant.
+	//
+	// The first decodes into a zero-valued Configuration for the sole purpose of checking that
+	// every key in the document is a key the schema defines. The second does the actual load,
+	// overlaying the document onto the defaults already in c.
+	//
+	// One strict pass directly into c does not work, and the reason is worth recording because the
+	// obvious simplification reintroduces a bug. yaml.v2's strict mode reports "key already set in
+	// map" when a document assigns a map key that is already present in the destination map — and
+	// c arrives here holding NewDefault's values, which include
+	// monitoring.metrics.custom_labels: {service: objectfs}. A user adding their own label, or
+	// overriding that one, would be told their file has a duplicate key. Decoding the strict pass
+	// into a fresh value means no map is pre-populated, so the only duplicate keys it can report
+	// are duplicates genuinely written in the document, which is a real mistake and worth
+	// rejecting.
+	var schemaCheck Configuration
+	if err := yaml.UnmarshalStrict(data, &schemaCheck); err != nil {
+		return fmt.Errorf("failed to parse config file %s: %w\n\nthe top-level keys this "+
+			"version accepts are: %s\nsee examples/config.yaml for the full schema",
+			cleanPath, err, strings.Join(TopLevelKeys(), ", "))
+	}
+
 	if err := yaml.Unmarshal(data, c); err != nil {
-		return fmt.Errorf("failed to parse config file: %w", err)
+		return fmt.Errorf("failed to parse config file %s: %w", cleanPath, err)
 	}
 
 	return nil
+}
+
+// TopLevelKeys reports the YAML keys [Configuration] accepts, read from the struct tags.
+//
+// Read by reflection rather than written out, so it cannot fall out of step with the schema the
+// way a hand-maintained list would — which is the same class of drift that produced P-10.
+func TopLevelKeys() []string {
+	t := reflect.TypeFor[Configuration]()
+
+	keys := make([]string, 0, t.NumField())
+
+	for field := range t.Fields() {
+		tag := field.Tag.Get("yaml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+
+		keys = append(keys, strings.Split(tag, ",")[0])
+	}
+
+	return keys
 }
 
 // envMapping defines environment variable mappings and setters

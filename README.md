@@ -94,16 +94,12 @@ grep "ATCG" /mnt/s3/samples/*.fasta  # Streaming search without full download
 cp /mnt/s3/results/*.vcf ./analysis/ # Intelligent tier selection for outputs
 ```
 
-#### **💰 Enterprise Cost Intelligence**
+#### **💰 Cost Estimation**
 
-```yaml
-# Institutional discount configuration
-pricing_config:
-  discount_config_file: "/shared/university-aws-discounts.yaml"  # IT-managed
-  cost_optimization:
-    enabled: true
-    auto_tier_transition: true  # Automatic Standard -> IA -> Archive progression
-```
+Storage-cost estimates use a built-in rate table, and an institution with negotiated rates can
+supply its own discount table. This is configured through the Go SDK's `s3.Config`, not through
+the mount configuration file — see [Enterprise Configuration](#enterprise-configuration) below
+for what is and is not reachable from YAML.
 
 #### **📊 Real-World Performance**
 
@@ -169,8 +165,10 @@ go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 
 ```bash
 # Create configuration
-cp examples/config.yaml ~/.objectfs/config.yaml
-# Edit config.yaml with your AWS credentials and S3 bucket
+cp configs/example.yaml ~/.objectfs/config.yaml
+# Edit config.yaml with your region and cache sizing. Credentials do not go in this
+# file — ObjectFS uses the standard AWS credential chain (AWS_PROFILE, environment
+# variables, the shared credentials file, or an instance role).
 
 # Mount S3 bucket as local filesystem
 ./objectfs mount --config ~/.objectfs/config.yaml --mount-point /mnt/s3-data
@@ -183,25 +181,27 @@ cat /mnt/s3-data/remote-file.txt
 
 ### Enterprise Configuration
 
-For institutions with AWS Enterprise Agreements:
+For institutions with AWS Enterprise Agreements, ObjectFS can price storage against a negotiated
+rate table instead of public list prices.
 
-```yaml
-backends:
-  s3:
-    bucket: "your-enterprise-bucket"
-    region: "us-west-2"
+**This is reachable from the Go SDK only, not from the mount configuration file.** The discount
+table lives on `s3.Config.PricingConfig`, and the mount path does not map it — so a
+`pricing_config:` block in `/etc/objectfs/config.yaml` is not a setting ObjectFS has, and is now
+rejected at startup rather than silently ignored.
 
-    # Reference external discount configuration distributed by IT
-    pricing_config:
-      discount_config_file: "/shared/aws/institutional-discounts.yaml"
-
-    # Intelligent cost optimization
-    cost_optimization:
-      enabled: true
-      cost_threshold: 0.01  # $0.01 minimum for optimization recommendations
+```go
+backend, err := s3.NewBackend(ctx, "your-enterprise-bucket", &s3.Config{
+	Region: "us-west-2",
+	PricingConfig: s3.PricingConfig{
+		// Distributed by IT; see examples/discount-config.yaml for the format.
+		DiscountConfigFile: "/shared/aws/institutional-discounts.yaml",
+	},
+})
 ```
 
-See [examples/DISCOUNT_CONFIG_README.md](examples/DISCOUNT_CONFIG_README.md) for complete institutional setup guide.
+Cost figures are estimates for planning, not billing. See
+[examples/DISCOUNT_CONFIG_README.md](examples/DISCOUNT_CONFIG_README.md) for the discount table
+format.
 
 ---
 
@@ -320,34 +320,50 @@ ObjectFS delivers exceptional performance for S3-based workloads:
 
 ## 🛠 Configuration
 
-ObjectFS supports comprehensive configuration for various deployment scenarios:
+ObjectFS starts from its built-in defaults, so a config file need only contain what it overrides.
+The bucket is not a config key — it comes from the `s3://bucket` command-line argument.
 
-### Basic Research Setup
-
-```yaml
-backends:
-  s3:
-    bucket: "research-data"
-    region: "us-east-1"
-    storage_tier: "STANDARD"
-```
-
-### Enterprise Cost Optimization
+### Basic research setup
 
 ```yaml
-backends:
+storage:
   s3:
-    pricing_config:
-      discount_config_file: "enterprise-discounts.yaml"
-      use_pricing_api: true
+    region: us-west-2
 
-    cost_optimization:
-      enabled: true
-      monitor_access_patterns: true
-      optimization_interval: "24h"
+performance:
+  cache_size: 8GB
+  max_concurrency: 150
 ```
 
-See [examples/config.yaml](examples/config.yaml) for complete configuration options.
+### Large sequential reads, buffered writes
+
+```yaml
+storage:
+  s3:
+    region: us-west-2
+
+performance:
+  cache_size: 32GB
+  connection_pool_size: 32
+
+cache:
+  ttl: 15m
+  persistent_cache:
+    enabled: true
+    directory: /var/cache/objectfs
+    max_size: 200GB
+
+write_buffer:
+  flush_interval: 30s
+  max_memory: 2GB
+```
+
+Two config files ship with ObjectFS, and they have different jobs:
+
+- [`configs/example.yaml`](configs/example.yaml) — a short, copyable starting point. Every key in it has an effect.
+- [`examples/config.yaml`](examples/config.yaml) — the complete schema: every key ObjectFS accepts, at its default value. Keys that parse and validate but are not yet read on the mount path are marked `not yet wired`, so this file is also the honest inventory of what is and is not implemented.
+
+A key the schema does not define is rejected at startup with the key named, rather than silently ignored.
 
 ---
 

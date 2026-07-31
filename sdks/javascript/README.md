@@ -387,35 +387,39 @@ try {
 
 ### Configuration File
 
+The config file is YAML with `snake_case` keys — the JavaScript API is camelCase, the file is not,
+and a camelCase key in the file is rejected at startup with the key named.
+
 ```yaml
 # objectfs.yaml
 global:
-  logLevel: INFO
-  logFile: /var/log/objectfs.log
+  log_level: INFO
+  log_file: /var/log/objectfs.log
 
 storage:
   s3:
     region: us-east-1
-    useAcceleration: true
-    costOptimization:
-      enabled: true
-      tieringEnabled: true
+    use_acceleration: true
 
 performance:
-  cacheSize: 8GB
-  maxConcurrency: 500
-  multilevelCaching: true
+  cache_size: 8GB
+  max_concurrency: 500
 
-cluster:
-  enabled: false
-  replicationFactor: 3
-  consistencyLevel: eventual
+cache:
+  ttl: 5m
+  eviction_policy: weighted_lru
 
 monitoring:
-  enabled: true
-  metricsAddr: ':9090'
-  healthCheckAddr: ':8081'
+  metrics:
+    enabled: true
+    prometheus: true
+  health_checks:
+    enabled: true
+    interval: 30s
 ```
+
+See [`examples/config.yaml`](../../examples/config.yaml) for the complete schema, including which
+keys are not yet read on the mount path.
 
 ### Environment Variables
 

@@ -172,20 +172,26 @@ objectfs mount s3://my-bucket /mnt/objectfs \
 
 ```yaml
 # /etc/objectfs/config.yaml
-s3:
-  bucket: my-research-data
-  region: us-west-2
-  endpoint: https://s3.amazonaws.com
+storage:
+  s3:
+    region: us-west-2
 
 cache:
-  type: persistent
-  max_size: 100GB
-  path: /var/cache/objectfs
+  ttl: 5m
+  persistent_cache:
+    enabled: true
+    directory: /var/cache/objectfs
+    max_size: 100GB
 
 performance:
-  enable_bbr: true
-  worker_pool_size: 10
+  cache_size: 8GB
+  max_concurrency: 150
+  connection_pool_size: 16
 ```
+
+The bucket is not a config key — it comes from the `s3://bucket` argument. A key the schema does
+not define is rejected at startup with the key named, so a typo cannot silently leave you on the
+defaults.
 
 ---
 

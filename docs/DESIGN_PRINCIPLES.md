@@ -180,9 +180,11 @@ s3.PutObject(key, data)
 **Good**: Documented configuration with validation
 ```yaml
 cache:
-  type: persistent  # Options: lru, persistent, predictive
-  max_size: 100GB   # Validates: must be > 0
-  path: /var/cache/objectfs
+  eviction_policy: weighted_lru   # Options: lru, lfu, weighted_lru
+  persistent_cache:
+    enabled: true
+    max_size: 100GB               # Validated: must parse as a size
+    directory: /var/cache/objectfs
 ```
 
 **Bad**: Hard-coded values or undocumented options

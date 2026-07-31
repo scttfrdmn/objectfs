@@ -328,7 +328,7 @@ func TestSaveToFile(t *testing.T) {
 	}
 
 	// Verify file exists
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+	if _, statErr := os.Stat(configFile); os.IsNotExist(statErr) {
 		t.Error("Config file was not created")
 	}
 
@@ -358,7 +358,7 @@ func TestSaveToFileCreateDirectory(t *testing.T) {
 	}
 
 	// Verify file exists
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+	if _, statErr := os.Stat(configFile); os.IsNotExist(statErr) {
 		t.Error("Config file was not created")
 	}
 

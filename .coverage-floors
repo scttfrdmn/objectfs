@@ -1,0 +1,71 @@
+# Per-package statement-coverage floors, enforced by scripts/coverage-gate.sh in CI.
+#
+# Each floor is that package's measured coverage rounded down to the nearest whole percent, so
+# this file is green on the commit that introduces it. That is the point: a gate set above where
+# the code is gets weakened until it passes, and a gate set at one number across a repo with a
+# real spread has to sit at the floor of the worst package, at which point it gates nothing.
+#
+# Every line is a ratchet. Raising a floor is a deliberate act. Lowering one has to be defended
+# in a diff, which is the only property that makes this file worth having — the alternative is a
+# coverage number that drifts down a percent at a time and is never anyone's fault.
+#
+# CLAUDE.md's target is 80%+ per package. Sixteen of the thirty-five packages below are already
+# there. The gap is concentrated in the packages the refactor is about to rewrite, which is where
+# raising a floor before the rewrite would buy tests of code that is being deleted:
+#
+#   internal/fuse       24.1%  — becomes a thin shim over internal/vfs (task #22)
+#   internal/adapter    45.7%  — the write path is being rebuilt around dirty ranges (task #20)
+#   internal/health     45.0%  — reachable now that pkg/health's probe path exists
+#   pkg/errors          48.3%  — mostly classification tables; needs table tests, not design work
+#
+# Floors are deliberately absent for four packages with no test files at all. A floor of 0% reads
+# as a target rather than as an absence, and the gate names unlisted packages in every run so the
+# omission stays visible instead of looking like a decision:
+#
+#   cmd/objectfs        no tests — argument parsing and signal handling, currently untestable
+#                       because main() calls log.Fatalf directly
+#   pkg/archive         no tests — metadata types; dead code pending a decision (Part 4)
+#   pkg/compression     no tests in this package; its constants and SupportedAlgorithms list are
+#                       exercised from internal/compression, which is at 87.3%
+#   sdks/c              no tests — cgo shim, not reachable from `go test`
+
+internal/analytics       96
+internal/archive         90
+internal/awsname         100
+internal/buffer          81
+internal/cache           74
+internal/cache/redis     87
+internal/circuit         96
+internal/compression     87
+internal/config          83
+internal/cost            98
+internal/difftest        75
+internal/distributed     67
+internal/filesystem      88
+internal/fuse            24
+internal/health          45
+internal/metrics         79
+internal/network         100
+internal/storage/s3      71
+internal/testaws         57
+internal/vfs             98
+
+# internal/adapter is the one package whose floor is set below the current measurement on purpose.
+# Its coverage moves with which S3-backed tests the harness can run, and the write-path rebuild
+# will churn it substantially; 40 is the level below which it has genuinely regressed.
+internal/adapter         40
+
+pkg/api                  73
+pkg/errors               48
+pkg/health               93
+pkg/memmon               51
+pkg/profiling            75
+pkg/recovery             86
+pkg/retry                87
+pkg/status               93
+pkg/utils                81
+
+# sdks/go/objectfs measures 54.1% with AWS credentials present and 43.5% without, because several
+# of its tests call requireAWS and skip. CI has no credentials, so the floor is set for the
+# skipping case — the higher number is not something CI can hold it to.
+sdks/go/objectfs         43

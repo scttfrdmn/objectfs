@@ -287,9 +287,9 @@ func TestConcurrentProbesAdmitOne(t *testing.T) {
 	}
 }
 
-// TestProbeDisabledKeepsOldBehaviour documents that ProbeAfter <= 0 opts out. A deployment that wants
+// TestProbeDisabledKeepsOldBehavior documents that ProbeAfter <= 0 opts out. A deployment that wants
 // a component to stay down until something else intervenes can have that, explicitly.
-func TestProbeDisabledKeepsOldBehaviour(t *testing.T) {
+func TestProbeDisabledKeepsOldBehavior(t *testing.T) {
 	t.Parallel()
 
 	cfg := DefaultConfig()

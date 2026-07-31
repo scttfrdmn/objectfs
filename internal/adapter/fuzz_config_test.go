@@ -37,9 +37,12 @@ import (
 // mount and the error surfaces without attribution.
 //
 // It goes through YAML rather than constructing a Configuration literal, because the loader is part
-// of the seam. LoadFromFile uses non-strict unmarshalling (audit finding P-10), so a key with a typo
-// silently keeps its default — and a target that built the struct directly would test a path no user
-// takes.
+// of the seam, and it was a load-bearing part of it: before v0.10.1 LoadFromFile decoded
+// non-strictly, so a key with a typo silently kept its default (audit finding P-10). A target that
+// built the struct directly would test a path no user takes. The loader is strict now, which moves
+// most of the fuzzer's mutations from "silently ignored" to "rejected with the key named" — a
+// better outcome, and one that shifts where this target does its work: the interesting inputs are
+// now documents whose keys are all real and whose *values* disagree between layers.
 func FuzzConfigConstructsBackend(f *testing.F) {
 	// One endpoint and one bucket for the whole run. Both are supplied *after* buildS3Config, for
 	// the reason given in overrideTransport: an unreachable endpoint is a network fact, and this
@@ -73,7 +76,9 @@ func FuzzConfigConstructsBackend(f *testing.F) {
 		}
 
 		if err := cfg.LoadFromFile(path); err != nil {
-			// Malformed YAML is the loader's to reject, and it did.
+			// Malformed YAML, or a key the schema does not define, is the loader's to reject, and it
+			// did. Both are the desired outcome: the property under test is that whatever survives
+			// the loader and Validate can be built into a backend, not that everything survives.
 			return
 		}
 
@@ -219,6 +224,17 @@ var configSeeds = []struct {
 	name string
 	why  string
 	yaml string
+
+	// rejectedByLoader marks a seed the loader is expected to refuse outright, rather than one that
+	// loads and then reaches Validate or NewBackend.
+	//
+	// It exists for exactly one seed and the distinction is the point of that seed. Since v0.10.1
+	// LoadFromFile decodes strictly, so a document with a key the schema does not define is an
+	// error — and being refused is the *desired* outcome, not a broken seed. Keeping it in the
+	// corpus means the fuzzer starts from a document that reaches the strict-decoding path, and
+	// keeping the flag means the corpus guard below asserts which behavior is expected instead of
+	// accepting either.
+	rejectedByLoader bool
 }{
 	{
 		name: "empty",
@@ -316,8 +332,9 @@ global:
 `,
 	},
 	{
-		name: "a key that does not exist",
-		why:  "P-10: non-strict unmarshalling accepts it silently, which is itself worth pinning",
+		name:             "a key that does not exist",
+		why:              "P-10: this exact document was silently accepted before v0.10.1, setting nothing",
+		rejectedByLoader: true,
 		yaml: `write_buffer:
   compression:
     enable: true
@@ -353,7 +370,24 @@ func TestConfigSeedsLoadAsTheShapesTheyClaim(t *testing.T) {
 				t.Fatalf("write: %v", err)
 			}
 
-			if err := cfg.LoadFromFile(path); err != nil {
+			err := cfg.LoadFromFile(path)
+
+			if tc.rejectedByLoader {
+				if err == nil {
+					t.Fatalf("the loader accepted this, and the seed exists to assert it does "+
+						"not: %s", tc.why)
+				}
+
+				// The message has to name what is wrong. "failed to parse config file" alone sends
+				// a user to look for a syntax error in a file whose syntax is fine.
+				if !strings.Contains(err.Error(), "not found in type") {
+					t.Errorf("rejected, but without naming the offending key: %v", err)
+				}
+
+				return
+			}
+
+			if err != nil {
 				t.Fatalf("does not parse, so it exercises the YAML library rather than "+
 					"ObjectFS: %v\n%s", err, tc.why)
 			}

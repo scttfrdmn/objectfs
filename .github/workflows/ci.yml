@@ -8,37 +8,232 @@ on:
 
 permissions:
   contents: read
-  security-events: write
+
+# A new push to a PR makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Sourced from go.mod so this file cannot drift from the version the module declares. The
+  # previous configuration pinned 1.24.x against a `go 1.26.0` directive, which builds only
+  # because setup-go silently installs a newer toolchain — so CI was not testing the version it
+  # claimed to.
+  GO_VERSION_FILE: go.mod
 
 jobs:
+  # ---------------------------------------------------------------------------------------------
+  # test — the full suite with the race detector, not -short.
+  #
+  # The previous configuration ran `go test -race -short ./...`, and -short is what the harness
+  # uses to skip everything that needs an S3 endpoint. So the one job that was supposed to be the
+  # gate skipped the tests covering the subsystem where every proven data-loss defect lived.
+  # ---------------------------------------------------------------------------------------------
   test:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.24.x
-        cache: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
 
-    - name: Run tests
-      run: go test -race -short ./...
+      - name: Build
+        run: go build ./...
 
+      - name: Vet
+        run: go vet ./...
+
+      # The full suite. Every test that needs an S3 endpoint gets one in-process from substrate,
+      # so this needs no credentials and reaches no network.
+      - name: Test
+        run: go test -race -timeout 20m ./...
+
+  # ---------------------------------------------------------------------------------------------
+  # coverage — a floor per package, ratcheting toward 80%.
+  #
+  # Per-package rather than repo-wide, because a repo-wide number lets a well-tested package pay
+  # for an untested one: the repo sits at 69.3% overall while internal/fuse is at 24.1%, and the
+  # overall figure is the one that looks fine.
+  #
+  # The floors below are each package's measured coverage rounded down, so this gate starts
+  # green and can only be tightened. Raising one is a deliberate act; lowering one has to be
+  # justified in a diff. Packages absent from the list have no floor yet.
+  # ---------------------------------------------------------------------------------------------
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Measure per-package coverage
+        run: go test -covermode=atomic -coverprofile=coverage.out -timeout 20m ./...
+
+      - name: Enforce per-package floors
+        run: ./scripts/coverage-gate.sh coverage.out .coverage-floors
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.out
+
+  # ---------------------------------------------------------------------------------------------
+  # lint — golangci-lint against the config in this repo.
+  #
+  # --new-from-merge-base, deliberately. The repo has ~800 findings under this configuration, most
+  # of them pre-existing and many in code the refactor is about to replace; blocking every PR on
+  # all of them would mean the config gets weakened until it passes, which is how a lint gate
+  # becomes decorative. This gates *new* code at the full configuration and leaves the backlog to
+  # be drawn down deliberately. The whole-repo number is reported below so it stays visible.
+  # ---------------------------------------------------------------------------------------------
   lint:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          # golangci-lint needs the merge base to diff against, which a shallow clone does not have.
+          fetch-depth: 0
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.24.x
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
 
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v4
-      with:
-        version: latest
-        args: --timeout=5m
+      - name: Verify the lint configuration parses
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+          args: config verify
+
+      - name: Lint changed code (blocking)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+          args: --new-from-merge-base=origin/${{ github.base_ref || 'main' }} --timeout=10m
+
+      - name: Whole-repo finding count (informational)
+        if: always()
+        run: |
+          # Not a gate. It is here so the backlog has a number attached to it in every run,
+          # rather than being a thing everyone knows is large and nobody can quantify.
+          golangci-lint run --timeout=10m ./... 2>&1 | tail -30 || true
+
+  # ---------------------------------------------------------------------------------------------
+  # fuzz-smoke — 60 seconds per target, from the committed corpus outward.
+  #
+  # The corpora are committed and the ordinary `go test` run replays them, so this job is not
+  # about regression: it is about finding the *next* defect. Three of the eight targets found a
+  # real shipped defect within seconds of first being run, so a minute each is not a token
+  # gesture.
+  #
+  # Each target is named explicitly rather than discovered, because `-run Fuzz -fuzz .` cannot
+  # fuzz more than one target per invocation, and a loop that silently fuzzes only the first
+  # match would look like coverage.
+  # ---------------------------------------------------------------------------------------------
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {pkg: ./internal/vfs, target: FuzzExtentList}
+          - {pkg: ./internal/vfs, target: FuzzAttrFromMetadata}
+          - {pkg: ./internal/vfs, target: FuzzNodeLifecycle}
+          - {pkg: ./internal/difftest, target: FuzzOperationSequence}
+          - {pkg: ./internal/adapter, target: FuzzConfigConstructsBackend}
+          - {pkg: ./internal/storage/s3, target: FuzzRoundTrip}
+          - {pkg: ./internal/storage/s3, target: FuzzSliceRange}
+          - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
+          - {pkg: ./internal/awsname, target: FuzzValidateRegion}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Fuzz ${{ matrix.target }}
+        run: go test ${{ matrix.pkg }} -run '^${{ matrix.target }}$' -fuzz '^${{ matrix.target }}$' -fuzztime=60s
+
+      # A counterexample is the whole point of the job, so it has to leave the machine.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: |
+            **/testdata/fuzz/**
+
+  # ---------------------------------------------------------------------------------------------
+  # cross-build — must fail, not warn.
+  #
+  # The Makefile's cgofuse cross-build targets ended in `|| echo "Failed..."`, so a broken target
+  # produced a green build and a line of log nobody read. Windows is deliberately absent: there is
+  # no Windows FUSE binding, and a binary that cannot mount anything is not a supported target.
+  # internal/fuse carries a build constraint that makes any other GOOS fail with a message naming
+  # the reason.
+  # ---------------------------------------------------------------------------------------------
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./cmd/objectfs
+
+  # ---------------------------------------------------------------------------------------------
+  # config-examples — every config file this repository publishes, in a file or in a doc, must
+  # load against the schema and must actually change something.
+  #
+  # configs/example.yaml — the file the README told users to copy, and the file postinstall.sh
+  # installs as /etc/objectfs/config.yaml — was 162 lines of which exactly one field differed from
+  # the built-in defaults, and nothing read that field. It opened with a top-level `s3:` block
+  # where the schema has `storage.s3`, so `region: us-west-2` loaded as `us-east-1`. That is also
+  # why its compression block documented `enable`/`zstd_level`/`min_file_size` against the real
+  # `enabled`/`level`/`min_size` and nobody noticed: the whole block was already inert, so
+  # correcting the names would not have changed the behavior either.
+  #
+  # This job is its own job rather than a line in the test suite because it is the check whose
+  # failure a reviewer most needs named. The loader is strict now, so a shipped file with an
+  # unknown key fails; the effect assertion additionally fails a file that parses cleanly and
+  # leaves every value at its default, which strict decoding cannot see; and the documentation
+  # check extends both to every YAML block in every markdown file, because a block captioned
+  # `# /etc/objectfs/config.yaml` is a file a user will copy too.
+  # ---------------------------------------------------------------------------------------------
+  config-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Load and validate every shipped and documented config
+        run: |
+          go test ./internal/config/ -v \
+            -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'
