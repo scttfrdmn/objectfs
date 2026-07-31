@@ -307,7 +307,7 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	// 2,621,440x amplification. Compressed objects are the rare case and are the only ones that pay.
 	fetchOffset, fetchSize := offset, size
 
-	data, contentEncoding, objectMeta, err := b.getObjectRange(ctx, key, fetchOffset, fetchSize)
+	read, err := b.getObjectRange(ctx, key, fetchOffset, fetchSize)
 
 	// A ranged read has two ways of landing on a compressed object, and both mean the same thing: the
 	// range was applied to the *stored* bytes when the caller meant the *decoded* ones. A zstd or
@@ -328,12 +328,12 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	ranged := fetchOffset > 0 || fetchSize > 0
 
 	switch {
-	case ranged && err == nil && contentEncoding != "":
+	case ranged && err == nil && read.contentEncoding != "":
 		fetchOffset, fetchSize = 0, 0
-		data, contentEncoding, objectMeta, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
+		read, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
 
 		b.logger.Debug("Re-fetched whole object: a ranged read cannot slice an encoded body",
-			"key", key, "content_encoding", contentEncoding, "offset", offset, "size", size)
+			"key", key, "content_encoding", read.contentEncoding, "offset", offset, "size", size)
 
 	case ranged && isInvalidRange(err):
 		info, headErr := b.HeadObject(ctx, key)
@@ -356,7 +356,7 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		}
 
 		fetchOffset, fetchSize = 0, 0
-		data, contentEncoding, objectMeta, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
+		read, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
 
 		b.logger.Debug("Re-fetched whole object: the range fell past the end of a compressed body",
 			"key", key, "decoded_size", info.Size, "offset", offset, "size", size)
@@ -370,8 +370,9 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	// object's own header rather than the write config, so objects stay readable across a config
 	// change (audit finding C2 is the opposite: dispatching on the configured codec silently returned
 	// the raw frame for anything else).
-	if b.compressor != nil && contentEncoding != "" {
-		decompressed, decompErr := b.compressor.Decompress(data, contentEncoding)
+	data := read.data
+	if b.compressor != nil && read.contentEncoding != "" {
+		decompressed, decompErr := b.compressor.Decompress(data, read.contentEncoding)
 		if decompErr != nil {
 			return nil, fmt.Errorf("decompress object %q: %w", key, decompErr)
 		}
@@ -390,10 +391,32 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	// size, so the kernel pads the shortfall with zeros and the caller gets a silently corrupt file
 	// with a successful exit status. Compressor.Decompress does exactly that today for an encoding it
 	// does not recognize, which is why the check lives here rather than there.
-	if err := checkFullyDecoded(objectMeta, data, offset, size, contentEncoding, key); err != nil {
+	if err := checkFullyDecoded(read.metadata, data, offset, size, read.contentEncoding, key); err != nil {
 		b.metricsCollector.RecordError(err)
 
 		return nil, err
+	}
+
+	// Verify the stored SHA-256 against the bytes actually in hand.
+	//
+	// Placed before the slice below, not after: the recorded hash is over the whole uncompressed
+	// content, so it can only be checked against a buffer holding all of it. See verifyChecksum for
+	// what that leaves uncovered.
+	//
+	// The question asked is "does this buffer hold the entire object", and read.whole answers it from
+	// what S3 reported rather than from the shape of the request. Those differ constantly and in the
+	// direction that matters: a cat(1) of a 4 KiB file arrives here as offset=0, size=131072 — the
+	// kernel's MaxRead, not the file's length — which sends a Range header and returns every byte of
+	// the object. Keying on "was a range requested" would decline to verify the single most common
+	// read a filesystem serves, and would have left this check dark for whole files while reporting
+	// that reads are verified.
+	if read.whole {
+		if err := verifyChecksum(read.metadata, data, key); err != nil {
+			b.metricsCollector.RecordError(err)
+			b.healthTracker.RecordError("s3-reads", err)
+
+			return nil, err
+		}
 	}
 
 	// Slice locally only when the fetch covered more than the caller asked for, which now happens
@@ -439,8 +462,26 @@ func sliceRange(data []byte, offset, size int64) []byte {
 	return data[offset:end]
 }
 
+// objectRead is what one GET returned: the bytes, what S3 said about them, and whether they are the
+// whole object.
+//
+// A struct rather than a fourth and fifth return value because whole is the one field a caller can
+// get wrong silently. Deriving it at the call site means re-deriving S3's answer from the request,
+// and the two disagree for the most ordinary read there is — a full-file read whose size is the
+// kernel's buffer rather than the file's length. Computed once, where the response is in hand.
+type objectRead struct {
+	data            []byte
+	contentEncoding string
+	metadata        map[string]string
+
+	// whole reports that data holds every byte of the stored object, so a whole-object hash can be
+	// checked against it. It is a claim about the *stored* bytes: for a compressed object it means the
+	// complete compressed body, which is what decodes to the complete content.
+	whole bool
+}
+
 // getObjectRange fetches a byte range of an object, or the whole object when size is not positive,
-// and reports the encoding and user metadata S3 returned with it.
+// and reports the encoding, user metadata, and whole-object coverage S3 returned with it.
 //
 // The reliability stack lives here rather than at the call site so both the direct read and the
 // encoded re-fetch get it: retry, circuit breaker, health tracking, metrics, and error translation.
@@ -448,7 +489,14 @@ func (b *Backend) getObjectRange(
 	ctx context.Context,
 	key string,
 	offset, size int64,
-) (data []byte, contentEncoding string, metadata map[string]string, err error) {
+) (objectRead, error) {
+	var (
+		data            []byte
+		contentEncoding string
+		metadata        map[string]string
+		whole           bool
+	)
+
 	var rangeHeader *string
 
 	switch {
@@ -460,12 +508,12 @@ func (b *Backend) getObjectRange(
 
 	breaker := b.circuitManager.GetBreaker("s3-get")
 
-	err = b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
+	err := b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
 		return breaker.ExecuteWithContext(retryCtx, func(ctx context.Context) error {
 			// Reset per attempt. A retry that fails after a partial read would otherwise leave the
 			// previous attempt's bytes in place, and the caller cannot tell a stale buffer from a
 			// fresh one (audit finding L24).
-			data, contentEncoding, metadata = nil, "", nil
+			data, contentEncoding, metadata, whole = nil, "", nil, false
 
 			input := &s3.GetObjectInput{
 				Bucket: aws.String(b.bucket),
@@ -498,6 +546,15 @@ func (b *Backend) getObjectRange(
 
 				data = body
 
+				// Did this response carry the entire stored object?
+				//
+				// A 200 with no Content-Range did by definition. A 206 did only if the range it reports
+				// spans the whole thing, which is the case for any read whose requested length met or
+				// exceeded the object — routine, since callers size reads by buffer rather than by file.
+				// S3 states the total after the slash in "bytes 0-4095/4096", so it is read from there
+				// rather than guessed from the request.
+				whole = wholeObjectResponse(aws.ToString(result.ContentRange), int64(len(body)))
+
 				b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
 				b.healthTracker.RecordSuccess("s3-reads")
 
@@ -506,10 +563,80 @@ func (b *Backend) getObjectRange(
 		})
 	})
 	if err != nil {
-		return nil, "", nil, err
+		return objectRead{}, err
 	}
 
-	return data, contentEncoding, metadata, nil
+	return objectRead{data: data, contentEncoding: contentEncoding, metadata: metadata, whole: whole}, nil
+}
+
+// wholeObjectResponse reports whether a GET response body is the entire stored object, given the
+// Content-Range header S3 returned and the number of bytes actually read.
+//
+// An empty header means a 200: the whole object, whatever its length. Otherwise the header is
+// "bytes <first>-<last>/<total>" and the body is the whole object exactly when it starts at zero and
+// runs to total. Comparing the body length against total is what makes this safe against a truncated
+// read: a short body reports false and simply goes unverified, rather than being hashed as if
+// complete and failing as corruption.
+//
+// Anything unparseable returns false. This gates an integrity check, so an unrecognized header must
+// mean "cannot confirm" — and false only forgoes verification, while a wrong true would report a
+// fragment as corrupt and fail a legitimate read.
+func wholeObjectResponse(contentRange string, bodyLen int64) bool {
+	// A negative length is not a body. The current caller passes len(body) so it cannot happen, but
+	// this function's answer decides whether an integrity check runs, and "the caller is correct" is
+	// not the assumption to rest that on — FuzzWholeObjectResponse asserts the total function, not the
+	// one reachable path.
+	if bodyLen < 0 {
+		return false
+	}
+
+	if contentRange == "" {
+		return true
+	}
+
+	// RFC 9110 grammar, which admits no whitespace of its own:
+	//
+	//	Content-Range = "bytes" SP incl-range "/" complete-length
+	//	              | "bytes" SP "*" "/" complete-length      ; the 416 form
+	//
+	// Parsed exactly, because leniency here is not free in either direction. Accepting shapes no
+	// server sends makes the parse harder to reason about, and every tolerance is another way to
+	// conclude "whole object" from a response that is not one. The outer trim is the sole concession,
+	// and only because it costs nothing: header values reach here through http.Header, which has
+	// trimmed them already.
+	rest, ok := strings.CutPrefix(strings.TrimSpace(contentRange), "bytes ")
+	if !ok {
+		return false
+	}
+
+	slash := strings.LastIndex(rest, "/")
+	if slash < 0 {
+		return false
+	}
+
+	// "bytes */1234" is the 416 form: there is no satisfied range, so nothing was covered. Requiring
+	// the range to begin at zero rejects it along with every genuine tail fragment.
+	first, _, found := strings.Cut(rest[:slash], "-")
+	if !found || first != "0" {
+		return false
+	}
+
+	// complete-length is 1*DIGIT. strconv.ParseInt is looser — it accepts "+4096" and "-1" — and a
+	// signed total has no meaning against a byte count, so require plain digits rather than letting a
+	// sign through to be compared against a length.
+	digits := rest[slash+1:]
+	if digits == "" || strings.ContainsFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) {
+		return false
+	}
+
+	total, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		// Overflows int64: no real object is that long, so this is not a response to draw conclusions
+		// from.
+		return false
+	}
+
+	return bodyLen == total
 }
 
 // PutObject stores an object in S3 with CargoShip optimization
@@ -774,7 +901,7 @@ func (b *Backend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo
 
 	// Populate Checksum from objectfs-sha256 metadata key (set on upload).
 	// Empty string for objects written before this feature — backward compatible.
-	if v, ok := result.Metadata[metaChecksum]; ok {
+	if v, ok := lookupMetaValue(result.Metadata, metaChecksum); ok {
 		info.Checksum = v
 	}
 
@@ -790,7 +917,7 @@ func (b *Backend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo
 // back to contentLength when the key is absent (objects written before
 // objectfs-original-size existed, or uncompressed objects) or unparseable.
 func originalSize(metadata map[string]string, contentLength int64, key string, logger *slog.Logger) int64 {
-	v, ok := metadata[metaOriginalSize]
+	v, ok := lookupMetaValue(metadata, metaOriginalSize)
 	if !ok {
 		return contentLength
 	}
@@ -1165,7 +1292,7 @@ func isErrorType[T error](err error) bool {
 // backend fetches the entire object and slices after decoding, so a ranged caller reaches this with
 // data that already went through the decode above.
 func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int64, contentEncoding, key string) error {
-	recorded, ok := metadata[metaOriginalSize]
+	recorded, ok := lookupMetaValue(metadata, metaOriginalSize)
 	if !ok {
 		return nil
 	}
@@ -1199,6 +1326,98 @@ func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int
 		WithDetail("suggestion", "The object was written by a build that stored the encoding as user "+
 			"metadata instead of the Content-Encoding header. Rewrite it, or read it with a build "+
 			"that recognizes that layout.")
+}
+
+// verifyChecksum recomputes the SHA-256 of a whole object's uncompressed content and compares it
+// against the objectfs-sha256 the writer recorded, returning an integrity error on any mismatch.
+//
+// # Why this exists
+//
+// v0.10.0 computed this hash on every single upload, stored it as user metadata, and surfaced it on
+// HeadObject as ObjectInfo.Checksum — and then no read path anywhere ever compared it against bytes
+// that came back. The one piece of stored evidence that what came out is what went in was written
+// and never read. That is what makes this the guard the compression findings needed: a codec
+// mismatch, a lost Content-Encoding header, a truncated body, a mangled multipart assembly, and
+// bit-rot in the bucket all produce bytes that differ from what was hashed, and all of them were
+// previously returned with a successful exit status.
+//
+// # What it deliberately does not cover
+//
+// A partial read. The hash is over the entire content, so there is nothing to check a fragment
+// against without fetching the whole object — which is exactly the read amplification the read path
+// was just fixed to stop doing. Verifying a 4 KiB read of a 10 GiB object would mean transferring
+// 10 GiB. So a genuine fragment goes unverified, and stating that plainly is better than implying a
+// guarantee that does not hold. Per-chunk checksums are the real fix and belong with the
+// seekable-framing work, since both change the stored object's layout.
+//
+// Note that "partial" means the response covered less than the object, not that a Range header was
+// sent. A read of a whole small file is a ranged request — its size is the kernel's buffer, not the
+// file's length — and is verified, because the response came back complete. Callers must not read
+// this as "small reads are checked and large ones are not": what is checked is a complete object,
+// at any size, and the large-file random read is precisely the case that is not.
+//
+// An object with no recorded checksum verifies trivially. That is not a weakened check but the only
+// possible behavior: objects written by aws s3 cp, by boto3, by a bucket that predates ObjectFS, or
+// by any other tool carry no objectfs-sha256, and refusing to read them would make ObjectFS unable
+// to read the buckets it exists to mount.
+//
+// A malformed recorded value is an error, not a skip. Unlike objectfs-original-size — where
+// HeadObject falls back to ContentLength because a bad mode must not make a file unreadable — there
+// is no safe fallback for a checksum. A value that is not 64 hex characters was not written by this
+// code, and treating "I cannot tell whether this is corrupt" as "this is fine" is the exact reasoning
+// that let the compression corruption ship.
+func verifyChecksum(metadata map[string]string, data []byte, key string) error {
+	recorded, ok := lookupMetaValue(metadata, metaChecksum)
+	if !ok || recorded == "" {
+		return nil
+	}
+
+	want, decodeErr := hex.DecodeString(recorded)
+	if decodeErr != nil || len(want) != sha256.Size {
+		return errors.NewError(errors.ErrCodeDataCorruption,
+			"object records a malformed SHA-256; refusing to return content that cannot be verified").
+			WithComponent("s3-backend").
+			WithOperation("GetObject").
+			WithContext("key", key).
+			WithDetail("recorded_checksum", recorded).
+			WithDetail("suggestion", "The objectfs-sha256 metadata value is not 64 hex characters, so it "+
+				"was not written by ObjectFS. Remove or correct the metadata, or rewrite the object.")
+	}
+
+	got := sha256.Sum256(data)
+	if bytes.Equal(got[:], want) {
+		return nil
+	}
+
+	return errors.NewError(errors.ErrCodeDataCorruption,
+		"object content does not match its recorded SHA-256").
+		WithComponent("s3-backend").
+		WithOperation("GetObject").
+		WithContext("key", key).
+		WithDetail("recorded_checksum", recorded).
+		WithDetail("computed_checksum", hex.EncodeToString(got[:])).
+		WithDetail("bytes_read", len(data)).
+		WithDetail("suggestion", "The stored object differs from what was uploaded. Do not treat the "+
+			"returned length as authoritative; restore the object from a version or backup.")
+}
+
+// lookupMetaValue finds a user-metadata key case-insensitively.
+//
+// S3 lower-cases user-metadata keys in transit, but the SDK's response map preserves whatever case
+// the server sent: MinIO title-cases them and a Go http.Header round-trip canonicalizes to
+// Objectfs-Sha256. A case-sensitive lookup therefore passes every unit test and then silently finds
+// nothing against real storage — which for an integrity check means it stops checking without ever
+// failing, the worst available outcome.
+func lookupMetaValue(metadata map[string]string, key string) (string, bool) {
+	if v, ok := metadata[key]; ok {
+		return v, true
+	}
+	for k, v := range metadata {
+		if strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // isNotFound reports whether err means "that key is not there", whatever layer produced it.
