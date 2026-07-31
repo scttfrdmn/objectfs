@@ -15,6 +15,30 @@ import (
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 )
 
+// clientOptions returns the s3.Options mutator that applies the endpoint and addressing settings
+// from cfg. Every S3 client ObjectFS builds must go through this, including the connection pool's
+// factory.
+//
+// It exists because the pool's factory previously called s3.NewFromConfig with no options at all
+// while the direct clients applied Endpoint and ForcePathStyle. HeadObject, DeleteObject,
+// ListObjects, and the health check draw from the pool, so those four operations addressed real AWS
+// S3 while PutObject and GetObject addressed the configured endpoint — making a MinIO, Ceph, or
+// emulator deployment fail in a way that looks like a credentials problem. One mutator, used
+// everywhere, is what stops the two from drifting apart again.
+func clientOptions(cfg *Config) func(*s3.Options) {
+	return func(o *s3.Options) {
+		if cfg.Endpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
+		}
+		if cfg.ForcePathStyle {
+			o.UsePathStyle = true
+		}
+		if cfg.UseDualStack {
+			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
+		}
+	}
+}
+
 // ClientManager handles S3 client creation and management
 type ClientManager struct {
 	client             *s3.Client
@@ -63,17 +87,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	}
 
 	// Create standard S3 client without acceleration
-	standardClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		if cfg.Endpoint != "" {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
-		}
-		if cfg.ForcePathStyle {
-			o.UsePathStyle = true
-		}
-		if cfg.UseDualStack {
-			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
-		}
-	})
+	standardClient := s3.NewFromConfig(awsCfg, clientOptions(cfg))
 
 	// Create accelerated S3 client if Transfer Acceleration is enabled
 	var acceleratedClient *s3.Client
@@ -81,17 +95,8 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	accelerationActive := false
 
 	if cfg.UseAccelerate {
-		acceleratedClient = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-			if cfg.Endpoint != "" {
-				o.BaseEndpoint = aws.String(cfg.Endpoint)
-			}
-			if cfg.ForcePathStyle {
-				o.UsePathStyle = true
-			}
+		acceleratedClient = s3.NewFromConfig(awsCfg, clientOptions(cfg), func(o *s3.Options) {
 			o.UseAccelerate = true
-			if cfg.UseDualStack {
-				o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
-			}
 		})
 		primaryClient = acceleratedClient
 		accelerationActive = true
@@ -104,9 +109,12 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 			"bucket", bucket)
 	}
 
-	// Create connection pool
+	// Create connection pool. The factory must apply the same options as the direct clients above:
+	// HeadObject, DeleteObject, ListObjects, and HealthCheck all draw from this pool, so a factory
+	// that skips the endpoint sends them to real AWS S3 while the rest of the backend talks to the
+	// configured endpoint.
 	pool, err := NewConnectionPool(cfg.PoolSize, func() (*s3.Client, error) {
-		return s3.NewFromConfig(awsCfg), nil
+		return s3.NewFromConfig(awsCfg, clientOptions(cfg)), nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %w", err)
@@ -152,8 +160,11 @@ func (cm *ClientManager) GetClient() *s3.Client {
 	return cm.client
 }
 
-// GetPooledClient gets a client from the connection pool
-func (cm *ClientManager) GetPooledClient() *s3.Client {
+// GetPooledClient gets a client from the connection pool.
+//
+// It returns an error rather than a nil client: callers dereference the result immediately, and a nil
+// here previously panicked and unmounted the filesystem once the pool was saturated.
+func (cm *ClientManager) GetPooledClient() (*s3.Client, error) {
 	return cm.pool.Get()
 }
 
@@ -179,7 +190,10 @@ func (cm *ClientManager) IsCargoShipEnabled() bool {
 
 // HealthCheck verifies the client connection
 func (cm *ClientManager) HealthCheck(ctx context.Context, bucket string) error {
-	client := cm.GetPooledClient()
+	client, err := cm.GetPooledClient()
+	if err != nil {
+		return fmt.Errorf("S3 health check failed: %w", err)
+	}
 	defer cm.ReturnPooledClient(client)
 
 	// Try to head the bucket
@@ -187,8 +201,7 @@ func (cm *ClientManager) HealthCheck(ctx context.Context, bucket string) error {
 		Bucket: aws.String(bucket),
 	}
 
-	_, err := client.HeadBucket(ctx, input)
-	if err != nil {
+	if _, err := client.HeadBucket(ctx, input); err != nil {
 		return fmt.Errorf("S3 health check failed: %w", err)
 	}
 

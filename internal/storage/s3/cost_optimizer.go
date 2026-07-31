@@ -309,11 +309,14 @@ func (co *CostOptimizer) calculateConfidence(pattern *AccessPattern) float64 {
 // the target storage class.  The object is copied in-place (same bucket and
 // key) so only its storage class changes; no data is moved.
 func (co *CostOptimizer) applyOptimization(ctx context.Context, opt TierOptimization) error {
-	client := co.backend.clientManager.GetPooledClient()
+	client, err := co.backend.clientManager.GetPooledClient()
+	if err != nil {
+		return fmt.Errorf("tier transition %s→%s for %q: %w", opt.FromTier, opt.ToTier, opt.ObjectKey, err)
+	}
 	defer co.backend.clientManager.ReturnPooledClient(client)
 
 	copySource := fmt.Sprintf("%s/%s", co.backend.bucket, opt.ObjectKey)
-	_, err := client.CopyObject(ctx, &s3.CopyObjectInput{
+	_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            aws.String(co.backend.bucket),
 		CopySource:        aws.String(copySource),
 		Key:               aws.String(opt.ObjectKey),

@@ -550,7 +550,11 @@ func (b *Backend) DeleteObject(ctx context.Context, key string) error {
 		return fmt.Errorf("tier validation failed: %w", err)
 	}
 
-	client := b.clientManager.GetPooledClient()
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return fmt.Errorf("delete %q: %w", key, err)
+	}
 	defer b.clientManager.ReturnPooledClient(client)
 
 	input := &s3.DeleteObjectInput{
@@ -574,7 +578,11 @@ func (b *Backend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo
 		b.metricsCollector.RecordMetrics(time.Since(start), false)
 	}()
 
-	client := b.clientManager.GetPooledClient()
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return nil, fmt.Errorf("head %q: %w", key, err)
+	}
 	defer b.clientManager.ReturnPooledClient(client)
 
 	input := &s3.HeadObjectInput{
@@ -729,7 +737,11 @@ func (b *Backend) ListObjects(ctx context.Context, prefix string, limit int) ([]
 		b.metricsCollector.RecordMetrics(time.Since(start), false)
 	}()
 
-	client := b.clientManager.GetPooledClient()
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return nil, fmt.Errorf("list %q: %w", prefix, err)
+	}
 	defer b.clientManager.ReturnPooledClient(client)
 
 	var maxKeys *int32
@@ -1155,8 +1167,12 @@ func (b *Backend) executeWithAccelerationFallback(
 ) error {
 	// If acceleration is not active, just execute with standard client
 	if !b.clientManager.IsAccelerationActive() {
-		client := b.clientManager.GetPooledClient()
+		client, err := b.clientManager.GetPooledClient()
+		if err != nil {
+			return fmt.Errorf("%s: %w", operation, err)
+		}
 		defer b.clientManager.ReturnPooledClient(client)
+
 		return fn(client)
 	}
 
@@ -1201,6 +1217,7 @@ func (b *Backend) executeWithAccelerationFallback(
 //   - uploadParts              – concurrent UploadPart fan-out
 //   - abortMultipartUpload     – AbortMultipartUpload on failure
 //   - completeMultipartUpload  – CompleteMultipartUpload on success
+//
 // objectMeta carries the S3 user metadata built by the caller (checksum over the
 // uncompressed content, plus the original size when compressed). It must not be
 // recomputed here: data is the post-compression payload, so hashing it would
