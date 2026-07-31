@@ -324,7 +324,7 @@ func TestObjectFSError_String(t *testing.T) {
 		Operation: "fetch",
 		RequestID: "req-123",
 		Retryable: true,
-		Details:   map[string]interface{}{"duration": 30},
+		Details:   map[string]any{"duration": 30},
 		Cause:     errors.New("network timeout"),
 	}
 
@@ -366,7 +366,7 @@ func TestObjectFSError_JSON(t *testing.T) {
 	jsonStr := err.JSON()
 
 	// Parse JSON to verify it's valid
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if parseErr := json.Unmarshal([]byte(jsonStr), &parsed); parseErr != nil {
 		t.Fatalf("JSON() returned invalid JSON: %v\nJSON: %s", parseErr, jsonStr)
 	}

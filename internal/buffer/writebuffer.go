@@ -543,7 +543,7 @@ func (wb *WriteBuffer) OptimizeBuffers() {
 		}
 
 		// Simple bubble sort by size (descending)
-		for i := 0; i < len(sizes)-1; i++ {
+		for i := range len(sizes) - 1 {
 			for j := i + 1; j < len(sizes); j++ {
 				if sizes[i].size < sizes[j].size {
 					sizes[i], sizes[j] = sizes[j], sizes[i]

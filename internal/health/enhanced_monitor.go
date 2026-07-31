@@ -69,12 +69,12 @@ type DetectedIssue struct {
 // ComponentHealthDetail provides detailed component health information
 type ComponentHealthDetail struct {
 	*pkghealth.ComponentHealth
-	Pattern         *HealthPattern         `json:"pattern"`
-	RecentDiagnoses []*ProblemDiagnosis    `json:"recent_diagnoses"`
-	ActiveIssues    []*DetectedIssue       `json:"active_issues"`
-	HealthScore     float64                `json:"health_score"` // 0-100
-	Recommendations []*RemediationAction   `json:"recommendations"`
-	Trends          map[string]interface{} `json:"trends"`
+	Pattern         *HealthPattern       `json:"pattern"`
+	RecentDiagnoses []*ProblemDiagnosis  `json:"recent_diagnoses"`
+	ActiveIssues    []*DetectedIssue     `json:"active_issues"`
+	HealthScore     float64              `json:"health_score"` // 0-100
+	Recommendations []*RemediationAction `json:"recommendations"`
+	Trends          map[string]any       `json:"trends"`
 }
 
 // NewEnhancedMonitor creates an enhanced monitor with problem detection and remediation
@@ -135,7 +135,7 @@ func (em *EnhancedMonitor) GetComponentHealthDetail(componentName string) (*Comp
 
 	detail := &ComponentHealthDetail{
 		ComponentHealth: baseHealth,
-		Trends:          make(map[string]interface{}),
+		Trends:          make(map[string]any),
 	}
 
 	// Add pattern analysis
@@ -339,7 +339,7 @@ func (em *EnhancedMonitor) calculatePatternMetrics(pattern *HealthPattern) {
 		midpoint := len(pattern.RecentResults) / 2
 		var firstHalfLatency, secondHalfLatency time.Duration
 
-		for i := 0; i < midpoint; i++ {
+		for i := range midpoint {
 			firstHalfLatency += pattern.RecentResults[i].Duration
 		}
 		for i := midpoint; i < len(pattern.RecentResults); i++ {

@@ -167,7 +167,7 @@ func (idx *ArchiveIndex) ListDirectory(dirPath string) []*ArchiveEntry {
 
 // containsSlash checks if a string contains a slash character.
 func containsSlash(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == '/' {
 			return true
 		}
@@ -180,7 +180,7 @@ func containsSlashExceptLast(s string) bool {
 	if len(s) <= 1 {
 		return false
 	}
-	for i := 0; i < len(s)-1; i++ {
+	for i := range len(s) - 1 {
 		if s[i] == '/' {
 			return true
 		}

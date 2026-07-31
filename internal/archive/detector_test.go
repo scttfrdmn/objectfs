@@ -121,7 +121,6 @@ func TestDetect_FormatsDetected(t *testing.T) {
 		{"d.tar.bz2", archivepkg.FormatTarBzip2},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.key, func(t *testing.T) {
 			t.Parallel()
 			objects := []types.ObjectInfo{makeObjectInfo(tt.key, 100)}

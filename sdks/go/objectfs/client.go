@@ -58,7 +58,7 @@ func New(ctx context.Context, bucket string, opts ...Option) (*Client, error) {
 
 	backend, err := s3.NewBackend(ctx, bucket, s3cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialise S3 backend: %w", err)
+		return nil, fmt.Errorf("failed to initialize S3 backend: %w", err)
 	}
 
 	return &Client{

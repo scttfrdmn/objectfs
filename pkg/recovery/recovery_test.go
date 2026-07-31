@@ -100,7 +100,7 @@ func TestRecoveryManager_ExecuteWithCircuitBreaker(t *testing.T) {
 
 	attempts := 0
 	// First few attempts should fail and trip the breaker
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_ = rm.Execute(ctx, component, "operation", func() error {
 			attempts++
 			return errors.New("failure")
@@ -121,7 +121,7 @@ func TestRecoveryManager_RegisterFallback(t *testing.T) {
 	rm := NewRecoveryManager(config)
 
 	fallbackCalled := false
-	rm.RegisterFallback("test", "operation", func(ctx context.Context) (interface{}, error) {
+	rm.RegisterFallback("test", "operation", func(ctx context.Context) (any, error) {
 		fallbackCalled = true
 		return "fallback-result", nil
 	})
@@ -155,13 +155,13 @@ func TestRecoveryManager_GracefulDegradation(t *testing.T) {
 
 	// Register a fallback
 	fallbackCalled := false
-	rm.RegisterFallback(component, "operation", func(ctx context.Context) (interface{}, error) {
+	rm.RegisterFallback(component, "operation", func(ctx context.Context) (any, error) {
 		fallbackCalled = true
 		return "degraded-result", nil
 	})
 
 	// Execute operation that fails
-	result, err := rm.ExecuteWithResult(ctx, component, "operation", func() (interface{}, error) {
+	result, err := rm.ExecuteWithResult(ctx, component, "operation", func() (any, error) {
 		return nil, errors.New("primary failed")
 	})
 
@@ -336,7 +336,7 @@ func TestRecoveryManager_ExecuteWithResult(t *testing.T) {
 	ctx := context.Background()
 	expectedResult := "success-result"
 
-	result, err := rm.ExecuteWithResult(ctx, "test", "operation", func() (interface{}, error) {
+	result, err := rm.ExecuteWithResult(ctx, "test", "operation", func() (any, error) {
 		return expectedResult, nil
 	})
 
@@ -442,7 +442,7 @@ func TestRecoveryManager_ConcurrentExecution(t *testing.T) {
 	const numGoroutines = 10
 
 	done := make(chan bool, numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			_ = rm.Execute(ctx, "concurrent", "operation", func() error {
 				time.Sleep(1 * time.Millisecond)
@@ -456,7 +456,7 @@ func TestRecoveryManager_ConcurrentExecution(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		<-done
 	}
 

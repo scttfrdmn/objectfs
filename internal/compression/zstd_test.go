@@ -79,7 +79,6 @@ func TestZstdLevels(t *testing.T) {
 	input := bytes.Repeat([]byte("level test data for objectfs\n"), 500)
 
 	for _, lvl := range levels {
-		lvl := lvl
 		t.Run(string(rune('0'+lvl%10)), func(t *testing.T) {
 			t.Parallel()
 			c, err := NewZstdCodec(lvl)
@@ -182,7 +181,6 @@ func TestMapZstdLevel(t *testing.T) {
 		{23, true},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run("", func(t *testing.T) {
 			t.Parallel()
 			_, err := mapZstdLevel(tt.level)

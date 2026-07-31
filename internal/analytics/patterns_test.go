@@ -56,7 +56,7 @@ func TestPatternAnalyzer_Features_AccessRates(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	// Simulate 30 daily accesses (one per day for 30 days).
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		pa.RecordAccess("daily", anchor.Add(time.Duration(i)*24*time.Hour), 0)
 	}
 
@@ -74,7 +74,7 @@ func TestPatternAnalyzer_Features_AccessRate1d(t *testing.T) {
 	t.Parallel()
 	pa := NewPatternAnalyzer(50)
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		pa.RecordAccess("k", anchor.Add(time.Duration(i)*time.Hour), 0)
 	}
 	now := anchor.Add(6 * time.Hour)
@@ -88,7 +88,7 @@ func TestPatternAnalyzer_Features_IntervalStats(t *testing.T) {
 	pa := NewPatternAnalyzer(50)
 	anchor := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	// 4 accesses, 2h apart → mean interval = 2h, variance = 0.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		pa.RecordAccess("k", anchor.Add(time.Duration(i)*2*time.Hour), 0)
 	}
 	now := anchor.Add(8 * time.Hour)
@@ -103,7 +103,7 @@ func TestPatternAnalyzer_Features_SlidingWindowCap(t *testing.T) {
 	// Window of 5: only the last 5 timestamps should be retained.
 	pa := NewPatternAnalyzer(5)
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		pa.RecordAccess("k", anchor.Add(time.Duration(i)*24*time.Hour), 0)
 	}
 	pa.mu.RLock()
@@ -117,7 +117,7 @@ func TestPatternAnalyzer_Features_PeakHourFraction(t *testing.T) {
 	t.Parallel()
 	pa := NewPatternAnalyzer(200)
 	anchor := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC) // 09:00 UTC
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		pa.RecordAccess("k", anchor, 0) // all accesses at hour 9
 	}
 	now := anchor.Add(time.Hour)

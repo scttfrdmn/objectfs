@@ -43,10 +43,7 @@ func (m *MockPredictiveBackend) GetObject(ctx context.Context, key string, offse
 		return []byte{}, nil
 	}
 
-	end := offset + size
-	if end > int64(len(data)) {
-		end = int64(len(data))
-	}
+	end := min(offset+size, int64(len(data)))
 
 	return data[offset:end], nil
 }
@@ -293,7 +290,7 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 	blockSize := int64(1024)
 
 	// Create sequential access pattern
-	for i := int64(0); i < 10; i++ {
+	for i := range int64(10) {
 		data := make([]byte, blockSize)
 		for j := range data {
 			data[j] = byte(i)
@@ -342,12 +339,12 @@ func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
 	operationsPerGoroutine := 100
 	var wg sync.WaitGroup
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		wg.Add(1)
 		go func(goroutineID int) {
 			defer wg.Done()
 
-			for j := 0; j < operationsPerGoroutine; j++ {
+			for j := range operationsPerGoroutine {
 				key := fmt.Sprintf("concurrent-key-%d-%d", goroutineID, j)
 				data := make([]byte, 512)
 				_, _ = cryptoRand.Read(data)
@@ -400,7 +397,7 @@ func TestPredictiveCache_EvictionIntelligence(t *testing.T) {
 	}
 
 	// Fill cache with test data
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		key := fmt.Sprintf("evict-test-%d", i)
 		data := make([]byte, 1024)
 		for j := range data {
@@ -412,7 +409,7 @@ func TestPredictiveCache_EvictionIntelligence(t *testing.T) {
 		// Simulate different access patterns
 		if i%3 == 0 {
 			// Frequently accessed items
-			for k := 0; k < 5; k++ {
+			for range 5 {
 				pc.Get(key, 0, 1024)
 			}
 		}
@@ -461,7 +458,7 @@ func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 	numBlocks := int64(1000)
 
 	// Pre-populate cache
-	for i := int64(0); i < numBlocks; i++ {
+	for i := range numBlocks {
 		data := make([]byte, blockSize)
 		_, _ = cryptoRand.Read(data)
 		pc.Put(key, i*blockSize, data)
@@ -499,7 +496,7 @@ func BenchmarkPredictiveCache_RandomRead(b *testing.B) {
 	keys := make([]string, numKeys)
 	blockSize := int64(4096)
 
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		keys[i] = fmt.Sprintf("benchmark-random-%d", i)
 		data := make([]byte, blockSize)
 		_, _ = cryptoRand.Read(data)
@@ -541,7 +538,7 @@ func BenchmarkPredictiveCache_ConcurrentAccess(b *testing.B) {
 	keys := make([]string, numKeys)
 	blockSize := int64(1024)
 
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		keys[i] = fmt.Sprintf("benchmark-concurrent-%d", i)
 		data := make([]byte, blockSize)
 		_, _ = cryptoRand.Read(data)

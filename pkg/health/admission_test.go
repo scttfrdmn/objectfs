@@ -272,15 +272,13 @@ func TestConcurrentProbesAdmitOne(t *testing.T) {
 		admitted int
 	)
 	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if tr.CanRead("c") {
 				mu.Lock()
 				admitted++
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -312,7 +310,7 @@ func TestProbeDisabledKeepsOldBehaviour(t *testing.T) {
 
 // TestSuccessStillRecoversDegradedWithoutAProbe guards the pre-existing recovery path. A degraded
 // component admits its own operations, so it never needs a probe, and the incremental
-// success-decrements-errors behaviour must survive the addition of the probe path.
+// success-decrements-errors behavior must survive the addition of the probe path.
 func TestSuccessStillRecoversDegradedWithoutAProbe(t *testing.T) {
 	t.Parallel()
 

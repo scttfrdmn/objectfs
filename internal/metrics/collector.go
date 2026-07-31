@@ -264,11 +264,11 @@ func (c *Collector) UpdateActiveConnections(count int) {
 }
 
 // GetMetrics returns current metrics
-func (c *Collector) GetMetrics() map[string]interface{} {
+func (c *Collector) GetMetrics() map[string]any {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	metrics := make(map[string]interface{})
+	metrics := make(map[string]any)
 
 	// Copy operation metrics
 	operations := make(map[string]*OperationMetrics)
@@ -464,7 +464,7 @@ func (c *Collector) debugMetricsHandler(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 
 	// Simple JSON encoding - using helper to avoid errcheck issues
-	writef := func(format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
+	writef := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format, args...) }
 
 	writef("{\n")
 	writef("  \"uptime\": \"%v\",\n", metrics["uptime"])
@@ -498,7 +498,7 @@ func (c *Collector) debugOperationsHandler(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "text/plain")
 
 	// Helper to avoid errcheck issues
-	writef := func(format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
+	writef := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format, args...) }
 
 	writef("ObjectFS Operations Summary\n")
 	writef("==========================\n\n")

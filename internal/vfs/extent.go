@@ -366,7 +366,7 @@ func (l *ExtentList) Splice(size int64, base []Extent) ([]byte, error) {
 // Truncate records that the file has been resized to size, discarding dirty bytes at or beyond it.
 //
 // Growing a file adds no extents: the new bytes are a hole, which reads as zeros and which
-// [ExtentList.Splice] materialises at flush time. That keeps `truncate -s 1T` an O(1) metadata
+// [ExtentList.Splice] materializes at flush time. That keeps `truncate -s 1T` an O(1) metadata
 // operation rather than a terabyte allocation.
 //
 // Shrinking also invalidates the stored object past size, permanently — growing back afterwards

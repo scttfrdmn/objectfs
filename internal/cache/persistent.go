@@ -246,7 +246,7 @@ func (c *PersistentCache) Evict(targetSize int64) bool {
 	}
 
 	// Sort by access time (oldest first)
-	for i := 0; i < len(items)-1; i++ {
+	for i := range len(items) - 1 {
 		for j := i + 1; j < len(items); j++ {
 			if items[i].accessTime.After(items[j].accessTime) {
 				items[i], items[j] = items[j], items[i]

@@ -201,7 +201,7 @@ func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
 	}
 }
 
-// TestReadPastEndOfObjectIsShortNotAnError pins the EOF behaviour a POSIX read depends on: asking
+// TestReadPastEndOfObjectIsShortNotAnError pins the EOF behavior a POSIX read depends on: asking
 // for more than the object holds returns what is there. The kernel routinely asks for a full
 // MaxRead-sized block at the tail of a file.
 func TestReadPastEndOfObjectIsShortNotAnError(t *testing.T) {

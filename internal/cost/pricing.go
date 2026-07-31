@@ -2,6 +2,8 @@
 // accumulation, ROI reporting, and budget-threshold alerting.
 package cost
 
+import "maps"
+
 // S3 storage tier identifiers — mirror constants in internal/storage/s3/tiers.go.
 const (
 	TierStandard    = "STANDARD"
@@ -107,12 +109,8 @@ type PriceTable struct {
 // any overrides provided.  Pass nil or an empty map to use defaults as-is.
 func NewPriceTable(overrides map[string]Price) *PriceTable {
 	merged := make(map[string]Price, len(DefaultPrices))
-	for k, v := range DefaultPrices {
-		merged[k] = v
-	}
-	for k, v := range overrides {
-		merged[k] = v
-	}
+	maps.Copy(merged, DefaultPrices)
+	maps.Copy(merged, overrides)
 	return &PriceTable{prices: merged}
 }
 

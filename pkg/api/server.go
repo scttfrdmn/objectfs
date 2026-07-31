@@ -12,10 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/health"
-	"github.com/objectfs/objectfs/pkg/status"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/objectfs/objectfs/pkg/health"
+	"github.com/objectfs/objectfs/pkg/status"
 )
 
 // MountManager handles mount/unmount operations.
@@ -173,7 +174,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.healthTracker == nil {
-		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		s.respondJSON(w, http.StatusOK, map[string]any{
 			"status": "healthy",
 			"note":   "Health tracking not configured",
 		})
@@ -183,7 +184,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	overallHealth := s.healthTracker.GetOverallHealth()
 	components := s.healthTracker.GetAllComponents()
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":     overallHealth.String(),
 		"timestamp":  time.Now(),
 		"components": len(components),
@@ -222,7 +223,7 @@ func (s *Server) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Liveness probe - is the service running?
-	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+	s.respondJSON(w, http.StatusOK, map[string]any{
 		"alive":     true,
 		"timestamp": time.Now(),
 	})
@@ -236,7 +237,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 
 	// Readiness probe - can the service accept traffic?
 	if s.healthTracker == nil {
-		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		s.respondJSON(w, http.StatusOK, map[string]any{
 			"ready":     true,
 			"timestamp": time.Now(),
 			"note":      "Health tracking not configured",
@@ -252,7 +253,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	}
 
-	s.respondJSON(w, statusCode, map[string]interface{}{
+	s.respondJSON(w, statusCode, map[string]any{
 		"ready":     ready,
 		"status":    overallHealth.String(),
 		"timestamp": time.Now(),
@@ -288,7 +289,7 @@ func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	operations := s.statusTracker.GetAllOperations()
-	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+	s.respondJSON(w, http.StatusOK, map[string]any{
 		"operations": operations,
 		"count":      len(operations),
 		"timestamp":  time.Now(),
@@ -344,7 +345,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	history := s.statusTracker.GetHistory(limit)
-	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+	s.respondJSON(w, http.StatusOK, map[string]any{
 		"history":   history,
 		"count":     len(history),
 		"limit":     limit,
@@ -365,7 +366,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		version = "unknown"
 	}
 
-	info := map[string]interface{}{
+	info := map[string]any{
 		"service":   "ObjectFS API",
 		"version":   version,
 		"timestamp": time.Now(),
@@ -423,7 +424,7 @@ func (s *Server) handleMounts(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		mounts := s.config.MountManager.ListMounts()
-		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		s.respondJSON(w, http.StatusOK, map[string]any{
 			"mounts":    mounts,
 			"count":     len(mounts),
 			"timestamp": time.Now(),
@@ -446,7 +447,7 @@ func (s *Server) handleMounts(w http.ResponseWriter, r *http.Request) {
 			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("Mount failed: %v", err))
 			return
 		}
-		s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		s.respondJSON(w, http.StatusCreated, map[string]any{
 			"mount_point": req.MountPoint,
 			"mounted":     true,
 			"timestamp":   time.Now(),
@@ -479,7 +480,7 @@ func (s *Server) handleMount(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		mounted := s.config.MountManager.IsMounted(mountPoint)
-		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		s.respondJSON(w, http.StatusOK, map[string]any{
 			"mount_point": mountPoint,
 			"mounted":     mounted,
 			"timestamp":   time.Now(),
@@ -490,7 +491,7 @@ func (s *Server) handleMount(w http.ResponseWriter, r *http.Request) {
 			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("Unmount failed: %v", err))
 			return
 		}
-		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		s.respondJSON(w, http.StatusOK, map[string]any{
 			"mount_point": mountPoint,
 			"mounted":     false,
 			"timestamp":   time.Now(),
@@ -529,7 +530,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 
 // Helper methods
 
-func (s *Server) respondJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+func (s *Server) respondJSON(w http.ResponseWriter, statusCode int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 
@@ -539,7 +540,7 @@ func (s *Server) respondJSON(w http.ResponseWriter, statusCode int, data interfa
 }
 
 func (s *Server) respondError(w http.ResponseWriter, statusCode int, message string) {
-	s.respondJSON(w, statusCode, map[string]interface{}{
+	s.respondJSON(w, statusCode, map[string]any{
 		"error":     message,
 		"timestamp": time.Now(),
 	})

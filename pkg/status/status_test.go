@@ -37,7 +37,7 @@ func TestTracker_StartOperation(t *testing.T) {
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"bucket": "test-bucket",
 		"key":    "test-key",
 	}
@@ -286,7 +286,7 @@ func TestTracker_GetHistory(t *testing.T) {
 	ctx := context.Background()
 
 	// Start and complete multiple operations
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		op, _ := tracker.StartOperation(ctx, fmt.Sprintf("op-%d", i), nil)
 		if err := tracker.CompleteOperation(op.ID); err != nil {
 			t.Fatalf("CompleteOperation failed: %v", err)
@@ -459,7 +459,7 @@ func TestOperation_Copy(t *testing.T) {
 		Status:    StatusInProgress,
 		StartTime: now,
 		EndTime:   &now,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"key": "value",
 		},
 		Progress: &Progress{
@@ -501,7 +501,7 @@ func TestTracker_MaxHistory(t *testing.T) {
 	ctx := context.Background()
 
 	// Complete 5 operations
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		op, _ := tracker.StartOperation(ctx, fmt.Sprintf("op-%d", i), nil)
 		if err := tracker.CompleteOperation(op.ID); err != nil {
 			t.Fatalf("CompleteOperation failed: %v", err)
@@ -591,7 +591,7 @@ func BenchmarkTracker_GetSystemStatus(b *testing.B) {
 	ctx := context.Background()
 
 	// Create some operations
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		tracker.StartOperation(ctx, "test", nil)
 	}
 

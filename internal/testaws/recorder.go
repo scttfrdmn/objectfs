@@ -12,7 +12,7 @@ import (
 )
 
 // Request is one HTTP request the harness observed, reduced to the fields that matter for asserting
-// transfer behaviour.
+// transfer behavior.
 type Request struct {
 	// Method is the HTTP method, e.g. "GET".
 	Method string

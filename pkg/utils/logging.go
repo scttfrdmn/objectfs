@@ -76,35 +76,35 @@ func NewLogger(level LogLevel, output io.Writer) *Logger {
 }
 
 // Debug logs a debug message
-func (l *Logger) Debug(format string, args ...interface{}) {
+func (l *Logger) Debug(format string, args ...any) {
 	if l.level <= DEBUG {
 		l.log("DEBUG", format, args...)
 	}
 }
 
 // Info logs an info message
-func (l *Logger) Info(format string, args ...interface{}) {
+func (l *Logger) Info(format string, args ...any) {
 	if l.level <= INFO {
 		l.log("INFO", format, args...)
 	}
 }
 
 // Warn logs a warning message
-func (l *Logger) Warn(format string, args ...interface{}) {
+func (l *Logger) Warn(format string, args ...any) {
 	if l.level <= WARN {
 		l.log("WARN", format, args...)
 	}
 }
 
 // Error logs an error message
-func (l *Logger) Error(format string, args ...interface{}) {
+func (l *Logger) Error(format string, args ...any) {
 	if l.level <= ERROR {
 		l.log("ERROR", format, args...)
 	}
 }
 
 // log writes a log message
-func (l *Logger) log(level, format string, args ...interface{}) {
+func (l *Logger) log(level, format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	_, _ = fmt.Fprintf(l.output, "[%s] %s\n", level, message)
 }

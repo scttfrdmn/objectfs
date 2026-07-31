@@ -50,7 +50,7 @@ func TestTracker_RecordError_Degradation(t *testing.T) {
 	tracker.RegisterComponent("test-service")
 
 	// Record errors below threshold
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		tracker.RecordError("test-service", fmt.Errorf("error %d", i))
 	}
 
@@ -76,7 +76,7 @@ func TestTracker_RecordError_Unavailable(t *testing.T) {
 	tracker.RegisterComponent("test-service")
 
 	// Record errors up to unavailable threshold
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		tracker.RecordError("test-service", fmt.Errorf("error %d", i))
 	}
 
@@ -94,7 +94,7 @@ func TestTracker_RecordError_ReadOnly(t *testing.T) {
 
 	// Record write errors (should transition to read-only)
 	writeErr := errors.NewError(errors.ErrCodeStorageWrite, "write failed")
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		tracker.RecordError("test-service", writeErr)
 	}
 
@@ -117,7 +117,7 @@ func TestTracker_GetOverallHealth(t *testing.T) {
 	}
 
 	// One degraded
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		tracker.RecordError("service-2", fmt.Errorf("error %d", i))
 	}
 
@@ -127,7 +127,7 @@ func TestTracker_GetOverallHealth(t *testing.T) {
 	}
 
 	// One unavailable
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		tracker.RecordError("service-3", fmt.Errorf("error %d", i))
 	}
 
@@ -193,7 +193,7 @@ func TestTracker_StateChangeCallback(t *testing.T) {
 	})
 
 	// Trigger state change to degraded
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		tracker.RecordError("test-service", fmt.Errorf("error %d", i))
 	}
 
@@ -332,7 +332,7 @@ func TestTracker_IsHealthy(t *testing.T) {
 	}
 
 	// Record errors to degrade
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		tracker.RecordError("test-service", fmt.Errorf("error %d", i))
 	}
 
@@ -438,7 +438,7 @@ func TestTracker_RecoveryFromDegradation(t *testing.T) {
 	tracker.RegisterComponent("test-service")
 
 	// Degrade the service
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		tracker.RecordError("test-service", fmt.Errorf("error %d", i))
 	}
 
@@ -448,7 +448,7 @@ func TestTracker_RecoveryFromDegradation(t *testing.T) {
 	}
 
 	// Record successes to recover (need to clear ConsecutiveErrors)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		tracker.RecordSuccess("test-service")
 	}
 

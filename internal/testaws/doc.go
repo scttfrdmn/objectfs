@@ -22,7 +22,7 @@ the pooled client was supposed to reach could have caught it.
 
 # Capabilities
 
-The emulator implements a subset of S3, and the subset moves. A test that needs behaviour the
+The emulator implements a subset of S3, and the subset moves. A test that needs behavior the
 running emulator does not have must **skip loudly, never pass quietly** — a harness that returns a
 whole object for a ranged GET does not fail the read-path tests, it ratifies the bug. [Capabilities]
 probes the running server and reports what is actually there, and helpers like
@@ -30,7 +30,7 @@ probes the running server and reports what is actually there, and helpers like
 
 # What this package is not
 
-It is not a substitute for the live AWS suite. Real S3 has consistency behaviour, throttling,
+It is not a substitute for the live AWS suite. Real S3 has consistency behavior, throttling,
 multipart minimums, and error taxonomies the emulator approximates. Integration tests under the
 `integration` build tag run against real S3 in us-west-2 and remain the final word; this package is
 what makes the fast path fast enough to run on every commit.

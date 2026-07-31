@@ -211,10 +211,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		// Perform sequential reads to trigger read-ahead
 		readSize := 64 * 1024 // 64KB chunks
 		for offset := 0; offset < len(testData); offset += readSize {
-			end := offset + readSize
-			if end > len(testData) {
-				end = len(testData)
-			}
+			end := min(offset+readSize, len(testData))
 
 			data, err := backend.GetObject(context.Background(), testKey, int64(offset), int64(readSize))
 			require.NoError(t, err)
@@ -284,7 +281,7 @@ func TestFUSEOptimizations(t *testing.T) {
 
 		// Verify cache statistics
 		stats := mlCache.Stats()
-		assert.Greater(t, stats.Hits, uint64(0))
+		assert.Positive(t, stats.Hits)
 	})
 
 	t.Run("TestMetricsCollection", func(t *testing.T) {
@@ -320,7 +317,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		iterations := 10
 		totalBytes := int64(0)
 
-		for i := 0; i < iterations; i++ {
+		for range iterations {
 			data, err := backend.GetObject(context.Background(), testKey, 0, 0)
 			require.NoError(t, err)
 			totalBytes += int64(len(data))

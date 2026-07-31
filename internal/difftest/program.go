@@ -75,7 +75,7 @@ type Op struct {
 }
 
 // String renders the op as the Go that would construct it, so a failing program can be pasted into a
-// test. Data is summarised rather than dumped: a 64 KiB literal is not something a human reads, and
+// test. Data is summarized rather than dumped: a 64 KiB literal is not something a human reads, and
 // [Program.GoSource] emits a reproducible generator call for it instead.
 func (o Op) String() string {
 	switch o.Kind {
@@ -102,7 +102,7 @@ func describeBytes(b []byte) string {
 	}
 
 	// A short run of one repeated byte is the common shape in a shrunk counterexample and is worth
-	// showing literally; anything else is summarised by length and first byte.
+	// showing literally; anything else is summarized by length and first byte.
 	same := true
 	for _, c := range b {
 		if c != b[0] {

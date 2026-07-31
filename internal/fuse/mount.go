@@ -14,6 +14,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"github.com/objectfs/objectfs/pkg/status"
 )
 
@@ -133,7 +134,7 @@ func (m *MountManager) Mount(ctx context.Context) error {
 	m.mu.Unlock()
 
 	// Start tracking the mount operation
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"mount_point": m.config.MountPoint,
 		"fs_name":     m.config.Options.FSName,
 		"read_only":   m.config.Options.ReadOnly,
@@ -239,7 +240,7 @@ func (m *MountManager) Unmount() error {
 	}
 
 	// Start tracking the unmount operation
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"mount_point": m.config.MountPoint,
 	}
 	op, _ := m.statusTracker.StartOperation(context.Background(), "unmount", metadata)

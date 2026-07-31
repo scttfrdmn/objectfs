@@ -214,7 +214,7 @@ func TestWriteBuffer_MultipleKeys_IndependentBuffers(t *testing.T) {
 	require.NoError(t, err)
 	defer wb.Close() //nolint:errcheck
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		wb.WriteWithRequest(context.Background(), &WriteRequest{
 			Key: fmt.Sprintf("key/%d", i), Offset: 0, Data: []byte("payload"),
 		})
@@ -291,15 +291,15 @@ func TestWriteBuffer_FlushAll_CallsCallbackWithCorrectData(t *testing.T) {
 func TestWriteBuffer_FlushAll_MultipleKeys(t *testing.T) {
 	t.Parallel()
 
-	var count int32
+	var count atomic.Int32
 	wb, err := NewWriteBuffer(testWBConfig(), func(_ string, _ []byte, _ int64) error {
-		atomic.AddInt32(&count, 1)
+		count.Add(1)
 		return nil
 	})
 	require.NoError(t, err)
 	defer wb.Close() //nolint:errcheck
 
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		wb.WriteWithRequest(context.Background(), &WriteRequest{
 			Key: fmt.Sprintf("key%d", i), Offset: 0, Data: []byte("x"),
 		})
@@ -309,7 +309,7 @@ func TestWriteBuffer_FlushAll_MultipleKeys(t *testing.T) {
 	err = wb.FlushAll()
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(7), atomic.LoadInt32(&count))
+	assert.Equal(t, int32(7), count.Load())
 	assert.Equal(t, 0, wb.Count())
 }
 
@@ -370,9 +370,9 @@ func TestWriteBuffer_FlushCallbackError_BufferCanRetry(t *testing.T) {
 func TestWriteBuffer_Close_FlushesOnStop(t *testing.T) {
 	t.Parallel()
 
-	var flushed int32
+	var flushed atomic.Int32
 	cb := func(_ string, _ []byte, _ int64) error {
-		atomic.AddInt32(&flushed, 1)
+		flushed.Add(1)
 		return nil
 	}
 
@@ -385,15 +385,15 @@ func TestWriteBuffer_Close_FlushesOnStop(t *testing.T) {
 	wb.WriteWithRequest(context.Background(), &WriteRequest{Key: "k", Offset: 0, Data: []byte("data")})
 
 	require.NoError(t, wb.Close()) // blocks until flushLoop drains
-	assert.Equal(t, int32(1), atomic.LoadInt32(&flushed))
+	assert.Equal(t, int32(1), flushed.Load())
 }
 
 func TestWriteBuffer_Close_SyncOnClose_FlushesBeforeStop(t *testing.T) {
 	t.Parallel()
 
-	var flushed int32
+	var flushed atomic.Int32
 	cb := func(_ string, _ []byte, _ int64) error {
-		atomic.AddInt32(&flushed, 1)
+		flushed.Add(1)
 		return nil
 	}
 
@@ -407,7 +407,7 @@ func TestWriteBuffer_Close_SyncOnClose_FlushesBeforeStop(t *testing.T) {
 	wb.WriteWithRequest(context.Background(), &WriteRequest{Key: "k", Offset: 0, Data: []byte("data")})
 
 	require.NoError(t, wb.Close())
-	assert.Equal(t, int32(1), atomic.LoadInt32(&flushed))
+	assert.Equal(t, int32(1), flushed.Load())
 }
 
 // --- GetBufferInfo ---
@@ -498,7 +498,7 @@ func TestWriteBuffer_MaxBuffers_EvictsLRU(t *testing.T) {
 	require.NoError(t, err)
 	defer wb.Close() //nolint:errcheck
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		wb.WriteWithRequest(context.Background(), &WriteRequest{
 			Key: fmt.Sprintf("k%d", i), Offset: 0, Data: []byte("x"),
 		})
@@ -541,7 +541,7 @@ func TestWriteBuffer_OptimizeBuffers_FlushesLargeBuffers(t *testing.T) {
 	defer wb.Close() //nolint:errcheck
 
 	// Each buffer is 60 bytes; total = 240 > MaxBufferSize(100)*MaxBuffers(4)/2 = 200
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		wb.WriteWithRequest(context.Background(), &WriteRequest{
 			Key: fmt.Sprintf("k%d", i), Offset: 0, Data: make([]byte, 60),
 		})
@@ -556,9 +556,9 @@ func TestWriteBuffer_OptimizeBuffers_FlushesLargeBuffers(t *testing.T) {
 func TestWriteBuffer_ConcurrentWrites_DifferentKeys(t *testing.T) {
 	t.Parallel()
 
-	var callCount int32
+	var callCount atomic.Int32
 	cb := func(_ string, _ []byte, _ int64) error {
-		atomic.AddInt32(&callCount, 1)
+		callCount.Add(1)
 		return nil
 	}
 
@@ -572,7 +572,7 @@ func TestWriteBuffer_ConcurrentWrites_DifferentKeys(t *testing.T) {
 	const n = 30
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			wb.WriteWithRequest(context.Background(), &WriteRequest{
@@ -584,7 +584,7 @@ func TestWriteBuffer_ConcurrentWrites_DifferentKeys(t *testing.T) {
 
 	err = wb.FlushAll()
 	require.NoError(t, err)
-	assert.Equal(t, int32(n), atomic.LoadInt32(&callCount))
+	assert.Equal(t, int32(n), callCount.Load())
 }
 
 func TestWriteBuffer_ConcurrentReadsAndWrites(t *testing.T) {
@@ -595,7 +595,7 @@ func TestWriteBuffer_ConcurrentReadsAndWrites(t *testing.T) {
 	defer wb.Close() //nolint:errcheck
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -624,11 +624,11 @@ func TestWriteBuffer_ConcurrentFlushAndWrite(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Writers
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			for j := 0; j < 3; j++ {
+			for j := range 3 {
 				wb.WriteWithRequest(context.Background(), &WriteRequest{
 					Key: fmt.Sprintf("w%d", i), Offset: int64(j * 4), Data: []byte("data"),
 				})
@@ -637,12 +637,10 @@ func TestWriteBuffer_ConcurrentFlushAndWrite(t *testing.T) {
 	}
 
 	// Concurrent FlushAll
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		time.Sleep(5 * time.Millisecond)
 		_ = wb.FlushAll()
-	}()
+	})
 
 	wg.Wait()
 }

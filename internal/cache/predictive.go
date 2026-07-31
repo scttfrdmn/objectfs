@@ -765,7 +765,7 @@ func (pc *PredictiveCache) triggerPrefetch(candidates []types.PrefetchCandidate)
 }
 
 func (pc *PredictiveCache) startPrefetchWorkers() {
-	for i := 0; i < pc.config.MaxConcurrentFetch; i++ {
+	for range pc.config.MaxConcurrentFetch {
 		go pc.prefetchWorker()
 	}
 }
@@ -860,10 +860,9 @@ func (em *IntelligentEvictionManager) generateEvictionCandidates() []*EvictionCa
 		// are handled correctly.
 		var recencyScore float64
 		if !pattern.LastAccess.IsZero() {
-			age := now.Sub(pattern.LastAccess)
-			if age < 0 {
-				age = 0 // clamp: treat future-timestamped entries as just-accessed
-			}
+			age := max(now.Sub(pattern.LastAccess),
+				// clamp: treat future-timestamped entries as just-accessed
+				0)
 			recencyScore = math.Exp(-age.Hours() / 24)
 		}
 
@@ -914,13 +913,6 @@ func (rl *RateLimiter) Allow(bytes int64) bool {
 	}
 
 	return false
-}
-
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // Statistics and monitoring

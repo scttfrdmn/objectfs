@@ -274,7 +274,7 @@ func (p *ConnectionPool) Close() error {
 	p.mu.Unlock()
 
 	// Stop the health checker after releasing the lock: checkHealth calls GetWithTimeout, which takes
-	// the read lock, so signalling it while holding the write lock would deadlock.
+	// the read lock, so signaling it while holding the write lock would deadlock.
 	close(p.healthCheck.stopCh)
 	<-p.healthCheck.stopped
 
@@ -346,7 +346,7 @@ func (p *ConnectionPool) Warmup(ctx context.Context, count int) error {
 
 	var errs []error
 
-	for i := 0; i < count; i++ {
+	for range count {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -431,13 +431,10 @@ func (hc *HealthChecker) run() {
 
 func (hc *HealthChecker) checkHealth() {
 	// Get a sample of connections to test
-	testCount := 3
-	if hc.pool.Stats().Idle < testCount {
-		testCount = hc.pool.Stats().Idle
-	}
+	testCount := min(hc.pool.Stats().Idle, 3)
 
 	var unhealthyCount int
-	for i := 0; i < testCount; i++ {
+	for range testCount {
 		conn, err := hc.pool.GetWithTimeout(1 * time.Second)
 		if err != nil {
 			// A saturated or closed pool is not a health signal about any individual

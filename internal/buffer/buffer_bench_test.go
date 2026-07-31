@@ -80,7 +80,7 @@ func BenchmarkWriteBuffer_Flush_1MB(b *testing.B) {
 // ─── Concurrent Write benchmark ───────────────────────────────────────────────
 
 // BenchmarkWriteBuffer_Concurrent_Write exercises parallel writes to different
-// keys to measure lock contention behaviour.
+// keys to measure lock contention behavior.
 func BenchmarkWriteBuffer_Concurrent_Write(b *testing.B) {
 	wb := newBenchBuffer(b)
 	defer func() { _ = wb.Close() }()
@@ -108,7 +108,7 @@ func BenchmarkWriteBuffer_FlushAll(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		wb := newBenchBuffer(b)
-		for j := 0; j < numKeys; j++ {
+		for j := range numKeys {
 			key := fmt.Sprintf("bench/fa-key-%d", j)
 			_ = wb.Write(key, 0, payload)
 		}

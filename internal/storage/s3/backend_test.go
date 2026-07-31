@@ -53,7 +53,7 @@ func TestBackendMetrics_InitialState(t *testing.T) {
 	assert.Equal(t, int64(0), metrics.BytesUploaded)
 	assert.Equal(t, int64(0), metrics.BytesDownloaded)
 	assert.Equal(t, time.Duration(0), metrics.AverageLatency)
-	assert.Equal(t, "", metrics.LastError)
+	assert.Empty(t, metrics.LastError)
 	assert.True(t, metrics.LastErrorTime.IsZero())
 }
 
@@ -187,7 +187,7 @@ func BenchmarkDetectContentType(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := keys[i%len(keys)]
 		backend.detectContentType(key)
 	}
@@ -201,7 +201,7 @@ func BenchmarkRecordMetrics(b *testing.B) {
 	duration := 100 * time.Millisecond
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		backend.metricsCollector.RecordMetrics(duration, i%10 == 0) // 10% error rate
 	}
 }

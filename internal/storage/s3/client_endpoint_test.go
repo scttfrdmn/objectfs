@@ -113,7 +113,7 @@ func TestPooledClientsAreConfiguredAcrossDraws(t *testing.T) {
 	// Hold the whole pool at once, so every one of these comes from the factory rather than
 	// from the idle set.
 	drawn := make([]*awss3.Client, 0, cfg.PoolSize)
-	for i := 0; i < cfg.PoolSize; i++ {
+	for i := range cfg.PoolSize {
 		c, err := cm.GetPooledClient()
 		if err != nil {
 			t.Fatalf("factory draw %d: %v", i, err)
@@ -126,7 +126,7 @@ func TestPooledClientsAreConfiguredAcrossDraws(t *testing.T) {
 	}
 
 	// Now every draw is served from the idle set — the other code path.
-	for i := 0; i < cfg.PoolSize; i++ {
+	for i := range cfg.PoolSize {
 		c, err := cm.GetPooledClient()
 		if err != nil {
 			t.Fatalf("idle draw %d: %v", i, err)

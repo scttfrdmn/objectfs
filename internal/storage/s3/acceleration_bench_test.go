@@ -105,7 +105,7 @@ func BenchmarkFallback(b *testing.B) {
 	key := fmt.Sprintf("benchmark-fallback-%d", time.Now().UnixNano())
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		// Simulate acceleration error by temporarily disabling
 		backend.clientManager.DisableAcceleration("benchmark test")
 
@@ -143,7 +143,7 @@ func BenchmarkAccelerationOverhead(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		for _, err := range testErrors {
 			_ = backend.isAccelerationError(err)
 		}
@@ -186,7 +186,7 @@ func benchmarkGetObject(b *testing.B, useAccelerate bool, objectSize int) {
 	b.ResetTimer()
 	b.SetBytes(int64(objectSize))
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, err := backend.GetObject(ctx, key, 0, 0)
 		if err != nil {
 			b.Fatalf("GetObject failed: %v", err)
@@ -230,7 +230,7 @@ func benchmarkPutObject(b *testing.B, useAccelerate bool, objectSize int) {
 	b.SetBytes(int64(objectSize))
 
 	keys := make([]string, b.N)
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := fmt.Sprintf("benchmark-put-%d-%d", time.Now().UnixNano(), i)
 		keys[i] = key
 		if err := backend.PutObject(ctx, key, data); err != nil {
@@ -320,7 +320,7 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 		b.ResetTimer()
 		b.SetBytes(int64(size))
 
-		for i := 0; i < b.N; i++ {
+		for i := range b.N {
 			key := fmt.Sprintf("benchmark-single-%d-%d", time.Now().UnixNano(), i)
 			if err := backend.PutObject(ctx, key, data); err != nil {
 				b.Fatalf("PutObject failed: %v", err)
@@ -348,7 +348,7 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 		b.ResetTimer()
 		b.SetBytes(int64(size))
 
-		for i := 0; i < b.N; i++ {
+		for i := range b.N {
 			key := fmt.Sprintf("benchmark-multi-%d-%d", time.Now().UnixNano(), i)
 			if err := backend.PutObject(ctx, key, data); err != nil {
 				b.Fatalf("PutObject failed: %v", err)
@@ -397,7 +397,7 @@ func BenchmarkMultipartConcurrency(b *testing.B) {
 			b.ResetTimer()
 			b.SetBytes(int64(size))
 
-			for i := 0; i < b.N; i++ {
+			for i := range b.N {
 				key := fmt.Sprintf("benchmark-concurrency-%d-%d-%d", concurrency, time.Now().UnixNano(), i)
 				if err := backend.PutObject(ctx, key, data); err != nil {
 					b.Fatalf("PutObject failed: %v", err)

@@ -27,10 +27,10 @@ type Backend interface {
 // DistributedCoordinator manages distributed operations across cluster nodes
 type DistributedCoordinator interface {
 	// Execute a distributed operation
-	ExecuteOperation(ctx context.Context, op interface{}) (interface{}, error)
+	ExecuteOperation(ctx context.Context, op any) (any, error)
 
 	// Get coordinator statistics
-	GetStats() map[string]interface{}
+	GetStats() map[string]any
 }
 
 // Cache defines the caching interface
@@ -58,17 +58,17 @@ type MetricsCollector interface {
 	RecordCacheHit(key string, size int64)
 	RecordCacheMiss(key string, size int64)
 	RecordError(operation string, err error)
-	GetMetrics() map[string]interface{}
+	GetMetrics() map[string]any
 }
 
 // ConfigManager defines configuration management interface
 type ConfigManager interface {
-	Get(key string) interface{}
+	Get(key string) any
 	GetString(key string) string
 	GetInt(key string) int
 	GetDuration(key string) time.Duration
 	GetBool(key string) bool
-	Watch(key string, callback func(interface{}))
+	Watch(key string, callback func(any))
 	Reload() error
 }
 
@@ -89,8 +89,8 @@ type AccessPredictor interface {
 
 // ConnectionManager defines connection pool management
 type ConnectionManager interface {
-	GetConnection() interface{}
-	ReturnConnection(conn interface{})
+	GetConnection() any
+	ReturnConnection(conn any)
 	HealthCheck() error
 	ScalePool(targetSize int) error
 	GetStats() ConnectionStats

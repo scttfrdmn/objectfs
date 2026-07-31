@@ -250,7 +250,7 @@ func TestNew_WithDefaults(t *testing.T) {
 	if got := defaultOptions().region; got != "us-east-1" {
 		t.Errorf("default region: got %q, want %q", got, "us-east-1")
 	}
-	// Verify the client initialises successfully against the real test bucket.
+	// Verify the client initializes successfully against the real test bucket.
 	c, err := New(context.Background(), testBucket(), WithRegion(testRegion()))
 	if err != nil {
 		t.Fatalf("New: %v", err)

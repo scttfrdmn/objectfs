@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"slices"
 	"sync"
 	"time"
 )
@@ -525,13 +527,7 @@ func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 				}
 			} else {
 				// Add to suspicion list if not already there
-				found := false
-				for _, from := range gossipNode.Suspicion.From {
-					if from == suspectMsg.From {
-						found = true
-						break
-					}
-				}
+				found := slices.Contains(gossipNode.Suspicion.From, suspectMsg.From)
 				if !found {
 					gossipNode.Suspicion.From = append(gossipNode.Suspicion.From, suspectMsg.From)
 				}
@@ -692,10 +688,7 @@ func (gp *GossipProtocol) performGossip() {
 	}
 
 	// Select random nodes to gossip with
-	fanout := gp.config.GossipFanout
-	if fanout > len(nodes) {
-		fanout = len(nodes)
-	}
+	fanout := min(gp.config.GossipFanout, len(nodes))
 
 	// Send alive message about ourselves
 	aliveMsg := &AliveMessage{
@@ -714,7 +707,7 @@ func (gp *GossipProtocol) performGossip() {
 	msg.Data = data
 
 	// Gossip to random subset of nodes
-	for i := 0; i < fanout; i++ {
+	for i := range fanout {
 		targetNode := nodes[i%len(nodes)]
 		if targetNode.Info != nil {
 			_ = gp.sendMessage(targetNode.Info.Address, msg)
@@ -886,9 +879,7 @@ func (gp *GossipProtocol) broadcastMessage(msg *GossipMessage) error {
 func (gp *GossipProtocol) sendSyncMessage(addr string) error {
 	gp.mu.RLock()
 	nodes := make(map[string]*GossipNode)
-	for id, node := range gp.memberlist {
-		nodes[id] = node
-	}
+	maps.Copy(nodes, gp.memberlist)
 	gp.mu.RUnlock()
 
 	syncMsg := &SyncMessage{
@@ -926,7 +917,7 @@ func (gp *GossipProtocol) generateMessageID() string {
 
 // sendConsensusMsg is a convenience helper that marshals payload into a
 // GossipMessage and sends it to addr over the gossip UDP socket.
-func (gp *GossipProtocol) sendConsensusMsg(addr string, msgType MessageType, payload interface{}) error {
+func (gp *GossipProtocol) sendConsensusMsg(addr string, msgType MessageType, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal consensus message: %w", err)
@@ -965,9 +956,7 @@ func (gp *GossipProtocol) GetStats() *GossipStats {
 		LastMessageReceived: gp.stats.LastMessageReceived,
 		MessagesByType:      make(map[string]int64),
 	}
-	for k, v := range gp.stats.MessagesByType {
-		stats.MessagesByType[k] = v
-	}
+	maps.Copy(stats.MessagesByType, gp.stats.MessagesByType)
 	gp.stats.mu.RUnlock()
 
 	return stats
@@ -985,9 +974,7 @@ func (gp *GossipProtocol) GetMemberlist() map[string]*GossipNode {
 		if node.Info != nil {
 			infoCopy := *node.Info
 			infoCopy.Metadata = make(map[string]string)
-			for k, v := range node.Info.Metadata {
-				infoCopy.Metadata[k] = v
-			}
+			maps.Copy(infoCopy.Metadata, node.Info.Metadata)
 			nodeCopy.Info = &infoCopy
 		}
 		if node.Suspicion != nil {

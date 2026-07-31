@@ -310,7 +310,7 @@ func TestLRUCache_Clear(t *testing.T) {
 	})
 
 	// Add multiple items
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		cache.Put("key", int64(i*100), []byte("data"))
 	}
 
@@ -342,10 +342,10 @@ func TestLRUCache_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent writes
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOpsPerGoroutine; j++ {
+			for j := range numOpsPerGoroutine {
 				key := "key"
 				offset := int64(id*numOpsPerGoroutine + j)
 				data := []byte("data")
@@ -357,10 +357,10 @@ func TestLRUCache_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent reads
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOpsPerGoroutine; j++ {
+			for j := range numOpsPerGoroutine {
 				key := "key"
 				offset := int64(id*numOpsPerGoroutine + j)
 				cache.Get(key, offset, 4)
@@ -426,7 +426,7 @@ func TestLRUCache_Resize(t *testing.T) {
 	})
 
 	// Fill cache with 500 bytes
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 100))
 	}
 
@@ -455,7 +455,7 @@ func TestLRUCache_Evict(t *testing.T) {
 	})
 
 	// Add 500 bytes
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 100))
 	}
 
@@ -532,7 +532,7 @@ func TestWeightedLRUCache_EvictByWeight(t *testing.T) {
 	cache.Put("cold", 0, make([]byte, 100)) // Won't be accessed
 
 	// Access "hot" item multiple times to increase its weight
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		cache.Get("hot", 0, 100)
 		time.Sleep(10 * time.Millisecond)
 	}

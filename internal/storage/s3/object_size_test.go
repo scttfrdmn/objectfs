@@ -18,7 +18,7 @@ func discardLogger() *slog.Logger {
 // TestOriginalSize covers the metadata lookup that keeps HeadObject from
 // reporting a compressed ContentLength as the file size. Reporting the
 // compressed size makes the kernel truncate every read at that offset, so the
-// fallback behaviour here is load-bearing for read correctness.
+// fallback behavior here is load-bearing for read correctness.
 func TestOriginalSize(t *testing.T) {
 	t.Parallel()
 

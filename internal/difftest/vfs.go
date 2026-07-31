@@ -32,7 +32,7 @@ import (
 // a write concurrent with a flush was dropped and accounted as flushed. MarkFlushed refuses when the
 // generation has moved, and this type loops rather than reporting a success it did not achieve.
 //
-// The kernel is not modelled here: no page cache, no readahead, no writeback ordering. This drives
+// The kernel is not modeled here: no page cache, no readahead, no writeback ordering. This drives
 // vfs directly, because a divergence has to be attributable to vfs or to the backend rather than to
 // three layers at once.
 type VFS struct {

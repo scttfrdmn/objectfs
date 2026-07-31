@@ -354,7 +354,7 @@ func TestPricingManager_ExternalDiscountConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// Create temporary external discount config file
-	tempFile, err := os.CreateTemp("", "discount-config-*.yaml")
+	tempFile, err := os.CreateTemp(t.TempDir(), "discount-config-*.yaml")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}

@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -38,17 +39,17 @@ func (suite *IntegrationTestSuite) SetupSuite() {
 
 	// Create temporary directories
 	suite.tempDir, err = os.MkdirTemp("", "objectfs-integration-test")
-	require.NoError(suite.T(), err)
+	suite.Require().NoError(err)
 
 	suite.mountPoint = filepath.Join(suite.tempDir, "mount")
 	suite.cacheDir = filepath.Join(suite.tempDir, "cache")
 	suite.configFile = filepath.Join(suite.tempDir, "config.yaml")
 
 	err = os.MkdirAll(suite.mountPoint, 0750)
-	require.NoError(suite.T(), err)
+	suite.Require().NoError(err)
 
 	err = os.MkdirAll(suite.cacheDir, 0750)
-	require.NoError(suite.T(), err)
+	suite.Require().NoError(err)
 
 	// Set up test context
 	suite.ctx, suite.cancel = context.WithTimeout(context.Background(), 5*time.Minute)
@@ -182,8 +183,8 @@ func (suite *IntegrationTestSuite) TestCacheIntegration() {
 
 	// Test cache statistics
 	stats := mlCache.Stats()
-	assert.Greater(t, stats.Hits, uint64(0))
-	assert.Greater(t, stats.Misses, uint64(0))
+	assert.Positive(t, stats.Hits)
+	assert.Positive(t, stats.Misses)
 
 	// Test cache eviction
 	evicted := mlCache.Evict(int64(len(testData)))
@@ -249,7 +250,7 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 
 	// Test buffer statistics
 	stats := writeBuffer.GetStats()
-	assert.Greater(t, stats.TotalWrites, uint64(0))
+	assert.Positive(t, stats.TotalWrites)
 
 	// Wait for potential async flush
 	time.Sleep(50 * time.Millisecond)
@@ -277,16 +278,14 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 	flushedDataMu.RLock()
 	flushedDataLen := len(flushedData)
 	flushedDataMu.RUnlock()
-	assert.True(t, flushedDataLen > 0, "Expected at least one flush to occur")
+	assert.Positive(t, flushedDataLen, "Expected at least one flush to occur")
 
 	// Check if either key was flushed
 	flushedDataMu.RLock()
 	data1, ok1 := flushedData[testKey]
 	data2, ok2 := flushedData[testKey2]
 	flushedDataCopy := make(map[string][]byte)
-	for k, v := range flushedData {
-		flushedDataCopy[k] = v
-	}
+	maps.Copy(flushedDataCopy, flushedData)
 	flushedDataMu.RUnlock()
 
 	if ok1 {
@@ -319,7 +318,7 @@ func (suite *IntegrationTestSuite) TestWriteBufferIntegration() {
 	assert.NoError(t, err)
 
 	managerStats := manager.GetStats()
-	assert.Greater(t, managerStats.TotalOperations, uint64(0))
+	assert.Positive(t, managerStats.TotalOperations)
 
 	// Check if manager is healthy (it should be after just being started)
 	isHealthy := manager.IsHealthy()
@@ -465,13 +464,13 @@ func (suite *IntegrationTestSuite) TestPerformanceAndStress() {
 	done := make(chan bool, numGoroutines)
 
 	// Start concurrent cache operations
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(goroutineID int) {
 			defer func() { done <- true }()
 
-			for j := 0; j < operationsPerGoroutine; j++ {
+			for j := range operationsPerGoroutine {
 				key := fmt.Sprintf("stress-test-%d-%d", goroutineID, j)
-				data := []byte(fmt.Sprintf("test data for %s", key))
+				data := fmt.Appendf(nil, "test data for %s", key)
 
 				// Put data
 				mlCache.Put(key, 0, data)
@@ -489,7 +488,7 @@ func (suite *IntegrationTestSuite) TestPerformanceAndStress() {
 	}
 
 	// Wait for all goroutines to complete
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		select {
 		case <-done:
 			// Goroutine completed

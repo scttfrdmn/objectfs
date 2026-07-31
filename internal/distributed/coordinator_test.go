@@ -87,7 +87,7 @@ func (e *errBackend) ListObjects(_ context.Context, _ string, _ int) ([]types.Ob
 func (e *errBackend) HealthCheck(_ context.Context) error { return e.err }
 
 // TestNewCoordinator verifies that NewCoordinator succeeds and returns a
-// non-nil coordinator with its load balancer and replicator initialised.
+// non-nil coordinator with its load balancer and replicator initialized.
 func TestNewCoordinator(t *testing.T) {
 	t.Parallel()
 	cm, err := NewClusterManager(testConfig("c-node"))
@@ -370,8 +370,7 @@ func TestCoordinator_GetStats_Structure(t *testing.T) {
 // populated by the remote node's handler.
 func TestCoordinator_ExecuteOperation_TwoNodes_RealUDP(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cfg1 := testConfig("coord-node-a")
 	cfg2 := testConfig("coord-node-b")
@@ -451,8 +450,7 @@ func TestCoordinator_StartStop(t *testing.T) {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := cm.coordinator.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -688,8 +686,7 @@ func TestClusterManager_InvalidateCacheKey_NoGossip(t *testing.T) {
 // same key over loopback UDP.
 func TestClusterManager_CacheInvalidation_TwoNodes(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cfg1 := testConfig("inval-node-a")
 	cfg2 := testConfig("inval-node-b")

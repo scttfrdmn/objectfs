@@ -85,7 +85,7 @@ func TestReadAheadManager_SequentialIncrementsHits(t *testing.T) {
 	defer ram.Stop()
 
 	// 4 sequential reads: offsets 0, 1024, 2048, 3072
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		ram.OnRead("seq.bin", int64(i)*1024, 1024)
 	}
 
@@ -107,7 +107,7 @@ func TestReadAheadManager_NonSequential_ResetsPattern(t *testing.T) {
 	defer ram.Stop()
 
 	// Build up some sequential hits.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		ram.OnRead("rnd.bin", int64(i)*1024, 1024)
 	}
 
@@ -161,7 +161,7 @@ func TestReadAheadManager_PrefetchScheduled_AfterEnoughHits(t *testing.T) {
 	const blk = int64(1024)
 	const path = "prefetch.bin"
 	// 6 sequential reads puts sequentialHits=6, confidence=0.6.
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		ram.OnRead(path, int64(i)*blk, blk)
 	}
 
@@ -424,15 +424,13 @@ func TestStats_ConcurrentReadWrites(t *testing.T) {
 	const n = 200
 
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			stats.mu.Lock()
 			stats.Reads++
 			stats.BytesRead += 512
 			stats.mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 

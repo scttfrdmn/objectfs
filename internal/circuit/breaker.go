@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -380,9 +381,7 @@ func (m *Manager) GetAllBreakers() map[string]*CircuitBreaker {
 	defer m.mu.RUnlock()
 
 	result := make(map[string]*CircuitBreaker, len(m.breakers))
-	for name, breaker := range m.breakers {
-		result[name] = breaker
-	}
+	maps.Copy(result, m.breakers)
 	return result
 }
 
@@ -412,9 +411,7 @@ func (m *Manager) ResetAll() {
 func (m *Manager) GetStats() map[string]CircuitBreakerStats {
 	m.mu.RLock()
 	breakers := make(map[string]*CircuitBreaker, len(m.breakers))
-	for name, breaker := range m.breakers {
-		breakers[name] = breaker
-	}
+	maps.Copy(breakers, m.breakers)
 	m.mu.RUnlock()
 
 	stats := make(map[string]CircuitBreakerStats)

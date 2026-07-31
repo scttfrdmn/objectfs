@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/utils"
 	"gopkg.in/yaml.v2"
+
+	"github.com/objectfs/objectfs/pkg/utils"
 )
 
 // Currency Constants
@@ -375,9 +377,7 @@ func mergeDiscountConfigs(inline, external DiscountConfig) DiscountConfig {
 		if merged.CustomDiscounts == nil {
 			merged.CustomDiscounts = make(map[string]float64)
 		}
-		for tier, discount := range external.CustomDiscounts {
-			merged.CustomDiscounts[tier] = discount
-		}
+		maps.Copy(merged.CustomDiscounts, external.CustomDiscounts)
 	}
 
 	return merged

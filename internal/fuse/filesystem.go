@@ -275,9 +275,9 @@ func (n *DirectoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 		name := strings.TrimPrefix(obj.Key, prefix)
 
 		// Handle nested directories
-		if slashIdx := strings.Index(name, "/"); slashIdx != -1 {
+		if before, _, ok := strings.Cut(name, "/"); ok {
 			// This is a subdirectory
-			dirName := name[:slashIdx]
+			dirName := before
 			if !seen[dirName] {
 				entries = append(entries, fuse.DirEntry{
 					Name: dirName,
@@ -504,10 +504,7 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	const cacheChunkSize = 16 * 1024 * 1024 // 16 MB — mirrors ReadChunkSize default
 	if int64(len(data)) > cacheChunkSize {
 		for chunkOff := int64(0); chunkOff < int64(len(data)); chunkOff += cacheChunkSize {
-			end := chunkOff + cacheChunkSize
-			if end > int64(len(data)) {
-				end = int64(len(data))
-			}
+			end := min(chunkOff+cacheChunkSize, int64(len(data)))
 			fh.fs.cache.Put(fh.file.path, off+chunkOff, data[chunkOff:end])
 		}
 	} else {

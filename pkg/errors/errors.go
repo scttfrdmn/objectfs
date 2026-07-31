@@ -109,10 +109,10 @@ const (
 // ObjectFSError represents a structured error with context and metadata.
 type ObjectFSError struct {
 	// Core error information
-	Code     ErrorCode              `json:"code"`
-	Category ErrorCategory          `json:"category"`
-	Message  string                 `json:"message"`
-	Details  map[string]interface{} `json:"details,omitempty"`
+	Code     ErrorCode      `json:"code"`
+	Category ErrorCategory  `json:"category"`
+	Message  string         `json:"message"`
+	Details  map[string]any `json:"details,omitempty"`
 
 	// Contextual information
 	Context   map[string]string `json:"context,omitempty"`
@@ -210,7 +210,7 @@ func NewError(code ErrorCode, message string) *ObjectFSError {
 		Category:   GetCategory(code),
 		Message:    message,
 		Timestamp:  time.Now(),
-		Details:    make(map[string]interface{}),
+		Details:    make(map[string]any),
 		Context:    make(map[string]string),
 		Retryable:  IsRetryableByDefault(code),
 		UserFacing: IsUserFacingByDefault(code),
@@ -418,9 +418,9 @@ func (e *ObjectFSError) WithContext(key, value string) *ObjectFSError {
 }
 
 // WithDetail adds detailed information to an error
-func (e *ObjectFSError) WithDetail(key string, value interface{}) *ObjectFSError {
+func (e *ObjectFSError) WithDetail(key string, value any) *ObjectFSError {
 	if e.Details == nil {
-		e.Details = make(map[string]interface{})
+		e.Details = make(map[string]any)
 	}
 	e.Details[key] = value
 	return e

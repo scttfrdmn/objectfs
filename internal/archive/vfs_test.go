@@ -385,7 +385,7 @@ func TestVFS_IndexCaching(t *testing.T) {
 	vfs := NewVFS(backend)
 	ctx := context.Background()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := vfs.Stat(ctx, "c.tar.gz", "f.txt"); err != nil {
 			t.Fatalf("Stat iteration %d: %v", i, err)
 		}
@@ -410,7 +410,7 @@ func TestVFS_ContentCaching(t *testing.T) {
 	vfs := NewVFS(backend)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := vfs.ReadFile(ctx, "cc.tar.gz", "data.txt", 0, 0); err != nil {
 			t.Fatalf("ReadFile iteration %d: %v", i, err)
 		}

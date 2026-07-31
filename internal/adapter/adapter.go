@@ -149,7 +149,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	// Create a simple flush callback that writes to S3.
 	// Use context.Background() rather than the Start() ctx: the flush
 	// callback runs asynchronously long after Start() returns, and the
-	// caller's ctx is typically cancelled at that point (#100).
+	// caller's ctx is typically canceled at that point (#100).
 	flushCallback := func(key string, data []byte, offset int64) error {
 		return a.backend.PutObject(context.Background(), key, data)
 	}

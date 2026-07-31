@@ -32,7 +32,7 @@ func (inv *Invalidator) Publish(ctx context.Context, key string) error {
 }
 
 // Subscribe starts a goroutine that listens for invalidation messages on the channel
-// and deletes the corresponding key from the local cache. It returns when ctx is cancelled.
+// and deletes the corresponding key from the local cache. It returns when ctx is canceled.
 func (inv *Invalidator) Subscribe(ctx context.Context) {
 	sub := inv.client.Subscribe(ctx, invalidationChannel)
 	go func() {
@@ -54,13 +54,13 @@ func (inv *Invalidator) Subscribe(ctx context.Context) {
 
 // handle processes a single invalidation message payload.
 func (inv *Invalidator) handle(payload string) {
-	idx := strings.IndexByte(payload, ':')
-	if idx < 0 {
+	before, after, ok := strings.Cut(payload, ":")
+	if !ok {
 		slog.Warn("redis invalidation: malformed message", "payload", payload)
 		return
 	}
-	senderID := payload[:idx]
-	key := payload[idx+1:]
+	senderID := before
+	key := after
 	if senderID == inv.nodeID {
 		return // skip our own broadcasts — we already deleted locally
 	}

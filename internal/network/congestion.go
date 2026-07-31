@@ -18,6 +18,7 @@ package network
 
 import (
 	"net"
+	"slices"
 	"time"
 )
 
@@ -67,10 +68,8 @@ func Detect() DetectionResult {
 // Preference order: BBR > CUBIC > system default > AlgorithmAuto.
 func Select(result DetectionResult) Algorithm {
 	for _, preferred := range []Algorithm{AlgorithmBBR, AlgorithmCUBIC} {
-		for _, a := range result.Available {
-			if a == preferred {
-				return preferred
-			}
+		if slices.Contains(result.Available, preferred) {
+			return preferred
 		}
 	}
 	if result.SystemDefault != "" && result.SystemDefault != AlgorithmAuto {

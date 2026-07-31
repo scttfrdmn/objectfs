@@ -16,7 +16,6 @@ func TestAlgorithm_Constants(t *testing.T) {
 		{AlgorithmReno, "reno"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(string(tt.algo), func(t *testing.T) {
 			t.Parallel()
 			if string(tt.algo) != tt.want {
@@ -108,7 +107,6 @@ func TestNewDialer_DoesNotPanic(t *testing.T) {
 		AlgorithmCUBIC,
 		AlgorithmReno,
 	} {
-		algo := algo
 		t.Run(string(algo), func(t *testing.T) {
 			t.Parallel()
 			d := NewDialer(algo)

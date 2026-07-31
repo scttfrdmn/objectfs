@@ -155,7 +155,7 @@ func TestDefaultIsSuccessful(t *testing.T) {
 			true,
 		},
 		{
-			"a cancelled operation is successful",
+			"a canceled operation is successful",
 			objerrors.NewError(objerrors.ErrCodeOperationCanceled, "context canceled"),
 			true,
 		},
@@ -189,7 +189,7 @@ func TestDefaultIsSuccessful(t *testing.T) {
 	}
 }
 
-// TestBreakerDoesNotOpenOnMissingObjects is the behavioural form of the case above: enough reads of
+// TestBreakerDoesNotOpenOnMissingObjects is the behavioral form of the case above: enough reads of
 // absent keys to trip any threshold, then one real request that must still be admitted.
 func TestBreakerDoesNotOpenOnMissingObjects(t *testing.T) {
 	t.Parallel()
@@ -296,7 +296,7 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 	}
 
 	// Cause 3 failures to trip the breaker
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_ = cb.Execute(func() error {
 			return errors.New("failure")
 		})
@@ -348,7 +348,7 @@ func TestCircuitBreaker_OpenState_RejectsRequests(t *testing.T) {
 	})
 
 	// Cause 2 failures to open the breaker
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		_ = cb.Execute(func() error {
 			return errors.New("failure")
 		})
@@ -775,7 +775,7 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 	manager := NewManager(Config{})
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()

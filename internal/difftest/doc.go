@@ -11,7 +11,7 @@
 // The v0.10.0 audit found roughly forty-five defects that 32,680 lines of tests across 90 files had
 // all missed. The write-path ones were not subtle in effect — appending one byte to a 1 MiB file left
 // a 1-byte object — but every one of them was invisible to a unit test, because each layer was tested
-// against a mock of its neighbour and the mock restated what the caller believed. The bug lived in
+// against a mock of its neighbor and the mock restated what the caller believed. The bug lived in
 // the disagreement between layers, which is exactly what a mock removes.
 //
 // A differential oracle cannot be fooled that way, because the reference is not written by the same

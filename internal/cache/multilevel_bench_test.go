@@ -116,7 +116,7 @@ func BenchmarkMultiLevelCache_Warmup_10keys(b *testing.B) {
 func BenchmarkMultiLevelCache_Get_Parallel(b *testing.B) {
 	c := newBenchCache(b)
 	payload := makePayload(4 * 1024)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.Put(fmt.Sprintf("par-key-%d", i), 0, payload)
 	}
 

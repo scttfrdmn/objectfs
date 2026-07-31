@@ -321,7 +321,7 @@ func TestHandleTableIDsAreNotReused(t *testing.T) {
 	tbl := NewHandleTable()
 	seen := make(map[uint64]bool)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		h, err := tbl.Open("f", OpenRead, testAttr(0), 0)
 		if err != nil {
 			t.Fatalf("Open %d: %v", i, err)
@@ -1383,12 +1383,12 @@ func TestHandleTableConcurrentAccess(t *testing.T) {
 	const iterations = 40
 
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
 
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				path := fmt.Sprintf("f%d", i%4)
 
 				h, err := tbl.Open(path, OpenRead|OpenWrite, testAttr(0), 0)

@@ -225,7 +225,7 @@ func (m *Monitor) RegisterComponent(component HealthyComponent) error {
 // GetStatus returns the current system health status
 func (m *Monitor) GetStatus() *ServiceStatus {
 	version := "1.0.0" // This would come from build info
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"service":        "objectfs",
 		"components":     len(m.components),
 		"monitor_config": m.config,
@@ -235,17 +235,17 @@ func (m *Monitor) GetStatus() *ServiceStatus {
 }
 
 // GetDetailedStatus returns detailed health information
-func (m *Monitor) GetDetailedStatus() map[string]interface{} {
-	status := make(map[string]interface{})
+func (m *Monitor) GetDetailedStatus() map[string]any {
+	status := make(map[string]any)
 
 	// Add basic status
 	status["status"] = m.checker.GetStatus()
 
 	// Add component information
 	m.mu.RLock()
-	components := make(map[string]interface{})
+	components := make(map[string]any)
 	for name, component := range m.components {
-		components[name] = map[string]interface{}{
+		components[name] = map[string]any{
 			"name": component.GetComponentName(),
 			"type": component.GetComponentType(),
 		}
@@ -557,7 +557,7 @@ func (am *AlertManager) GetRecentAlerts(limit int) []*Alert {
 	}
 
 	// Sort by timestamp (most recent first)
-	for i := 0; i < len(alerts)-1; i++ {
+	for i := range len(alerts) - 1 {
 		for j := i + 1; j < len(alerts); j++ {
 			if alerts[i].Timestamp.Before(alerts[j].Timestamp) {
 				alerts[i], alerts[j] = alerts[j], alerts[i]
@@ -598,21 +598,21 @@ func NewHealthEndpoints(monitor *Monitor) *HealthEndpoints {
 }
 
 // GetHealthStatus returns basic health status (for load balancers)
-func (he *HealthEndpoints) GetHealthStatus() map[string]interface{} {
+func (he *HealthEndpoints) GetHealthStatus() map[string]any {
 	if he.monitor.IsHealthy() {
-		return map[string]interface{}{
+		return map[string]any{
 			"status":    "healthy",
 			"timestamp": time.Now(),
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"status":    "unhealthy",
 		"timestamp": time.Now(),
 	}
 }
 
 // GetDetailedHealth returns detailed health information
-func (he *HealthEndpoints) GetDetailedHealth() map[string]interface{} {
+func (he *HealthEndpoints) GetDetailedHealth() map[string]any {
 	return he.monitor.GetDetailedStatus()
 }

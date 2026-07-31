@@ -312,7 +312,7 @@ func TestPersistentCache_Eviction(t *testing.T) {
 	}
 
 	// Add items that exceed capacity
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 30))
 		time.Sleep(10 * time.Millisecond) // Ensure different access times
 	}
@@ -341,7 +341,7 @@ func TestPersistentCache_EvictManual(t *testing.T) {
 	}
 
 	// Add some items
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 100))
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -373,7 +373,7 @@ func TestPersistentCache_Clear(t *testing.T) {
 	}
 
 	// Add multiple items
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		cache.Put("key", int64(i*100), []byte("data"))
 	}
 
@@ -525,10 +525,10 @@ func TestPersistentCache_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent writes
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOpsPerGoroutine; j++ {
+			for j := range numOpsPerGoroutine {
 				key := "key"
 				offset := int64(id*numOpsPerGoroutine + j)
 				data := []byte("data")
@@ -540,10 +540,10 @@ func TestPersistentCache_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent reads
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOpsPerGoroutine; j++ {
+			for j := range numOpsPerGoroutine {
 				key := "key"
 				offset := int64(id*numOpsPerGoroutine + j)
 				cache.Get(key, offset, 4)

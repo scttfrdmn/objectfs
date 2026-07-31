@@ -61,7 +61,7 @@ func TestBytePool_Get_ZeroSize(t *testing.T) {
 
 	p := NewBytePool()
 	buf := p.Get(0)
-	assert.Len(t, buf, 0)
+	assert.Empty(t, buf)
 }
 
 func TestBytePool_Get_LargerThanAllBuckets_DirectAlloc(t *testing.T) {
@@ -219,7 +219,7 @@ func TestBytePool_ConcurrentGetPut_RaceFree(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 
-	for i := 0; i < goroutines; i++ {
+	for i := range goroutines {
 		go func(i int) {
 			defer wg.Done()
 			size := 4096 * (1 + i%4) // vary sizes across 4096, 8192, 12288→next bucket, 16384
@@ -237,7 +237,7 @@ func TestGlobalPool_ConcurrentAccess_RaceFree(t *testing.T) {
 	t.Parallel()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

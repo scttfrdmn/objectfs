@@ -68,17 +68,17 @@ func FuzzRoundTrip(f *testing.F) {
 	}
 
 	// Seeds chosen for the branches they take, not for looking like data.
-	f.Add([]byte{}, uint8(0))                              // empty: a legitimate object, and an easy off-by-one
-	f.Add([]byte{0}, uint8(1))                             // one byte
-	f.Add(bytes.Repeat([]byte("A"), 4096), uint8(1))       // maximally compressible, zstd
-	f.Add(bytes.Repeat([]byte("A"), 4096), uint8(2))       // the same, lz4
-	f.Add(bytes.Repeat([]byte("A"), 4096), uint8(3))       // the same, gzip
-	f.Add(incompressible(4096), uint8(1))                  // compression makes it larger: the discard path
-	f.Add(bytes.Repeat([]byte("xyz"), 100), uint8(0))      // no codec configured
+	f.Add([]byte{}, uint8(0))                                 // empty: a legitimate object, and an easy off-by-one
+	f.Add([]byte{0}, uint8(1))                                // one byte
+	f.Add(bytes.Repeat([]byte("A"), 4096), uint8(1))          // maximally compressible, zstd
+	f.Add(bytes.Repeat([]byte("A"), 4096), uint8(2))          // the same, lz4
+	f.Add(bytes.Repeat([]byte("A"), 4096), uint8(3))          // the same, gzip
+	f.Add(incompressible(4096), uint8(1))                     // compression makes it larger: the discard path
+	f.Add(bytes.Repeat([]byte("xyz"), 100), uint8(0))         // no codec configured
 	f.Add(bytes.Repeat([]byte("B"), 5*1024*1024+1), uint8(0)) // over the multipart threshold: #170's path
 	f.Add(bytes.Repeat([]byte("B"), 5*1024*1024+1), uint8(1)) // multipart *and* compressed
-	f.Add([]byte{0xff, 0xfe, 0x00, 0x01}, uint8(2))        // bytes that are not text
-	f.Add(bytes.Repeat([]byte{0}, 1<<16), uint8(1))        // a large run of zeros
+	f.Add([]byte{0xff, 0xfe, 0x00, 0x01}, uint8(2))           // bytes that are not text
+	f.Add(bytes.Repeat([]byte{0}, 1<<16), uint8(1))           // a large run of zeros
 
 	algorithms := []string{"none", "zstd", "lz4", "gzip"}
 

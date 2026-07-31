@@ -167,7 +167,7 @@ Directory operations:
 	Empty directory → zero-byte marker object at "<prefix>/"
 
 Special files are not supported. Device nodes, named pipes, symlinks, and hard links have no
-representation in S3 and none is synthesised — hard links never will be, since S3 has no such
+representation in S3 and none is synthesized — hard links never will be, since S3 has no such
 concept. Symlink support, if added, will store the target in object metadata; that is not
 implemented today.
 

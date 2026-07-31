@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"sort"
+	"slices"
 	"testing"
 )
 
@@ -42,7 +42,7 @@ func (m *model) extents() []Extent {
 	for off := range m.dirty {
 		offs = append(offs, off)
 	}
-	sort.Slice(offs, func(i, j int) bool { return offs[i] < offs[j] })
+	slices.Sort(offs)
 
 	var out []Extent
 	cur := Extent{Offset: offs[0], Data: []byte{m.dirty[offs[0]]}}
@@ -175,7 +175,7 @@ func TestExtentListAdd(t *testing.T) {
 			want: []Extent{{0, []byte("NEWCONTENT")}},
 		},
 		{
-			name: "write spanning a gap merges both neighbours",
+			name: "write spanning a gap merges both neighbors",
 			ops:  []writeOp{{0, "AAAA"}, {10, "BBBB"}, {2, "xxxxxxxxxx"}},
 			want: []Extent{{0, []byte("AAxxxxxxxxxxBB")}},
 		},
@@ -806,7 +806,7 @@ func TestExtentListPlanIsSelfConsistent(t *testing.T) {
 
 	rng := rand.New(rand.NewPCG(0x5eed, 0x1234))
 
-	for iter := 0; iter < 3000; iter++ {
+	for range 3000 {
 		var l ExtentList
 		truncated := false
 		for i := 0; i < rng.IntN(7); i++ {
@@ -1218,7 +1218,7 @@ func TestWriteFlushRoundTripMatchesModel(t *testing.T) {
 
 	rng := rand.New(rand.NewPCG(0xC0FFEE, 0x0DDBA11))
 
-	for iter := 0; iter < 3000; iter++ {
+	for iter := range 3000 {
 		// The object as it exists in storage, and the file as it should end up.
 		storedSize := int64(rng.IntN(120))
 		stored := make([]byte, storedSize)
@@ -1317,7 +1317,7 @@ func TestReadAtMatchesModel(t *testing.T) {
 
 	rng := rand.New(rand.NewPCG(0xBEEF, 0xCAFE))
 
-	for iter := 0; iter < 2000; iter++ {
+	for iter := range 2000 {
 		storedSize := int64(rng.IntN(80))
 		stored := make([]byte, storedSize)
 		for i := range stored {
@@ -1472,7 +1472,7 @@ func BenchmarkExtentListAddSequential(b *testing.B) {
 	for b.Loop() {
 		var l ExtentList
 		var off int64
-		for i := 0; i < 1000; i++ {
+		for range 1000 {
 			if err := l.Add(off, data); err != nil {
 				b.Fatal(err)
 			}
@@ -1488,7 +1488,7 @@ func BenchmarkExtentListAddSparse(b *testing.B) {
 	data := make([]byte, 4096)
 	for b.Loop() {
 		var l ExtentList
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			// Descending offsets: every insert lands at the front, the worst case for the shift.
 			if err := l.Add(int64(1000-i)*8192, data); err != nil {
 				b.Fatal(err)

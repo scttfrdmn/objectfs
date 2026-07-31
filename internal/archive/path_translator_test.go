@@ -127,7 +127,6 @@ func TestTranslate_NonArchiveDirectory(t *testing.T) {
 		{"report.pdf"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.path, func(t *testing.T) {
 			t.Parallel()
 			p := Translate(tt.path)

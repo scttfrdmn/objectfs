@@ -2,7 +2,7 @@ package compression
 
 import "math"
 
-// ContentClass categorises object data for compression algorithm selection.
+// ContentClass categorizes object data for compression algorithm selection.
 type ContentClass string
 
 const (

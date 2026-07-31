@@ -263,14 +263,14 @@ func TestPoolSaturationDoesNotFailOperations(t *testing.T) {
 
 	errs := make(chan error, callers)
 
-	for i := 0; i < callers; i++ {
+	for range callers {
 		go func() {
 			_, err := backend.HeadObject(ctx, key)
 			errs <- err
 		}()
 	}
 
-	for i := 0; i < callers; i++ {
+	for range callers {
 		if err := <-errs; err != nil {
 			t.Errorf("HeadObject under pool saturation failed: %v", err)
 		}

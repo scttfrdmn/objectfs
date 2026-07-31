@@ -23,8 +23,8 @@ type outcomeRecord struct {
 // algorithm.  Once windowSize outcomes have been collected it replaces the base
 // recommendation with the algorithm that achieves the best trade-off for the
 // given AccessHint:
-//   - Hot: minimise elapsed time
-//   - Cold / Warm / Unknown: minimise compression ratio (= maximise savings)
+//   - Hot: minimize elapsed time
+//   - Cold / Warm / Unknown: minimize compression ratio (= maximize savings)
 //
 // RecordOutcome must be called after each compress operation to feed results
 // back into the model.  AdaptiveSelector is safe for concurrent use.

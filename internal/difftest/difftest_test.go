@@ -163,7 +163,7 @@ func TestOracleDetectsAPlantedDefect(t *testing.T) {
 	}
 }
 
-// brokenFS wraps an FS and introduces one specific wrong behaviour, for testing the oracle itself.
+// brokenFS wraps an FS and introduces one specific wrong behavior, for testing the oracle itself.
 type brokenFS struct {
 	difftest.FS
 

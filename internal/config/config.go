@@ -4,14 +4,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v2"
+
 	"github.com/objectfs/objectfs/internal/awsname"
 	"github.com/objectfs/objectfs/internal/compression"
 	"github.com/objectfs/objectfs/pkg/utils"
-	"gopkg.in/yaml.v2"
 )
 
 // Boolean Constants
@@ -657,13 +659,7 @@ func (c *Configuration) Validate() error {
 	}
 
 	validLogLevels := []string{"DEBUG", "INFO", "WARN", "ERROR"}
-	logLevelValid := false
-	for _, level := range validLogLevels {
-		if c.Global.LogLevel == level {
-			logLevelValid = true
-			break
-		}
-	}
+	logLevelValid := slices.Contains(validLogLevels, c.Global.LogLevel)
 	if !logLevelValid {
 		return fmt.Errorf("invalid log_level: %s (must be one of: %s)",
 			c.Global.LogLevel, strings.Join(validLogLevels, ", "))
@@ -733,13 +729,7 @@ func (c *Configuration) validateReadAheadConfig() error {
 
 	// Validate strategy
 	validStrategies := []string{"simple", "predictive", "ml"}
-	strategyValid := false
-	for _, strategy := range validStrategies {
-		if ra.Strategy == strategy {
-			strategyValid = true
-			break
-		}
-	}
+	strategyValid := slices.Contains(validStrategies, ra.Strategy)
 	if !strategyValid {
 		return fmt.Errorf("invalid strategy: %s (must be one of: %s)",
 			ra.Strategy, strings.Join(validStrategies, ", "))

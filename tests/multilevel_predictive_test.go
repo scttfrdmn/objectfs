@@ -48,7 +48,7 @@ func TestMultiLevelCacheWithPredictive(t *testing.T) {
 	blockSize := int64(256)
 	numBlocks := 10
 
-	for i := 0; i < numBlocks; i++ {
+	for i := range numBlocks {
 		blockKey := "sequential-block"
 		offset := int64(i) * blockSize
 		blockData := make([]byte, blockSize)
@@ -113,7 +113,7 @@ func TestMultiLevelCache_LevelStats(t *testing.T) {
 	t.Logf("  Size: %d bytes", l1Stats.Size)
 
 	// Add some data
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		key := "level-test-" + string(rune(i))
 		data := make([]byte, 1024)
 		for j := range data {
@@ -155,7 +155,7 @@ func BenchmarkMultiLevelCache_PredictiveEnabled(b *testing.B) {
 	keys := make([]string, numKeys)
 	blockSize := int64(1024)
 
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		keys[i] = "bench-key-" + string(rune(i))
 		data := make([]byte, blockSize)
 		for j := range data {
@@ -198,7 +198,7 @@ func BenchmarkMultiLevelCache_PredictiveDisabled(b *testing.B) {
 	keys := make([]string, numKeys)
 	blockSize := int64(1024)
 
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		keys[i] = "bench-key-" + string(rune(i))
 		data := make([]byte, blockSize)
 		for j := range data {

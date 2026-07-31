@@ -30,7 +30,7 @@ defects, and the clustering was not accidental:
 
 The deeper problem was testability. Those are all *seam* defects — a value correctly produced at
 one layer and silently dropped at the boundary to the next — and the v0.10.0 suite's 32,680 lines
-across 90 files caught none of them, because a unit test that mocks the neighbouring layer cannot
+across 90 files caught none of them, because a unit test that mocks the neighboring layer cannot
 observe a seam by construction. Semantics reachable only through a live mount are semantics that do
 not get tested.
 

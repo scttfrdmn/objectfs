@@ -198,7 +198,7 @@ const (
 // another tool — aws s3 cp, boto3, a bucket populated before ObjectFS existed — gets sensible
 // attributes rather than zeros.
 //
-// Malformed metadata is ignored in favour of the default, not propagated as an error. A file must
+// Malformed metadata is ignored in favor of the default, not propagated as an error. A file must
 // remain readable when someone sets objectfs-mode to "banana": the alternative is that one bad
 // metadata value makes an object permanently inaccessible, which is a worse failure than a wrong
 // mode. Callers wanting to know use [MetadataWarnings].

@@ -317,7 +317,7 @@ func TestDeterministicBytesVariesByOffsetAndSeed(t *testing.T) {
 	}
 
 	if shifted != windows {
-		t.Errorf("%d of %d windows are identical to their neighbour; the sequence repeats",
+		t.Errorf("%d of %d windows are identical to their neighbor; the sequence repeats",
 			windows-shifted, windows)
 	}
 }
@@ -355,7 +355,7 @@ func TestCapabilitiesFailsClosed(t *testing.T) {
 	honoursRange := string(served) == "4567"
 
 	if caps.RangeGET != honoursRange {
-		t.Fatalf("Capabilities().RangeGET = %v but a ranged GET returned %q (want %q if honoured); "+
+		t.Fatalf("Capabilities().RangeGET = %v but a ranged GET returned %q (want %q if honored); "+
 			"the probe disagrees with the endpoint",
 			caps.RangeGET, served, "4567")
 	}

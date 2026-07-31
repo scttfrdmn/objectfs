@@ -111,7 +111,7 @@ func TestCompressor_Incompressible(t *testing.T) {
 		t.Fatalf("NewCompressor: %v", err)
 	}
 
-	// Incompressible: psuedo-random bytes.
+	// Incompressible: pseudo-random bytes.
 	noisy := make([]byte, 512)
 	for i := range noisy {
 		noisy[i] = byte(i*7 + 3)
@@ -207,7 +207,6 @@ func TestParseSize(t *testing.T) {
 		{"1ZB", 0, true},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseSize(tt.input)

@@ -65,7 +65,7 @@ func TestGenerateEvictionCandidates_PopulatedPatterns(t *testing.T) {
 
 	// Record 5 sequential accesses for "key-a".
 	now := time.Now()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		pc.predictor.RecordAccess(AccessEvent{
 			Key:       "key-a",
 			Offset:    int64(i) * 128 * 1024,
@@ -125,7 +125,7 @@ func TestPredictiveCache_SequentialPrefetch(t *testing.T) {
 	now := time.Now()
 
 	// Simulate 10 sequential block reads of "data/file.dat".
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		pc.predictor.RecordAccess(AccessEvent{
 			Key:       "data/file.dat",
 			Offset:    int64(i) * blockSize,
@@ -173,7 +173,7 @@ func TestGenerateEvictionCandidates_EvictionScoreOrder(t *testing.T) {
 	})
 
 	// "stale-key": last accessed 25 hours ago, so recency decays to near zero
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		pc.predictor.RecordAccess(AccessEvent{
 			Key:       "stale-key",
 			Size:      1024,

@@ -240,11 +240,11 @@ func (m *Manager) GetStats() ManagerStats {
 }
 
 // GetDetailedInfo returns detailed information about the buffer state
-func (m *Manager) GetDetailedInfo() map[string]interface{} {
+func (m *Manager) GetDetailedInfo() map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	info := make(map[string]interface{})
+	info := make(map[string]any)
 	info["manager_stats"] = m.stats
 	info["started"] = m.started
 	info["config"] = m.config

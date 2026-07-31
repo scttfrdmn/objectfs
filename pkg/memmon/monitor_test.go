@@ -82,7 +82,7 @@ func TestMemoryMonitor_MemoryGrowthDetection(t *testing.T) {
 
 	// Allocate memory to trigger growth detection
 	allocations := make([][]byte, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		allocations[i] = make([]byte, 1024*1024) // 1MB each
 	}
 
@@ -122,7 +122,7 @@ func TestMemoryMonitor_GoroutineLeakDetection(t *testing.T) {
 
 	// Create goroutines to simulate a leak
 	stopCh := make(chan struct{})
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		go func() {
 			<-stopCh
 		}()
@@ -156,7 +156,7 @@ func TestMemoryMonitor_TrackObject(t *testing.T) {
 	monitor.TrackObject("test-object", 100)
 
 	// Increment objects
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		monitor.IncrementObject("test-object", 1024)
 	}
 
@@ -177,7 +177,7 @@ func TestMemoryMonitor_TrackObject(t *testing.T) {
 	}
 
 	// Decrement objects
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		monitor.DecrementObject("test-object", 1024)
 	}
 
@@ -322,7 +322,7 @@ func TestMemoryMonitor_GetSamples(t *testing.T) {
 	monitor := NewMemoryMonitor(config)
 
 	// Take multiple samples
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		monitor.takeSample()
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -348,9 +348,9 @@ func TestMemoryMonitor_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent access to monitor
 	done := make(chan bool, 10)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		go func() {
-			for j := 0; j < 10; j++ {
+			for range 10 {
 				monitor.GetStats()
 				monitor.GetAlerts()
 				monitor.GetSamples()
@@ -363,7 +363,7 @@ func TestMemoryMonitor_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 

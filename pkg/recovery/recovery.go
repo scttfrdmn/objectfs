@@ -120,7 +120,7 @@ type DegradedState struct {
 }
 
 // FallbackFunc is a fallback function for an operation
-type FallbackFunc func(ctx context.Context) (interface{}, error)
+type FallbackFunc func(ctx context.Context) (any, error)
 
 // RecoveryResult represents the result of a recovery attempt
 type RecoveryResult struct {
@@ -153,21 +153,21 @@ func NewRecoveryManager(config RecoveryConfig) *RecoveryManager {
 
 // Execute executes an operation with automatic error recovery
 func (rm *RecoveryManager) Execute(ctx context.Context, component string, operation string, fn func() error) error {
-	_, err := rm.ExecuteWithResult(ctx, component, operation, func() (interface{}, error) {
+	_, err := rm.ExecuteWithResult(ctx, component, operation, func() (any, error) {
 		return nil, fn()
 	})
 	return err
 }
 
 // ExecuteWithResult executes an operation and returns its result with recovery
-func (rm *RecoveryManager) ExecuteWithResult(ctx context.Context, component string, operation string, fn func() (interface{}, error)) (interface{}, error) {
+func (rm *RecoveryManager) ExecuteWithResult(ctx context.Context, component string, operation string, fn func() (any, error)) (any, error) {
 	opKey := fmt.Sprintf("%s:%s", component, operation)
 
 	// Check if component is degraded
 	if rm.isComponentDegraded(component) {
 		if fallback := rm.getFallback(opKey); fallback != nil {
 			rm.logger.Info("Using fallback for degraded component",
-				map[string]interface{}{
+				map[string]any{
 					"component": component,
 					"operation": operation,
 				})
@@ -200,8 +200,8 @@ func (rm *RecoveryManager) ExecuteWithResult(ctx context.Context, component stri
 }
 
 // executeWithRetry executes with retry logic
-func (rm *RecoveryManager) executeWithRetry(ctx context.Context, component string, operation string, fn func() (interface{}, error)) (interface{}, error) {
-	var result interface{}
+func (rm *RecoveryManager) executeWithRetry(ctx context.Context, component string, operation string, fn func() (any, error)) (any, error) {
+	var result any
 
 	err := rm.retryer.DoWithContext(ctx, func(ctx context.Context) error {
 		var err error
@@ -219,10 +219,10 @@ func (rm *RecoveryManager) executeWithRetry(ctx context.Context, component strin
 }
 
 // executeWithCircuitBreaker executes with circuit breaker protection
-func (rm *RecoveryManager) executeWithCircuitBreaker(ctx context.Context, component string, operation string, fn func() (interface{}, error)) (interface{}, error) {
+func (rm *RecoveryManager) executeWithCircuitBreaker(ctx context.Context, component string, operation string, fn func() (any, error)) (any, error) {
 	breaker := rm.breakers.GetBreaker(component)
 
-	var result interface{}
+	var result any
 	var fnErr error
 
 	err := breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
@@ -236,7 +236,7 @@ func (rm *RecoveryManager) executeWithCircuitBreaker(ctx context.Context, compon
 		// Check if circuit breaker is open
 		if err == circuit.ErrOpenState {
 			rm.markDegraded(component, operation, fmt.Errorf("circuit breaker open"))
-			rm.logger.Warn("Circuit breaker open", map[string]interface{}{
+			rm.logger.Warn("Circuit breaker open", map[string]any{
 				"component": component,
 				"operation": operation,
 			})
@@ -255,7 +255,7 @@ func (rm *RecoveryManager) executeWithCircuitBreaker(ctx context.Context, compon
 }
 
 // executeWithDegradation executes with graceful degradation
-func (rm *RecoveryManager) executeWithDegradation(ctx context.Context, component string, operation string, fn func() (interface{}, error)) (interface{}, error) {
+func (rm *RecoveryManager) executeWithDegradation(ctx context.Context, component string, operation string, fn func() (any, error)) (any, error) {
 	result, err := fn()
 	if err != nil {
 		rm.markDegraded(component, operation, err)
@@ -263,7 +263,7 @@ func (rm *RecoveryManager) executeWithDegradation(ctx context.Context, component
 		// Try fallback if available
 		opKey := fmt.Sprintf("%s:%s", component, operation)
 		if fallback := rm.getFallback(opKey); fallback != nil {
-			rm.logger.Info("Using fallback due to error", map[string]interface{}{
+			rm.logger.Info("Using fallback due to error", map[string]any{
 				"component": component,
 				"operation": operation,
 				"error":     err.Error(),
@@ -279,12 +279,12 @@ func (rm *RecoveryManager) executeWithDegradation(ctx context.Context, component
 }
 
 // executeWithFallback executes with fallback function
-func (rm *RecoveryManager) executeWithFallback(ctx context.Context, component string, operation string, fn func() (interface{}, error)) (interface{}, error) {
+func (rm *RecoveryManager) executeWithFallback(ctx context.Context, component string, operation string, fn func() (any, error)) (any, error) {
 	result, err := fn()
 	if err != nil {
 		opKey := fmt.Sprintf("%s:%s", component, operation)
 		if fallback := rm.getFallback(opKey); fallback != nil {
-			rm.logger.Info("Primary operation failed, using fallback", map[string]interface{}{
+			rm.logger.Info("Primary operation failed, using fallback", map[string]any{
 				"component": component,
 				"operation": operation,
 			})
@@ -333,7 +333,7 @@ func (rm *RecoveryManager) markDegraded(component string, operation string, err 
 		state.OriginalError = objErr
 	}
 
-	rm.logger.Warn("Component marked as degraded", map[string]interface{}{
+	rm.logger.Warn("Component marked as degraded", map[string]any{
 		"component": component,
 		"reason":    state.Reason,
 		"attempts":  state.AttemptCount,
@@ -366,7 +366,7 @@ func (rm *RecoveryManager) attemptAutoRecovery(component string) {
 	// Wait until next attempt time
 	time.Sleep(time.Until(nextAttempt))
 
-	rm.logger.Info("Attempting automatic recovery", map[string]interface{}{
+	rm.logger.Info("Attempting automatic recovery", map[string]any{
 		"component": component,
 		"attempt":   state.AttemptCount + 1,
 	})
@@ -380,7 +380,7 @@ func (rm *RecoveryManager) attemptAutoRecovery(component string) {
 	delete(rm.degradedComponents, component)
 	rm.mu.Unlock()
 
-	rm.logger.Info("Component recovered", map[string]interface{}{
+	rm.logger.Info("Component recovered", map[string]any{
 		"component": component,
 	})
 }
@@ -401,7 +401,7 @@ func (rm *RecoveryManager) RecoverComponent(component string) error {
 	breaker := rm.breakers.GetBreaker(component)
 	breaker.Reset()
 
-	rm.logger.Info("Component manually recovered", map[string]interface{}{
+	rm.logger.Info("Component manually recovered", map[string]any{
 		"component": component,
 	})
 
@@ -460,7 +460,7 @@ func (rm *RecoveryManager) handleFailure(component string, operation string, err
 	attempts := rm.recoveryAttempts[component]
 	rm.mu.Unlock()
 
-	rm.logger.Error("Operation failed", map[string]interface{}{
+	rm.logger.Error("Operation failed", map[string]any{
 		"component": component,
 		"operation": operation,
 		"attempts":  attempts,
@@ -530,7 +530,7 @@ func (rm *RecoveryManager) Shutdown(ctx context.Context) error {
 	rm.logger.Info("Recovery manager shutting down", nil)
 
 	// Close logger if it has a Close method
-	if closer, ok := interface{}(rm.logger).(interface{ Close() error }); ok {
+	if closer, ok := any(rm.logger).(interface{ Close() error }); ok {
 		return closer.Close()
 	}
 

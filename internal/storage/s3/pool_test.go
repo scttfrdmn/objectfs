@@ -39,7 +39,7 @@ func TestPoolExhaustionWaitsForReturnInsteadOfFailing(t *testing.T) {
 	p := newTestPool(t, size)
 
 	held := make([]*s3.Client, 0, size)
-	for i := 0; i < size; i++ {
+	for i := range size {
 		conn, err := p.Get()
 		if err != nil {
 			t.Fatalf("draw %d of %d: %v", i, size, err)
@@ -137,7 +137,7 @@ func TestPoolConcurrentPutAndCloseIsSafe(t *testing.T) {
 		}
 
 		conns := make([]*s3.Client, 0, 4)
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			c, err := p.Get()
 			if err != nil {
 				t.Fatalf("draw %d: %v", i, err)
@@ -157,14 +157,12 @@ func TestPoolConcurrentPutAndCloseIsSafe(t *testing.T) {
 			}(c)
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			if err := p.Close(); err != nil {
 				t.Errorf("Close: %v", err)
 			}
-		}()
+		})
 
 		close(start)
 		wg.Wait()
@@ -236,11 +234,9 @@ func TestPoolConcurrentGetPutRespectsMaxSize(t *testing.T) {
 	p := newTestPool(t, size)
 
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < iters; i++ {
+	for range workers {
+		wg.Go(func() {
+			for range iters {
 				conn, err := p.GetWithTimeout(10 * time.Second)
 				if err != nil {
 					t.Errorf("draw failed under contention: %v", err)
@@ -252,7 +248,7 @@ func TestPoolConcurrentGetPutRespectsMaxSize(t *testing.T) {
 				}
 				p.Put(conn)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -317,7 +313,7 @@ func TestPoolWarmupPreFills(t *testing.T) {
 
 // Resize down must converge on the new limit, including for connections that were checked out when
 // it ran. Resize up past the channel's fixed capacity must be refused rather than silently leaving a
-// maxSize the buffer cannot honour — a reservation for a slot with no buffer space deadlocks the
+// maxSize the buffer cannot honor — a reservation for a slot with no buffer space deadlocks the
 // return.
 func TestPoolResize(t *testing.T) {
 	t.Parallel()
@@ -349,7 +345,7 @@ func TestPoolResize(t *testing.T) {
 		p := newTestPool(t, 4)
 
 		held := make([]*s3.Client, 0, 4)
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			c, err := p.Get()
 			if err != nil {
 				t.Fatalf("draw %d: %v", i, err)
@@ -481,7 +477,7 @@ func TestPoolWarmupBoundsAndErrors(t *testing.T) {
 		}
 
 		// Full capacity must still be available.
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			c, err := p.Get()
 			if err != nil {
 				t.Fatalf("draw %d after a failed warm: %v", i, err)
@@ -490,7 +486,7 @@ func TestPoolWarmupBoundsAndErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("a cancelled context stops the warm", func(t *testing.T) {
+	t.Run("a canceled context stops the warm", func(t *testing.T) {
 		t.Parallel()
 
 		p := newTestPool(t, 4)
@@ -499,10 +495,10 @@ func TestPoolWarmupBoundsAndErrors(t *testing.T) {
 		cancel()
 
 		if err := p.Warmup(ctx, 4); !errors.Is(err, context.Canceled) {
-			t.Errorf("Warmup with a cancelled context = %v, want context.Canceled", err)
+			t.Errorf("Warmup with a canceled context = %v, want context.Canceled", err)
 		}
 		if idle := p.Stats().Idle; idle != 0 {
-			t.Errorf("Stats().Idle = %d after a cancelled warm, want 0", idle)
+			t.Errorf("Stats().Idle = %d after a canceled warm, want 0", idle)
 		}
 	})
 

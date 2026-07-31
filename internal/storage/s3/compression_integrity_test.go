@@ -56,10 +56,7 @@ func semiCompressible(seed string, n int) []byte {
 
 	data := testaws.DeterministicBytes(seed, n)
 	for i := 0; i < n; i += 2 * run {
-		end := i + run
-		if end > n {
-			end = n
-		}
+		end := min(i+run, n)
 
 		for j := i; j < end; j++ {
 			data[j] = 0

@@ -17,7 +17,7 @@ import (
 // Fixed width, not variable, and that choice is load-bearing. A format where a write's payload length
 // determines how many bytes the next record starts at means every mutation the fuzzer makes to a length
 // byte reinterprets the entire remainder of the input as different operations. Coverage-guided fuzzing
-// depends on small input changes making small behaviour changes; a self-desynchronising format destroys
+// depends on small input changes making small behavior changes; a self-desynchronising format destroys
 // that, and it also makes every hand-written seed unreadable and unmaintainable.
 //
 // Payload bytes are therefore not taken from the input at all. Only a seed is, and [difftest.FillBytes]

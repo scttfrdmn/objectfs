@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"sync"
@@ -269,16 +270,14 @@ func (c *Checker) RunAllChecks(ctx context.Context) (map[string]*Result, error) 
 	}
 
 	// Collect results
-	for i := 0; i < len(checks); i++ {
+	for range len(checks) {
 		result := <-resultsChan
 		results[result.Check] = result
 	}
 
 	// Update stored results
 	c.mu.Lock()
-	for name, result := range results {
-		c.results[name] = result
-	}
+	maps.Copy(c.results, results)
 	c.updateStats()
 	c.mu.Unlock()
 
@@ -286,11 +285,11 @@ func (c *Checker) RunAllChecks(ctx context.Context) (map[string]*Result, error) 
 }
 
 // GetStatus returns the current health status
-func (c *Checker) GetStatus() map[string]interface{} {
+func (c *Checker) GetStatus() map[string]any {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	status := make(map[string]interface{})
+	status := make(map[string]any)
 	status["overall_status"] = c.stats.OverallStatus
 	status["timestamp"] = time.Now()
 	status["uptime"] = time.Since(c.lastUpdate)
@@ -298,9 +297,7 @@ func (c *Checker) GetStatus() map[string]interface{} {
 
 	// Add individual check results
 	checks := make(map[string]*Result)
-	for name, result := range c.results {
-		checks[name] = result
-	}
+	maps.Copy(checks, c.results)
 	status["checks"] = checks
 
 	return status
@@ -482,7 +479,7 @@ func (c *Checker) startHTTPServer() {
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]any{
 			"status":    status["overall_status"],
 			"timestamp": status["timestamp"],
 			"checks":    status["checks"],
@@ -562,17 +559,17 @@ func NetworkCheck(host string, port int) CheckFunction {
 
 // ServiceStatus represents the health status of the entire service
 type ServiceStatus struct {
-	Status    Status                 `json:"status"`
-	Timestamp time.Time              `json:"timestamp"`
-	Uptime    time.Duration          `json:"uptime"`
-	Version   string                 `json:"version,omitempty"`
-	Checks    map[string]*Result     `json:"checks"`
-	Stats     Stats                  `json:"stats"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Status    Status             `json:"status"`
+	Timestamp time.Time          `json:"timestamp"`
+	Uptime    time.Duration      `json:"uptime"`
+	Version   string             `json:"version,omitempty"`
+	Checks    map[string]*Result `json:"checks"`
+	Stats     Stats              `json:"stats"`
+	Metadata  map[string]any     `json:"metadata,omitempty"`
 }
 
 // NewServiceStatus creates a comprehensive service status
-func (c *Checker) NewServiceStatus(version string, metadata map[string]interface{}) *ServiceStatus {
+func (c *Checker) NewServiceStatus(version string, metadata map[string]any) *ServiceStatus {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -587,9 +584,7 @@ func (c *Checker) NewServiceStatus(version string, metadata map[string]interface
 	}
 
 	// Copy current results
-	for name, result := range c.results {
-		status.Checks[name] = result
-	}
+	maps.Copy(status.Checks, c.results)
 
 	return status
 }

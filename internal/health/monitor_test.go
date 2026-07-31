@@ -534,7 +534,7 @@ func TestAlertManager_GetRecentAlerts(t *testing.T) {
 
 	// Add multiple alerts with different timestamps
 	baseTime := time.Now()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		alert := &Alert{
 			ID:        fmt.Sprintf("alert-%d", i),
 			Component: "objectfs",

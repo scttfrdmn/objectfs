@@ -46,14 +46,14 @@ func (s HealthState) String() string {
 
 // ComponentHealth tracks the health of a specific component
 type ComponentHealth struct {
-	Name              string                 `json:"name"`
-	State             HealthState            `json:"state"`
-	LastStateChange   time.Time              `json:"last_state_change"`
-	LastHealthCheck   time.Time              `json:"last_health_check"`
-	ConsecutiveErrors int                    `json:"consecutive_errors"`
-	LastError         error                  `json:"-"`
-	LastErrorMessage  string                 `json:"last_error_message,omitempty"`
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	Name              string         `json:"name"`
+	State             HealthState    `json:"state"`
+	LastStateChange   time.Time      `json:"last_state_change"`
+	LastHealthCheck   time.Time      `json:"last_health_check"`
+	ConsecutiveErrors int            `json:"consecutive_errors"`
+	LastError         error          `json:"-"`
+	LastErrorMessage  string         `json:"last_error_message,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
 
 	// probing marks a component that the availability gate has admitted one operation into after
 	// ProbeAfter elapsed, and whose outcome has not come back yet. It is the half-open state of a
@@ -161,7 +161,7 @@ func (t *Tracker) RegisterComponent(name string) {
 			State:           StateHealthy,
 			LastStateChange: time.Now(),
 			LastHealthCheck: time.Now(),
-			Metadata:        make(map[string]interface{}),
+			Metadata:        make(map[string]any),
 		}
 	}
 }
@@ -210,7 +210,7 @@ func (t *Tracker) RecordSuccess(component string) {
 // RecordError records an error for a component.
 //
 // An error that is not evidence of a service failure — a missing object, a rejected request, a
-// cancelled operation — is recorded as a success instead, because that is what it is: the service
+// canceled operation — is recorded as a success instead, because that is what it is: the service
 // was asked a question and answered it. See [errors.IsServiceFailure] for why the distinction
 // cannot be skipped.
 func (t *Tracker) RecordError(component string, err error) {
@@ -442,7 +442,7 @@ func (t *Tracker) AddHealthListener(listener HealthListener) {
 }
 
 // SetComponentMetadata sets metadata for a component
-func (t *Tracker) SetComponentMetadata(component, key string, value interface{}) {
+func (t *Tracker) SetComponentMetadata(component, key string, value any) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

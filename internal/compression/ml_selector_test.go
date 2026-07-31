@@ -51,7 +51,7 @@ func TestAdaptiveSelector_LearnsFasterAlgorithm(t *testing.T) {
 		CompressedSize: 500,
 	}
 
-	for i := 0; i < minSamples; i++ {
+	for range minSamples {
 		sel.RecordOutcome(ContentClassText, comprpkg.AlgorithmLZ4, lz4Stats, 1*time.Millisecond)
 		sel.RecordOutcome(ContentClassText, comprpkg.AlgorithmZstd, zstdStats, 50*time.Millisecond)
 	}
@@ -80,7 +80,7 @@ func TestAdaptiveSelector_LearnsLowerRatio(t *testing.T) {
 		CompressedSize: 450, // 0.45 ratio — better
 	}
 
-	for i := 0; i < minSamples; i++ {
+	for range minSamples {
 		sel.RecordOutcome(ContentClassBinary, comprpkg.AlgorithmLZ4, lz4Stats, 5*time.Millisecond)
 		sel.RecordOutcome(ContentClassBinary, comprpkg.AlgorithmZstd, zstdStats, 30*time.Millisecond)
 	}
@@ -99,7 +99,7 @@ func TestAdaptiveSelector_WindowEviction(t *testing.T) {
 	sel := NewAdaptiveSelector(base, windowSize)
 
 	stats := comprpkg.Stats{OriginalSize: 100, CompressedSize: 50}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		sel.RecordOutcome(ContentClassText, comprpkg.AlgorithmZstd, stats, time.Millisecond)
 	}
 

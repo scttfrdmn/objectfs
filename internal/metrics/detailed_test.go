@@ -69,7 +69,7 @@ func TestRecordOperation_MultipleOperations(t *testing.T) {
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record multiple read operations
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		dpm.RecordOperation(
 			OpRead,
 			"/test/file.txt",
@@ -357,12 +357,12 @@ func TestGetSummary(t *testing.T) {
 	dpm := NewDetailedPerformanceMetrics(100, true)
 
 	// Record some operations
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		dpm.RecordOperation(OpRead, "/test/file.txt", 100*time.Millisecond, 1024*1024, CacheSourceL1, nil)
 	}
 
 	// Record some errors
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		dpm.RecordOperation(OpWrite, "/test/file.txt", 200*time.Millisecond, 2048, CacheSourceBackend, errors.New("test error"))
 	}
 

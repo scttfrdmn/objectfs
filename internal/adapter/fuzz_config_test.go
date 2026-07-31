@@ -32,7 +32,7 @@ import (
 // entire content.
 //
 // The property is directional. Validate rejecting a configuration is a pass, not a failure: refusing
-// a bad setting at load time with a clear message is the behaviour wanted. What must not happen is
+// a bad setting at load time with a clear message is the behavior wanted. What must not happen is
 // Validate accepting something NewBackend then refuses, because by then the user has asked for a
 // mount and the error surfaces without attribution.
 //

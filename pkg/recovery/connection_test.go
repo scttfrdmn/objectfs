@@ -67,10 +67,10 @@ func TestDefaultConnectionConfig(t *testing.T) {
 
 func TestNewConnectionManager(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		if mc, ok := conn.(*mockConnection); ok && mc.healthy {
 			return nil
 		}
@@ -96,10 +96,10 @@ func TestConnectionManager_Connect(t *testing.T) {
 	config := DefaultConnectionConfig()
 	config.ConnectionTimeout = 5 * time.Second
 
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		if mc, ok := conn.(*mockConnection); ok && mc.healthy {
 			return nil
 		}
@@ -128,7 +128,7 @@ func TestConnectionManager_ConnectTimeout(t *testing.T) {
 	config.ConnectionTimeout = 100 * time.Millisecond
 	config.EnableAutoReconnect = false // Disable for this test
 
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		// Simulate slow connection that respects context
 		select {
 		case <-time.After(200 * time.Millisecond):
@@ -137,7 +137,7 @@ func TestConnectionManager_ConnectTimeout(t *testing.T) {
 			return nil, ctx.Err()
 		}
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -152,10 +152,10 @@ func TestConnectionManager_ConnectTimeout(t *testing.T) {
 
 func TestConnectionManager_GetConnection(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -194,11 +194,11 @@ func TestConnectionManager_Reconnect(t *testing.T) {
 	config.EnableAutoReconnect = false
 
 	connectCount := 0
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		connectCount++
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -233,12 +233,12 @@ func TestConnectionManager_HealthCheckFailure(t *testing.T) {
 	config.ReconnectDelay = 50 * time.Millisecond
 	config.EnableAutoReconnect = true
 
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
 
 	healthCheckCount := int32(0)
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		count := atomic.AddInt32(&healthCheckCount, 1)
 		// Fail on second health check
 		if count >= 2 {
@@ -266,10 +266,10 @@ func TestConnectionManager_HealthCheckFailure(t *testing.T) {
 
 func TestConnectionManager_GetStats(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -313,10 +313,10 @@ func TestConnectionManager_GetStats(t *testing.T) {
 
 func TestConnectionManager_Close(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -361,7 +361,7 @@ func TestConnectionManager_AutoReconnect(t *testing.T) {
 	config.EnableAutoReconnect = true
 
 	connectAttempts := int32(0)
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		attempt := atomic.AddInt32(&connectAttempts, 1)
 		// Fail first two attempts, succeed on third
 		if attempt < 3 {
@@ -369,7 +369,7 @@ func TestConnectionManager_AutoReconnect(t *testing.T) {
 		}
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -398,11 +398,11 @@ func TestConnectionManager_MaxReconnectAttempts(t *testing.T) {
 	config.EnableAutoReconnect = true
 
 	connectAttempts := int32(0)
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		atomic.AddInt32(&connectAttempts, 1)
 		return nil, errors.New("always fails")
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -432,10 +432,10 @@ func TestConnectionManager_MaxReconnectAttempts(t *testing.T) {
 
 func TestConnectionPool_New(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -452,10 +452,10 @@ func TestConnectionPool_New(t *testing.T) {
 
 func TestConnectionPool_ConnectAll(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -478,10 +478,10 @@ func TestConnectionPool_ConnectAll(t *testing.T) {
 
 func TestConnectionPool_GetConnection(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -494,7 +494,7 @@ func TestConnectionPool_GetConnection(t *testing.T) {
 	}
 
 	// Get multiple connections (should round-robin)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		conn, err := pool.GetConnection()
 		if err != nil {
 			t.Fatalf("Expected to get connection, got %v", err)
@@ -509,10 +509,10 @@ func TestConnectionPool_HealthyCount(t *testing.T) {
 	config := DefaultConnectionConfig()
 	config.EnableAutoReconnect = false
 
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -535,10 +535,10 @@ func TestConnectionPool_HealthyCount(t *testing.T) {
 
 func TestConnectionPool_Close(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -560,10 +560,10 @@ func TestConnectionPool_Close(t *testing.T) {
 
 func TestConnectionManager_Wait(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 
@@ -591,12 +591,12 @@ func TestConnectionManager_Wait(t *testing.T) {
 
 func TestConnectionManager_WaitTimeout(t *testing.T) {
 	config := DefaultConnectionConfig()
-	factory := func(ctx context.Context) (interface{}, error) {
+	factory := func(ctx context.Context) (any, error) {
 		// Never connects
 		time.Sleep(10 * time.Second)
 		return &mockConnection{healthy: true}, nil
 	}
-	health := func(ctx context.Context, conn interface{}) error {
+	health := func(ctx context.Context, conn any) error {
 		return nil
 	}
 

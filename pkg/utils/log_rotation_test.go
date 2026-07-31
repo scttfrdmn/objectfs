@@ -261,7 +261,7 @@ func TestLogRotator_MaxBackups(t *testing.T) {
 	defer func() { _ = rotator.Close() }()
 
 	// Create multiple rotations
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if _, err := rotator.Write([]byte("Test message\n")); err != nil {
 			t.Fatalf("Failed to write: %v", err)
 		}

@@ -231,7 +231,7 @@ type OperationMetrics struct {
 type BatchResult struct {
 	Index            int           `json:"index"`
 	Success          bool          `json:"success"`
-	Result           interface{}   `json:"result,omitempty"`
+	Result           any           `json:"result,omitempty"`
 	Error            error         `json:"error,omitempty"`
 	Duration         time.Duration `json:"duration"`
 	BytesTransferred int64         `json:"bytes_transferred"`

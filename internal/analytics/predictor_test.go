@@ -35,7 +35,7 @@ func TestPredictor_RecordAndRecommend_Hot(t *testing.T) {
 	p := NewPredictor()
 	now := time.Now()
 	// 10 accesses in the last hour → very hot.
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		p.RecordAccessAt("hot-key", now.Add(-time.Duration(i)*5*time.Minute), 4096)
 	}
 	rec := p.Recommend("hot-key")

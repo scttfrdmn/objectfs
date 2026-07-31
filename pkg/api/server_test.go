@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/objectfs/objectfs/pkg/errors"
 	"github.com/objectfs/objectfs/pkg/health"
 	"github.com/objectfs/objectfs/pkg/status"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestNewServer(t *testing.T) {
@@ -58,7 +59,7 @@ func TestHandleHealth(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestHandleHealthDegraded(t *testing.T) {
 	healthTracker.RegisterComponent("test-service")
 
 	// Make service degraded
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		healthTracker.RecordError("test-service", fmt.Errorf("test error"))
 	}
 
@@ -91,7 +92,7 @@ func TestHandleHealthDegraded(t *testing.T) {
 		t.Errorf("Expected status 206, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestHandleLiveness(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -180,7 +181,7 @@ func TestHandleReadiness(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestHandleReadinessUnavailable(t *testing.T) {
 	healthTracker.RegisterComponent("test-service")
 
 	// Make service unavailable
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		healthTracker.RecordError("test-service", fmt.Errorf("test error"))
 	}
 
@@ -213,7 +214,7 @@ func TestHandleReadinessUnavailable(t *testing.T) {
 		t.Errorf("Expected status 503, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -277,7 +278,7 @@ func TestHandleOperations(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -344,7 +345,7 @@ func TestHandleHistory(t *testing.T) {
 	ctx := context.Background()
 
 	// Complete some operations
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		op, _ := statusTracker.StartOperation(ctx, fmt.Sprintf("op-%d", i), nil)
 		if err := statusTracker.CompleteOperation(op.ID); err != nil {
 			t.Fatalf("Failed to complete operation: %v", err)
@@ -365,7 +366,7 @@ func TestHandleHistory(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -396,7 +397,7 @@ func TestHandleInfo(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", w.Code)
 		}
 
-		var response map[string]interface{}
+		var response map[string]any
 		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
@@ -416,7 +417,7 @@ func TestHandleInfo(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.handleInfo(w, req)
 
-		var response map[string]interface{}
+		var response map[string]any
 		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
@@ -541,7 +542,7 @@ func BenchmarkHandleOperations(b *testing.B) {
 	ctx := context.Background()
 
 	// Create some operations
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		statusTracker.StartOperation(ctx, "test", nil)
 	}
 
@@ -572,7 +573,7 @@ func TestHealthWithActualErrors(t *testing.T) {
 
 	// Record write errors to trigger read-only mode
 	writeErr := errors.NewError(errors.ErrCodeStorageWrite, "write failed")
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		healthTracker.RecordError("storage", writeErr)
 	}
 
@@ -585,7 +586,7 @@ func TestHealthWithActualErrors(t *testing.T) {
 		t.Errorf("Expected status 206, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
@@ -775,7 +776,7 @@ func TestHandleMounts_List(t *testing.T) {
 		t.Fatalf("Expected 200, got %d", w.Code)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -838,7 +839,7 @@ func TestHandleMount_GetStatus(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected 200, got %d; body: %s", w.Code, w.Body.String())
 	}
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}

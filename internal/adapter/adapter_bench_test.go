@@ -20,19 +20,19 @@ import (
 // BenchmarkParseSize measures the throughput of the human-readable size parser
 // used when converting config values (e.g. "2GB") into byte counts.
 func BenchmarkParseSize_GB(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = parseSize("2GB")
 	}
 }
 
 func BenchmarkParseSize_MB(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = parseSize("512MB")
 	}
 }
 
 func BenchmarkParseSize_KB(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = parseSize("128KB")
 	}
 }
@@ -53,7 +53,7 @@ func BenchmarkParseSize_Parallel(b *testing.B) {
 
 // BenchmarkValidateStorageURI measures URI validation for valid s3:// URIs.
 func BenchmarkValidateStorageURI_Valid(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = validateStorageURI("s3://my-bucket")
 	}
 }
@@ -61,7 +61,7 @@ func BenchmarkValidateStorageURI_Valid(b *testing.B) {
 // BenchmarkValidateStorageURI_Invalid measures validation for invalid URIs
 // (expected to return an error quickly).
 func BenchmarkValidateStorageURI_Invalid(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		_ = validateStorageURI(fmt.Sprintf("gs://bucket-%d", i%10))
 	}
 }

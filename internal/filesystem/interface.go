@@ -131,7 +131,7 @@ func (fi FileInfo) Size() int64        { return fi.Size_ }
 func (fi FileInfo) Mode() os.FileMode  { return fi.Mode_ }
 func (fi FileInfo) ModTime() time.Time { return fi.ModTime_ }
 func (fi FileInfo) IsDir() bool        { return fi.IsDir_ }
-func (fi FileInfo) Sys() interface{}   { return nil }
+func (fi FileInfo) Sys() any           { return nil }
 
 // StatfsInfo represents filesystem statistics
 type StatfsInfo struct {

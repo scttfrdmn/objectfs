@@ -181,14 +181,14 @@ func TestManager_Write_ThenFlushAll_CallsCallback(t *testing.T) {
 func TestManager_Write_Sync_FlushesAll(t *testing.T) {
 	t.Parallel()
 
-	var count int32
+	var count atomic.Int32
 	m := startedManager(t, testMgrConfig())
 	m.RegisterFlushCallback("*", func(_ string, _ []byte, _ int64) error {
-		atomic.AddInt32(&count, 1)
+		count.Add(1)
 		return nil
 	})
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		require.NoError(t, m.Write(context.Background(), fmt.Sprintf("k%d", i), 0, []byte("x"), false))
 	}
 
@@ -198,7 +198,7 @@ func TestManager_Write_Sync_FlushesAll(t *testing.T) {
 	_ = m.writeBuffer.FlushAll()
 
 	// At least the FlushAll should have delivered all callbacks
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&count), int32(4))
+	assert.GreaterOrEqual(t, count.Load(), int32(4))
 }
 
 // --- RegisterFlushCallback and pattern matching ---
@@ -256,10 +256,10 @@ func TestManager_StatsTracking_SuccessAndFailure(t *testing.T) {
 	m := startedManager(t, testMgrConfig())
 
 	// Simulate 3 successes and 2 failures via updateStats directly
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		m.updateStats(time.Now(), nil)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		m.updateStats(time.Now(), fmt.Errorf("err"))
 	}
 
@@ -317,7 +317,7 @@ func TestManager_HealthDegrades_WhenConsecutiveErrorsExceedThreshold(t *testing.
 
 	m := startedManager(t, cfg)
 
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		m.updateStats(time.Now(), fmt.Errorf("err"))
 	}
 
@@ -334,10 +334,10 @@ func TestManager_HealthDegrades_WhenErrorRateExceedsThreshold(t *testing.T) {
 	m := startedManager(t, cfg)
 
 	// 9 successes then 2 failures → rate ≈ 18%
-	for i := 0; i < 9; i++ {
+	for range 9 {
 		m.updateStats(time.Now(), nil)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		m.updateStats(time.Now(), fmt.Errorf("err"))
 	}
 
@@ -352,7 +352,7 @@ func TestManager_HealthRecovers_AfterClearStats(t *testing.T) {
 
 	m := startedManager(t, cfg)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		m.updateStats(time.Now(), fmt.Errorf("err"))
 	}
 	require.False(t, m.IsHealthy())
@@ -430,7 +430,7 @@ func TestManager_ConcurrentWrites_RaceFree(t *testing.T) {
 	const n = 40
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			_ = m.Write(context.Background(), fmt.Sprintf("concurrent/k%d", i), 0, []byte("x"), false)
@@ -449,7 +449,7 @@ func TestManager_ConcurrentGetStats_RaceFree(t *testing.T) {
 	m.RegisterFlushCallback("*", noopFlush)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

@@ -69,7 +69,7 @@ func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadMana
 	}
 
 	// Start prefetch workers
-	for i := 0; i < config.ConcurrentReads; i++ {
+	for range config.ConcurrentReads {
 		go ram.prefetchWorker()
 	}
 
@@ -351,7 +351,7 @@ func (wc *WriteCoalescer) shouldFlush(cw *CoalescedWrite) bool {
 // flushCoalescedWrite flushes a coalesced write to the buffer
 func (wc *WriteCoalescer) flushCoalescedWrite(cw *CoalescedWrite) {
 	// Sort writes by offset to ensure proper ordering
-	for i := 0; i < len(cw.writes)-1; i++ {
+	for i := range len(cw.writes) - 1 {
 		for j := i + 1; j < len(cw.writes); j++ {
 			if cw.writes[i].offset > cw.writes[j].offset {
 				cw.writes[i], cw.writes[j] = cw.writes[j], cw.writes[i]

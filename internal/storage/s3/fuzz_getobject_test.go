@@ -67,10 +67,7 @@ func FuzzGetObjectRange(f *testing.F) {
 		}
 
 		// The expectation, in terms of the object's contents and nothing borrowed from the read path.
-		start := max(offset, 0)
-		if start > length {
-			start = length
-		}
+		start := min(max(offset, 0), length)
 
 		end := int64(length)
 		if size > 0 && size < length-start {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"runtime"
 	"strings"
@@ -22,17 +23,17 @@ const (
 // Field represents a structured logging field
 type Field struct {
 	Key   string
-	Value interface{}
+	Value any
 }
 
 // LogEntry represents a complete log entry
 type LogEntry struct {
-	Timestamp time.Time              `json:"timestamp"`
-	Level     string                 `json:"level"`
-	Message   string                 `json:"message"`
-	Fields    map[string]interface{} `json:"fields,omitempty"`
-	Caller    string                 `json:"caller,omitempty"`
-	Stack     string                 `json:"stack,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+	Level     string         `json:"level"`
+	Message   string         `json:"message"`
+	Fields    map[string]any `json:"fields,omitempty"`
+	Caller    string         `json:"caller,omitempty"`
+	Stack     string         `json:"stack,omitempty"`
 }
 
 // StructuredLogger provides structured logging with levels and fields
@@ -41,7 +42,7 @@ type StructuredLogger struct {
 	level           LogLevel
 	output          io.Writer
 	format          LogFormat
-	contextFields   map[string]interface{}
+	contextFields   map[string]any
 	includeCaller   bool
 	includeStack    bool // Only for ERROR and FATAL
 	componentLevels map[string]LogLevel
@@ -79,7 +80,7 @@ func NewStructuredLogger(config *StructuredLoggerConfig) (*StructuredLogger, err
 		level:           config.Level,
 		output:          config.Output,
 		format:          config.Format,
-		contextFields:   make(map[string]interface{}),
+		contextFields:   make(map[string]any),
 		includeCaller:   config.IncludeCaller,
 		includeStack:    config.IncludeStack,
 		componentLevels: make(map[string]LogLevel),
@@ -99,14 +100,12 @@ func NewStructuredLogger(config *StructuredLoggerConfig) (*StructuredLogger, err
 }
 
 // WithField returns a new logger with an additional context field
-func (sl *StructuredLogger) WithField(key string, value interface{}) *StructuredLogger {
+func (sl *StructuredLogger) WithField(key string, value any) *StructuredLogger {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	newFields := make(map[string]interface{}, len(sl.contextFields)+1)
-	for k, v := range sl.contextFields {
-		newFields[k] = v
-	}
+	newFields := make(map[string]any, len(sl.contextFields)+1)
+	maps.Copy(newFields, sl.contextFields)
 	newFields[key] = value
 
 	return &StructuredLogger{
@@ -122,17 +121,13 @@ func (sl *StructuredLogger) WithField(key string, value interface{}) *Structured
 }
 
 // WithFields returns a new logger with multiple context fields
-func (sl *StructuredLogger) WithFields(fields map[string]interface{}) *StructuredLogger {
+func (sl *StructuredLogger) WithFields(fields map[string]any) *StructuredLogger {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	newFields := make(map[string]interface{}, len(sl.contextFields)+len(fields))
-	for k, v := range sl.contextFields {
-		newFields[k] = v
-	}
-	for k, v := range fields {
-		newFields[k] = v
-	}
+	newFields := make(map[string]any, len(sl.contextFields)+len(fields))
+	maps.Copy(newFields, sl.contextFields)
+	maps.Copy(newFields, fields)
 
 	return &StructuredLogger{
 		level:           sl.level,
@@ -191,7 +186,7 @@ func (sl *StructuredLogger) isEnabled(level LogLevel) bool {
 }
 
 // log writes a log entry
-func (sl *StructuredLogger) log(level LogLevel, message string, fields map[string]interface{}) {
+func (sl *StructuredLogger) log(level LogLevel, message string, fields map[string]any) {
 	if !sl.isEnabled(level) {
 		return
 	}
@@ -200,20 +195,16 @@ func (sl *StructuredLogger) log(level LogLevel, message string, fields map[strin
 		Timestamp: time.Now(),
 		Level:     level.String(),
 		Message:   message,
-		Fields:    make(map[string]interface{}),
+		Fields:    make(map[string]any),
 	}
 
 	// Add context fields
 	sl.mu.RLock()
-	for k, v := range sl.contextFields {
-		entry.Fields[k] = v
-	}
+	maps.Copy(entry.Fields, sl.contextFields)
 	sl.mu.RUnlock()
 
 	// Add provided fields
-	for k, v := range fields {
-		entry.Fields[k] = v
-	}
+	maps.Copy(entry.Fields, fields)
 
 	// Add caller information if enabled
 	if sl.includeCaller {
@@ -299,39 +290,39 @@ func (sl *StructuredLogger) formatText(entry LogEntry) string {
 }
 
 // Trace logs a trace message
-func (sl *StructuredLogger) Trace(message string, fields ...map[string]interface{}) {
+func (sl *StructuredLogger) Trace(message string, fields ...map[string]any) {
 	sl.logWithFields(TRACE, message, fields...)
 }
 
 // Debug logs a debug message
-func (sl *StructuredLogger) Debug(message string, fields ...map[string]interface{}) {
+func (sl *StructuredLogger) Debug(message string, fields ...map[string]any) {
 	sl.logWithFields(DEBUG, message, fields...)
 }
 
 // Info logs an info message
-func (sl *StructuredLogger) Info(message string, fields ...map[string]interface{}) {
+func (sl *StructuredLogger) Info(message string, fields ...map[string]any) {
 	sl.logWithFields(INFO, message, fields...)
 }
 
 // Warn logs a warning message
-func (sl *StructuredLogger) Warn(message string, fields ...map[string]interface{}) {
+func (sl *StructuredLogger) Warn(message string, fields ...map[string]any) {
 	sl.logWithFields(WARN, message, fields...)
 }
 
 // Error logs an error message
-func (sl *StructuredLogger) Error(message string, fields ...map[string]interface{}) {
+func (sl *StructuredLogger) Error(message string, fields ...map[string]any) {
 	sl.logWithFields(ERROR, message, fields...)
 }
 
 // Fatal logs a fatal message and exits
-func (sl *StructuredLogger) Fatal(message string, fields ...map[string]interface{}) {
+func (sl *StructuredLogger) Fatal(message string, fields ...map[string]any) {
 	sl.logWithFields(FATAL, message, fields...)
 	os.Exit(1)
 }
 
 // logWithFields is a helper to log with optional field maps
-func (sl *StructuredLogger) logWithFields(level LogLevel, message string, fieldMaps ...map[string]interface{}) {
-	var fields map[string]interface{}
+func (sl *StructuredLogger) logWithFields(level LogLevel, message string, fieldMaps ...map[string]any) {
+	var fields map[string]any
 	if len(fieldMaps) > 0 && fieldMaps[0] != nil {
 		fields = fieldMaps[0]
 	}
@@ -339,32 +330,32 @@ func (sl *StructuredLogger) logWithFields(level LogLevel, message string, fieldM
 }
 
 // Tracef logs a formatted trace message
-func (sl *StructuredLogger) Tracef(format string, args ...interface{}) {
+func (sl *StructuredLogger) Tracef(format string, args ...any) {
 	sl.log(TRACE, fmt.Sprintf(format, args...), nil)
 }
 
 // Debugf logs a formatted debug message
-func (sl *StructuredLogger) Debugf(format string, args ...interface{}) {
+func (sl *StructuredLogger) Debugf(format string, args ...any) {
 	sl.log(DEBUG, fmt.Sprintf(format, args...), nil)
 }
 
 // Infof logs a formatted info message
-func (sl *StructuredLogger) Infof(format string, args ...interface{}) {
+func (sl *StructuredLogger) Infof(format string, args ...any) {
 	sl.log(INFO, fmt.Sprintf(format, args...), nil)
 }
 
 // Warnf logs a formatted warning message
-func (sl *StructuredLogger) Warnf(format string, args ...interface{}) {
+func (sl *StructuredLogger) Warnf(format string, args ...any) {
 	sl.log(WARN, fmt.Sprintf(format, args...), nil)
 }
 
 // Errorf logs a formatted error message
-func (sl *StructuredLogger) Errorf(format string, args ...interface{}) {
+func (sl *StructuredLogger) Errorf(format string, args ...any) {
 	sl.log(ERROR, fmt.Sprintf(format, args...), nil)
 }
 
 // Fatalf logs a formatted fatal message and exits
-func (sl *StructuredLogger) Fatalf(format string, args ...interface{}) {
+func (sl *StructuredLogger) Fatalf(format string, args ...any) {
 	sl.log(FATAL, fmt.Sprintf(format, args...), nil)
 	os.Exit(1)
 }

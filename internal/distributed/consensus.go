@@ -645,7 +645,7 @@ func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 
 	success := false
 	if req.Term >= ce.currentTerm {
-		// Recognised leader — step down if needed and reset election timer.
+		// Recognized leader — step down if needed and reset election timer.
 		if req.Term > ce.currentTerm {
 			ce.currentTerm = req.Term
 			ce.votedFor = ""

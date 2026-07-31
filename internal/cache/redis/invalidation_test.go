@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/objectfs/objectfs/internal/cache/redis"
-	"github.com/objectfs/objectfs/internal/config"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/objectfs/objectfs/internal/cache/redis"
+	"github.com/objectfs/objectfs/internal/config"
 )
 
 func newTestCacheAndInvalidator(t *testing.T, mr *miniredis.Miniredis, nodeID string) (*redis.Cache, *redis.Invalidator) {
@@ -49,8 +50,7 @@ func TestInvalidator_Subscribe_RemoteInvalidation(t *testing.T) {
 	c1.Put("shared/key", 0, []byte("value"))
 	require.NotNil(t, c1.Get("shared/key", 0, 0))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// node1 subscribes to invalidation messages
 	inv1.Subscribe(ctx)
@@ -79,8 +79,7 @@ func TestInvalidator_Subscribe_IgnoresSelf(t *testing.T) {
 	c1, inv1 := newTestCacheAndInvalidator(t, mr, "node1")
 	c1.Put("mykey", 0, []byte("data"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	inv1.Subscribe(ctx)
 
 	time.Sleep(50 * time.Millisecond)

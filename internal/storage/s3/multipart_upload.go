@@ -27,10 +27,7 @@ import (
 func partSlice(data []byte, chunkSize int64, partNum int) []byte {
 	dataSize := int64(len(data))
 	start := int64(partNum-1) * chunkSize
-	end := start + chunkSize
-	if end > dataSize {
-		end = dataSize
-	}
+	end := min(start+chunkSize, dataSize)
 	return data[start:end]
 }
 
@@ -145,7 +142,7 @@ func (b *Backend) uploadParts(
 	var uploadErrors []error
 	var totalBytes int64
 
-	for i := 0; i < totalParts; i++ {
+	for range totalParts {
 		r := <-resultCh
 		if r.err != nil {
 			uploadErrors = append(uploadErrors, fmt.Errorf("part %d failed: %w", r.partNumber, r.err))

@@ -48,7 +48,7 @@ func TestLRUCacheUnit(t *testing.T) {
 	stats := lruCache.Stats()
 	assert.Equal(t, uint64(1), stats.Hits)
 	assert.Equal(t, uint64(1), stats.Misses)
-	assert.Greater(t, stats.Size, int64(0))
+	assert.Positive(t, stats.Size)
 
 	// Test cache eviction
 	evicted := lruCache.Evict(int64(len(testData)))
@@ -201,7 +201,7 @@ func TestWriteBufferUnit(t *testing.T) {
 
 	// Test buffer stats
 	stats := writeBuffer.GetStats()
-	assert.Greater(t, stats.TotalWrites, uint64(0))
+	assert.Positive(t, stats.TotalWrites)
 	assert.GreaterOrEqual(t, stats.TotalBytes, int64(len(smallData)+len(largeData)+len(syncData)))
 
 	// Test buffer info
@@ -268,7 +268,7 @@ func TestBufferManagerUnit(t *testing.T) {
 
 	// Test manager stats
 	stats := manager.GetStats()
-	assert.Greater(t, stats.TotalOperations, uint64(0))
+	assert.Positive(t, stats.TotalOperations)
 	assert.True(t, manager.IsHealthy())
 
 	// Test flush
@@ -374,8 +374,8 @@ func parseSize(sizeStr string) (int64, error) {
 	}
 
 	for unit, multiplier := range units {
-		if strings.HasSuffix(strings.ToUpper(sizeStr), unit) {
-			numStr := strings.TrimSuffix(strings.ToUpper(sizeStr), unit)
+		if before, ok := strings.CutSuffix(strings.ToUpper(sizeStr), unit); ok {
+			numStr := before
 			if val, err := strconv.ParseFloat(numStr, 64); err == nil {
 				return int64(val * float64(multiplier)), nil
 			}
@@ -565,13 +565,13 @@ func TestConcurrentAccess(t *testing.T) {
 	done := make(chan bool, numGoroutines)
 
 	// Start concurrent operations
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer func() { done <- true }()
 
-			for j := 0; j < operationsPerGoroutine; j++ {
+			for j := range operationsPerGoroutine {
 				key := fmt.Sprintf("concurrent-key-%d-%d", id, j)
-				data := []byte(fmt.Sprintf("data-%d-%d", id, j))
+				data := fmt.Appendf(nil, "data-%d-%d", id, j)
 
 				// Mix of operations
 				switch j % 3 {
@@ -587,7 +587,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		select {
 		case <-done:
 		case err := <-errors:

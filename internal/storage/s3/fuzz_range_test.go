@@ -57,10 +57,7 @@ func FuzzSliceRange(f *testing.F) {
 		// The expectation, computed independently of the implementation: clamp the offset into
 		// [0, length], read "to the end" for a non-positive size, and clamp the end into [offset, length]
 		// without ever letting offset+size overflow.
-		wantStart := offset
-		if wantStart < 0 {
-			wantStart = 0
-		}
+		wantStart := max(offset, 0)
 		if wantStart > int64(length) {
 			wantStart = int64(length)
 		}
@@ -101,7 +98,7 @@ func FuzzSliceRange(f *testing.F) {
 //
 // Its expectation is hand-written arithmetic that resembles the implementation's. If the two were ever
 // made identical — by copying one into the other during a refactor — the fuzzer would compare a function
-// against itself and pass on any behaviour at all, including the panic it was written to prevent. These
+// against itself and pass on any behavior at all, including the panic it was written to prevent. These
 // cases pin the contract in literals, so the expectation is anchored to something outside both.
 func TestSliceRangeExpectationIsNotTheImplementation(t *testing.T) {
 	t.Parallel()
@@ -114,7 +111,7 @@ func TestSliceRangeExpectationIsNotTheImplementation(t *testing.T) {
 		why          string
 	}{
 		{0, -1, data, "a negative size means to the end — C3's input, which used to panic"},
-		{5, -1, data[5:], "and it still honours the offset"},
+		{5, -1, data[5:], "and it still honors the offset"},
 		{0, 0, data, "zero means to the end, matching the range header the fetch would send"},
 		{0, 4, data[:4], "an ordinary range"},
 		{6, 4, data[6:], "a range that ends exactly at the end"},

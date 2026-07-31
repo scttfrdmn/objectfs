@@ -64,7 +64,7 @@ type MemoryMonitor struct {
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
-	active int32
+	active atomic.Int32
 }
 
 // MemorySample represents a memory usage sample
@@ -158,11 +158,11 @@ func NewMemoryMonitor(config MonitorConfig) *MemoryMonitor {
 
 // Start begins memory monitoring
 func (mm *MemoryMonitor) Start(ctx context.Context) error {
-	if !atomic.CompareAndSwapInt32(&mm.active, 0, 1) {
+	if !mm.active.CompareAndSwap(0, 1) {
 		return fmt.Errorf("monitor already running")
 	}
 
-	mm.logger.Info("Starting memory monitor", map[string]interface{}{
+	mm.logger.Info("Starting memory monitor", map[string]any{
 		"sample_interval": mm.config.SampleInterval,
 		"alert_threshold": mm.config.AlertThreshold,
 	})
@@ -175,7 +175,7 @@ func (mm *MemoryMonitor) Start(ctx context.Context) error {
 
 // Stop stops memory monitoring
 func (mm *MemoryMonitor) Stop() error {
-	if !atomic.CompareAndSwapInt32(&mm.active, 1, 0) {
+	if !mm.active.CompareAndSwap(1, 0) {
 		return nil // Already stopped
 	}
 
@@ -373,7 +373,7 @@ func (mm *MemoryMonitor) generateAlert(alertType AlertType, message string, curr
 	mm.alerts = append(mm.alerts, alert)
 	mm.mu.Unlock()
 
-	mm.logger.Warn("Memory alert", map[string]interface{}{
+	mm.logger.Warn("Memory alert", map[string]any{
 		"type":       alertType.String(),
 		"message":    message,
 		"current":    current,
@@ -511,7 +511,7 @@ func (mm *MemoryMonitor) ResetBaseline() {
 	defer mm.mu.Unlock()
 
 	mm.baselineSample = mm.currentSample
-	mm.logger.Info("Baseline reset", map[string]interface{}{
+	mm.logger.Info("Baseline reset", map[string]any{
 		"alloc":         mm.baselineSample.Alloc,
 		"num_goroutine": mm.baselineSample.NumGoroutine,
 	})

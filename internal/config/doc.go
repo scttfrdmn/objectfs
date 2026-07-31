@@ -15,13 +15,11 @@ Multi-source configuration hierarchy with precedence:
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│        Environment Variables                │
-	│           (OBJECTFS_*)                     │
+	│        Environment Variables                │           (OBJECTFS_*)                     │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│         Configuration Files                 │
-	│            (YAML format)                    │
+	│         Configuration Files                 │            (YAML format)                    │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
@@ -168,7 +166,6 @@ Example validation:
 			if _, err := utils.ParseLogLevel(c.Global.LogLevel); err != nil {
 				return fmt.Errorf("invalid log level: %w", err)
 			}
-		}
 
 		// Validate performance settings
 		if c.Performance.MaxConcurrency < 1 || c.Performance.MaxConcurrency > 10000 {
@@ -192,7 +189,7 @@ Watch Configuration:
 	config := config.NewDefault()
 
 	// Set up file watcher
-	watcher := config.StartWatcher("/etc/objectfs/config.yaml")
+	:= config.StartWatcher("/etc/objectfs/config.yaml")
 	defer watcher.Stop()
 
 	// Handle updates

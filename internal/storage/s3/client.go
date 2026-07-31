@@ -11,9 +11,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/objectfs/objectfs/internal/network"
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
+
+	"github.com/objectfs/objectfs/internal/network"
 )
 
 // clientOptions returns the s3.Options mutator that applies the endpoint and addressing settings

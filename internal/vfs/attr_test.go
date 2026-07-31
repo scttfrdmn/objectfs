@@ -234,7 +234,7 @@ func TestAttrFromMetadata(t *testing.T) {
 			},
 		},
 		{
-			name: "full metadata is honoured",
+			name: "full metadata is honored",
 			meta: map[string]string{
 				metaMode:     "600",
 				metaUID:      "1001",

@@ -463,7 +463,7 @@ func (c *WeightedLRUCache) EvictByWeight(targetSize int64) bool {
 	}
 
 	// Sort by weight (lowest first)
-	for i := 0; i < len(items)-1; i++ {
+	for i := range len(items) - 1 {
 		for j := i + 1; j < len(items); j++ {
 			if items[i].weight > items[j].weight {
 				items[i], items[j] = items[j], items[i]

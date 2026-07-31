@@ -271,7 +271,7 @@ func (ts *TestServer) ObjectExists(key string) bool {
 // grows over time, so this is probed at runtime rather than pinned to a version: a test gated on a
 // hardcoded version number starts skipping for the wrong reason the moment the dependency moves.
 type Capabilities struct {
-	// RangeGET reports whether GetObject honours the Range header, answering 206 with a
+	// RangeGET reports whether GetObject honors the Range header, answering 206 with a
 	// Content-Range. When false, a ranged request is served the *whole* object with a 200,
 	// which silently turns every read-path assertion into a tautology.
 	RangeGET bool
@@ -419,7 +419,7 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// RequireRangeGET skips the test unless the endpoint honours the Range header.
+// RequireRangeGET skips the test unless the endpoint honors the Range header.
 //
 // Skipping is the only safe response. ObjectFS's entire read path is ranged GETs, so against an
 // endpoint that ignores Range every ranged assertion passes for the wrong reason: the whole object
@@ -472,7 +472,7 @@ func (ts *TestServer) SeedRandom(key string, n int) []byte {
 func DeterministicBytes(seed string, n int) []byte {
 	// FNV-1a over the seed gives the starting state; a xorshift step gives the sequence.
 	state := uint64(14695981039346656037)
-	for i := 0; i < len(seed); i++ {
+	for i := range len(seed) {
 		state ^= uint64(seed[i])
 		state *= 1099511628211
 	}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -91,7 +92,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	// internal/config validates this too, and the duplication is deliberate: this constructor is
 	// public API that the Go SDK reaches with a hand-built &Config{Region: ...}, never passing
 	// through the config loader. Validating only at the loader would leave the SDK path with the
-	// behaviour FuzzConfigConstructsBackend found — a space in the region producing "exceeded maximum
+	// behavior FuzzConfigConstructsBackend found — a space in the region producing "exceeded maximum
 	// number of attempts" several layers below anything that could name the cause.
 	if err := awsname.ValidateRegion(cfg.Region); err != nil {
 		return nil, fmt.Errorf("invalid S3 configuration: %w", err)
@@ -643,9 +644,7 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 				"storage-tier":    effectiveTier,
 				"configured-tier": b.currentTier,
 			}
-			for k, v := range objectMeta {
-				cargoMeta[k] = v
-			}
+			maps.Copy(cargoMeta, objectMeta)
 			if contentEncoding != "" {
 				cargoMeta["content-encoding"] = contentEncoding
 			}
@@ -771,9 +770,7 @@ func (b *Backend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo
 	}
 
 	// Copy metadata
-	for k, v := range result.Metadata {
-		info.Metadata[k] = v
-	}
+	maps.Copy(info.Metadata, result.Metadata)
 
 	// Populate Checksum from objectfs-sha256 metadata key (set on upload).
 	// Empty string for objects written before this feature — backward compatible.
@@ -837,7 +834,7 @@ func (b *Backend) GetObjects(ctx context.Context, keys []string) (map[string][]b
 	}
 
 	var firstError error
-	for i := 0; i < len(keys); i++ {
+	for range keys {
 		res := <-resultCh
 		if res.err != nil {
 			if firstError == nil {
@@ -996,16 +993,13 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 	resultCh := make(chan chunkResult, numChunks)
 	semaphore := make(chan struct{}, concurrency)
 
-	for i := int64(0); i < numChunks; i++ {
+	for i := range numChunks {
 		go func(idx int64) {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
 			start := offset + idx*chunkSize
-			end := start + chunkSize
-			if end > offset+totalSize {
-				end = offset + totalSize
-			}
+			end := min(start+chunkSize, offset+totalSize)
 			rangeHdr := aws.String(fmt.Sprintf("bytes=%d-%d", start, end-1))
 
 			var chunk []byte
@@ -1031,7 +1025,7 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 	}
 
 	chunks := make([][]byte, numChunks)
-	for i := int64(0); i < numChunks; i++ {
+	for range numChunks {
 		r := <-resultCh
 		if r.err != nil {
 			return nil, r.err
@@ -1090,7 +1084,7 @@ func (b *Backend) translateError(err error, operation, key string) error {
 				WithOperation(operation).
 				WithContext("bucket", b.bucket).
 				WithContext("key", key).
-				WithDetail("timeout_config", map[string]interface{}{
+				WithDetail("timeout_config", map[string]any{
 					"connect_timeout": b.config.ConnectTimeout,
 					"request_timeout": b.config.RequestTimeout,
 				}).

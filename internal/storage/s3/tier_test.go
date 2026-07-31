@@ -3,6 +3,7 @@ package s3
 import (
 	"log/slog"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -155,13 +156,7 @@ func TestTierRecommendations(t *testing.T) {
 
 		// Small objects should recommend Standard tier
 		recommendations := validator.GetRecommendations(64*1024, "unknown") // 64KB
-		found := false
-		for _, rec := range recommendations {
-			if rec == "Consider Standard tier for small objects to avoid IA minimum charges" {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(recommendations, "Consider Standard tier for small objects to avoid IA minimum charges")
 		if !found {
 			t.Error("Should recommend Standard tier for small objects")
 		}
@@ -172,13 +167,7 @@ func TestTierRecommendations(t *testing.T) {
 
 		// Infrequent access should recommend IA tiers
 		recommendations := validator.GetRecommendations(1024*1024, "infrequent") // 1MB
-		found := false
-		for _, rec := range recommendations {
-			if rec == "Consider Standard-IA or One Zone-IA for cost savings" {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(recommendations, "Consider Standard-IA or One Zone-IA for cost savings")
 		if !found {
 			t.Error("Should recommend IA tiers for infrequent access")
 		}

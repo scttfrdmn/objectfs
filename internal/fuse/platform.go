@@ -4,6 +4,7 @@ package fuse
 
 import (
 	"context"
+
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
