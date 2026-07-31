@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
 	"github.com/objectfs/objectfs/internal/circuit"
@@ -253,18 +254,6 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 			WithContext("key", key)
 	}
 
-	breaker := b.circuitManager.GetBreaker("s3-get")
-	var data []byte
-	var contentEncoding string
-
-	// When transparent compression is enabled, fetch the entire object so we
-	// can decompress it before applying any byte-range slice.  For uncompressed
-	// objects the behaviour is identical to before.
-	fetchOffset, fetchSize := offset, size
-	if b.compressor != nil && b.compressor.Enabled() {
-		fetchOffset, fetchSize = 0, 0
-	}
-
 	// Parallel range GET fast-path: fan out large reads into concurrent chunks.
 	// Skipped when transparent compression is active (whole-object decompress
 	// path must remain intact) or when the threshold is disabled.
@@ -282,62 +271,84 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		}
 	}
 
-	// Wrap with retry logic
-	err := b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
-		return breaker.ExecuteWithContext(retryCtx, func(ctx context.Context) error {
-			// Build range header if needed
-			var rangeHeader *string
-			if fetchOffset > 0 || fetchSize > 0 {
-				if fetchSize > 0 {
-					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-%d", fetchOffset, fetchOffset+fetchSize-1))
-				} else {
-					rangeHeader = aws.String(fmt.Sprintf("bytes=%d-", fetchOffset))
-				}
-			}
+	// Ask S3 for exactly the bytes the caller wants.
+	//
+	// Whether this object needs whole-object decoding is a property of *the object*, not of the
+	// local compression config, and the response reports it: S3 returns Content-Encoding on a 206
+	// just as it does on a 200. So request the range, and re-fetch whole only if the answer comes
+	// back encoded.
+	//
+	// The alternative — fetching whole whenever compression is configured — is audit finding C4, and
+	// it is catastrophic rather than merely wasteful. It applied to every object in the bucket,
+	// including ones never compressed, ones below MinSize, ones where compression did not help, and
+	// ones written by other tools. Measured on real S3: a 4 KiB read of a 256 MiB object took 49
+	// seconds against 227 ms, and a 4 KiB read of a 10 GiB object transferred all 10 GiB —
+	// 2,621,440x amplification. Compressed objects are the rare case and are the only ones that pay.
+	fetchOffset, fetchSize := offset, size
 
-			input := &s3.GetObjectInput{
-				Bucket: aws.String(b.bucket),
-				Key:    aws.String(key),
-				Range:  rangeHeader,
-			}
+	data, contentEncoding, objectMeta, err := b.getObjectRange(ctx, key, fetchOffset, fetchSize)
 
-			// Use acceleration fallback pattern for reads
-			err := b.executeWithAccelerationFallback(ctx, "GetObject", func(client *s3.Client) error {
-				result, err := client.GetObject(ctx, input)
-				if err != nil {
-					b.metricsCollector.RecordError(err)
-					translatedErr := b.translateError(err, "GetObject", key)
-					b.healthTracker.RecordError("s3-reads", translatedErr)
-					return translatedErr
-				}
-				defer func() { _ = result.Body.Close() }()
+	// A ranged read has two ways of landing on a compressed object, and both mean the same thing: the
+	// range was applied to the *stored* bytes when the caller meant the *decoded* ones. A zstd or
+	// gzip frame is not seekable, so neither can be served from a range — the whole object has to be
+	// fetched and decoded. That costs one extra request, paid only by compressed objects read in
+	// part; the seekable-zstd issue is the fix that removes it.
+	//
+	//  1. The read succeeded and came back encoded: the range fell inside the compressed body.
+	//  2. The read failed 416: the range fell past the end of the compressed body. A
+	//     legitimately-sized read of the decoded content routinely does, since the body is a
+	//     fraction of the size the caller was told. S3 is right to refuse; the request was wrong.
+	//
+	// Case 2 is ambiguous, though, and resolving it wrong is expensive in one direction. A 416 also
+	// means "you read past the end", which for an uncompressed object is an ordinary EOF read that
+	// must return no bytes — and fetching a 10 GiB object to discover that would reintroduce exactly
+	// the amplification this code removed. So ask HeadObject, which answers in one cheap request
+	// whether the object is compressed and how long its decoded content is.
+	ranged := fetchOffset > 0 || fetchSize > 0
 
-				if result.ContentEncoding != nil {
-					contentEncoding = aws.ToString(result.ContentEncoding)
-				}
+	switch {
+	case ranged && err == nil && contentEncoding != "":
+		fetchOffset, fetchSize = 0, 0
+		data, contentEncoding, objectMeta, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
 
-				data, err = io.ReadAll(result.Body)
-				if err != nil {
-					b.metricsCollector.RecordError(err)
-					readErr := fmt.Errorf("failed to read object body: %w", err)
-					b.healthTracker.RecordError("s3-reads", readErr)
-					return readErr
-				}
+		b.logger.Debug("Re-fetched whole object: a ranged read cannot slice an encoded body",
+			"key", key, "content_encoding", contentEncoding, "offset", offset, "size", size)
 
-				b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
-				b.healthTracker.RecordSuccess("s3-reads")
-				return nil
-			})
+	case ranged && isInvalidRange(err):
+		info, headErr := b.HeadObject(ctx, key)
+		if headErr != nil {
+			// Report the range failure, not the HEAD's: the range request is what the caller made,
+			// and the HEAD was our own attempt to interpret it.
+			return nil, err
+		}
 
-			return err
-		})
-	})
+		// HeadObject reports the *decoded* size, so this is the caller's coordinate space. Past the
+		// end of that is a real EOF read whatever the storage format, and costs nothing more.
+		if offset >= info.Size {
+			return []byte{}, nil
+		}
+
+		if !isCompressed(info.Metadata) {
+			// Inside an uncompressed object but S3 refused the range: not something to paper over
+			// with a whole-object fetch.
+			return nil, err
+		}
+
+		fetchOffset, fetchSize = 0, 0
+		data, contentEncoding, objectMeta, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
+
+		b.logger.Debug("Re-fetched whole object: the range fell past the end of a compressed body",
+			"key", key, "decoded_size", info.Size, "offset", offset, "size", size)
+	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	// Decompress if the object was stored with transparent compression.
+	// Decompress if the object was stored with transparent compression. The encoding comes from the
+	// object's own header rather than the write config, so objects stay readable across a config
+	// change (audit finding C2 is the opposite: dispatching on the configured codec silently returned
+	// the raw frame for anything else).
 	if b.compressor != nil && contentEncoding != "" {
 		decompressed, decompErr := b.compressor.Decompress(data, contentEncoding)
 		if decompErr != nil {
@@ -346,24 +357,132 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		data = decompressed
 	}
 
-	// Apply byte-range slice after decompression (or directly for uncompressed).
-	// This handles the case where compression was active and we fetched the
-	// full object instead of issuing a range request to S3.
-	if (offset > 0 || size > 0) && (fetchOffset != offset || fetchSize != size) {
-		if offset >= int64(len(data)) {
-			return []byte{}, nil
-		}
-		end := offset + size
-		if size == 0 || end > int64(len(data)) {
-			end = int64(len(data))
-		}
-		data = data[offset:end]
+	// Fail closed if the object is still encoded after the decode above.
+	//
+	// objectfs-original-size is written only for objects that were actually compressed, so its
+	// presence is an assertion by the writer that the caller must receive that many bytes. If the
+	// data on hand is shorter, decompression did not happen — either the stored Content-Encoding was
+	// lost (which is what CargoShip's metadata-only upload did), or it names a codec this build
+	// cannot decode, or compression was reconfigured since the write.
+	//
+	// Returning the bytes anyway is the worst option available: HeadObject reports the uncompressed
+	// size, so the kernel pads the shortfall with zeros and the caller gets a silently corrupt file
+	// with a successful exit status. Compressor.Decompress does exactly that today for an encoding it
+	// does not recognize, which is why the check lives here rather than there.
+	if err := checkFullyDecoded(objectMeta, data, offset, size, contentEncoding, key); err != nil {
+		b.metricsCollector.RecordError(err)
+
+		return nil, err
+	}
+
+	// Slice locally only when the fetch covered more than the caller asked for, which now happens
+	// only on the encoded re-fetch above. An ordinary ranged read is already exactly the requested
+	// bytes and must not be sliced again — the offset would be applied twice.
+	if fetchOffset != offset || fetchSize != size {
+		data = sliceRange(data, offset, size)
 	}
 
 	// Record access pattern for cost optimization
 	b.costOptimizer.RecordAccess(key, int64(len(data)))
 
 	return data, nil
+}
+
+// sliceRange returns data[offset : offset+size], clamped to what data holds.
+//
+// It is a function so the bounds arithmetic has one home and one set of tests. The inline version was
+// audit finding C3: with size < 0 it computed end < offset, neither clamp arm fired, and the slice
+// expression panicked — "slice bounds out of range [100:99]" — taking the mount process down and
+// unmounting under every open fd. A size of 0 or less is treated as "to the end", matching the range
+// header the fetch would have sent.
+func sliceRange(data []byte, offset, size int64) []byte {
+	if offset < 0 {
+		offset = 0
+	}
+
+	if offset >= int64(len(data)) {
+		return []byte{}
+	}
+
+	end := int64(len(data))
+	if size > 0 && offset+size < end {
+		end = offset + size
+	}
+
+	return data[offset:end]
+}
+
+// getObjectRange fetches a byte range of an object, or the whole object when size is not positive,
+// and reports the encoding and user metadata S3 returned with it.
+//
+// The reliability stack lives here rather than at the call site so both the direct read and the
+// encoded re-fetch get it: retry, circuit breaker, health tracking, metrics, and error translation.
+func (b *Backend) getObjectRange(
+	ctx context.Context,
+	key string,
+	offset, size int64,
+) (data []byte, contentEncoding string, metadata map[string]string, err error) {
+	var rangeHeader *string
+
+	switch {
+	case size > 0:
+		rangeHeader = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+size-1))
+	case offset > 0:
+		rangeHeader = aws.String(fmt.Sprintf("bytes=%d-", offset))
+	}
+
+	breaker := b.circuitManager.GetBreaker("s3-get")
+
+	err = b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
+		return breaker.ExecuteWithContext(retryCtx, func(ctx context.Context) error {
+			// Reset per attempt. A retry that fails after a partial read would otherwise leave the
+			// previous attempt's bytes in place, and the caller cannot tell a stale buffer from a
+			// fresh one (audit finding L24).
+			data, contentEncoding, metadata = nil, "", nil
+
+			input := &s3.GetObjectInput{
+				Bucket: aws.String(b.bucket),
+				Key:    aws.String(key),
+				Range:  rangeHeader,
+			}
+
+			return b.executeWithAccelerationFallback(ctx, "GetObject", func(client *s3.Client) error {
+				result, getErr := client.GetObject(ctx, input)
+				if getErr != nil {
+					b.metricsCollector.RecordError(getErr)
+					translatedErr := b.translateError(getErr, "GetObject", key)
+					b.healthTracker.RecordError("s3-reads", translatedErr)
+
+					return translatedErr
+				}
+				defer func() { _ = result.Body.Close() }()
+
+				contentEncoding = aws.ToString(result.ContentEncoding)
+				metadata = result.Metadata
+
+				body, readErr := io.ReadAll(result.Body)
+				if readErr != nil {
+					b.metricsCollector.RecordError(readErr)
+					wrapped := fmt.Errorf("failed to read object body: %w", readErr)
+					b.healthTracker.RecordError("s3-reads", wrapped)
+
+					return wrapped
+				}
+
+				data = body
+
+				b.metricsCollector.RecordBytesDownloaded(int64(len(data)))
+				b.healthTracker.RecordSuccess("s3-reads")
+
+				return nil
+			})
+		})
+	})
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	return data, contentEncoding, metadata, nil
 }
 
 // PutObject stores an object in S3 with CargoShip optimization
@@ -467,8 +586,29 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 			input.ContentEncoding = aws.String(contentEncoding)
 		}
 
-		// Use CargoShip transporter if available for optimized uploads (4.6x performance)
-		if transporter := b.clientManager.GetTransporter(); transporter != nil {
+		// Use the CargoShip transporter for optimized uploads, but never for a compressed object.
+		//
+		// cargoships3.Archive has no ContentEncoding field — its CompressionType becomes user
+		// metadata (transporter.go:184) and nothing sets the HTTP header. Uploading a compressed
+		// object through it therefore stored the encoding as metadata only, so GetObject saw an
+		// empty result.ContentEncoding, skipped decompression, and returned the raw zstd frame while
+		// HeadObject still reported the uncompressed size. An 8 KiB write read back as 29 bytes with
+		// no error, and the kernel zero-padded the difference: silent corruption on the default
+		// configuration, which enables both compression and CargoShip.
+		//
+		// The direct path below sets ContentEncoding properly, so compressed objects take it. This
+		// costs CargoShip's throughput optimization only for objects that compressed — and only
+		// until the transporter can carry the header.
+		transporter := b.clientManager.GetTransporter()
+		if contentEncoding != "" && transporter != nil {
+			b.logger.Debug("Bypassing CargoShip for a compressed object: the transporter cannot set Content-Encoding",
+				"key", key,
+				"content_encoding", contentEncoding)
+
+			transporter = nil
+		}
+
+		if transporter != nil {
 			// Use CargoShip's optimized upload with BBR/CUBIC algorithms
 			cargoStorageClass := ConvertTierToCargoShipStorageClass(effectiveTier)
 			cargoMeta := map[string]string{
@@ -532,12 +672,11 @@ func (b *Backend) DeleteObject(ctx context.Context, key string) error {
 		b.metricsCollector.RecordMetrics(time.Since(start), false)
 	}()
 
-	// Get object metadata to check creation time for tier validation
+	// Get object metadata to check creation time for tier validation. Deleting a key that is not
+	// there is a no-op, which is both S3's contract and what the Go SDK documents.
 	objectInfo, err := b.HeadObject(ctx, key)
 	if err != nil {
-		// If object doesn't exist, that's ok for delete operation
-		var notFound *s3types.NoSuchKey
-		if stderr.As(err, &notFound) {
+		if isNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("failed to get object metadata for deletion validation: %w", err)
@@ -994,6 +1133,119 @@ func (b *Backend) detectContentType(key string) string {
 func isErrorType[T error](err error) bool {
 	var target T
 	return stderr.As(err, &target)
+}
+
+// checkFullyDecoded reports an integrity error when an object recorded an uncompressed size that the
+// data in hand cannot account for.
+//
+// It only fires for a whole-object read — a ranged read legitimately returns fewer bytes than the
+// object holds, and distinguishing "this range is short because it is a range" from "this range is
+// short because it is still compressed" is not possible from the length alone. That is acceptable
+// because the whole-object path is where the encoding is resolved: when compression is enabled the
+// backend fetches the entire object and slices after decoding, so a ranged caller reaches this with
+// data that already went through the decode above.
+func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int64, contentEncoding, key string) error {
+	recorded, ok := metadata[metaOriginalSize]
+	if !ok {
+		return nil
+	}
+
+	want, parseErr := strconv.ParseInt(recorded, 10, 64)
+	if parseErr != nil || want < 0 {
+		// HeadObject warns and falls back to ContentLength for a malformed value; matching that
+		// here keeps the two from disagreeing about the same object.
+		return nil
+	}
+
+	wholeObject := offset == 0 && (size <= 0 || size >= want)
+	if !wholeObject || int64(len(data)) >= want {
+		return nil
+	}
+
+	detail := "the stored Content-Encoding was lost, so the object was never decompressed"
+	if contentEncoding != "" {
+		detail = fmt.Sprintf("the object is encoded as %q, which this build cannot decode", contentEncoding)
+	}
+
+	return errors.NewError(errors.ErrCodeDataCorruption,
+		"object is still encoded after decompression; refusing to return partial content").
+		WithComponent("s3-backend").
+		WithOperation("GetObject").
+		WithContext("key", key).
+		WithContext("content_encoding", contentEncoding).
+		WithDetail("recorded_size", want).
+		WithDetail("decoded_size", len(data)).
+		WithDetail("cause", detail).
+		WithDetail("suggestion", "The object was written by a build that stored the encoding as user "+
+			"metadata instead of the Content-Encoding header. Rewrite it, or read it with a build "+
+			"that recognizes that layout.")
+}
+
+// isNotFound reports whether err means "that key is not there", whatever layer produced it.
+//
+// Three spellings have to be recognized. S3 answers a missing key with NoSuchKey on GetObject but
+// with NotFound on HeadObject — a distinction that made DeleteObject error on a key that was already
+// gone, contradicting both S3's contract and the Go SDK's documented no-op. And once translateError
+// has run, the SDK type is wrapped inside an ObjectFSError, so a caller downstream of a Backend
+// method sees neither raw type; matching on the code is what works there.
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if isErrorType[*s3types.NoSuchKey](err) || isErrorType[*s3types.NotFound](err) {
+		return true
+	}
+
+	var objErr *errors.ObjectFSError
+	if stderr.As(err, &objErr) {
+		return objErr.Code == errors.ErrCodeObjectNotFound
+	}
+
+	// A backend behind a non-AWS endpoint may report absence only in the API error code.
+	var apiErr smithy.APIError
+	if stderr.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound":
+			return true
+		}
+	}
+
+	return false
+}
+
+// isInvalidRange reports whether err is S3 refusing a Range that falls outside the object — HTTP 416
+// with an InvalidRange code.
+//
+// The Go SDK models this as a bare API error rather than a typed shape, so the code string is the
+// only thing to match on. Matching the *code* rather than searching the message is what keeps this
+// from being audit finding L27, where substring-matching an error message made unrelated failures
+// look like this one.
+func isInvalidRange(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr smithy.APIError
+	if stderr.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "InvalidRange"
+	}
+
+	return false
+}
+
+// isCompressed reports whether an object's metadata says its stored bytes are encoded.
+//
+// objectfs-original-size is written only for objects that actually compressed, which makes its
+// presence the writer's own record that the stored length and the content length differ.
+func isCompressed(metadata map[string]string) bool {
+	for k := range metadata {
+		if strings.EqualFold(k, metaOriginalSize) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // GetCurrentTier returns the current storage tier information

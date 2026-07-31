@@ -38,6 +38,13 @@ const (
 	ErrCodeQuotaExceeded  ErrorCode = "QUOTA_EXCEEDED"
 	ErrCodeBucketExists   ErrorCode = "BUCKET_EXISTS"
 
+	// ErrCodeDataCorruption means stored data failed an integrity check: a checksum mismatch, a
+	// length that disagrees with recorded metadata, or content still encoded after decoding was
+	// supposed to have happened. It is never retryable — retrying reads the same bad bytes — and it
+	// is always user-facing, because the alternative to reporting it is handing the caller data that
+	// is wrong.
+	ErrCodeDataCorruption ErrorCode = "DATA_CORRUPTION"
+
 	// Filesystem Errors (4000-4999)
 	ErrCodeMountFailed      ErrorCode = "MOUNT_FAILED"
 	ErrCodeUnmountFailed    ErrorCode = "UNMOUNT_FAILED"
@@ -213,44 +220,45 @@ func NewError(code ErrorCode, message string) *ObjectFSError {
 
 // Category prefix mappings for efficient lookup
 var categoryPrefixes = map[string]ErrorCategory{
-	"INVALID_CONFIG": CategoryConfiguration,
-	"MISSING_CONFIG": CategoryConfiguration,
-	"CONFIG_":        CategoryConfiguration,
-	"CONNECTION_":    CategoryConnection,
-	"NETWORK_":       CategoryConnection,
-	"OBJECT_":        CategoryStorage,
-	"BUCKET_":        CategoryStorage,
-	"STORAGE_":       CategoryStorage,
-	"TIER_":          CategoryStorage,
-	"ACCESS_":        CategoryStorage,
-	"QUOTA_":         CategoryStorage,
-	"MOUNT_":         CategoryFilesystem,
-	"UNMOUNT_":       CategoryFilesystem,
-	"PERMISSION_":    CategoryFilesystem,
-	"PATH_":          CategoryFilesystem,
-	"FILE_":          CategoryFilesystem,
-	"DIRECTORY_":     CategoryFilesystem,
-	"NOT_DIRECTORY":  CategoryFilesystem,
-	"NOT_EMPTY":      CategoryFilesystem,
-	"OUT_OF_":        CategoryResource,
-	"BUFFER_":        CategoryResource,
-	"RESOURCE_":      CategoryResource,
-	"CACHE_":         CategoryResource,
-	"WORKER_":        CategoryResource,
-	"LIMIT_":         CategoryResource,
-	"ALREADY_":       CategoryState,
+	"INVALID_CONFIG":  CategoryConfiguration,
+	"MISSING_CONFIG":  CategoryConfiguration,
+	"CONFIG_":         CategoryConfiguration,
+	"CONNECTION_":     CategoryConnection,
+	"NETWORK_":        CategoryConnection,
+	"OBJECT_":         CategoryStorage,
+	"BUCKET_":         CategoryStorage,
+	"DATA_":           CategoryStorage,
+	"STORAGE_":        CategoryStorage,
+	"TIER_":           CategoryStorage,
+	"ACCESS_":         CategoryStorage,
+	"QUOTA_":          CategoryStorage,
+	"MOUNT_":          CategoryFilesystem,
+	"UNMOUNT_":        CategoryFilesystem,
+	"PERMISSION_":     CategoryFilesystem,
+	"PATH_":           CategoryFilesystem,
+	"FILE_":           CategoryFilesystem,
+	"DIRECTORY_":      CategoryFilesystem,
+	"NOT_DIRECTORY":   CategoryFilesystem,
+	"NOT_EMPTY":       CategoryFilesystem,
+	"OUT_OF_":         CategoryResource,
+	"BUFFER_":         CategoryResource,
+	"RESOURCE_":       CategoryResource,
+	"CACHE_":          CategoryResource,
+	"WORKER_":         CategoryResource,
+	"LIMIT_":          CategoryResource,
+	"ALREADY_":        CategoryState,
 	"NOT_INITIALIZED": CategoryState,
-	"INVALID_STATE":  CategoryState,
-	"SHUTDOWN_":      CategoryState,
-	"COMPONENT_":     CategoryState,
-	"SERVICE_":       CategoryState,
-	"OPERATION_":     CategoryOperation,
-	"RETRY_":         CategoryOperation,
-	"VALIDATION_":    CategoryOperation,
+	"INVALID_STATE":   CategoryState,
+	"SHUTDOWN_":       CategoryState,
+	"COMPONENT_":      CategoryState,
+	"SERVICE_":        CategoryState,
+	"OPERATION_":      CategoryOperation,
+	"RETRY_":          CategoryOperation,
+	"VALIDATION_":     CategoryOperation,
 	"AUTHENTICATION_": CategoryAuth,
-	"AUTHORIZATION_": CategoryAuth,
-	"TOKEN_":         CategoryAuth,
-	"CREDENTIALS_":   CategoryAuth,
+	"AUTHORIZATION_":  CategoryAuth,
+	"TOKEN_":          CategoryAuth,
+	"CREDENTIALS_":    CategoryAuth,
 }
 
 // GetCategory determines the category based on the error code.
@@ -294,6 +302,9 @@ func IsUserFacingByDefault(code ErrorCode) bool {
 		ErrCodeMountFailed:      true,
 		ErrCodeOperationTimeout: true,
 		ErrCodeValidationFailed: true,
+		// Corruption is always user-facing: the alternative to telling the caller is handing them
+		// data that is wrong.
+		ErrCodeDataCorruption: true,
 	}
 	return userFacingCodes[code]
 }
@@ -320,6 +331,7 @@ func GetDefaultHTTPStatus(code ErrorCode) int {
 		ErrCodeResourceExhausted:    429, // Too Many Requests
 		ErrCodeLimitExceeded:        429,
 		ErrCodeQuotaExceeded:        429,
+		ErrCodeDataCorruption:       422, // Unprocessable Content — the object is unusable as stored
 		ErrCodeInternalError:        500, // Internal Server Error
 		ErrCodeServiceUnavailable:   503, // Service Unavailable
 		ErrCodeServiceDegraded:      503,
@@ -431,6 +443,11 @@ func (e *ObjectFSError) GetRecommendation() string {
 			"or configure aws credentials in ~/.aws/credentials.",
 		ErrCodeServiceUnavailable: "Service is currently unavailable. " +
 			"The system is temporarily unable to process requests. Please retry later.",
+		ErrCodeDataCorruption: "Stored data failed an integrity check and was not returned. " +
+			"Reading it again will produce the same result — retrying does not help. " +
+			"If the object was written by an older ObjectFS build, rewrite it; otherwise verify the " +
+			"object with the AWS CLI and check whether another tool has modified it in place.",
+
 		ErrCodeServiceDegraded: "Service is running in degraded mode. " +
 			"Some operations may be temporarily unavailable or slower than usual.",
 	}
@@ -462,6 +479,7 @@ func (e *ObjectFSError) GetTroubleshootingURL() string {
 		ErrCodeQuotaExceeded:        "#quota-exceeded",
 		ErrCodeAuthenticationFailed: "#authentication-failed",
 		ErrCodeCredentialsMissing:   "#credentials-missing",
+		ErrCodeDataCorruption:       "#data-corruption",
 	}
 
 	if fragment, exists := urlFragments[e.Code]; exists {
@@ -495,6 +513,7 @@ func (e *ObjectFSError) UserFacingMessage() string {
 		ErrCodeCredentialsMissing:   "AWS credentials not configured",
 		ErrCodeServiceUnavailable:   "Service temporarily unavailable",
 		ErrCodeServiceDegraded:      "Service running in degraded mode",
+		ErrCodeDataCorruption:       "Data failed an integrity check and was not returned",
 	}
 
 	if msg, exists := messages[e.Code]; exists {

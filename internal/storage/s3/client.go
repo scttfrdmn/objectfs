@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/objectfs/objectfs/internal/network"
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
@@ -77,11 +78,25 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	httpClient := &http.Client{Transport: transport}
 
 	// Load AWS configuration
-	awsCfg, err := config.LoadDefaultConfig(ctx,
+	loadOpts := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 		config.WithRetryMaxAttempts(cfg.MaxRetries),
 		config.WithHTTPClient(httpClient),
-	)
+	}
+
+	// Static credentials, when configured. configs/example.yaml has documented
+	// access_key_id/secret_access_key since the first release and nothing read them, so a
+	// deployment that set them silently fell through to the default chain — and failed with
+	// "no credentials" or, worse, picked up an unrelated ambient profile. Leaving them empty
+	// keeps the default chain (environment, shared config, IMDS), which is the right default
+	// for EC2 and for anyone using AWS_PROFILE.
+	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+		loadOpts = append(loadOpts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken),
+		))
+	}
+
+	awsCfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
