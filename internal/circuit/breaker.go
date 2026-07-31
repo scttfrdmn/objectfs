@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	objerrors "github.com/objectfs/objectfs/pkg/errors"
 )
 
 // State represents the circuit breaker state
@@ -109,9 +111,29 @@ func defaultReadyToTrip(counts Counts) bool {
 		float64(counts.TotalFailures)/float64(counts.Requests) >= 0.5
 }
 
-// defaultIsSuccessful is the default function to determine if a result is successful
+// defaultIsSuccessful is the default function to determine if a result is successful.
+//
+// An error that is not evidence of a service failure counts as a success, because for the breaker's
+// purpose it is one: the service was reached and it answered. A 404 for an object that was never
+// written proves S3 is up, reachable, authenticating, and correct.
+//
+// Counting those as failures opened the s3-get breaker after enough reads of missing keys and
+// refused every subsequent read, including reads of objects that existed — the same defect the
+// health tracker had, in the second of the two mechanisms guarding the same call. Both now ask
+// [objerrors.IsServiceFailure], which is the single authority on the question.
 func defaultIsSuccessful(err error) bool {
-	return err == nil
+	if err == nil {
+		return true
+	}
+
+	var objErr *objerrors.ObjectFSError
+	if errors.As(err, &objErr) {
+		return !objerrors.IsServiceFailure(objErr.Code)
+	}
+
+	// An error with no ObjectFS code counts as a failure: the safe direction for something
+	// unclassified, since the breaker recovers on its own timer if the service is in fact fine.
+	return false
 }
 
 // Execute runs the given function if the circuit breaker allows it

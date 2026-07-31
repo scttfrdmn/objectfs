@@ -289,6 +289,49 @@ func IsRetryableByDefault(code ErrorCode) bool {
 	return retryableCodes[code]
 }
 
+// IsServiceFailure reports whether an error code is evidence that the service itself is unwell,
+// as opposed to an ordinary answer to an ordinary request.
+//
+// Health tracking needs this distinction and cannot make it from the fact that an error occurred.
+// A 404 for an object that was never written means the service is up, reachable, authenticating,
+// and answering correctly — it is the *filesystem* equivalent of a successful call. Counting it as
+// a health failure is how ten stat(2) calls on absent paths drove the S3 read component to
+// unavailable and refused every subsequent read, including reads of objects that existed. That was
+// verified by execution before this function existed.
+//
+// The listed codes are the non-failures; everything else counts. That direction is deliberate: a
+// code added later defaults to counting, so the failure mode of forgetting to update this list is
+// a component that degrades too eagerly and recovers on the health tracker's probe timer, not one
+// that never notices an outage.
+func IsServiceFailure(code ErrorCode) bool {
+	notAFailure := map[ErrorCode]bool{
+		// The object or path simply is not there. The service said so, which required it to work.
+		ErrCodeObjectNotFound: true,
+		ErrCodeFileNotFound:   true,
+
+		// Ordinary POSIX and S3 conditions: the request was well-formed and the answer was no.
+		ErrCodeNotEmpty:        true,
+		ErrCodeDirectoryExists: true,
+		ErrCodeNotDirectory:    true,
+		ErrCodeBucketExists:    true,
+
+		// The object's own state, not the service's — an unrestored Glacier object, for instance.
+		ErrCodeInvalidState: true,
+
+		// Rejected before the service was asked, or rejected for what the caller sent. Blaming the
+		// service for a caller's invalid request lets one misbehaving process degrade the mount for
+		// every other process on the host.
+		ErrCodeValidationFailed: true,
+		ErrCodeTierValidation:   true,
+		ErrCodePathInvalid:      true,
+
+		// The caller withdrew the request. A FUSE interrupt or an unmount arrives here, and neither
+		// says anything about S3.
+		ErrCodeOperationCanceled: true,
+	}
+	return !notAFailure[code]
+}
+
 // IsUserFacingByDefault determines if an error should be shown to users.
 func IsUserFacingByDefault(code ErrorCode) bool {
 	userFacingCodes := map[ErrorCode]bool{

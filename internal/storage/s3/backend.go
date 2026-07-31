@@ -161,7 +161,16 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 			"min_size", cfg.Compression.MinSize)
 	}
 
-	// Initialize circuit breaker manager
+	// Initialize circuit breaker manager.
+	//
+	// MaxRequests is the half-open probe limit, not a failure count — the trip decision belongs to
+	// ReadyToTrip, which is left at the package default (20 requests in the interval with at least
+	// half failing). Naming that here rather than relying on the zero value being filled in, because
+	// reading this block and seeing only MaxRequests invites the conclusion that ten failures trip
+	// the breaker, and it was read that way during the audit.
+	//
+	// What counts as a failure is circuit.defaultIsSuccessful, which asks
+	// errors.IsServiceFailure: a missing object is an answer, not an outage.
 	circuitConfig := circuit.Config{
 		MaxRequests: 10,
 		Interval:    60 * time.Second,
