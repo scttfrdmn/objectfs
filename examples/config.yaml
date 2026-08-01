@@ -33,6 +33,32 @@ storage:
     profile: ""                       # not yet wired — use AWS_PROFILE
     use_acceleration: false           # S3 Transfer Acceleration (bucket must have it enabled)
     force_path_style: false           # true for most S3-compatible servers
+
+    # S3 storage class for written objects. Validated at load: an unrecognized class used to be
+    # silently replaced with STANDARD, so `STANDARD_1A` — digit one for capital I — was billed as
+    # STANDARD with nothing reporting a problem.
+    #
+    # STANDARD_IA, ONEZONE_IA, GLACIER_IR and INTELLIGENT_TIERING bill a 128 KB minimum per object
+    # and IA classes bill a 30-day minimum duration, so a mount that writes many small or
+    # short-lived files costs *more* on these than on STANDARD. GLACIER and DEEP_ARCHIVE cannot be
+    # read without a restore, which ObjectFS does not perform — a read of such an object fails.
+    storage_tier: STANDARD
+
+    # The AWS SDK's attempt limit per HTTP request. Composes with network.retry below rather than
+    # replacing it: 3 SDK attempts inside 3 ObjectFS attempts is up to nine requests.
+    max_retries: 3
+
+    # Route uploads through the CargoShip transporter, which does its own chunking and congestion
+    # control. Off by default: the plain path is the one the filesystem has the most coverage of,
+    # and until v0.10.1 this flag was unreachable from a config file, so leaving it off preserves
+    # what mounts actually did rather than switching every deployment's write path on upgrade.
+    use_cargoship: false
+
+    multipart:
+      threshold: 32MB                 # objects at least this large are uploaded in parts
+      chunk_size: 16MB                # bytes per part; S3 rejects a non-final part under 5MB
+      concurrency: 8                  # parts in flight at once
+
     cost_optimization:                # not yet wired — none of this block reaches the backend
       enabled: false
       tiering_enabled: false
@@ -47,6 +73,9 @@ performance:
   max_concurrency: 150
   read_ahead_size: 64MB               # not yet wired — see read_ahead below
   compression_enabled: true           # not yet wired — write_buffer.compression is the live setting
+  # Pooled S3 clients. Also the batch concurrency in GetObjects/PutObjects and MaxIdleConnsPerHost
+  # on the HTTP transport, so it bounds three things at once. Must be > 0: zero reached the batch
+  # paths as an unbuffered channel and blocked forever.
   connection_pool_size: 8
   predictive_caching: false           # not yet wired
   ml_model_path: ""                   # not yet wired
@@ -75,8 +104,13 @@ performance:
     statistics_interval: 30s
     model_update_interval: 5m
 
-  # Fan out a large read into concurrent range GETs. Not yet wired: the backend gate is
-  # s3.Config.ParallelReadThreshold, which the mount path leaves at zero. Issue #156.
+  # Fan out a large read into concurrent range GETs.
+  #
+  # enabled: false is carried to the backend as a threshold of zero, which is how it spells
+  # "disabled" — there is deliberately no second flag that could disagree with the threshold.
+  #
+  # Ignored for compressed objects: a compression frame cannot be sliced, so a ranged read of one
+  # has to fetch the whole object and the fan-out would be pure overhead.
   parallel_read:
     enabled: true
     threshold: 64MB                   # objects at least this large are fetched in parallel
@@ -93,10 +127,16 @@ cache:
     max_size: 10GB
 
 # Write buffering.
+#
+# Not yet wired: vfs.NewWriter takes no configuration, so none of the three sizes below is read.
+# What actually happens is that dirty ranges accumulate per open file until the kernel flushes, and
+# nothing bounds the total — a large enough write set is bounded by available memory rather than by
+# max_memory. Fixing that means backpressure in the writer, not a wider mapping, so these keys stay
+# marked rather than being plumbed to a component that cannot honour them.
 write_buffer:
-  flush_interval: 30s                 # how long a dirty buffer may wait before being written
-  max_buffers: 1000                   # not yet wired — the adapter does not pass this through
-  max_memory: 512MB                   # per-file write buffer capacity
+  flush_interval: 30s                 # not yet wired — flushes happen when the kernel asks
+  max_buffers: 1000                   # not yet wired
+  max_memory: 512MB                   # not yet wired — nothing bounds dirty bytes today
 
   # Transparent object compression. Off by default, and worth understanding before turning on: a
   # compressed object is an opaque frame to `aws s3 cp`, boto3, and every other S3 client, so
@@ -111,18 +151,29 @@ write_buffer:
 
 # Network behavior.
 network:
-  # Not yet wired: these three are not applied to any HTTP client or context. The AWS SDK's own
-  # defaults are in effect.
   timeouts:
-    connect: 10s
+    connect: 10s                      # TCP dial timeout
+    # How long S3 has to *begin* answering — the transport's ResponseHeaderTimeout, not a deadline
+    # on the whole response. A ranged GET of a large object legitimately spends minutes streaming
+    # its body, and a whole-response deadline would abort it as though S3 had stalled.
     read: 30s
-    write: 300s
-  # Not yet wired: pkg/retry is configured from s3.Config.RetryConfig, not from here.
+    write: 300s                       # not yet wired — see internal/config.TimeoutConfig
+  # ObjectFS's own retry of a failed operation, layered on top of storage.s3.max_retries. *Which*
+  # errors are retried is not configurable: it is a fixed list of timeout, connection-failure and
+  # resource-exhaustion conditions.
   retry:
     max_attempts: 3
     base_delay: 1s
     max_delay: 30s
-  # Not yet wired: the circuit breaker is constructed with its own defaults.
+  # Stop sending to S3 after repeated failures, then probe for recovery after `timeout`.
+  #
+  # failure_threshold is an absolute count of failures within one window. Zero — not the default
+  # here, but accepted — selects a proportional rule instead: trip at 50% failures over at least 20
+  # requests. That is the better rule when the request rate is unknown, since a fixed count of ten
+  # failures is a broken bucket at 1 rps and a rounding error at 1000.
+  #
+  # enabled: false leaves the breaker in the call path counting and reporting state; it simply never
+  # opens. There is no bypass, because a second code path with no coverage is worse than a counter.
   circuit_breaker:
     enabled: true
     failure_threshold: 5

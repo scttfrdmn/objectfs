@@ -84,14 +84,12 @@ func (s *AWSS3TestSuite) SetupSuite() {
 
 		// Enable CargoShip optimization for performance testing
 		EnableCargoShipOptimization: true,
-		TargetThroughput:            800.0, // 800 MB/s target
-		OptimizationLevel:           "standard",
 	}
 
 	s.backend, err = s3backend.NewBackend(s.ctx, s.bucket, backendConfig)
 	require.NoError(s.T(), err, "Failed to create S3 backend")
 
-	s.T().Logf("✅ AWS S3 backend initialized with CargoShip optimization (target: 800 MB/s)")
+	s.T().Logf("AWS S3 backend initialized with CargoShip optimization")
 }
 
 func (s *AWSS3TestSuite) TearDownSuite() {

@@ -341,6 +341,175 @@ global:
     zstd_level: 3
 `,
 	},
+
+	// Everything below is a key that buildS3Config did not map before v0.10.1 (audit finding D12).
+	// Each was defined in the schema, defaulted, documented in examples/config.yaml, and delivered
+	// zero to the backend. They are seeds rather than only table-test cases because the mapping is
+	// now thirty fields wide: the fuzzer mutates these documents into shapes nobody would write, and
+	// FuzzConfigConstructsBackend asserts the whole chain — load, Validate, buildS3Config,
+	// NewBackend — reaches a decision rather than a panic or a hang.
+	{
+		name: "the storage tier",
+		why: "unmapped, this reached the backend as \"\" and became STANDARD, so the object was " +
+			"billed as STANDARD whatever the file said",
+		yaml: `storage:
+  s3:
+    storage_tier: GLACIER_IR
+`,
+	},
+	{
+		name: "a storage tier that is a typo for a real one",
+		why: "STANDARD_1A is a digit one for a capital I. NewTierValidator silently substitutes " +
+			"STANDARD for a class it does not know, so the loader has to be what refuses it",
+		yaml: `storage:
+  s3:
+    storage_tier: STANDARD_1A
+`,
+	},
+	{
+		name: "the multipart block",
+		why: "threshold and chunk_size are sizes, parsed by utils.ParseBytes; concurrency is the " +
+			"part fan-out",
+		yaml: `storage:
+  s3:
+    multipart:
+      threshold: 64MB
+      chunk_size: 8MB
+      concurrency: 4
+`,
+	},
+	{
+		name: "a chunk size larger than the multipart threshold",
+		why: "multipart would never engage: every upload big enough to split is still one part. " +
+			"Rejected by Validate, so it must not reach a backend",
+		yaml: `storage:
+  s3:
+    multipart:
+      threshold: 8MB
+      chunk_size: 64MB
+`,
+	},
+	{
+		name: "a multipart chunk size below S3's 5 MB part minimum",
+		why: "S3 rejects a non-final part under 5 MB with EntityTooSmall; the backend raises the " +
+			"value to that floor rather than failing, so this must construct",
+		yaml: `storage:
+  s3:
+    multipart:
+      threshold: 32MB
+      chunk_size: 1MB
+`,
+	},
+	{
+		name: "the SDK retry limit alongside ObjectFS's own",
+		why: "the two multiply — max_retries attempts inside each of network.retry.max_attempts — " +
+			"so both reaching the backend is the thing to check",
+		yaml: `storage:
+  s3:
+    max_retries: 5
+network:
+  retry:
+    max_attempts: 4
+    base_delay: 50ms
+    max_delay: 5s
+`,
+	},
+	{
+		name: "the CargoShip upload path",
+		why: "off by default here and on in s3.NewDefaultConfig. Plumbed only after the " +
+			"Content-Encoding corruption in that path was fixed",
+		yaml: `storage:
+  s3:
+    use_cargoship: true
+`,
+	},
+	{
+		name: "parallel reads on",
+		why: "the backend's gate is `threshold > 0`; unmapped, this left v0.10.0's headline feature " +
+			"unreachable from a mount",
+		yaml: `performance:
+  parallel_read:
+    enabled: true
+    threshold: 32MB
+    chunk_size: 4MB
+`,
+	},
+	{
+		name: "parallel reads off with sizes still written",
+		why: "enabled: false must collapse to a zero threshold — the stale sizes must not resurrect " +
+			"the feature",
+		yaml: `performance:
+  parallel_read:
+    enabled: false
+    threshold: 32MB
+    chunk_size: 4MB
+`,
+	},
+	{
+		name: "the timeouts",
+		why: "connect becomes the dialer's timeout and read becomes ResponseHeaderTimeout; both " +
+			"were read only into an error-context map before v0.10.1",
+		yaml: `network:
+  timeouts:
+    connect: 2s
+    read: 15s
+    write: 15s
+`,
+	},
+	{
+		name: "the circuit breaker's failure threshold",
+		why: "becomes a ReadyToTrip closure, because circuit.Config has no threshold field. A " +
+			"careless zero case builds `failures >= 0` and opens the breaker before the first request",
+		yaml: `network:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 2
+    timeout: 5s
+`,
+	},
+	{
+		name: "the circuit breaker disabled",
+		why:  "must mean a breaker that never opens, not one that rejects everything",
+		yaml: `network:
+  circuit_breaker:
+    enabled: false
+`,
+	},
+	{
+		name: "a size written the way a person who knows the units writes it",
+		why: "64MiB parsed as 64 bytes under fmt.Sscanf — it consumed the digits and reported " +
+			"success. Rejected by Validate now, so it must not reach a backend as a 64-byte chunk",
+		yaml: `performance:
+  parallel_read:
+    enabled: true
+    chunk_size: 64MiB
+`,
+	},
+	{
+		name: "every size key at once",
+		why: "the mapping is thirty fields wide and the sizes are the crossable ones; a threshold " +
+			"read into a chunk size compiles",
+		yaml: `performance:
+  cache_size: 3GB
+  write_buffer_size: 24MB
+  read_ahead_size: 2MB
+  connection_pool_size: 12
+  parallel_read:
+    enabled: true
+    threshold: 48MB
+    chunk_size: 6MB
+cache:
+  persistent_cache:
+    max_size: 5GB
+write_buffer:
+  max_memory: 256MB
+storage:
+  s3:
+    multipart:
+      threshold: 40MB
+      chunk_size: 10MB
+`,
+	},
 }
 
 // TestConfigSeedsLoadAsTheShapesTheyClaim guards the corpus the way the difftest corpus is guarded:

@@ -75,8 +75,21 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	}
 
 	// Build a congestion-aware HTTP transport for the AWS SDK.
+	//
+	// ConnectTimeout and RequestTimeout are applied here, and until v0.10.1 they were applied
+	// nowhere: both were defaulted by NewDefaultConfig, documented in the config schema, and read
+	// only to be copied into an error-context map for display. A mount inherited network.NewDialer's
+	// bare *net.Dialer, which has no timeout at all, so a connect to an unroutable address hung until
+	// the kernel gave up — minutes, with a FUSE request blocked behind it.
+	//
+	// RequestTimeout becomes ResponseHeaderTimeout, not a whole-response deadline. The distinction is
+	// the difference between a working filesystem and a broken one: a ranged GET of a large object
+	// legitimately spends minutes streaming its body, and http.Client.Timeout or a context deadline
+	// around the call would abort it as though S3 had stalled. ResponseHeaderTimeout bounds the part
+	// that can actually hang — the wait for S3 to begin answering — and leaves the transfer alone.
 	algo := network.Algorithm(cfg.CongestionAlgorithm)
 	dialer := network.NewDialer(algo)
+	dialer.Timeout = cfg.ConnectTimeout
 	mon := network.NewMonitor(algo)
 	transport := &http.Transport{
 		DialContext:           mon.WrapDialContext(dialer.DialContext),
@@ -85,6 +98,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: cfg.RequestTimeout,
 	}
 	httpClient := &http.Client{Transport: transport}
 
@@ -170,7 +184,6 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		// Use accelerated client if available, otherwise use standard
 		transporter = cargoships3.NewTransporter(primaryClient, cargoConfig)
 		logger.Info("CargoShip S3 optimization enabled",
-			"target_throughput", cfg.TargetThroughput,
 			"multipart_threshold", cfg.MultipartThreshold,
 			"chunk_size", cfg.MultipartChunkSize,
 			"concurrency", cfg.MultipartConcurrency,

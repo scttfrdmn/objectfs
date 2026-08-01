@@ -71,8 +71,10 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 		optimizer.RecordAccess("test.txt", 1024)
 		optimizer.RecordAccess("test.txt", 1024)
 
-		// Check that pattern was recorded
-		pattern, exists := optimizer.accessPatterns["test.txt"]
+		// Check that pattern was recorded. Read through patternFor rather than indexing the map:
+		// accessPatterns is guarded by co.mu, and a test that reaches past the lock is the template
+		// the next test copies.
+		pattern, exists := optimizer.patternFor("test.txt")
 		if !exists {
 			t.Fatal("Access pattern should be recorded")
 		}
@@ -100,7 +102,7 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 		disabledOptimizer := NewCostOptimizer(disabledBackend, disabledConfig, logger)
 		disabledOptimizer.RecordAccess("disabled.txt", 1024)
 
-		if len(disabledOptimizer.accessPatterns) != 0 {
+		if disabledOptimizer.PatternCount() != 0 {
 			t.Error("Should not record access patterns when disabled")
 		}
 	})
@@ -286,7 +288,7 @@ func TestCostOptimizer_OptimizationReport(t *testing.T) {
 
 	// Create a pattern that should be optimized (infrequent access on Standard tier)
 	oldTime := time.Now().Add(-90 * 24 * time.Hour) // 90 days ago (older than 30 day minimum)
-	optimizer.accessPatterns["optimize-me.txt"] = &AccessPattern{
+	optimizer.putPattern(AccessPattern{
 		ObjectKey:       "optimize-me.txt",
 		AccessCount:     5, // Infrequent but not too low
 		FirstAccessTime: oldTime,
@@ -294,7 +296,7 @@ func TestCostOptimizer_OptimizationReport(t *testing.T) {
 		ObjectSize:      1024 * 1024,                          // 1MB (large enough for IA)
 		CurrentTier:     TierStandard,
 		EstimatedCost:   optimizer.calculateObjectCost(1024*1024, TierStandard),
-	}
+	})
 
 	report := optimizer.GetOptimizationReport()
 

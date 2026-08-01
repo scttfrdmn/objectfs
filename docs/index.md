@@ -185,7 +185,6 @@ cache:
 
 performance:
   cache_size: 8GB
-  max_concurrency: 150
   connection_pool_size: 16
 ```
 

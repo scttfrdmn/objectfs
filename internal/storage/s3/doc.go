@@ -127,24 +127,23 @@ Flexible configuration options:
 
 	config := &s3.Config{
 		Region:   "us-west-2",
-		Endpoint: "", // Use default AWS
+		Endpoint: "", // empty: the AWS endpoint for the region
 
-		// CargoShip Optimization
-		CargoShipEnabled: true,
-		OptimizationLevel: "aggressive",
+		// CargoShip upload path
+		EnableCargoShipOptimization: true,
 
-		// Connection Pool
-		MaxConnections:    10,
-		ConnectionTimeout: 30 * time.Second,
+		// Connections and timeouts
+		PoolSize:       8,
+		ConnectTimeout: 10 * time.Second,
+		RequestTimeout: 30 * time.Second,
 
-		// Storage Tiers
-		DefaultTier:           s3.TierStandard,
-		AutoTierOptimization: true,
-
-		// Enterprise Pricing
-		EnterpriseDiscount: 15.0, // 15% discount
-		VolumeDiscounts:    true,
+		// Storage tier
+		StorageTier: s3.TierStandard,
 	}
+
+Every field may be omitted. NewBackend fills in a default for each one whose zero value is not a
+usable setting, so &s3.Config{Region: "us-west-2"} is a complete configuration — see NewBackend.
+The exception is ParallelReadThreshold, where zero means "off" rather than "unset".
 
 # Usage Examples
 

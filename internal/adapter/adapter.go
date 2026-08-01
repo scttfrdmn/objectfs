@@ -14,6 +14,16 @@ import (
 	"github.com/objectfs/objectfs/internal/metrics"
 	"github.com/objectfs/objectfs/internal/storage/s3"
 	"github.com/objectfs/objectfs/internal/vfs"
+	"github.com/objectfs/objectfs/pkg/retry"
+	"github.com/objectfs/objectfs/pkg/utils"
+)
+
+// Fallback sizes for the two cache capacities, used only if a configured value fails to parse here
+// after having passed Configuration.Validate — see sizeOrDefault. They match internal/config's
+// NewDefault so that the fallback is the documented default rather than a third number.
+const (
+	defaultCacheSize           = 2 << 30  // 2 GiB, matching NewDefault's "2GB"
+	defaultPersistentCacheSize = 10 << 30 // 10 GiB, matching NewDefault's "10GB"
 )
 
 // Adapter represents the main ObjectFS adapter
@@ -125,14 +135,15 @@ func (a *Adapter) Start(ctx context.Context) error {
 	cacheConfig := &cache.MultiLevelConfig{
 		L1Config: &cache.L1Config{
 			Enabled:    true,
-			Size:       parseSize(a.config.Performance.CacheSize),
+			Size:       a.sizeOrDefault("performance.cache_size", a.config.Performance.CacheSize, defaultCacheSize),
 			MaxEntries: a.config.Cache.MaxEntries,
 			TTL:        a.config.Cache.TTL,
 			Prefetch:   true,
 		},
 		L2Config: &cache.L2Config{
-			Enabled:     a.config.Cache.PersistentCache.Enabled,
-			Size:        parseSize(a.config.Cache.PersistentCache.MaxSize),
+			Enabled: a.config.Cache.PersistentCache.Enabled,
+			Size: a.sizeOrDefault("cache.persistent_cache.max_size",
+				a.config.Cache.PersistentCache.MaxSize, defaultPersistentCacheSize),
 			Directory:   a.config.Cache.PersistentCache.Directory,
 			TTL:         a.config.Cache.TTL,
 			Compression: true,
@@ -338,23 +349,168 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	return lastErr
 }
 
-// buildS3Config constructs an s3.Config from the adapter's configuration,
-// mapping the configurable storage fields so that no region or endpoint
-// values are hard-coded in adapter logic.
+// buildS3Config translates the loaded configuration into the backend's configuration.
+//
+// This function is audit finding D12, and the finding was not that it was wrong — it was that it was
+// *short*. It mapped six of s3.Config's thirty fields, so on every real mount everything else
+// arrived at the backend zero-valued: the storage tier, the connection pool size, the retry limit,
+// the timeouts, the multipart settings, and the parallel-read threshold. Each of those is named in
+// examples/config.yaml, and each of them did nothing.
+//
+// Two of the omissions were not merely inert. `PoolSize: 0` reached GetObjects and PutObjects as
+// `make(chan struct{}, 0)`, an unbuffered semaphore whose first send blocks forever — so a batch
+// operation on a stock mount hung rather than failed. And `ParallelReadThreshold: 0` closed the gate
+// on parallel range GETs, which is the feature v0.10.0 was released for: the code existed, had
+// tests, and was unreachable from a mount.
+//
+// So the shape of this function matters more than its content. It is written as one explicit
+// assignment per field, ordered to match s3.Config's declaration, because the defect was a mapping
+// somebody extended one field at a time and stopped extending.
+// TestBuildS3ConfigMapsEveryConfiguredValue asserts the output values rather than recomputing the
+// mapping — a test that reapplied the formula here would agree with any formula, including a wrong
+// one.
+//
+// It cannot return an error. Every string it parses has already been through
+// Configuration.Validate — utils.ParseBytes on the same value, by the same rules, reachable from
+// [New] before a mount is attempted — so a parse failure here would mean Validate and this function
+// disagree, which is the very seam this whole task is about. sizeOrDefault therefore falls back to
+// the backend's default and says so in a log line, rather than silently substituting the way the old
+// parseSize substituted 1 GiB.
 func (a *Adapter) buildS3Config() *s3.Config {
-	return &s3.Config{
-		Region:         a.config.Storage.S3.Region,
-		Endpoint:       a.config.Storage.S3.Endpoint,
-		ForcePathStyle: a.config.Storage.S3.ForcePathStyle,
-		UseAccelerate:  a.config.Storage.S3.UseAcceleration,
+	s3cfg := a.config.Storage.S3
+	defaults := s3.NewDefaultConfig()
+
+	cfg := &s3.Config{
+		Region:         s3cfg.Region,
+		Endpoint:       s3cfg.Endpoint,
+		ForcePathStyle: s3cfg.ForcePathStyle,
+
+		MaxRetries:     s3cfg.MaxRetries,
+		ConnectTimeout: a.config.Network.Timeouts.Connect,
+		RequestTimeout: a.config.Network.Timeouts.Read,
+		PoolSize:       a.config.Performance.ConnectionPoolSize,
+
+		RetryConfig: a.buildRetryConfig(),
+
+		CircuitBreaker: s3.CircuitBreakerConfig{
+			Enabled:          a.config.Network.CircuitBreaker.Enabled,
+			FailureThreshold: a.config.Network.CircuitBreaker.FailureThreshold,
+			Timeout:          a.config.Network.CircuitBreaker.Timeout,
+		},
+
+		UseAccelerate: s3cfg.UseAcceleration,
+
+		EnableCargoShipOptimization: s3cfg.UseCargoShip,
+
+		MultipartThreshold: a.sizeOrDefault("storage.s3.multipart.threshold",
+			s3cfg.Multipart.Threshold, defaults.MultipartThreshold),
+		MultipartChunkSize: a.sizeOrDefault("storage.s3.multipart.chunk_size",
+			s3cfg.Multipart.ChunkSize, defaults.MultipartChunkSize),
+		MultipartConcurrency: s3cfg.Multipart.Concurrency,
+
+		StorageTier: s3cfg.StorageTier,
+
 		Compression: s3.CompressionConfig{
 			Enabled:   a.config.WriteBuffer.Compression.Enabled,
 			Algorithm: a.config.WriteBuffer.Compression.Algorithm,
 			Level:     a.config.WriteBuffer.Compression.Level,
 			MinSize:   a.config.WriteBuffer.Compression.MinSize,
 		},
+
 		CongestionAlgorithm: a.config.Network.CongestionAlgorithm,
 	}
+
+	// Parallel reads. Enabled: false is expressed as a threshold of zero, which is how the backend
+	// spells "disabled" — the gate there is `threshold > 0`. Mapping Enabled to a separate field
+	// would give the backend two ways to say the same thing and a way for them to disagree.
+	if a.config.Performance.ParallelRead.Enabled {
+		cfg.ParallelReadThreshold = a.sizeOrDefault("performance.parallel_read.threshold",
+			a.config.Performance.ParallelRead.Threshold, defaults.ParallelReadThreshold)
+		cfg.ReadChunkSize = a.sizeOrDefault("performance.parallel_read.chunk_size",
+			a.config.Performance.ParallelRead.ChunkSize, defaults.ReadChunkSize)
+	}
+
+	// TierConstraints, CostOptimization, PricingConfig and the credential fields are deliberately
+	// left at their zero values, and each for its own reason rather than by omission:
+	//
+	//   - TierConstraints overrides a tier's built-in minimum size and deletion embargo. Those come
+	//     from StorageTiers, which is derived from what AWS actually enforces; a config file that
+	//     could raise or lower them has no correct value to hold, and lowering one produces writes
+	//     S3 rejects.
+	//
+	//   - CostOptimization is not mappable. internal/config.S3CostOptimization and
+	//     s3.CostOptimization are disjoint types — {Enabled, TieringEnabled, LifecycleEnabled,
+	//     TransitionToIA, TransitionToGlacier} against {EnableAutoTiering, TransitionRules,
+	//     LifecycleManagement, IntelligentTiering, CostThreshold, MonitorAccessPatterns} — with no
+	//     field in common. Nothing reads either one, and the backend's automatic-tiering machinery
+	//     (AnalyzeAndOptimize, applyOptimization) has no caller either, so mapping the two would
+	//     wire a config block to an unreachable feature. examples/config.yaml says so at the block.
+	//     MonitorAccessPatterns is additionally held back because it writes an unsynchronized map
+	//     from the read path and silently rewrites the storage class of objects under 128 KiB.
+	//
+	//   - PricingConfig's Pricing API path was removed in v0.10.1; what remains is a custom rate
+	//     table, which belongs in a file of its own (configs/discount-config.yaml) rather than in a
+	//     mount configuration.
+	//
+	//   - AccessKeyID, SecretAccessKey and SessionToken have no config keys on purpose. Empty means
+	//     the AWS default credential chain — environment, shared config, IMDS — which is what works
+	//     on EC2 and for anyone using AWS_PROFILE. A YAML key for a long-lived secret invites it
+	//     into version control.
+	return cfg
+}
+
+// buildRetryConfig maps network.retry onto the retryer's configuration.
+//
+// It starts from retry.DefaultConfig rather than building a retry.Config from the three configured
+// fields, and that is load-bearing: retry.New backfills MaxAttempts, InitialDelay, MaxDelay and
+// Multiplier when they are zero, but it does *not* backfill RetryableErrors. shouldRetry consults
+// that list, so a config mapped field-for-field would produce a retryer that reports three attempts
+// and retries almost nothing — a connection reset would fail the operation on the first try while
+// the configuration said otherwise.
+//
+// Which errors are retryable is therefore not configurable, by design. The default list is seven
+// ObjectFS error codes covering timeouts, connection failures and resource exhaustion; the values
+// below control how many times and how long to wait, which is what an operator has a basis for
+// choosing.
+func (a *Adapter) buildRetryConfig() retry.Config {
+	cfg := retry.DefaultConfig()
+
+	if n := a.config.Network.Retry.MaxAttempts; n > 0 {
+		cfg.MaxAttempts = n
+	}
+	if d := a.config.Network.Retry.BaseDelay; d > 0 {
+		cfg.InitialDelay = d
+	}
+	if d := a.config.Network.Retry.MaxDelay; d > 0 {
+		cfg.MaxDelay = d
+	}
+
+	return cfg
+}
+
+// sizeOrDefault parses a configured size, falling back to the backend's default for an empty value.
+//
+// The error arm is unreachable from a loaded configuration: Configuration.Validate parses every one
+// of these strings with the same function and refuses to start on a bad one, and [New] calls
+// Validate before anything here runs. It is handled rather than ignored because "unreachable" is a
+// property of today's call graph, and the failure mode of assuming otherwise is the one
+// internal/adapter.parseSize had — it substituted 1 GiB for anything it could not parse, silently,
+// so `cache_size: 2G` and `cache_size: tpyo` both configured a 1 GiB cache with no message. Logging
+// at Warn and using the default is the same fallback with the silence removed.
+func (a *Adapter) sizeOrDefault(path, value string, fallback int64) int64 {
+	if value == "" {
+		return fallback
+	}
+
+	n, err := utils.ParseBytes(value)
+	if err != nil {
+		slog.Warn("configured size is not parseable; using the built-in default",
+			"setting", path, "value", value, "default", fallback, "error", err)
+
+		return fallback
+	}
+
+	return n
 }
 
 // validateStorageURI validates the storage URI format
@@ -374,39 +530,4 @@ func validateStorageURI(uri string) error {
 	}
 
 	return nil
-}
-
-// parseSize parses a human-readable size string (e.g., "2GB", "512MB") to bytes
-func parseSize(sizeStr string) int64 {
-	// Simple implementation - in practice you'd use a proper parsing library
-	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
-
-	var multiplier int64 = 1
-	var numStr string
-
-	if strings.HasSuffix(sizeStr, "GB") {
-		multiplier = 1024 * 1024 * 1024
-		numStr = strings.TrimSuffix(sizeStr, "GB")
-	} else if strings.HasSuffix(sizeStr, "MB") {
-		multiplier = 1024 * 1024
-		numStr = strings.TrimSuffix(sizeStr, "MB")
-	} else if strings.HasSuffix(sizeStr, "KB") {
-		multiplier = 1024
-		numStr = strings.TrimSuffix(sizeStr, "KB")
-	} else if strings.HasSuffix(sizeStr, "B") {
-		multiplier = 1
-		numStr = strings.TrimSuffix(sizeStr, "B")
-	} else {
-		numStr = sizeStr
-	}
-
-	// Parse the numeric part
-	var num int64 = 1024 * 1024 * 1024 // Default 1GB
-	if numStr != "" {
-		if parsed, err := fmt.Sscanf(numStr, "%d", &num); err != nil || parsed != 1 {
-			return 1024 * 1024 * 1024 // Default 1GB on error
-		}
-	}
-
-	return num * multiplier
 }

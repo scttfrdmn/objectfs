@@ -7,18 +7,28 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/scttfrdmn/cargoship/pkg/aws/config"
+
+	"github.com/objectfs/objectfs/internal/awsname"
 )
 
-// S3 Storage Tier Constants
+// S3 Storage Tier Constants.
+//
+// These are aliases of internal/awsname's storage classes rather than independent string literals.
+// The tier is named in configuration, validated at load by internal/config, and acted on here — and
+// internal/config cannot import this package (see the awsname package comment for the cycle). So the
+// names have to live somewhere both sides reach, and if they were spelled twice the two spellings
+// could disagree: a tier this table knows about but the loader rejects, or worse, one the loader
+// accepts and this table has no entry for. TestStorageTiersCoversEveryStorageClass pins the other
+// direction — that every class awsname admits has a billing entry here.
 const (
-	TierStandard          = "STANDARD"
-	TierStandardIA        = "STANDARD_IA"
-	TierOneZoneIA         = "ONEZONE_IA"
-	TierReducedRedundancy = "REDUCED_REDUNDANCY"
-	TierGlacierIR         = "GLACIER_IR"
-	TierGlacier           = "GLACIER"
-	TierDeepArchive       = "DEEP_ARCHIVE"
-	TierIntelligent       = "INTELLIGENT_TIERING"
+	TierStandard          = awsname.StorageClassStandard
+	TierStandardIA        = awsname.StorageClassStandardIA
+	TierOneZoneIA         = awsname.StorageClassOneZoneIA
+	TierReducedRedundancy = awsname.StorageClassReducedRedundancy
+	TierGlacierIR         = awsname.StorageClassGlacierIR
+	TierGlacier           = awsname.StorageClassGlacier
+	TierDeepArchive       = awsname.StorageClassDeepArchive
+	TierIntelligent       = awsname.StorageClassIntelligent
 )
 
 // Access Pattern Constants

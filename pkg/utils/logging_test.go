@@ -319,6 +319,103 @@ func TestParseBytes(t *testing.T) {
 			expected: 0,
 			wantErr:  true,
 		},
+
+		// Everything below rejects an input the previous fmt.Sscanf implementation accepted, each
+		// silently and each producing a size the operator did not write. These are the reason
+		// ParseBytes became the repository's only size parser: it is now what every configured
+		// capacity, threshold and chunk size is read through, so what it accepts loosely it accepts
+		// loosely everywhere.
+		{
+			name:    "trailing garbage",
+			input:   "12abc",
+			wantErr: true,
+		},
+		{
+			name: "the units a person who knows the units writes",
+			// "64MiB" parsed as 64 *bytes*: Sscanf consumed the 64, stopped at the M, and reported
+			// success — so a 64 MiB read chunk was configured as a 64-byte one.
+			input:   "64MiB",
+			wantErr: true,
+		},
+		{
+			name:    "negative",
+			input:   "-5M",
+			wantErr: true,
+		},
+		{
+			name:  "explicit plus",
+			input: "+5M",
+			// Not a size anyone writes, and accepting it means the sign character is parsed at all,
+			// which is how the negative case got in.
+			wantErr: true,
+		},
+		{
+			name:    "infinity",
+			input:   "Inf",
+			wantErr: true,
+		},
+		{
+			name:    "not a number",
+			input:   "NaN",
+			wantErr: true,
+		},
+		{
+			name:  "exponent notation",
+			input: "1e9",
+			// Valid Go, never a config file's intent, and ambiguous next to the K/M/G units.
+			wantErr: true,
+		},
+		{
+			name:    "hex float",
+			input:   "0x1p10",
+			wantErr: true,
+		},
+		{
+			name:    "two decimal points",
+			input:   "1.2.3G",
+			wantErr: true,
+		},
+		{
+			name:  "unit with no number",
+			input: "GB",
+			// Sscanf on the empty remainder returned num unset and no error on some paths.
+			wantErr: true,
+		},
+		{
+			name:    "whitespace only",
+			input:   "   ",
+			wantErr: true,
+		},
+		{
+			name:  "overflows int64",
+			input: "16384P",
+			// 16384 PiB is 2^64 bytes. Converting the out-of-range float64 to int64 is
+			// implementation-defined and yielded a large negative number, so a nonsense size arrived
+			// downstream as a negative capacity rather than as an error.
+			wantErr: true,
+		},
+		{
+			name:     "the largest representable size",
+			input:    "8191P",
+			expected: 8191 * (1 << 50),
+		},
+		{
+			name:     "zero",
+			input:    "0",
+			expected: 0,
+			// Zero is a legitimate size and means "no limit" or "disabled" to several callers, so it
+			// must not be an error.
+		},
+		{
+			name:     "zero with a unit",
+			input:    "0MB",
+			expected: 0,
+		},
+		{
+			name:     "fractional bytes truncate",
+			input:    "1.5",
+			expected: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -333,4 +430,61 @@ func TestParseBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseBytesErrorsQuoteTheInput asserts the error names the value that was rejected.
+//
+// The operator's next action is to edit a line in a YAML file, and they can only do that if the
+// message says which value was wrong. It matters most for the cases where the problem is invisible:
+// a trailing space, a non-breaking space pasted from a web page, a Cyrillic 'М' where an ASCII 'M'
+// belongs. %q escapes all three; the value printed bare does not.
+func TestParseBytesErrorsQuoteTheInput(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{"64MiB", "-5M", "12abc", "1.2.3G", "16384P", "МB"} {
+		_, err := ParseBytes(input)
+		if err == nil {
+			t.Errorf("ParseBytes(%q) was accepted; it must not be", input)
+			continue
+		}
+
+		if !strings.Contains(err.Error(), `"`+input+`"`) &&
+			!strings.Contains(err.Error(), strings.ToUpper(input)) {
+			t.Errorf("ParseBytes(%q) error does not quote the offending value, so an invisible "+
+				"character in it cannot be seen: %v", input, err)
+		}
+	}
+}
+
+// FuzzParseBytes asserts the parser is total and that what it accepts is non-negative.
+//
+// Two properties, both about what the callers do with the result. It reads operator configuration, so
+// it must not panic on any string — a panic here is a mount that dies during startup with a stack
+// trace instead of a message naming the setting. And every caller treats the result as a capacity, a
+// threshold or a chunk size; a negative one is at best a disabled feature reported as enabled, and at
+// worst a slice length. The old implementation returned negatives for "-5M" and math.MinInt64 for
+// "-Inf".
+func FuzzParseBytes(f *testing.F) {
+	for _, seed := range []string{
+		"", "0", "512", "4KB", "1.5G", " 2 GB ", "-5M", "Inf", "NaN", "1e9", "0x1p10", "16384P",
+		"64MiB", "12abc", "GB", "...", "9999999999999999999999P", "\x00", "١٢٣",
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, s string) {
+		n, err := ParseBytes(s)
+		if err != nil {
+			if n != 0 {
+				t.Errorf("ParseBytes(%q) returned %d alongside an error; a caller that logs the "+
+					"error and carries on would use it", s, n)
+			}
+			return
+		}
+
+		if n < 0 {
+			t.Errorf("ParseBytes(%q) = %d, a negative size — it becomes a cache capacity or a "+
+				"chunk length", s, n)
+		}
+	})
 }

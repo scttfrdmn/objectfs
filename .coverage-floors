@@ -9,14 +9,18 @@
 # in a diff, which is the only property that makes this file worth having — the alternative is a
 # coverage number that drifts down a percent at a time and is never anyone's fault.
 #
-# CLAUDE.md's target is 80%+ per package. Sixteen of the thirty-five packages below are already
-# there. The gap is concentrated in the packages the refactor is about to rewrite, which is where
-# raising a floor before the rewrite would buy tests of code that is being deleted:
+# CLAUDE.md's target is 80%+ per package. Sixteen of the thirty below are there. Two of the four
+# packages this file originally listed as furthest from it have since been rewritten, and both moved
+# for a structural reason rather than by anyone writing tests harder — which is the useful thing to
+# record, because it says where the remaining two are actually blocked:
 #
-#   internal/fuse       37.7%  — becomes a thin shim over internal/vfs (task #22)
-#   internal/adapter    45.7%  — the write path is being rebuilt around dirty ranges (task #20)
-#   internal/health     45.0%  — reachable now that pkg/health's probe path exists
-#   pkg/errors          48.3%  — mostly classification tables; needs table tests, not design work
+#   internal/fuse       37.7% → 59.9%  the package became a translation shim over internal/vfs, so
+#                                      its behavior is reachable by calling a node method instead of
+#                                      by mounting
+#   internal/adapter    45.7% → 46.9%  see its own note below; the floor stays at 40 on purpose
+#   internal/health     45.0%          reachable now that pkg/health's probe path exists
+#   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
+#                                      work
 #
 # Floors are deliberately absent for four packages with no test files at all. A floor of 0% reads
 # as a target rather than as an absence, and the gate names unlisted packages in every run so the
@@ -35,7 +39,13 @@ internal/awsname         100
 internal/cache/redis     87
 internal/circuit         96
 internal/compression     87
-internal/config          83
+# internal/config goes from 83 to 86 with the validation the config plumbing added. The two points
+# that raise is worth are in what the new tests assert rather than in the number: each case checks
+# that the rejection message names the YAML path, because the failure being prevented is not "a bad
+# value was accepted" but "a bad value was accepted, replaced with something plausible, and never
+# mentioned again" — an unrecognized storage class became STANDARD, and any unparseable size became
+# 1 GiB. An error that says "invalid configuration" leaves the operator exactly as stuck.
+internal/config          86
 internal/cost            98
 internal/difftest        75
 internal/distributed     67
@@ -56,7 +66,14 @@ internal/vfs             98
 # default path. Every layer in between agreed on the tier — ValidateWrite enforced its minimum size,
 # the logs named it, ConvertTierToStorageClass had a passing unit test — while objects were stored as
 # INTELLIGENT_TIERING. Coverage of a seam is not the same quantity as coverage of a function.
-internal/storage/s3      73
+#
+# The config-plumbing work takes it from 73 to 79, and most of that is the same lesson twice. The
+# backend's config had six fields nothing on the mount path ever set, so the tests that now cover
+# them are seam tests too: they assert what the endpoint recorded for a configured storage tier, and
+# they drive the cost optimizer's access-pattern map through GetObject rather than calling it, because
+# the map was written from the read path and a test that called the optimizer directly would prove
+# the lock works without proving the path that needs it has it.
+internal/storage/s3      79
 
 # internal/adapter is the one package whose floor is set below the current measurement on purpose.
 # Its coverage moves with which S3-backed tests the harness can run, and the write-path rebuild
@@ -106,7 +123,7 @@ pkg/profiling            75
 pkg/recovery             86
 pkg/retry                87
 pkg/status               93
-pkg/utils                81
+pkg/utils                82
 
 # sdks/go/objectfs measures 54.1% with AWS credentials present and 43.5% without, because several
 # of its tests call requireAWS and skip. CI has no credentials, so the floor is set for the

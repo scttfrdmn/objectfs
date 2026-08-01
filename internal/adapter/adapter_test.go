@@ -99,81 +99,80 @@ func TestValidateStorageURI(t *testing.T) {
 	}
 }
 
-func TestParseSize(t *testing.T) {
+// TestSizeOrDefault replaces TestParseSize, whose case names pinned the behaviour that had to go:
+// "empty string defaults to 1GB", "invalid format defaults to 1GB". adapter.parseSize returned 1 GiB
+// for any string it could not read, so `cache_size: 2G` — a real spelling, missing only the B — and
+// `cache_size: tpyo` both configured a 1 GiB cache, silently, with the configured value discarded and
+// nothing logged. Three other parsers disagreed with it about the same inputs.
+//
+// utils.ParseBytes is now the only size parser in the repository, and the two behaviours the adapter
+// still owns are the ones asserted here: an empty value means "use the default", and a value that
+// somehow reaches Start unparseable falls back to the default rather than to a wrong number. The
+// second arm is unreachable through New — Configuration.Validate rejects it first, which
+// TestValidateRejectsUnparseableSizes covers — so this asserts the backstop, not the path.
+func TestSizeOrDefault(t *testing.T) {
 	t.Parallel()
 
+	const fallback = 7 << 20 // a value no default anywhere shares, so a match means this arm ran
+
 	tests := []struct {
-		name     string
-		sizeStr  string
-		expected int64
+		name  string
+		value string
+		want  int64
+		why   string
 	}{
 		{
-			name:     "gigabytes",
-			sizeStr:  "2GB",
-			expected: 2 * 1024 * 1024 * 1024,
+			name:  "empty means the default",
+			value: "",
+			want:  fallback,
+			why:   "an unset key must take the documented default, not zero",
 		},
 		{
-			name:     "megabytes",
-			sizeStr:  "512MB",
-			expected: 512 * 1024 * 1024,
+			name:  "a configured size is used as written",
+			value: "512MB",
+			want:  512 << 20,
 		},
 		{
-			name:     "kilobytes",
-			sizeStr:  "100KB",
-			expected: 100 * 1024,
+			name:  "units are binary and case-insensitive",
+			value: "2gb",
+			want:  2 << 30,
 		},
 		{
-			name:     "bytes",
-			sizeStr:  "1024B",
-			expected: 1024,
+			name:  "a plain number is bytes",
+			value: "4096",
+			want:  4096,
 		},
 		{
-			name:     "lowercase gb",
-			sizeStr:  "1gb",
-			expected: 1 * 1024 * 1024 * 1024,
+			name:  "zero is a value, not an absence",
+			value: "0",
+			want:  0,
+			why: "several callers read zero as \"disabled\" or \"no limit\"; substituting the " +
+				"default here would make the feature unswitchable-off",
 		},
 		{
-			name:     "lowercase mb",
-			sizeStr:  "256mb",
-			expected: 256 * 1024 * 1024,
+			name:  "an unparseable size falls back rather than guessing",
+			value: "tpyo",
+			want:  fallback,
+			why:   "parseSize returned 1 GiB here, which is neither the default nor what was written",
 		},
 		{
-			name:     "with spaces",
-			sizeStr:  "  4GB  ",
-			expected: 4 * 1024 * 1024 * 1024,
-		},
-		{
-			name:     "single digit",
-			sizeStr:  "1GB",
-			expected: 1 * 1024 * 1024 * 1024,
-		},
-		{
-			name:     "large number",
-			sizeStr:  "10GB",
-			expected: 10 * 1024 * 1024 * 1024,
-		},
-		{
-			name:     "empty string defaults to 1GB",
-			sizeStr:  "",
-			expected: 1024 * 1024 * 1024,
-		},
-		{
-			name:     "invalid format defaults to 1GB",
-			sizeStr:  "invalid",
-			expected: 1024 * 1024 * 1024,
-		},
-		{
-			name:     "plain number is treated as bytes",
-			sizeStr:  "1024",
-			expected: 1024, // parseSize interprets plain numbers literally
+			name:  "the near-miss spelling falls back rather than truncating",
+			value: "64MiB",
+			want:  fallback,
+			why: "fmt.Sscanf read this as 64 bytes — it consumed the digits, stopped at the M, and " +
+				"reported success, so a 64 MiB setting became a 64-byte one",
 		},
 	}
 
+	a := &Adapter{}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseSize(tt.sizeStr)
-			if result != tt.expected {
-				t.Errorf("parseSize(%q) = %d, expected %d", tt.sizeStr, result, tt.expected)
+			t.Parallel()
+
+			got := a.sizeOrDefault("test.setting", tt.value, fallback)
+			if got != tt.want {
+				t.Errorf("sizeOrDefault(%q) = %d, want %d. %s", tt.value, got, tt.want, tt.why)
 			}
 		})
 	}
@@ -623,50 +622,21 @@ func TestHealthComponent_Error(t *testing.T) {
 	}
 }
 
-// TestWriteBufferConfig_CorrectSizes is a regression test for the bug where
-// MaxBufferSize and FlushThreshold were accidentally divided by 100 and 200,
-// producing buffers ~100× smaller than the configured MaxMemory value.
-func TestWriteBufferConfig_CorrectSizes(t *testing.T) {
-	t.Parallel()
-
-	// The config carries "512MB" as MaxMemory.  After the fix:
-	//   MaxBufferSize  = parseSize("512MB")       = 512 MiB
-	//   FlushThreshold = MaxBufferSize * 3 / 4    = 384 MiB
-	//
-	// The old buggy code produced:
-	//   MaxBufferSize  = parseSize("512MB") / 100  ≈   5 MiB  (wrong)
-	//   FlushThreshold = parseSize("512MB") / 200  ≈   2.5 MiB (wrong)
-	const maxMemory = "512MB"
-	const oneMiB = int64(1024 * 1024)
-
-	maxBufBytes := parseSize(maxMemory)
-	wantMax := int64(512) * oneMiB
-	if maxBufBytes != wantMax {
-		t.Fatalf("parseSize(%q) = %d, want %d", maxMemory, maxBufBytes, wantMax)
-	}
-
-	flushThreshold := maxBufBytes * 3 / 4
-	wantFlush := int64(384) * oneMiB
-	if flushThreshold != wantFlush {
-		t.Errorf("FlushThreshold = %d bytes (%d MiB), want %d bytes (%d MiB)",
-			flushThreshold, flushThreshold/oneMiB,
-			wantFlush, wantFlush/oneMiB)
-	}
-
-	// Guard against the old bug: the old MaxBufferSize was ≈5 MiB.
-	if maxBufBytes/100 == maxBufBytes {
-		t.Error("MaxBufferSize should NOT equal MaxBufferSize/100")
-	}
-	if maxBufBytes < int64(100)*oneMiB {
-		t.Errorf("MaxBufferSize = %d MiB, which is unreasonably small — the /100 placeholder bug may have been re-introduced",
-			maxBufBytes/oneMiB)
-	}
-
-	// FlushThreshold must be strictly less than MaxBufferSize.
-	if flushThreshold >= maxBufBytes {
-		t.Errorf("FlushThreshold (%d) must be < MaxBufferSize (%d)", flushThreshold, maxBufBytes)
-	}
-}
+// TestWriteBufferConfig_CorrectSizes is deleted rather than ported, and what it was guarding is worth
+// recording because the reason it can go is not "the bug is fixed".
+//
+// It asserted that MaxBufferSize was parseSize(MaxMemory) and FlushThreshold was three quarters of
+// that, after a bug divided them by 100 and 200. Both fields belonged to internal/buffer.WriteBuffer,
+// which the write-path rebuild replaced with internal/vfs.Writer — and vfs.NewWriter takes no
+// configuration at all. So the test was computing a formula over a config value in a package that no
+// longer reads it: parseSize("512MB")*3/4 == 384 MiB is arithmetic, and it passed for the same reason
+// 2+2 does.
+//
+// The live fact underneath is that write_buffer.max_memory, max_buffers and flush_interval currently
+// have no reader. Nothing bounds how many dirty bytes vfs.Writer accumulates. That is a real gap and
+// is not this task's — it needs backpressure in the writer, not a mapping — so the keys are marked
+// "not yet wired" in examples/config.yaml, which is the form of honesty available without inventing a
+// limit here. A test that asserted a bound would assert one that does not exist.
 
 // contains checks if a string contains a substring
 func contains(s, substr string) bool {

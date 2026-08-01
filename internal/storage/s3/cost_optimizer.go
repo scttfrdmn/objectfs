@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,11 +21,29 @@ const (
 
 // CostOptimizer handles cost optimization decisions and Standard tier overhead management
 type CostOptimizer struct {
-	backend        *Backend
-	config         CostOptimization
-	logger         *slog.Logger
+	backend       *Backend
+	config        CostOptimization
+	logger        *slog.Logger
+	costThreshold float64
+
+	// mu guards accessPatterns and the AccessPattern values it holds.
+	//
+	// RecordAccess is called from GetObject — from both the serial and the parallel read paths — so
+	// the map is written from every goroutine that reads an object, and GetOptimizationReport and
+	// AnalyzeAndOptimize range over it from whatever caller asks for a report. That is a concurrent
+	// map write, which is not a race the runtime tolerates: it aborts the process with "concurrent
+	// map writes", taking the mount and every open file descriptor with it.
+	//
+	// It was latent rather than live, because MonitorAccessPatterns defaults false and the mount path
+	// did not map the cost-optimization block at all — so the gate at the top of RecordAccess always
+	// returned early. A config knob that silently does nothing is its own defect, and the fix for
+	// that one turns this one on, so the lock lands first (audit finding M12).
+	//
+	// The pointers are the subtle part. RecordAccess mutates *AccessPattern in place, and
+	// analyzeObject reads six of its fields, so handing a caller a pointer would move the data race
+	// outside the lock. Nothing here returns one.
+	mu             sync.RWMutex
 	accessPatterns map[string]*AccessPattern
-	costThreshold  float64
 }
 
 // AccessPattern tracks object access patterns for cost optimization
@@ -50,15 +69,25 @@ func NewCostOptimizer(backend *Backend, config CostOptimization, logger *slog.Lo
 	}
 }
 
-// RecordAccess records an access pattern for cost optimization analysis
+// RecordAccess records an access pattern for cost optimization analysis.
+//
+// This is called from GetObject, on both the serial and the parallel read paths, so it runs on
+// every reader goroutine — see the mu field for why that requires a lock rather than merely
+// benefiting from one.
 func (co *CostOptimizer) RecordAccess(objectKey string, objectSize int64) {
 	if !co.config.MonitorAccessPatterns {
 		return
 	}
 
 	now := time.Now()
-	pattern, exists := co.accessPatterns[objectKey]
 
+	// The tier is read from the backend rather than passed in, so read it before taking the lock:
+	// nothing here should hold co.mu while reaching into another object.
+	currentTier := co.backend.currentTier
+
+	co.mu.Lock()
+
+	pattern, exists := co.accessPatterns[objectKey]
 	if !exists {
 		pattern = &AccessPattern{
 			ObjectKey:       objectKey,
@@ -67,8 +96,8 @@ func (co *CostOptimizer) RecordAccess(objectKey string, objectSize int64) {
 			FirstAccessTime: now,
 			AvgAccessGap:    0,
 			ObjectSize:      objectSize,
-			CurrentTier:     co.backend.currentTier,
-			EstimatedCost:   co.calculateObjectCost(objectSize, co.backend.currentTier),
+			CurrentTier:     currentTier,
+			EstimatedCost:   co.calculateObjectCost(objectSize, currentTier),
 		}
 		co.accessPatterns[objectKey] = pattern
 	} else {
@@ -83,11 +112,77 @@ func (co *CostOptimizer) RecordAccess(objectKey string, objectSize int64) {
 		}
 	}
 
+	// Snapshot what the log line needs. Logging under the lock would hold it across a formatting
+	// call and a write to the handler's io.Writer; logging *after* unlocking without a snapshot
+	// would read pattern's fields with no lock at all, which is the race this method is fixing.
+	accessCount, avgGap, tier := pattern.AccessCount, pattern.AvgAccessGap, pattern.CurrentTier
+
+	co.mu.Unlock()
+
 	co.logger.Debug("Access pattern recorded",
 		"object", objectKey,
-		"access_count", pattern.AccessCount,
-		"avg_gap", pattern.AvgAccessGap,
-		"current_tier", pattern.CurrentTier)
+		"access_count", accessCount,
+		"avg_gap", avgGap,
+		"current_tier", tier)
+}
+
+// snapshotPatterns returns a copy of every tracked access pattern.
+//
+// Copies, not pointers: analyzeObject reads six fields of a pattern and RecordAccess writes three of
+// them from any reader goroutine, so handing out the live pointer would move the race outside the
+// lock while looking like it had been fixed. Copying also keeps the analysis — which reaches the
+// pricing manager once per candidate tier — off the lock, so a report cannot stall the read path.
+//
+// The consequence is that analysis works from a consistent-per-object but not
+// consistent-across-objects view. That is the right trade here: this drives an advisory tiering
+// suggestion, not a correctness decision, and the alternative is holding the lock across every
+// pricing lookup in the bucket.
+func (co *CostOptimizer) snapshotPatterns() []AccessPattern {
+	co.mu.RLock()
+	defer co.mu.RUnlock()
+
+	snapshot := make([]AccessPattern, 0, len(co.accessPatterns))
+	for _, pattern := range co.accessPatterns {
+		snapshot = append(snapshot, *pattern)
+	}
+
+	return snapshot
+}
+
+// PatternCount reports how many objects currently have a tracked access pattern.
+func (co *CostOptimizer) PatternCount() int {
+	co.mu.RLock()
+	defer co.mu.RUnlock()
+
+	return len(co.accessPatterns)
+}
+
+// putPattern installs an access pattern, replacing any pattern already tracked for the same key.
+//
+// It exists so that callers with a pattern in hand — today only tests, which need one aged past
+// analyzeObject's 30-day floor without waiting a month — go through the lock. Taking a copy means
+// the caller keeps no reference to what the map holds.
+func (co *CostOptimizer) putPattern(pattern AccessPattern) {
+	co.mu.Lock()
+	defer co.mu.Unlock()
+
+	co.accessPatterns[pattern.ObjectKey] = &pattern
+}
+
+// patternFor returns a copy of the tracked pattern for objectKey, if one exists.
+//
+// A copy for the same reason snapshotPatterns copies: the stored *AccessPattern is mutated in place
+// by RecordAccess, so returning it would hand the caller a pointer into data under the lock.
+func (co *CostOptimizer) patternFor(objectKey string) (AccessPattern, bool) {
+	co.mu.RLock()
+	defer co.mu.RUnlock()
+
+	pattern, ok := co.accessPatterns[objectKey]
+	if !ok {
+		return AccessPattern{}, false
+	}
+
+	return *pattern, true
 }
 
 // AnalyzeAndOptimize analyzes access patterns and suggests/applies optimizations
@@ -98,8 +193,9 @@ func (co *CostOptimizer) AnalyzeAndOptimize(ctx context.Context) error {
 
 	optimizations := make([]TierOptimization, 0)
 
-	for _, pattern := range co.accessPatterns {
-		optimization := co.analyzeObject(pattern)
+	snapshot := co.snapshotPatterns()
+	for i := range snapshot {
+		optimization := co.analyzeObject(&snapshot[i])
 		if optimization != nil {
 			optimizations = append(optimizations, *optimization)
 		}
@@ -328,24 +424,35 @@ func (co *CostOptimizer) applyOptimization(ctx context.Context, opt TierOptimiza
 	}
 
 	// Update local access-pattern tracking to reflect the new tier.
+	//
+	// The cost is computed before taking the lock: calculateObjectCost reaches the pricing manager,
+	// and ObjectSize is immutable once the pattern exists — RecordAccess only ever writes
+	// AccessCount, LastAccessTime and AvgAccessGap — so reading it from the snapshot the caller
+	// analyzed is equivalent to reading it from the map.
+	cost := co.calculateObjectCost(opt.ObjectSize, opt.ToTier)
+
+	co.mu.Lock()
 	if pattern, exists := co.accessPatterns[opt.ObjectKey]; exists {
 		pattern.CurrentTier = opt.ToTier
-		pattern.EstimatedCost = co.calculateObjectCost(pattern.ObjectSize, opt.ToTier)
+		pattern.EstimatedCost = cost
 	}
+	co.mu.Unlock()
 
 	return nil
 }
 
 // GetOptimizationReport generates a cost optimization report
 func (co *CostOptimizer) GetOptimizationReport() OptimizationReport {
+	snapshot := co.snapshotPatterns()
+
 	report := OptimizationReport{
-		TotalObjects:          len(co.accessPatterns),
+		TotalObjects:          len(snapshot),
 		OptimizationResults:   make([]TierOptimization, 0),
 		TotalPotentialSavings: 0,
 	}
 
-	for _, pattern := range co.accessPatterns {
-		if opt := co.analyzeObject(pattern); opt != nil {
+	for i := range snapshot {
+		if opt := co.analyzeObject(&snapshot[i]); opt != nil {
 			report.OptimizationResults = append(report.OptimizationResults, *opt)
 			report.TotalPotentialSavings += opt.EstimatedMonthlySavings
 		}

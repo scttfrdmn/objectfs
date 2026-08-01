@@ -332,19 +332,25 @@ storage:
 
 performance:
   cache_size: 8GB
-  max_concurrency: 150
 ```
 
-### Large sequential reads, buffered writes
+### Large sequential reads
 
 ```yaml
 storage:
   s3:
     region: us-west-2
+    multipart:
+      threshold: 64MB
+      chunk_size: 32MB
 
 performance:
   cache_size: 32GB
   connection_pool_size: 32
+  parallel_read:
+    enabled: true
+    threshold: 64MB     # objects at least this large are fetched as concurrent range GETs
+    chunk_size: 16MB
 
 cache:
   ttl: 15m
@@ -352,15 +358,11 @@ cache:
     enabled: true
     directory: /var/cache/objectfs
     max_size: 200GB
-
-write_buffer:
-  flush_interval: 30s
-  max_memory: 2GB
 ```
 
 Two config files ship with ObjectFS, and they have different jobs:
 
-- [`configs/example.yaml`](configs/example.yaml) — a short, copyable starting point. Every key in it has an effect.
+- [`configs/example.yaml`](configs/example.yaml) — a short, copyable starting point. Every key in it is read on the mount path; keys that are not are excluded rather than marked.
 - [`examples/config.yaml`](examples/config.yaml) — the complete schema: every key ObjectFS accepts, at its default value. Keys that parse and validate but are not yet read on the mount path are marked `not yet wired`, so this file is also the honest inventory of what is and is not implemented.
 
 A key the schema does not define is rejected at startup with the key named, rather than silently ignored.

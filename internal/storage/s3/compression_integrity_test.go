@@ -108,9 +108,11 @@ func defaultBackendAgainst(t *testing.T, ts *testaws.TestServer) *s3.Backend {
 //
 // Measured before the fix, on the shipped default configuration: an 8192-byte write read back as
 // 29 bytes with a nil error. The audit classified this as latent because
-// EnableCargoShipOptimization is only set in NewDefaultConfig and the mount path bypasses it. That
-// was wrong — NewBackend(ctx, bucket, nil) and NewDefaultConfig() are both documented entry points,
-// and the Go SDK reaches the same defaulting.
+// EnableCargoShipOptimization is only set in NewDefaultConfig and the mount path bypassed it. That
+// was wrong twice over — NewBackend(ctx, bucket, nil) and NewDefaultConfig() are both documented
+// entry points reaching the same defaulting, and as of v0.10.1 the mount path does not bypass it
+// either: `storage.s3.use_cargoship` maps straight to the flag. The ordering mattered, which is why
+// this fix landed before the plumbing did.
 func TestDefaultConfigDoesNotCorruptCompressedObjects(t *testing.T) {
 	t.Parallel()
 

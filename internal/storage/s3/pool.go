@@ -185,7 +185,7 @@ func (p *ConnectionPool) GetWithTimeout(timeout time.Duration) (*s3.Client, erro
 		p.mu.Unlock()
 
 		return nil, fmt.Errorf("timed out after %s waiting for an S3 connection (%d/%d in use); "+
-			"raise storage.s3.pool_size", timeout, size, limit)
+			"raise performance.connection_pool_size", timeout, size, limit)
 	}
 }
 
@@ -288,7 +288,7 @@ func (p *ConnectionPool) Close() error {
 // room for the connection it is about to produce. Raising maxSize above the buffer would make a
 // return block while holding the write lock — a deadlock, not a bigger pool. Growing for real means
 // a new channel, so this refuses instead of pretending, and the caller is told to raise
-// storage.s3.pool_size and restart.
+// performance.connection_pool_size and restart.
 //
 // Shrinking discards idle connections until the total is within the new limit. Connections that are
 // currently checked out are left alone; they are dropped by Put once they come back.
@@ -306,7 +306,7 @@ func (p *ConnectionPool) Resize(newSize int) error {
 
 	if capacity := cap(p.connections); newSize > capacity {
 		return fmt.Errorf("cannot grow the pool from %d to %d: its capacity is fixed at %d; "+
-			"raise storage.s3.pool_size and restart", p.maxSize, newSize, capacity)
+			"raise performance.connection_pool_size and restart", p.maxSize, newSize, capacity)
 	}
 
 	p.maxSize = newSize

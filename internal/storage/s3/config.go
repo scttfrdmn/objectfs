@@ -3,6 +3,7 @@ package s3
 import (
 	"time"
 
+	"github.com/objectfs/objectfs/internal/circuit"
 	"github.com/objectfs/objectfs/pkg/retry"
 )
 
@@ -24,15 +25,16 @@ type Config struct {
 	// Retry configuration
 	RetryConfig retry.Config `yaml:"retry_config"`
 
+	// CircuitBreaker controls the breaker that fronts S3 operations.
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
+
 	// Advanced settings
 	UseAccelerate bool `yaml:"use_accelerate"`
 	UseDualStack  bool `yaml:"use_dual_stack"`
-	DisableSSL    bool `yaml:"disable_ssl"`
 
-	// CargoShip optimization settings
-	EnableCargoShipOptimization bool    `yaml:"enable_cargoship_optimization"`
-	TargetThroughput            float64 `yaml:"target_throughput"`  // MB/s
-	OptimizationLevel           string  `yaml:"optimization_level"` // "standard", "aggressive"
+	// EnableCargoShipOptimization routes uploads through the CargoShip transporter, which does its
+	// own multipart chunking and congestion control.
+	EnableCargoShipOptimization bool `yaml:"enable_cargoship_optimization"`
 
 	// Multipart upload configuration
 	MultipartThreshold   int64 `yaml:"multipart_threshold"`   // Size threshold for multipart uploads (bytes)
@@ -78,6 +80,57 @@ type CompressionConfig struct {
 	// MinSize is the minimum object size to compress (e.g. "4KB").
 	// Objects smaller than MinSize are stored uncompressed.
 	MinSize string `yaml:"min_size"`
+}
+
+// CircuitBreakerConfig defines the breaker that fronts S3 operations.
+//
+// Plain data rather than a circuit.Config, deliberately. circuit.Config expresses the trip decision
+// as a ReadyToTrip predicate — a func field, which is the right shape for the breaker and the wrong
+// shape for configuration: it cannot be compared, printed usefully, round-tripped through YAML, or
+// carried through the config fuzzer's %#v dedup key. NewBackend turns these three values into that
+// predicate, so the translation lives in one place and the config stays a value.
+type CircuitBreakerConfig struct {
+	// Enabled false means the breaker never opens. It stays in the call path counting and reporting
+	// state; it just never rejects. That is not the same as removing it, and removing it is not an
+	// option this config offers — a bypass would be a second code path through every S3 operation
+	// with no test coverage.
+	Enabled bool `yaml:"enabled"`
+
+	// FailureThreshold is the number of failures within one Interval that opens the breaker. Zero
+	// means the package default, which is proportional rather than absolute: at least 20 requests in
+	// the interval with half of them failing.
+	//
+	// A failure here is what circuit.defaultIsSuccessful calls one — a service failure, per
+	// errors.IsServiceFailure. A missing object is an answer, not an outage, and does not count.
+	FailureThreshold int `yaml:"failure_threshold"`
+
+	// Timeout is how long the breaker stays open before admitting probe requests. Zero means 30s.
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// readyToTrip turns a CircuitBreakerConfig into the predicate circuit.Config wants.
+//
+// Three cases, and the middle one is why this is a function rather than a field assignment:
+//
+//   - disabled: a predicate that never trips. See CircuitBreakerConfig.Enabled.
+//   - a positive threshold: an absolute count of service failures in the interval.
+//   - zero: nil, which NewCircuitBreaker replaces with its proportional default. Returning a
+//     `failures >= 0` closure instead would open the breaker before the first request and keep every
+//     S3 operation rejected for the life of the mount.
+func readyToTrip(cfg CircuitBreakerConfig) func(circuit.Counts) bool {
+	if !cfg.Enabled {
+		return func(circuit.Counts) bool { return false }
+	}
+
+	if cfg.FailureThreshold <= 0 {
+		return nil
+	}
+
+	threshold := uint32(cfg.FailureThreshold) //nolint:gosec // guarded positive above
+
+	return func(counts circuit.Counts) bool {
+		return counts.TotalFailures >= threshold
+	}
 }
 
 // GetOptimalChunkSize returns the optimal chunk size for a given file size
@@ -260,14 +313,20 @@ func NewDefaultConfig() *Config {
 	retryConfig.MaxDelay = 30 * time.Second
 
 	return &Config{
-		MaxRetries:                  3,
-		ConnectTimeout:              10 * time.Second,
-		RequestTimeout:              30 * time.Second,
-		PoolSize:                    8,
-		RetryConfig:                 retryConfig,
+		MaxRetries:     3,
+		ConnectTimeout: 10 * time.Second,
+		RequestTimeout: 30 * time.Second,
+		PoolSize:       8,
+		RetryConfig:    retryConfig,
+		CircuitBreaker: CircuitBreakerConfig{
+			Enabled: true,
+			// Zero: the package's proportional default. An absolute count has no defensible
+			// value without knowing the request rate — ten failures is a broken bucket at 1 rps
+			// and a rounding error at 1000.
+			FailureThreshold: 0,
+			Timeout:          30 * time.Second,
+		},
 		EnableCargoShipOptimization: true,
-		TargetThroughput:            800.0, // 800 MB/s target for ObjectFS
-		OptimizationLevel:           "standard",
 		MultipartThreshold:          32 * 1024 * 1024,  // 32MB - trigger multipart for larger files
 		MultipartChunkSize:          16 * 1024 * 1024,  // 16MB - optimal chunk size for performance
 		MultipartConcurrency:        8,                 // Match pool size for concurrent uploads

@@ -15,39 +15,10 @@ import (
 	"testing"
 )
 
-// ─── parseSize benchmarks ─────────────────────────────────────────────────────
-
-// BenchmarkParseSize measures the throughput of the human-readable size parser
-// used when converting config values (e.g. "2GB") into byte counts.
-func BenchmarkParseSize_GB(b *testing.B) {
-	for range b.N {
-		_ = parseSize("2GB")
-	}
-}
-
-func BenchmarkParseSize_MB(b *testing.B) {
-	for range b.N {
-		_ = parseSize("512MB")
-	}
-}
-
-func BenchmarkParseSize_KB(b *testing.B) {
-	for range b.N {
-		_ = parseSize("128KB")
-	}
-}
-
-// BenchmarkParseSize_Parallel measures parseSize under concurrent load.
-func BenchmarkParseSize_Parallel(b *testing.B) {
-	sizes := []string{"1GB", "512MB", "256KB", "4096B", "2GB"}
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			_ = parseSize(sizes[i%len(sizes)])
-			i++
-		}
-	})
-}
+// The four BenchmarkParseSize_* benchmarks that were here are gone with the function they measured.
+// adapter.parseSize is now utils.ParseBytes, and there is nothing to benchmark: every call happens
+// once, during Start, on a string from a config file. Measuring it under b.RunParallel described a
+// load that does not exist.
 
 // ─── validateStorageURI benchmarks ────────────────────────────────────────────
 

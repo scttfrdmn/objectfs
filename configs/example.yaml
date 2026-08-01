@@ -1,4 +1,8 @@
-# ObjectFS configuration — minimal, and every key below has an effect.
+# ObjectFS configuration — minimal, and every key below is read on the mount path.
+#
+# That is a deliberate property of this file, not a description of the schema: several keys in the
+# full schema parse and validate while being read by nothing, and they are excluded here rather
+# than listed with a caveat. examples/config.yaml has the complete set and marks those.
 #
 # Copy to /etc/objectfs/config.yaml (or pass --config), then mount:
 #
@@ -31,10 +35,27 @@ storage:
     # endpoint: https://s3.us-west-2.amazonaws.com   # set for MinIO/Ceph/Wasabi
     # force_path_style: false                        # true for most S3-compatible servers
 
+    # STANDARD unless you know the object pattern suits another class. The IA and Glacier classes
+    # bill a 128 KB minimum per object and a 30-day minimum duration, so a mount that writes many
+    # small or short-lived files costs more on them, not less. GLACIER and DEEP_ARCHIVE objects
+    # cannot be read without a restore, which ObjectFS does not perform.
+    storage_tier: STANDARD
+
+    multipart:
+      threshold: 32MB                 # objects at least this large are uploaded in parts
+      chunk_size: 16MB                # bytes per part; the S3 minimum for a non-final part is 5MB
+
 performance:
   cache_size: 2GB                     # in-memory read cache
-  max_concurrency: 150
+  # Pooled S3 clients, batch concurrency, and idle connections per host — one number for all three.
   connection_pool_size: 8
+
+  # Fan a large read out into concurrent range GETs. Skipped for compressed objects, whose frames
+  # cannot be sliced.
+  parallel_read:
+    enabled: true
+    threshold: 64MB
+    chunk_size: 16MB
 
 cache:
   ttl: 5m                             # how long a cached read or attribute stays valid
@@ -45,14 +66,18 @@ cache:
     directory: /var/cache/objectfs
     max_size: 10GB
 
-write_buffer:
-  flush_interval: 30s                 # how long a dirty buffer may wait before being written
-  max_memory: 512MB                   # per-file write buffer capacity
+network:
+  timeouts:
+    connect: 10s                      # TCP dial timeout
+    read: 30s                         # how long S3 has to start answering, not to finish
+  retry:
+    max_attempts: 3                   # ObjectFS's own retry, on top of the SDK's per-request one
+    base_delay: 1s
+    max_delay: 30s
 
 monitoring:
   metrics:
     enabled: true
-    prometheus: true
   health_checks:
     enabled: true
     interval: 30s

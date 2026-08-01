@@ -47,11 +47,14 @@ type GlobalConfig struct {
 
 // PerformanceConfig represents performance-related settings
 type PerformanceConfig struct {
-	CacheSize          string             `yaml:"cache_size"`
-	WriteBufferSize    string             `yaml:"write_buffer_size"`
-	MaxConcurrency     int                `yaml:"max_concurrency"`
-	ReadAheadSize      string             `yaml:"read_ahead_size"`
-	CompressionEnabled bool               `yaml:"compression_enabled"`
+	CacheSize          string `yaml:"cache_size"`
+	WriteBufferSize    string `yaml:"write_buffer_size"`
+	MaxConcurrency     int    `yaml:"max_concurrency"`
+	ReadAheadSize      string `yaml:"read_ahead_size"`
+	CompressionEnabled bool   `yaml:"compression_enabled"`
+	// ConnectionPoolSize is the number of pooled S3 clients, and also the batch concurrency in
+	// GetObjects/PutObjects and MaxIdleConnsPerHost on the HTTP transport. Validated > 0 below:
+	// zero reached the batch paths as an unbuffered semaphore and blocked forever.
 	ConnectionPoolSize int                `yaml:"connection_pool_size"`
 	PredictiveCaching  bool               `yaml:"predictive_caching"`
 	MLModelPath        string             `yaml:"ml_model_path"`
@@ -61,6 +64,13 @@ type PerformanceConfig struct {
 }
 
 // ParallelReadConfig controls fan-out of large object reads into concurrent range GETs.
+//
+// Reaches the backend as s3.Config.ParallelReadThreshold and ReadChunkSize. Enabled: false maps to
+// a threshold of zero, which is how the backend spells "disabled" — see buildS3Config.
+//
+// This block was defined, defaulted and documented for a whole release while being read by nothing,
+// which made the parallel range GET feature v0.10.0 was released for dead code on every mount: the
+// backend's gate is `threshold > 0` and the mount path left the threshold at zero.
 type ParallelReadConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Threshold string `yaml:"threshold"`  // e.g. "64MB"
@@ -138,21 +148,50 @@ type NetworkConfig struct {
 	CongestionAlgorithm string               `yaml:"congestion_algorithm"` // "auto", "bbr", "cubic", "reno"
 }
 
-// TimeoutConfig represents timeout settings
+// TimeoutConfig represents timeout settings.
+//
+// Connect becomes the dialer's timeout and Read becomes the transport's ResponseHeaderTimeout —
+// which is the time S3 has to *start* answering, not to finish. A response timeout would break
+// ranged reads of large objects, whose bodies legitimately take minutes: the transport cannot
+// distinguish a stalled connection from a slow one that is still delivering bytes.
+//
+// Write is not yet wired, and has no HTTP counterpart to be wired to: the transport sees a PUT as
+// one request whose body it is streaming, with no separate notion of a write timeout. Where it
+// belongs is the flush path's context in internal/vfs, which does not take one today.
 type TimeoutConfig struct {
 	Connect time.Duration `yaml:"connect"`
 	Read    time.Duration `yaml:"read"`
 	Write   time.Duration `yaml:"write"`
 }
 
-// RetryConfig represents retry settings
+// RetryConfig represents retry settings for ObjectFS's own retry of a failed S3 operation.
+//
+// Distinct from storage.s3.max_retries, which is the AWS SDK's per-request attempt limit. The two
+// compose: an operation is attempted MaxAttempts times here, and each of those attempts is itself
+// retried up to max_retries times by the SDK.
+//
+// Which errors are retried is not configurable and is not derived from this block: it is
+// pkg/retry.DefaultConfig's list of seven ObjectFS error codes (timeouts, connection failures,
+// resource exhaustion). buildS3Config therefore starts from that default and overrides only the
+// three fields below, because pkg/retry.New does *not* backfill RetryableErrors — a config mapped
+// field-for-field into an empty retry.Config would retry almost nothing while reporting three
+// attempts.
 type RetryConfig struct {
 	MaxAttempts int           `yaml:"max_attempts"`
 	BaseDelay   time.Duration `yaml:"base_delay"`
 	MaxDelay    time.Duration `yaml:"max_delay"`
 }
 
-// CircuitBreakerConfig represents circuit breaker settings
+// CircuitBreakerConfig represents circuit breaker settings.
+//
+// FailureThreshold is a count of failures within one Interval, and it becomes a ReadyToTrip closure
+// rather than a field: internal/circuit.Config has no threshold field, only a predicate. Reading
+// that struct's MaxRequests as the threshold is a mistake made during the audit and the reason this
+// is spelled out — MaxRequests is the half-open probe limit.
+//
+// Enabled: false is expressed as a ReadyToTrip that never trips, so the breaker still counts and
+// still reports state; it just never opens. There is no way to remove it from the call path, and
+// pretending otherwise would mean a second code path with no test coverage.
 type CircuitBreakerConfig struct {
 	Enabled          bool          `yaml:"enabled"`
 	FailureThreshold int           `yaml:"failure_threshold"`
@@ -242,14 +281,72 @@ type StorageConfig struct {
 	S3 S3Config `yaml:"s3"`
 }
 
-// S3Config represents AWS S3 configuration
+// S3Config represents AWS S3 configuration.
+//
+// Every field here has to be carried into the corresponding field of internal/storage/s3.Config by
+// internal/adapter.buildS3Config, and TestBuildS3ConfigMapsEveryConfiguredValue asserts it does.
+// That test is the other half of this struct: buildS3Config mapped six of the backend's thirty
+// fields, so `storage_tier`, the pool size, the retry limit, the timeouts and the multipart and
+// parallel-read settings were named in configuration, documented in examples/config.yaml, and left
+// at their zero values on every real mount (audit finding D12).
+//
+// Zero is not a benign default for several of them. A pool size of zero is not a small pool — it is
+// `make(chan struct{}, 0)` in GetObjects and PutObjects, so the first batch operation blocks
+// forever. A parallel-read threshold of zero disables the feature v0.10.0 was released for. A
+// storage tier of "" writes STANDARD whatever the file says.
 type S3Config struct {
-	Region           string             `yaml:"region"`
-	Endpoint         string             `yaml:"endpoint"`
-	Profile          string             `yaml:"profile"`
-	UseAcceleration  bool               `yaml:"use_acceleration"`
-	ForcePathStyle   bool               `yaml:"force_path_style"`
+	Region          string `yaml:"region"`
+	Endpoint        string `yaml:"endpoint"`
+	Profile         string `yaml:"profile"`
+	UseAcceleration bool   `yaml:"use_acceleration"`
+	ForcePathStyle  bool   `yaml:"force_path_style"`
+
+	// StorageTier is the S3 storage class objects are written with: STANDARD, STANDARD_IA,
+	// ONEZONE_IA, GLACIER_IR, GLACIER, DEEP_ARCHIVE, INTELLIGENT_TIERING or REDUCED_REDUNDANCY.
+	// Empty means STANDARD, which is also what S3 applies to a PUT that names no class.
+	//
+	// Validated at load by awsname.ValidateStorageClass, because a class the backend does not
+	// recognize is silently replaced with STANDARD by NewTierValidator — so `STANDARD_1A`, a digit
+	// one for a capital I, would be billed as STANDARD with nothing reporting a problem.
+	StorageTier string `yaml:"storage_tier"`
+
+	// MaxRetries is the AWS SDK's attempt limit per operation, passed to
+	// config.WithRetryMaxAttempts. Zero means the backend's default of 3.
+	//
+	// This is the SDK's own retry of a single HTTP call. ObjectFS layers its own retry on top of it
+	// (network.retry below), so the two multiply: 3 SDK attempts inside 3 ObjectFS attempts is up to
+	// nine requests.
+	MaxRetries int `yaml:"max_retries"`
+
+	// UseCargoShip routes uploads through the CargoShip transporter, which does its own
+	// multipart chunking and congestion control.
+	//
+	// Off by default, and deliberately different from internal/storage/s3.NewDefaultConfig's true —
+	// the same split as Compression, which is off here and on there. That constructor serves the Go
+	// SDK, where the caller has chosen the S3 backend explicitly; this file serves a mount, where the
+	// conservative path is the one the filesystem has the most test coverage of. Until v0.10.1 the
+	// flag was unreachable from a config file at all, so leaving it off preserves what mounts
+	// actually did rather than switching every deployment's write path on upgrade.
+	UseCargoShip bool `yaml:"use_cargoship"`
+
+	// Multipart controls when an upload is split into parts and how those parts are sent.
+	Multipart MultipartConfig `yaml:"multipart"`
+
 	CostOptimization S3CostOptimization `yaml:"cost_optimization"`
+}
+
+// MultipartConfig controls S3 multipart upload behavior.
+type MultipartConfig struct {
+	// Threshold is the object size above which an upload is split into parts (e.g. "32MB").
+	// Empty means the backend's default.
+	Threshold string `yaml:"threshold"`
+
+	// ChunkSize is the size of each part (e.g. "16MB"). S3 rejects any non-final part below 5 MB
+	// with EntityTooSmall, and the backend raises a smaller value to that floor.
+	ChunkSize string `yaml:"chunk_size"`
+
+	// Concurrency is the number of parts uploaded at once. Zero means the backend's default.
+	Concurrency int `yaml:"concurrency"`
 }
 
 // S3CostOptimization represents S3 cost optimization settings
@@ -301,6 +398,15 @@ func NewDefault() *Configuration {
 				Profile:         "",
 				UseAcceleration: false,
 				ForcePathStyle:  false,
+				StorageTier:     awsname.StorageClassStandard,
+				MaxRetries:      3,
+				// Off, unlike internal/storage/s3.NewDefaultConfig — see the field comment.
+				UseCargoShip: false,
+				Multipart: MultipartConfig{
+					Threshold:   "32MB",
+					ChunkSize:   "16MB",
+					Concurrency: 8,
+				},
 				CostOptimization: S3CostOptimization{
 					Enabled:             false,
 					TieringEnabled:      false,
@@ -653,6 +759,10 @@ func getEnvMappings() []envMapping {
 			c.Storage.S3.Endpoint = val
 			return nil
 		}},
+		{"OBJECTFS_S3_STORAGE_TIER", func(c *Configuration, val string) error {
+			c.Storage.S3.StorageTier = val
+			return nil
+		}},
 
 		// Read-ahead settings
 		{"OBJECTFS_READAHEAD_ENABLED", func(c *Configuration, val string) error {
@@ -742,6 +852,14 @@ func (c *Configuration) Validate() error {
 		return fmt.Errorf("write_buffer.compression configuration invalid: %w", err)
 	}
 
+	if err := c.validateSizes(); err != nil {
+		return err
+	}
+
+	if err := c.validateS3Config(); err != nil {
+		return err
+	}
+
 	// The region is checked here, at load, because nothing downstream checks it at all.
 	//
 	// FuzzConfigConstructsBackend found this: a region containing a space, a newline, or a slash
@@ -789,6 +907,118 @@ func validateCompressionConfig(cfg CompressionConfig) error {
 	}
 
 	return nil
+}
+
+// validateS3Config rejects storage.s3 settings the backend cannot act on.
+//
+// Same reasoning as validateCompressionConfig above and awsname.ValidateRegion below: the value is
+// checked by the layer that reads configuration, because the layer that acts on it either cannot
+// report a useful error or does not check at all. Specifically, an unrecognized storage class is
+// silently replaced with STANDARD inside NewTierValidator, so without this check `storage_tier:
+// STANDARD_1A` mounts successfully and bills as STANDARD forever.
+func (c *Configuration) validateS3Config() error {
+	s3cfg := c.Storage.S3
+
+	if err := awsname.ValidateStorageClass(s3cfg.StorageTier); err != nil {
+		return fmt.Errorf("storage.s3.storage_tier is invalid: %w", err)
+	}
+
+	if s3cfg.MaxRetries < 0 {
+		return fmt.Errorf("storage.s3.max_retries must not be negative, got %d", s3cfg.MaxRetries)
+	}
+
+	if s3cfg.Multipart.Concurrency < 0 {
+		return fmt.Errorf("storage.s3.multipart.concurrency must not be negative, got %d",
+			s3cfg.Multipart.Concurrency)
+	}
+
+	// Ordering matters and is asserted by a test: a chunk size above the threshold means the first
+	// part of every multipart upload is the whole object, so multipart never engages at all.
+	threshold, err := parseOptionalSize(s3cfg.Multipart.Threshold)
+	if err != nil {
+		return fmt.Errorf("storage.s3.multipart.threshold is invalid: %w", err)
+	}
+
+	chunk, err := parseOptionalSize(s3cfg.Multipart.ChunkSize)
+	if err != nil {
+		return fmt.Errorf("storage.s3.multipart.chunk_size is invalid: %w", err)
+	}
+
+	if threshold > 0 && chunk > threshold {
+		return fmt.Errorf("storage.s3.multipart.chunk_size (%s) is larger than "+
+			"storage.s3.multipart.threshold (%s), so an upload large enough to be split would "+
+			"still be a single part", s3cfg.Multipart.ChunkSize, s3cfg.Multipart.Threshold)
+	}
+
+	return nil
+}
+
+// validateSizes rejects every size-valued setting the loader accepts and the adapter would then
+// have to interpret.
+//
+// These are checked here rather than where they are used because of what "where they are used" did:
+// internal/adapter.parseSize returned 1 GiB — silently, with no error — for any string it could not
+// parse, so `cache_size: 2G` configured a 1 GiB cache, `cache_size: 64MiB` configured a 1 GiB cache,
+// and `cache_size: tpyo` configured a 1 GiB cache. Three different mistakes, one wrong answer, no
+// message. utils.ParseBytes is strict now, but a strict parser at the point of use still fails
+// late — after a mount has been attempted — and several of these values are read in constructors
+// that have nowhere to return an error to.
+//
+// Every entry names the YAML path rather than the Go field, because the operator's next action is to
+// edit a line in a file.
+func (c *Configuration) validateSizes() error {
+	sizes := []struct {
+		path  string
+		value string
+
+		// required marks a size that must be present. An optional one may be empty, meaning "use the
+		// built-in default" — which is how a partial config file is meant to work.
+		required bool
+	}{
+		{path: "performance.cache_size", value: c.Performance.CacheSize, required: true},
+		{path: "performance.write_buffer_size", value: c.Performance.WriteBufferSize},
+		{path: "performance.read_ahead_size", value: c.Performance.ReadAheadSize},
+		{path: "performance.read_ahead.size", value: c.Performance.ReadAhead.Size},
+		{path: "performance.read_ahead.sequential_min_size", value: c.Performance.ReadAhead.SequentialMinSize},
+		{path: "performance.parallel_read.threshold", value: c.Performance.ParallelRead.Threshold},
+		{path: "performance.parallel_read.chunk_size", value: c.Performance.ParallelRead.ChunkSize},
+		{path: "cache.persistent_cache.max_size", value: c.Cache.PersistentCache.MaxSize},
+		{path: "write_buffer.max_memory", value: c.WriteBuffer.MaxMemory},
+		{path: "storage.s3.multipart.threshold", value: c.Storage.S3.Multipart.Threshold},
+		{path: "storage.s3.multipart.chunk_size", value: c.Storage.S3.Multipart.ChunkSize},
+	}
+
+	for _, size := range sizes {
+		if size.value == "" {
+			if size.required {
+				return fmt.Errorf("%s must be set (for example \"2GB\")", size.path)
+			}
+
+			continue
+		}
+
+		if _, err := utils.ParseBytes(size.value); err != nil {
+			return fmt.Errorf("%s is invalid: %w", size.path, err)
+		}
+	}
+
+	// write_buffer.compression.min_size is validated by validateCompressionConfig, which builds the
+	// codec — and only when compression is enabled, since a disabled block is not consulted.
+
+	return nil
+}
+
+// parseOptionalSize parses a size that may be empty, where empty means zero.
+//
+// Zero is the caller's signal to fall back to a built-in default, which is distinct from a size of
+// literally zero bytes — "0" parses to 0 and is accepted, and no caller of this distinguishes them
+// because a zero-byte threshold and an absent one both mean "use the default".
+func parseOptionalSize(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	return utils.ParseBytes(s)
 }
 
 // validateReadAheadConfig validates read-ahead specific settings

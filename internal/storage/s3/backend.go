@@ -101,6 +101,18 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 
 	// Apply defaults for zero-value critical fields so that partial configs
 	// (e.g. created with &Config{Region: "us-west-2"}) behave correctly.
+	//
+	// The list below is exhaustive over the fields whose zero value is not a usable setting, and it
+	// became exhaustive as audit finding M18: it previously covered the four multipart and read-chunk
+	// fields and stopped, so the doc comment's promise held for the shape it named and not for the
+	// fields that break when unset. PoolSize is the sharp one — zero is not a small pool, it is
+	// `make(chan struct{}, 0)` in GetObjects and PutObjects, an unbuffered semaphore whose first send
+	// never returns.
+	//
+	// ParallelReadThreshold is deliberately absent. Zero is how this package spells "parallel reads
+	// off" — the gate in GetObject is `threshold > 0` — so backfilling it would make the feature
+	// unswitchable-off from the SDK. What made it a defect was the mount path leaving it at zero
+	// while configuration said otherwise, and that is fixed in the mapping, not here.
 	defaults := NewDefaultConfig()
 	if cfg.MultipartThreshold == 0 {
 		cfg.MultipartThreshold = defaults.MultipartThreshold
@@ -113,6 +125,28 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	}
 	if cfg.ReadChunkSize == 0 {
 		cfg.ReadChunkSize = defaults.ReadChunkSize
+	}
+	if cfg.PoolSize <= 0 {
+		cfg.PoolSize = defaults.PoolSize
+	}
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = defaults.MaxRetries
+	}
+	if cfg.ConnectTimeout <= 0 {
+		cfg.ConnectTimeout = defaults.ConnectTimeout
+	}
+	if cfg.RequestTimeout <= 0 {
+		cfg.RequestTimeout = defaults.RequestTimeout
+	}
+	if cfg.CongestionAlgorithm == "" {
+		cfg.CongestionAlgorithm = defaults.CongestionAlgorithm
+	}
+
+	// retry.New backfills the delays and the attempt count but not RetryableErrors, and shouldRetry
+	// consults that list — so an empty retry.Config is a retryer that reports three attempts and
+	// retries nothing. A &Config{Region: ...} from the SDK is exactly that shape.
+	if len(cfg.RetryConfig.RetryableErrors) == 0 {
+		cfg.RetryConfig.RetryableErrors = defaults.RetryConfig.RetryableErrors
 	}
 
 	// Set default storage tier if not specified
@@ -178,8 +212,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	// Initialize circuit breaker manager.
 	//
 	// MaxRequests is the half-open probe limit, not a failure count — the trip decision belongs to
-	// ReadyToTrip, which is left at the package default (20 requests in the interval with at least
-	// half failing). Naming that here rather than relying on the zero value being filled in, because
+	// ReadyToTrip. Naming that here rather than relying on the zero value being filled in, because
 	// reading this block and seeing only MaxRequests invites the conclusion that ten failures trip
 	// the breaker, and it was read that way during the audit.
 	//
@@ -188,7 +221,8 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	circuitConfig := circuit.Config{
 		MaxRequests: 10,
 		Interval:    60 * time.Second,
-		Timeout:     30 * time.Second,
+		Timeout:     cfg.CircuitBreaker.Timeout,
+		ReadyToTrip: readyToTrip(cfg.CircuitBreaker),
 		OnStateChange: func(name string, from circuit.State, to circuit.State) {
 			logger.Info("Circuit breaker state changed",
 				"breaker", name,
@@ -1056,6 +1090,25 @@ func originalSize(metadata map[string]string, contentLength int64, key string, l
 	return size
 }
 
+// batchConcurrency is the number of concurrent operations GetObjects and PutObjects allow.
+//
+// It exists because `make(chan struct{}, n)` with n <= 0 is not a small semaphore, it is an
+// unbuffered channel: the first `semaphore <- struct{}{}` blocks with no receiver and the batch never
+// returns. That is not a hypothetical. Until v0.10.1 the mount path did not map PoolSize at all, so
+// every mounted filesystem reached these two functions with PoolSize zero — a batch read or write
+// hung the calling goroutine forever, holding whatever FUSE request was above it.
+//
+// NewBackend now defaults PoolSize, so this is the second line of defense rather than the first, and
+// it is deliberately a floor rather than an assertion: a batch that runs one-at-a-time is slow, and a
+// batch that deadlocks is a wedged filesystem.
+func (b *Backend) batchConcurrency() int {
+	if n := b.config.PoolSize; n > 0 {
+		return n
+	}
+
+	return 1
+}
+
 // GetObjects retrieves multiple objects in batch with CargoShip optimization
 func (b *Backend) GetObjects(ctx context.Context, keys []string) (map[string][]byte, error) {
 	if len(keys) == 0 {
@@ -1072,7 +1125,7 @@ func (b *Backend) GetObjects(ctx context.Context, keys []string) (map[string][]b
 	}
 
 	resultCh := make(chan result, len(keys))
-	semaphore := make(chan struct{}, b.config.PoolSize)
+	semaphore := make(chan struct{}, b.batchConcurrency())
 
 	for _, key := range keys {
 		go func(k string) {
@@ -1116,7 +1169,7 @@ func (b *Backend) PutObjects(ctx context.Context, objects map[string][]byte) err
 	}
 
 	resultCh := make(chan result, len(objects))
-	semaphore := make(chan struct{}, b.config.PoolSize)
+	semaphore := make(chan struct{}, b.batchConcurrency())
 
 	for key, data := range objects {
 		go func(k string, d []byte) {
@@ -1717,9 +1770,13 @@ func (b *Backend) EstimateStandardTierOverhead(objectSize int64, targetTier stri
 	return b.costOptimizer.EstimateStandardTierOverhead(objectSize, targetTier)
 }
 
-// GetAccessPatterns returns access pattern data for cost analysis
+// GetAccessPatternCount returns the number of objects with a tracked access pattern.
+//
+// It delegates rather than taking len() of the map directly: the map is written from every reader
+// goroutine when MonitorAccessPatterns is on, and a bare len() of a map being written concurrently
+// is a race the runtime can abort the process for.
 func (b *Backend) GetAccessPatternCount() int {
-	return len(b.costOptimizer.accessPatterns)
+	return b.costOptimizer.PatternCount()
 }
 
 // GetPricingSummary returns current pricing configuration and rates
