@@ -135,7 +135,7 @@ func (l *Legacy) Flush(ctx context.Context) error {
 	}
 
 	// The offset is in scope and unused, exactly as it was.
-	if err := l.backend.PutObject(ctx, l.key, l.buf); err != nil {
+	if err := l.backend.PutObject(ctx, l.key, l.buf, nil); err != nil {
 		return fmt.Errorf("difftest: legacy flush: %w", err)
 	}
 

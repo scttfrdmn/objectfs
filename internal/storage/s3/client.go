@@ -149,13 +149,21 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	// Initialize CargoShip S3 transporter if enabled
 	var transporter *cargoships3.Transporter
 	if cfg.EnableCargoShipOptimization {
-		// Create CargoShip S3 config with optimization settings
+		// The storage class comes from the configured tier, not from a constant.
+		//
+		// cargoship's Transporter.optimizeStorageClass falls back to its config's StorageClass for an
+		// Archive with no AccessPattern and no RetentionDays, which is every archive ObjectFS builds —
+		// so a hardcoded value here is the class every object is stored under, whatever storage_tier
+		// says. It read StorageClassIntelligentTiering, and CargoShip is on in the shipped defaults,
+		// so `storage_tier: STANDARD_IA` silently stored INTELLIGENT_TIERING: no error, no log, and a
+		// different bill from the one the config describes. Found by asserting the stored class at the
+		// endpoint rather than the value passed in.
 		cargoConfig := awsconfig.S3Config{
 			Bucket:             bucket,
-			StorageClass:       awsconfig.StorageClassIntelligentTiering, // Intelligent tiering
-			MultipartThreshold: cfg.MultipartThreshold,                   // Use configured threshold
-			MultipartChunkSize: cfg.MultipartChunkSize,                   // Use configured chunk size
-			Concurrency:        cfg.MultipartConcurrency,                 // Use configured concurrency
+			StorageClass:       ConvertTierToCargoShipStorageClass(cfg.StorageTier),
+			MultipartThreshold: cfg.MultipartThreshold,   // Use configured threshold
+			MultipartChunkSize: cfg.MultipartChunkSize,   // Use configured chunk size
+			Concurrency:        cfg.MultipartConcurrency, // Use configured concurrency
 		}
 
 		// Use CargoShip's optimized transporter with BBR/CUBIC algorithms
@@ -165,7 +173,8 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 			"target_throughput", cfg.TargetThroughput,
 			"multipart_threshold", cfg.MultipartThreshold,
 			"chunk_size", cfg.MultipartChunkSize,
-			"concurrency", cfg.MultipartConcurrency)
+			"concurrency", cfg.MultipartConcurrency,
+			"storage_class", cargoConfig.StorageClass)
 	}
 
 	return &ClientManager{

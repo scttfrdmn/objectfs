@@ -99,7 +99,7 @@ func FuzzRoundTrip(f *testing.F) {
 		n++
 		key := fmt.Sprintf("roundtrip/%s-%d.bin", algo, n)
 
-		if err := backend.PutObject(context.Background(), key, content); err != nil {
+		if err := backend.PutObject(context.Background(), key, content, nil); err != nil {
 			t.Fatalf("PutObject(%d bytes, %s) failed: %v", len(content), algo, err)
 		}
 
@@ -247,7 +247,7 @@ func TestRoundTripAcrossACodecChange(t *testing.T) {
 			defer func() { _ = writer.Close() }()
 
 			key := fmt.Sprintf("codec-change/%d.bin", i)
-			if err := writer.PutObject(context.Background(), key, content); err != nil {
+			if err := writer.PutObject(context.Background(), key, content, nil); err != nil {
 				t.Fatalf("PutObject with %s: %v", tc.wroteWith, err)
 			}
 
@@ -335,7 +335,7 @@ func TestPutObjectRecordsAVerifiableChecksum(t *testing.T) {
 			}
 
 			key := fmt.Sprintf("checksum/%d.bin", i)
-			if err := backend.PutObject(context.Background(), key, content); err != nil {
+			if err := backend.PutObject(context.Background(), key, content, nil); err != nil {
 				t.Fatalf("PutObject(%d bytes): %v", tc.size, err)
 			}
 

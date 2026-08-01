@@ -213,7 +213,7 @@ func (s *SharedServer) Bucket(ctx context.Context) (string, error) {
 
 	name := fmt.Sprintf("objectfs-shared-%d", n)
 
-	client, err := newClient(s.URL)
+	client, err := newClient(ctx, s.URL)
 	if err != nil {
 		return "", err
 	}

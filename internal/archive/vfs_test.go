@@ -28,8 +28,13 @@ func (m *mockBackend) GetObject(_ context.Context, key string, _, _ int64) ([]by
 	return data, nil
 }
 
-func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte) error { return nil }
-func (m *mockBackend) DeleteObject(_ context.Context, _ string) error        { return nil }
+func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
+	return nil
+}
+func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (m *mockBackend) DeleteObject(_ context.Context, _ string) error { return nil }
 func (m *mockBackend) HeadObject(_ context.Context, _ string) (*types.ObjectInfo, error) {
 	return nil, nil
 }

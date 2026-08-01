@@ -110,7 +110,7 @@ func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 	testData := []byte("Hello, ObjectFS Integration Test!")
 
 	// Test PutObject
-	err = backend.PutObject(suite.ctx, testKey, testData)
+	err = backend.PutObject(suite.ctx, testKey, testData, nil)
 	assert.NoError(t, err)
 
 	// Test GetObject
@@ -510,7 +510,13 @@ type failingPutBackend struct {
 	err error
 }
 
-func (b *failingPutBackend) PutObject(ctx context.Context, key string, data []byte) error {
+func (b *failingPutBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
+	return b.err
+}
+
+// SetObjectMetadata fails too. The attribute-only write path is the other way a flush reaches storage,
+// and leaving it inherited would let a flush report success through the half the test did not break.
+func (b *failingPutBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	return b.err
 }
 

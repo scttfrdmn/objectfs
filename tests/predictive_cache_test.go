@@ -17,6 +17,7 @@ import (
 type MockPredictiveBackend struct {
 	mu      sync.RWMutex
 	objects map[string][]byte
+	meta    map[string]map[string]string
 	stats   struct {
 		gets int64
 		puts int64
@@ -26,6 +27,7 @@ type MockPredictiveBackend struct {
 func NewMockPredictiveBackend() *MockPredictiveBackend {
 	return &MockPredictiveBackend{
 		objects: make(map[string][]byte),
+		meta:    make(map[string]map[string]string),
 	}
 }
 
@@ -48,13 +50,25 @@ func (m *MockPredictiveBackend) GetObject(ctx context.Context, key string, offse
 	return data[offset:end], nil
 }
 
-func (m *MockPredictiveBackend) PutObject(ctx context.Context, key string, data []byte) error {
+func (m *MockPredictiveBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stats.puts++
 
 	m.objects[key] = make([]byte, len(data))
 	copy(m.objects[key], data)
+	m.meta[key] = copyMeta(meta)
+	return nil
+}
+
+func (m *MockPredictiveBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.objects[key]; !ok {
+		return fmt.Errorf("object not found: %s", key)
+	}
+	m.meta[key] = copyMeta(meta)
 	return nil
 }
 

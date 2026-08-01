@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -639,8 +640,12 @@ func wholeObjectResponse(contentRange string, bodyLen int64) bool {
 	return bodyLen == total
 }
 
-// PutObject stores an object in S3 with CargoShip optimization
-func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error {
+// PutObject stores an object in S3 with CargoShip optimization.
+//
+// meta is merged into the object's user metadata. The integrity keys this method computes —
+// objectfs-sha256 and objectfs-original-size — are written last and win over anything meta supplies:
+// they describe the bytes being uploaded, which the caller has not seen after compression.
+func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
 	start := time.Now()
 	defer func() {
 		b.metricsCollector.RecordMetrics(time.Since(start), false)
@@ -703,10 +708,21 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 		}
 	}
 
-	// Build the user metadata common to every upload path. The original size is
-	// recorded only for compressed objects, so HeadObject can report the size the
-	// kernel needs for reads rather than the compressed ContentLength.
-	objectMeta := map[string]string{metaChecksum: checksumHex}
+	// Build the user metadata common to every upload path: the caller's attributes first, then the
+	// integrity keys, which are this method's to own and must not be overridable. The original size is
+	// recorded only for compressed objects, so HeadObject can report the size the kernel needs for
+	// reads rather than the compressed ContentLength.
+	objectMeta := make(map[string]string, len(meta)+2)
+	for k, v := range meta {
+		if strings.EqualFold(k, metaChecksum) || strings.EqualFold(k, metaOriginalSize) {
+			// Not an error: a caller round-tripping metadata it read from HeadObject will carry these,
+			// and refusing the write would make the obvious way to preserve attributes fail. They are
+			// simply recomputed below.
+			continue
+		}
+		objectMeta[k] = v
+	}
+	objectMeta[metaChecksum] = checksumHex
 	if compressed {
 		objectMeta[metaOriginalSize] = strconv.FormatInt(int64(len(data)), 10)
 	}
@@ -815,6 +831,114 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte) error 
 	})
 
 	return err
+}
+
+// SetObjectMetadata replaces key's user metadata in place, without rewriting its contents.
+//
+// S3 has no metadata-update operation, so this is a CopyObject onto the same key with
+// MetadataDirective=REPLACE. The object's bytes are never transferred — the copy happens
+// server-side — which is the whole reason a chmod does not read and rewrite a 10 GiB file.
+//
+// Every other stored property has to be restated, because REPLACE discards all of them and not just
+// the metadata map. Content-Encoding is the one that matters for integrity: the read path dispatches
+// decoding on the stored encoding and fails closed on an encoding it cannot handle, so a chmod that
+// dropped the header would leave a compressed object permanently unreadable. Storage class is
+// restated because the default is STANDARD, so omitting it would silently promote an object out of
+// the tier the user is paying for — the same defect shape as L26.
+func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
+	start := time.Now()
+	defer func() {
+		b.metricsCollector.RecordMetrics(time.Since(start), false)
+	}()
+
+	if !b.healthTracker.CanWrite("s3-writes") {
+		state := b.healthTracker.GetState("s3-writes")
+		return errors.NewError(errors.ErrCodeServiceUnavailable, "S3 write operations are unavailable").
+			WithComponent("s3-backend").
+			WithOperation("SetObjectMetadata").
+			WithContext("health_state", state.String()).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key)
+	}
+
+	// Read the object's current state first. Its metadata is merged under the caller's — the integrity
+	// keys live there and are this backend's to preserve, and a caller setting a mode has no way to
+	// recompute a checksum over bytes it never saw.
+	head, err := b.headRaw(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	merged := make(map[string]string, len(head.Metadata)+len(meta))
+	maps.Copy(merged, head.Metadata)
+	for k, v := range meta {
+		if strings.EqualFold(k, metaChecksum) || strings.EqualFold(k, metaOriginalSize) {
+			continue
+		}
+		merged[k] = v
+	}
+
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return fmt.Errorf("set metadata on %q: %w", key, err)
+	}
+	defer b.clientManager.ReturnPooledClient(client)
+
+	// The source must be URL-escaped: S3 reads x-amz-copy-source as a path, so an unescaped key
+	// containing a space, a "+", or a "?" names a different object or fails outright.
+	//
+	// StorageClass is copied through as-is, including empty: HeadObject omits the header for STANDARD,
+	// and an empty StorageClass on the request means STANDARD too, so the round-trip is faithful at
+	// both ends.
+	input := &s3.CopyObjectInput{
+		Bucket:            aws.String(b.bucket),
+		Key:               aws.String(key),
+		CopySource:        aws.String(url.PathEscape(b.bucket + "/" + key)),
+		MetadataDirective: s3types.MetadataDirectiveReplace,
+		Metadata:          merged,
+		StorageClass:      head.StorageClass,
+	}
+	if enc := aws.ToString(head.ContentEncoding); enc != "" {
+		input.ContentEncoding = aws.String(enc)
+	}
+	if ct := aws.ToString(head.ContentType); ct != "" {
+		input.ContentType = aws.String(ct)
+	}
+
+	if _, err := client.CopyObject(ctx, input); err != nil {
+		b.metricsCollector.RecordError(err)
+		translated := b.translateError(err, "SetObjectMetadata", key)
+		b.healthTracker.RecordError("s3-writes", translated)
+		return translated
+	}
+
+	b.healthTracker.RecordSuccess("s3-writes")
+
+	return nil
+}
+
+// headRaw is HeadObject without ObjectFS's interpretation of the result: the SDK output, whose
+// Content-Encoding and StorageClass [Backend.SetObjectMetadata] must restate and which
+// types.ObjectInfo does not carry.
+func (b *Backend) headRaw(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return nil, fmt.Errorf("head %q: %w", key, err)
+	}
+	defer b.clientManager.ReturnPooledClient(client)
+
+	out, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return nil, b.translateError(err, "HeadObject", key)
+	}
+
+	return out, nil
 }
 
 // DeleteObject removes an object from S3
@@ -999,7 +1123,7 @@ func (b *Backend) PutObjects(ctx context.Context, objects map[string][]byte) err
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			err := b.PutObject(ctx, k, d)
+			err := b.PutObject(ctx, k, d, nil)
 			resultCh <- result{key: k, err: err}
 		}(key, data)
 	}
@@ -1019,7 +1143,13 @@ func (b *Backend) PutObjects(ctx context.Context, objects map[string][]byte) err
 	return nil
 }
 
-// ListObjects lists objects in the bucket with the given prefix
+// ListObjects lists objects in the bucket with the given prefix, following continuation tokens until
+// the limit is met or the prefix is exhausted. A limit of zero or less means every object.
+//
+// Pagination is not an optimization. S3 caps a single ListObjectsV2 response at 1000 keys regardless
+// of MaxKeys, and v0.10.0 issued exactly one request — so a directory with more than 1000 entries was
+// silently truncated, and a truncated listing is not a cosmetic problem: the missing entries do not
+// exist as far as readdir, and therefore as far as `cp -r` or `rm -r`, are concerned.
 func (b *Backend) ListObjects(ctx context.Context, prefix string, limit int) ([]types.ObjectInfo, error) {
 	start := time.Now()
 	defer func() {
@@ -1033,49 +1163,66 @@ func (b *Backend) ListObjects(ctx context.Context, prefix string, limit int) ([]
 	}
 	defer b.clientManager.ReturnPooledClient(client)
 
-	var maxKeys *int32
-	if limit > 0 {
-		// Safe conversion to prevent overflow
-		if limit > 0x7FFFFFFF {
-			maxKeys = aws.Int32(0x7FFFFFFF)
-		} else {
-			maxKeys = aws.Int32(int32(limit))
-		}
-	}
-
-	input := &s3.ListObjectsV2Input{
-		Bucket:  aws.String(b.bucket),
-		Prefix:  aws.String(prefix),
-		MaxKeys: maxKeys,
-	}
-
-	result, err := client.ListObjectsV2(ctx, input)
-	if err != nil {
-		b.metricsCollector.RecordError(err)
-		return nil, b.translateError(err, "ListObjects", prefix)
-	}
-
-	// NOTE: Size here is the *stored* length from the list response. For compressed
+	// NOTE: Size below is the *stored* length from the list response. For compressed
 	// objects that is the compressed size — ListObjectsV2 returns no user metadata,
 	// so objectfs-original-size is unavailable without a HeadObject per entry. This
 	// only affects sizes shown in directory listings; the kernel sizes reads from
 	// Lookup → HeadObject, which does report the uncompressed size. Adding a
 	// HeadObject fan-out here would cost one request per entry and is deliberately
 	// not done.
-	objects := make([]types.ObjectInfo, 0, len(result.Contents))
-	for _, obj := range result.Contents {
-		info := types.ObjectInfo{
-			Key:          aws.ToString(obj.Key),
-			Size:         aws.ToInt64(obj.Size),
-			LastModified: aws.ToTime(obj.LastModified),
-			ETag:         aws.ToString(obj.ETag),
-			Metadata:     make(map[string]string),
-		}
-		objects = append(objects, info)
-	}
+	var (
+		objects           []types.ObjectInfo
+		continuationToken *string
+	)
 
-	return objects, nil
+	for {
+		input := &s3.ListObjectsV2Input{
+			Bucket:            aws.String(b.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: continuationToken,
+		}
+
+		// Ask for only what is still wanted. Requesting more than the remainder would work — the extra
+		// keys are discarded below — but it makes the last page needlessly large on a small limit, and
+		// Lookup's existence probe passes limit 1 precisely to keep that page cheap.
+		if limit > 0 {
+			remaining := limit - len(objects)
+			input.MaxKeys = aws.Int32(int32(min(remaining, maxKeysPerRequest)))
+		}
+
+		result, err := client.ListObjectsV2(ctx, input)
+		if err != nil {
+			b.metricsCollector.RecordError(err)
+			return nil, b.translateError(err, "ListObjects", prefix)
+		}
+
+		for _, obj := range result.Contents {
+			objects = append(objects, types.ObjectInfo{
+				Key:          aws.ToString(obj.Key),
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: aws.ToTime(obj.LastModified),
+				ETag:         aws.ToString(obj.ETag),
+				Metadata:     make(map[string]string),
+			})
+
+			if limit > 0 && len(objects) >= limit {
+				return objects, nil
+			}
+		}
+
+		// IsTruncated is the only authoritative "there is more". A page can be short of MaxKeys and
+		// still be followed by another — S3 documents no minimum page size — so deciding from the count
+		// would drop entries on exactly the buckets where it is hardest to notice.
+		if !aws.ToBool(result.IsTruncated) || aws.ToString(result.NextContinuationToken) == "" {
+			return objects, nil
+		}
+		continuationToken = result.NextContinuationToken
+	}
 }
+
+// maxKeysPerRequest is the largest page S3 will return whatever MaxKeys asks for. Requesting more is
+// not an error and not honored, which is why the single-request version silently truncated.
+const maxKeysPerRequest = 1000
 
 // HealthCheck verifies the backend connection
 func (b *Backend) HealthCheck(ctx context.Context) error {

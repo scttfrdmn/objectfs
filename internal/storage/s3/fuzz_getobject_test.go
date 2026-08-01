@@ -40,7 +40,7 @@ func FuzzGetObjectRange(f *testing.F) {
 		content[i] = byte(i*31 + i>>8)
 	}
 
-	if err := backend.PutObject(context.Background(), key, content); err != nil {
+	if err := backend.PutObject(context.Background(), key, content, nil); err != nil {
 		f.Fatalf("seed the object under test: %v", err)
 	}
 

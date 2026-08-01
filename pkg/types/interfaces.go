@@ -7,9 +7,36 @@ import (
 
 // Backend defines the interface for object storage backends
 type Backend interface {
-	// Object operations
+	// GetObject returns bytes [offset, offset+size) of key. A size of zero or less means "to the end
+	// of the object" — assigning no meaning to it is what made a negative size a reachable panic.
 	GetObject(ctx context.Context, key string, offset, size int64) ([]byte, error)
-	PutObject(ctx context.Context, key string, data []byte) error
+
+	// PutObject stores data as key, with meta as the object's user metadata. A nil meta is valid and
+	// means "no attributes to record".
+	//
+	// The metadata parameter is not a convenience. POSIX mode, ownership, and mtime have no native
+	// field in object storage, so user metadata is the only place they can live; a Put that cannot
+	// carry them makes chmod and chown unimplementable, which is precisely the state v0.10.0 was in.
+	//
+	// Implementations own the integrity keys — objectfs-sha256 and objectfs-original-size — and must
+	// ignore caller-supplied values for them. Those describe the bytes being stored, which only the
+	// implementation has seen after compression, and a second writer for them would be a second
+	// source of truth for the values integrity checking depends on.
+	PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error
+
+	// SetObjectMetadata replaces key's user metadata without rewriting its contents, preserving every
+	// other stored property — content encoding, content type, and storage class.
+	//
+	// It exists because a chmod is not a write. Persisting one through PutObject would mean reading
+	// the whole object back and uploading it again: on a 10 GiB file, 20 GiB of transfer to change
+	// nine bits. Implementations that have no in-place metadata operation should still preserve the
+	// object's bytes and properties exactly.
+	//
+	// Preserving Content-Encoding is load-bearing rather than tidy. The read path dispatches decoding
+	// on the stored encoding and fails closed when it cannot handle what it finds, so dropping the
+	// header here would turn a chmod on a compressed object into an unreadable file.
+	SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error
+
 	DeleteObject(ctx context.Context, key string) error
 	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
 
@@ -17,7 +44,13 @@ type Backend interface {
 	GetObjects(ctx context.Context, keys []string) (map[string][]byte, error)
 	PutObjects(ctx context.Context, objects map[string][]byte) error
 
-	// List operations
+	// ListObjects returns the objects under prefix, at most limit of them. A limit of zero or less
+	// means every object under the prefix.
+	//
+	// Implementations must paginate to satisfy the limit. S3's ListObjectsV2 caps a single response at
+	// 1000 keys whatever MaxKeys says, so an implementation that issues one request silently truncates
+	// — and a truncated listing is not a display problem: it is a directory whose later entries do not
+	// exist as far as every caller is concerned, so `rm -r` reports success having deleted a prefix.
 	ListObjects(ctx context.Context, prefix string, limit int) ([]ObjectInfo, error)
 
 	// Health check

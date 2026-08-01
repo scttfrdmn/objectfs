@@ -43,9 +43,20 @@ internal/filesystem      88
 internal/health          45
 internal/metrics         79
 internal/network         100
-internal/storage/s3      71
 internal/testaws         57
 internal/vfs             98
+
+# internal/storage/s3 goes from 71 to 73 with the two operations the node contract added to the
+# backend: an attribute-only write and a listing that follows continuation tokens. Both are seam
+# operations in the strict sense — what matters is what crosses the wire, so both are tested by
+# asserting on the endpoint rather than on a return value.
+#
+# The two points that raise is worth: writing the missing assertion for "SetObjectMetadata restates
+# the storage class" found that the configured storage_tier never reached S3 at all on the shipped
+# default path. Every layer in between agreed on the tier — ValidateWrite enforced its minimum size,
+# the logs named it, ConvertTierToStorageClass had a passing unit test — while objects were stored as
+# INTELLIGENT_TIERING. Coverage of a seam is not the same quantity as coverage of a function.
+internal/storage/s3      73
 
 # internal/adapter is the one package whose floor is set below the current measurement on purpose.
 # Its coverage moves with which S3-backed tests the harness can run, and the write-path rebuild
@@ -63,10 +74,21 @@ internal/adapter         40
 # the paths where the cache-keying and prefetch defects lived, and they were previously reachable in
 # tests only through a map-backed stub that answered every request regardless of length.
 #
-# 37 is still not a target. This package remains a coupling of POSIX semantics to go-fuse types with
-# little seam to test at, which is what task #22 is for: once it is a translation shim over
-# internal/vfs (98%), its floor goes up with the rewrite rather than ahead of it.
-internal/fuse            37
+# The node-contract work raises it to 56, and the mechanism is the one the previous note predicted:
+# the package became a translation shim over internal/vfs, so its behaviour is now reachable by
+# calling a node method and asserting on S3 rather than by mounting. Getattr, Setattr, Fsync, Statfs,
+# Lookup, Readdir, Mkdir, and Create are covered against a substrate-backed endpoint.
+#
+# A table test over toErrno takes it to 59. That function is the whole of the package's error contract
+# and was at 16.2% — reachable only incidentally, through whichever error an operation test happened to
+# provoke. It is also the one function here whose defects are invisible to every other test, because a
+# wrong errno does not fail an operation, it fails it differently: v0.10.0 collapsed every HeadObject
+# error to ENOENT, and Create read that as "absent" and wrote an empty object over a throttled file.
+#
+# 59 rather than 80 because what remains uncovered is mostly what a unit test cannot reach: the mount
+# and unmount lifecycle, the signal handling around it, and the go-fuse option construction. Those
+# need a real mount, which is the live integration suite's job.
+internal/fuse            59
 
 # internal/cache goes from 74 to 76 with the re-keying work. The rise is small and the reason it is
 # small is worth stating: the chunking logic the two caches now share is one 250-line file that is

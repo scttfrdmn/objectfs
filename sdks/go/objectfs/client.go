@@ -110,8 +110,12 @@ func (c *Client) Get(ctx context.Context, key string, offset, size int64) ([]byt
 }
 
 // Put stores data under key in S3.
+//
+// No user metadata is attached. The POSIX attributes ObjectFS records in object metadata belong to
+// the filesystem's own view of a file; an object written through this client is not a file, and
+// stamping it with a mode and an owner it never had would make a later mount describe it wrongly.
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
-	return c.backend.PutObject(ctx, key, data)
+	return c.backend.PutObject(ctx, key, data, nil)
 }
 
 // Delete removes the object at key from S3.

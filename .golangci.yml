@@ -128,6 +128,18 @@ linters:
         linters:
           - paralleltest
 
+      # A test helper that takes *testing.T and no context is not a context violation. The testaws
+      # harness deliberately keeps context out of its assertion helpers — ts.GetObject, ts.Backend,
+      # ts.ObjectStorageClass — because a test that has to thread a context through an assertion
+      # reads as though the context were part of what is being asserted, and the harness fails the
+      # test itself rather than returning an error a caller might ignore. Where a context genuinely
+      # matters the harness offers ClientContext. contextcheck flags the helper's internal use of
+      # context.Background as failing to propagate the test's, which is not a defect it can act on.
+      - path: '_test\.go'
+        text: 'should pass the context parameter'
+        linters:
+          - contextcheck
+
       # The SDKs are a published surface: an exported symbol with no caller inside this repo is
       # the normal case there, not dead code.
       - path: 'sdks/'

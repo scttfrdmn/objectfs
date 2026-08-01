@@ -68,7 +68,7 @@ func TestShippedDefaultsConstructABackend(t *testing.T) {
 	const key = "defaults/roundtrip"
 
 	want := testaws.DeterministicBytes(key, 64*1024)
-	if err := backend.PutObject(ctx, key, want); err != nil {
+	if err := backend.PutObject(ctx, key, want, nil); err != nil {
 		t.Fatalf("PutObject on the default configuration: %v", err)
 	}
 

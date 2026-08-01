@@ -123,7 +123,7 @@ func TestDefaultConfigDoesNotCorruptCompressedObjects(t *testing.T) {
 	// Above the 4KB MinSize, so compression actually engages.
 	want := compressible(8192)
 
-	if err := backend.PutObject(ctx, key, want); err != nil {
+	if err := backend.PutObject(ctx, key, want, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestHeadObjectAgreesWithGetObject(t *testing.T) {
 	const key = "compressed/size-agreement"
 
 	want := compressible(8192)
-	if err := backend.PutObject(ctx, key, want); err != nil {
+	if err := backend.PutObject(ctx, key, want, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestUncompressedObjectsAreUnaffected(t *testing.T) {
 	const small = "small/object"
 
 	tiny := testaws.DeterministicBytes(small, 100)
-	if err := backend.PutObject(ctx, small, tiny); err != nil {
+	if err := backend.PutObject(ctx, small, tiny, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
@@ -357,7 +357,7 @@ func TestCompressionRoundTripAcrossSizes(t *testing.T) {
 			key := "roundtrip/compressed/" + sizeName(size)
 			want := compressible(size)
 
-			if err := backend.PutObject(ctx, key, want); err != nil {
+			if err := backend.PutObject(ctx, key, want, nil); err != nil {
 				t.Fatalf("PutObject(%d): %v", size, err)
 			}
 
@@ -421,7 +421,7 @@ func TestMultipartCompressedObjectRoundTrips(t *testing.T) {
 	// leaving this test measuring nothing.
 	want := semiCompressible(key, size)
 
-	if err := backend.PutObject(ctx, key, want); err != nil {
+	if err := backend.PutObject(ctx, key, want, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
@@ -479,7 +479,7 @@ func TestChecksumMetadataSurvivesCompression(t *testing.T) {
 	const key = "checksum/compressed"
 
 	want := compressible(8192)
-	if err := backend.PutObject(ctx, key, want); err != nil {
+	if err := backend.PutObject(ctx, key, want, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 

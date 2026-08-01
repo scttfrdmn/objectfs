@@ -77,10 +77,10 @@ Flexible mount configuration options:
 			AllowRoot:    false,
 
 			// Performance tuning
-			MaxRead:      128 * 1024,  // 128KB read buffer
 			MaxWrite:     128 * 1024,  // 128KB write buffer
 
-			// Caching
+			// Caching. AttrTimeout also becomes the timeout the nodes report from Getattr and
+			// Setattr, so the two cannot disagree.
 			AttrTimeout:  5 * time.Second,
 			EntryTimeout: 10 * time.Second,
 
@@ -89,12 +89,17 @@ Flexible mount configuration options:
 			Subtype:      "s3",
 		},
 		Permissions: &fuse.Permissions{
-			DefaultUID:  1000,
-			DefaultGID:  1000,
-			DefaultMode: 0644,
-			DirMode:     0755,
+			UID:      1000,
+			GID:      1000,
+			FileMode: 0644,
+			DirMode:  0755,
 		},
 	}
+
+`MountOptions.MaxRead` exists and is not plumbed anywhere: `fuse.MountOptions` in go-fuse v2.11.0
+has no corresponding field, so there is nothing to pass it to. It is retained only because removing
+a YAML key breaks existing config files. Set `MaxWrite` instead; the read size is negotiated by the
+kernel.
 
 # Usage Examples
 
@@ -173,9 +178,23 @@ implemented today.
 
 # Permissions
 
-Ownership and mode are not persisted. Every entry reports the configured `DefaultUID`,
-`DefaultGID`, and `DefaultMode` from `MountConfig.Permissions`. `chmod` and `chown` are not
-implemented, so their effects do not survive a remount.
+For a regular file, ownership and mode are persisted as object user metadata
+(`objectfs-uid`, `objectfs-gid`, `objectfs-mode`) and survive a remount. `chmod`, `chown`, and
+`touch` are implemented and flush synchronously, because both take a path rather than a descriptor:
+there is no handle whose release would later make the change durable, so a change not written
+immediately would never be written at all. An object carrying none of those keys — one written by
+`aws s3 cp`, boto3, or any other tool — reports the values from `MountConfig.Permissions`, defaulting
+to the mounting user and 0644.
+
+Setuid, setgid, and sticky are refused with ENOTSUP rather than stored. `vfs.Attr.Mode` holds
+permission bits only, and a setuid bit that appeared to persist would promise an escalation this
+filesystem cannot perform.
+
+A directory is a key prefix, so it has no metadata to hold anything: it reports
+`Permissions.DirMode` (default 0755), and `chmod` on it returns ENOTSUP rather than reporting a
+change that the next stat would contradict. Its times are synthetic — `utimes` on a directory is
+accepted and stores nothing, because failing it would make every `tar -x` and `cp -a` report errors
+for an attribute with nowhere to go.
 
 Access control is enforced by the S3 credentials the process holds, not by the reported mode bits.
 A mode of 0644 on a mount whose credentials grant `s3:PutObject` to everything does not make the
@@ -194,7 +213,13 @@ deletions that never happened through v0.10.0.
 # Thread safety
 
 FUSE delivers concurrent Read and Write calls against the same open file descriptor, so per-handle
-mutable state (`dirty`, `modified`, `size`, access tracking) is guarded by `OpenFile.accessMu` and
-the handle table by `FileSystem.mu`. All exported entry points are safe for concurrent use.
+mutable state (`dirty` and the access counters) is guarded by `OpenFile.accessMu` and the handle
+table by `FileSystem.mu`. All exported entry points are safe for concurrent use.
+
+A handle holds no size and no mode. Both were per-handle fields through v0.10.0, and both were a
+second source of truth for a value another descriptor can change underneath: a read is clamped
+against the size stat reported, so a handle's stale copy silently truncated reads of a file that had
+grown. Size comes from `internal/vfs` (which knows the pending writes) or from the object's metadata;
+mode comes from the object's metadata.
 */
 package fuse

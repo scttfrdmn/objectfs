@@ -141,7 +141,7 @@ func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
 	// Only ~50% compressible. compressible() shrinks 1 MiB to about 130 bytes, which would put every
 	// offset past the end of the stored body and collapse the two cases below into one.
 	body := semiCompressible(key, objectSize)
-	if err := backend.PutObject(ctx, key, body); err != nil {
+	if err := backend.PutObject(ctx, key, body, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 

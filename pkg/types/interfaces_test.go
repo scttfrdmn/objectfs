@@ -29,7 +29,11 @@ func (m *mockBackend) GetObject(ctx context.Context, key string, offset, size in
 	return nil, nil
 }
 
-func (m *mockBackend) PutObject(ctx context.Context, key string, data []byte) error {
+func (m *mockBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
+	return nil
+}
+
+func (m *mockBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	return nil
 }
 

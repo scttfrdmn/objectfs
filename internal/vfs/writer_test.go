@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -28,11 +30,33 @@ import (
 type fakeBackend struct {
 	mu      sync.Mutex
 	objects map[string][]byte
-	calls   []string
+
+	// meta holds each object's user metadata, kept as a real store rather than discarded. A fake that
+	// accepted metadata and dropped it would agree with every caller about attributes being written
+	// while nothing was — which is the shape of the defect the attribute path exists to fix, so the
+	// fake has to be able to expose it.
+	meta  map[string]map[string]string
+	calls []string
 
 	// putErr, when set, fails every PutObject. This is M22: a rejected upload must surface at
 	// close(2) rather than incrementing a counter nobody reads.
 	putErr error
+
+	// setMetaErr fails SetObjectMetadata, which is the attribute-only write path.
+	setMetaErr error
+
+	// setMetaSilentlyIgnores makes SetObjectMetadata return success and store nothing. This is not a
+	// hypothetical: S3 has no metadata-update operation, so the real implementation is a self-copy with
+	// MetadataDirective=REPLACE, and an endpoint that does not implement the directive answers 200 while
+	// carrying the source object's metadata forward (scttfrdmn/substrate#435). The write path has to
+	// catch that, because "chmod reports success and does nothing" is invisible from the caller's side.
+	setMetaSilentlyIgnores bool
+
+	// canonicalizeMetaKeys makes HeadObject return metadata keys title-cased, the way a Go http.Header
+	// round trip and MinIO both do. Real S3 lower-cases them. A read-back that compares keys
+	// case-sensitively passes against one and fails against the other, which is the seam shape this
+	// whole audit was about, so the fake can produce both.
+	canonicalizeMetaKeys bool
 
 	// headErr and getErr fail HeadObject and GetObject with something that is not an absence. They
 	// exist to prove the write path distinguishes "this object does not exist" from "I could not find
@@ -50,7 +74,10 @@ type fakeBackend struct {
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{objects: make(map[string][]byte)}
+	return &fakeBackend{
+		objects: make(map[string][]byte),
+		meta:    make(map[string]map[string]string),
+	}
 }
 
 func (f *fakeBackend) record(format string, args ...any) {
@@ -72,11 +99,29 @@ func (f *fakeBackend) Object(key string) ([]byte, bool) {
 	return append([]byte(nil), data...), ok
 }
 
+// Meta returns the stored user metadata for key.
+func (f *fakeBackend) Meta(key string) map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.meta[key]))
+	maps.Copy(out, f.meta[key])
+	return out
+}
+
 // Put stores an object directly, bypassing the recording, to set up a test's initial state.
 func (f *fakeBackend) Put(key string, data []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.objects[key] = append([]byte(nil), data...)
+}
+
+// PutWithMeta is [fakeBackend.Put] for an object that already carries attributes, which is how a test
+// sets up a file that exists in storage owned by somebody.
+func (f *fakeBackend) PutWithMeta(key string, data []byte, meta map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[key] = append([]byte(nil), data...)
+	f.meta[key] = meta
 }
 
 func (f *fakeBackend) GetObject(_ context.Context, key string, offset, size int64) ([]byte, error) {
@@ -103,21 +148,45 @@ func (f *fakeBackend) GetObject(_ context.Context, key string, offset, size int6
 	return append([]byte(nil), data[offset:end]...), nil
 }
 
-func (f *fakeBackend) PutObject(_ context.Context, key string, data []byte) error {
+func (f *fakeBackend) PutObject(_ context.Context, key string, data []byte, meta map[string]string) error {
 	f.mu.Lock()
-	f.record("PUT %s (%d bytes)", key, len(data))
+	f.record("PUT %s (%d bytes, %d meta)", key, len(data), len(meta))
 	if f.putErr != nil {
 		err := f.putErr
 		f.mu.Unlock()
 		return err
 	}
 	f.objects[key] = append([]byte(nil), data...)
+	// A PUT replaces metadata wholesale, as S3's does. Merging instead would hide a caller that
+	// forgot to carry the attributes forward.
+	f.meta[key] = meta
 	onPut := f.onPut
 	f.mu.Unlock()
 
 	if onPut != nil {
 		onPut()
 	}
+	return nil
+}
+
+func (f *fakeBackend) SetObjectMetadata(_ context.Context, key string, meta map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.record("SETMETA %s (%d meta)", key, len(meta))
+
+	if f.setMetaErr != nil {
+		return f.setMetaErr
+	}
+	if _, ok := f.objects[key]; !ok {
+		// Absence, not a generic failure: the attribute path must treat "no object yet" as a legal
+		// state and keep the attributes pending rather than failing close(2).
+		return errNotFound
+	}
+	if f.setMetaSilentlyIgnores {
+		return nil
+	}
+	f.meta[key] = meta
 	return nil
 }
 
@@ -139,7 +208,19 @@ func (f *fakeBackend) HeadObject(_ context.Context, key string) (*types.ObjectIn
 	if f.headSize != nil {
 		size = *f.headSize
 	}
-	return &types.ObjectInfo{Key: key, Size: size, ETag: fmt.Sprintf("etag-%d", len(data))}, nil
+	meta := make(map[string]string, len(f.meta[key]))
+	for k, v := range f.meta[key] {
+		if f.canonicalizeMetaKeys {
+			k = http.CanonicalHeaderKey(k)
+		}
+		meta[k] = v
+	}
+	return &types.ObjectInfo{
+		Key:      key,
+		Size:     size,
+		ETag:     fmt.Sprintf("etag-%d", len(data)),
+		Metadata: meta,
+	}, nil
 }
 
 func (f *fakeBackend) DeleteObject(_ context.Context, key string) error {
@@ -1368,5 +1449,537 @@ func TestReadOfADeletedObjectServesPendingWritesOverZeros(t *testing.T) {
 	}
 	if want := "\x00\x00\x00\x00\x00\x00TAIL"; string(buf[:n]) != want {
 		t.Errorf("read %q, want %q", buf[:n], want)
+	}
+}
+
+// TestAttrOnlyFlushFailsWhenTheBackendStoredNothing is the confirmation step of the attribute path.
+//
+// S3 has no metadata-update operation. Changing an object's user metadata means a self-copy with
+// MetadataDirective=REPLACE, which is a compound operation with a silent no-op mode: an endpoint that
+// does not implement the directive answers 200 and carries the *source* object's metadata forward.
+// Found against a real endpoint that does exactly this (scttfrdmn/substrate#435).
+//
+// So a chmod would report success, the next stat would report the old mode, and nothing would connect
+// the two. The flush reads the metadata back — the confirming HEAD is already being issued for the
+// size check — and refuses to mark the node clean, which keeps the attributes pending for the next
+// flush instead of discarding them.
+func TestAttrOnlyFlushFailsWhenTheBackendStoredNothing(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("contents"), map[string]string{"objectfs-mode": "644"})
+	backend.setMetaSilentlyIgnores = true
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err = w.SetAttr(context.Background(), "f", true, false, false,
+		vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+		t.Fatalf("SetAttr: %v", err)
+	}
+
+	err = w.Flush("f")
+	if err == nil {
+		t.Fatal("a chmod the backend silently discarded reported success; that is a mode that does not " +
+			"survive a remount, with nothing to indicate it")
+	}
+	if !errors.Is(err, vfs.ErrIntegrity) {
+		t.Errorf("error is not an integrity failure: %v", err)
+	}
+	if !strings.Contains(err.Error(), "objectfs-mode") {
+		t.Errorf("the error does not name the attribute that did not land: %v", err)
+	}
+
+	// The change stays pending. Dropping it would turn a detected failure into the silent one.
+	if !w.Dirty("f") {
+		t.Error("the unverified attribute change was discarded")
+	}
+}
+
+// TestAttrOnlyFlushIgnoresMetadataItDoesNotOwn covers the other direction of the same check.
+//
+// The confirming read-back compares only the keys the flush set. A backend legitimately carries keys
+// this layer does not own — the integrity keys objectfs-sha256 and objectfs-original-size, which the
+// S3 backend computes and deliberately refuses to let a caller override, plus anything another tool
+// put there. Comparing whole maps would make every chmod of a compressed object fail.
+func TestAttrOnlyFlushIgnoresMetadataItDoesNotOwn(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("contents"), map[string]string{
+		"objectfs-sha256":        "deadbeef",
+		"objectfs-original-size": "8",
+		"some-other-tool":        "value",
+	})
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.SetAttr(context.Background(), "f", true, false, false,
+		vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+		t.Fatalf("SetAttr: %v", err)
+	}
+
+	if err := w.Flush("f"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if got := backend.Meta("f")["objectfs-mode"]; got != "600" {
+		t.Errorf("stored objectfs-mode = %q, want 600", got)
+	}
+}
+
+// TestAttrOnlyFlushToleratesCaseFoldedMetadataKeys is the case-sensitivity trap.
+//
+// S3 lower-cases user-metadata keys, MinIO title-cases them, and a Go http.Header round trip
+// canonicalises them to Objectfs-Mode. A case-sensitive read-back would therefore pass against a fake
+// and report a spurious integrity failure — a chmod that cannot succeed — against real storage. That
+// is the exact seam shape this whole audit was about, so it is asserted rather than assumed.
+func TestAttrOnlyFlushToleratesCaseFoldedMetadataKeys(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("contents"), nil)
+	backend.canonicalizeMetaKeys = true
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.SetAttr(context.Background(), "f", true, false, false,
+		vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+		t.Fatalf("SetAttr: %v", err)
+	}
+
+	if err := w.Flush("f"); err != nil {
+		t.Fatalf("a backend that title-cases metadata keys failed the read-back: %v", err)
+	}
+	if w.Dirty("f") {
+		t.Error("the node is still dirty after a flush that reported success")
+	}
+}
+
+// TestWriterAttrReportsPendingChangesAndAbsence covers [vfs.Writer.Attr], which is what a stat asks.
+//
+// The two returns are the whole contract: an Attr, and whether the write path holds anything for the
+// key at all. A false second return is not an error — it means nothing is buffered, so the caller's
+// stored metadata is the current answer. Reporting an empty Attr as authoritative instead would make
+// a stat of an unopened file report mode 0000, which is the defect that made every directory in
+// v0.10.0 untraversable.
+func TestWriterAttrReportsPendingChangesAndAbsence(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("0123456789"), map[string]string{"objectfs-mode": "644"})
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	// Nothing buffered yet.
+	if _, ok := w.Attr("f"); ok {
+		t.Error("Attr claimed to hold state for a key nothing has touched")
+	}
+
+	// A pending chmod is visible before it is durable. This is what makes `chmod 600 f && stat f`
+	// report 600 rather than the object's still-unchanged metadata.
+	if err := w.SetAttr(context.Background(), "f", true, false, false,
+		vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+		t.Fatalf("SetAttr: %v", err)
+	}
+
+	got, ok := w.Attr("f")
+	if !ok {
+		t.Fatal("Attr reported no state for a key with a pending chmod")
+	}
+	if got.Mode.Perm() != 0o600 {
+		t.Errorf("Attr reports mode %#o, want 0600", got.Mode.Perm())
+	}
+	if got.Size != 10 {
+		t.Errorf("Attr reports size %d, want 10: a chmod must not change the size", got.Size)
+	}
+
+	// A pending write moves the size the same way, which is the value the kernel clamps reads to.
+	if err := w.Write("f", 10, []byte("MORE")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, _ := w.Attr("f"); got.Size != 14 {
+		t.Errorf("Attr reports size %d after appending 4 bytes to a 10-byte file, want 14", got.Size)
+	}
+
+	// And after a flush the node is dropped, so Attr goes back to reporting nothing — the object's own
+	// metadata is authoritative again.
+	if err := w.Flush("f"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if _, ok := w.Attr("f"); ok {
+		t.Error("Attr still claims state for a key that flushed clean; the node was not released")
+	}
+}
+
+// TestSetAttrAppliesOnlyTheFieldsTheMaskNames is the FATTR mask, checked in the direction that loses
+// data.
+//
+// A SETATTR request carries a bitmask saying which fields the caller set; the rest hold whatever was
+// in the struct, which in practice is zero. Applying them all would turn every `touch` into a chown to
+// root and a chmod to 0000. The three booleans carry that mask down to here, which is the one place
+// that owns the merge.
+func TestSetAttrAppliesOnlyTheFieldsTheMaskNames(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("contents"), map[string]string{
+		"objectfs-mode": "644",
+		"objectfs-uid":  "4242",
+		"objectfs-gid":  "4343",
+	})
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	// Mode only. Uid and Gid are zero in the request, as the kernel leaves them.
+	if err := w.SetAttr(context.Background(), "f", true, false, false,
+		vfs.Attr{Mode: fs.FileMode(0o600), UID: 0, GID: 0}); err != nil {
+		t.Fatalf("SetAttr: %v", err)
+	}
+
+	got, ok := w.Attr("f")
+	if !ok {
+		t.Fatal("no pending state after SetAttr")
+	}
+	if got.Mode.Perm() != 0o600 {
+		t.Errorf("mode is %#o, want 0600: the field the mask named was not applied", got.Mode.Perm())
+	}
+	if got.UID != 4242 || got.GID != 4343 {
+		t.Errorf("ownership is %d:%d, want 4242:4343. The request's unset zero fields were applied as "+
+			"though the caller had set them, which turns every chmod into a chown to root.",
+			got.UID, got.GID)
+	}
+
+	// And an mtime rides along on a non-zero value rather than on a boolean, because a zero time is
+	// unambiguously "not set" in a way a zero uid is not.
+	when := got.Mtime
+	if err := w.SetAttr(context.Background(), "f", false, false, false, vfs.Attr{}); err != nil {
+		t.Fatalf("SetAttr with nothing set: %v", err)
+	}
+	if after, _ := w.Attr("f"); !after.Mtime.Equal(when) {
+		t.Errorf("a SetAttr with a zero Mtime changed it from %v to %v", when, after.Mtime)
+	}
+}
+
+// TestTruncateRecordsAPendingResize covers [vfs.Writer.Truncate] in both directions.
+//
+// v0.10.0 had no truncate anywhere — no Setattr, no Truncate, no O_TRUNC handling — so `> file` could
+// not shorten an object. Both directions matter and they fail differently: shortening must not leave
+// the tail of the old object behind, and extending must zero-fill rather than leaving a short object
+// that a stat describes as long.
+func TestTruncateRecordsAPendingResize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		size int64
+		want string
+	}{
+		{name: "shorten", size: 4, want: "0123"},
+		{name: "to zero", size: 0, want: ""},
+		{name: "extend zero-fills", size: 14, want: "0123456789\x00\x00\x00\x00"},
+		{name: "unchanged", size: 10, want: "0123456789"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend := newFakeBackend()
+			backend.Put("f", []byte("0123456789"))
+
+			w, err := vfs.NewWriter(context.Background(), backend)
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+
+			if err := w.Truncate(context.Background(), "f", tt.size); err != nil {
+				t.Fatalf("Truncate(%d): %v", tt.size, err)
+			}
+
+			// The new size is visible before the flush: a stat between truncate(2) and the flush must
+			// report the length the file now has, not the one it had.
+			if got, _ := w.Attr("f"); got.Size != tt.size {
+				t.Errorf("Attr reports size %d after truncating to %d", got.Size, tt.size)
+			}
+
+			if err := w.Flush("f"); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+
+			stored, _ := backend.Object("f")
+			if string(stored) != tt.want {
+				t.Errorf("object = %q, want %q", stored, tt.want)
+			}
+		})
+	}
+}
+
+// TestTruncateAndSetAttrRejectAnEmptyKey pins the argument validation on the two entry points the node
+// contract added, matching what the others already do.
+func TestTruncateAndSetAttrRejectAnEmptyKey(t *testing.T) {
+	t.Parallel()
+
+	w, _ := newWriter(t)
+	ctx := context.Background()
+
+	if err := w.Truncate(ctx, "", 0); !errors.Is(err, vfs.ErrInvalid) {
+		t.Errorf("Truncate with an empty key: %v, want ErrInvalid", err)
+	}
+	if err := w.SetAttr(ctx, "", true, false, false, vfs.Attr{}); !errors.Is(err, vfs.ErrInvalid) {
+		t.Errorf("SetAttr with an empty key: %v, want ErrInvalid", err)
+	}
+}
+
+// TestStoredSizeTreatsAbsenceAsZeroAndReportsOtherFailures covers [vfs.Flusher.StoredSize].
+//
+// Absence is zero rather than an error because a file open for writing need not exist yet: open(2)
+// with O_CREAT produces an empty file, and S3 cannot represent a zero-byte object that has never been
+// written. But a HEAD that failed for any other reason is *not* absence, and reporting zero for it
+// would make the flush splice against a size it never confirmed — v0.10.0 read every HeadObject
+// failure as absence, which is how a throttled request came to look like a missing file.
+func TestStoredSizeTreatsAbsenceAsZeroAndReportsOtherFailures(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.Put("here", []byte("0123456789"))
+
+	flusher, err := vfs.NewFlusher(backend)
+	if err != nil {
+		t.Fatalf("NewFlusher: %v", err)
+	}
+	ctx := context.Background()
+
+	if got, err := flusher.StoredSize(ctx, "here"); err != nil || got != 10 {
+		t.Errorf("StoredSize of a 10-byte object = (%d, %v), want (10, nil)", got, err)
+	}
+
+	if got, err := flusher.StoredSize(ctx, "absent"); err != nil || got != 0 {
+		t.Errorf("StoredSize of an absent object = (%d, %v), want (0, nil)", got, err)
+	}
+
+	backend.mu.Lock()
+	backend.headErr = errors.New("SlowDown: please reduce your request rate")
+	backend.mu.Unlock()
+
+	if _, err := flusher.StoredSize(ctx, "here"); !errors.Is(err, vfs.ErrBackend) {
+		t.Errorf("StoredSize with a failing HEAD: %v, want ErrBackend. Reporting zero would make a "+
+			"throttled request indistinguishable from a missing file.", err)
+	}
+
+	// A negative size is not a size. It cannot come from S3, but it can come from a backend with a
+	// signedness bug, and splicing against it would produce arithmetic nobody checked.
+	backend.mu.Lock()
+	backend.headErr = nil
+	negative := int64(-1)
+	backend.headSize = &negative
+	backend.mu.Unlock()
+
+	if _, err := flusher.StoredSize(ctx, "here"); !errors.Is(err, vfs.ErrIntegrity) {
+		t.Errorf("StoredSize with a negative reported size: %v, want ErrIntegrity", err)
+	}
+}
+
+// TestAttrOnlyFlushErrorPaths covers each way the metadata-only write can fail.
+//
+// They are separated because they mean different things to a caller and must not collapse into one
+// answer. Absence is legal and keeps the change pending; a rejected request and an unconfirmable one
+// both fail, and a size that moved is corruption.
+func TestAttrOnlyFlushErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	// A chmod on a file that has never been written is legal: open(2) with O_CREAT then fchmod, before
+	// anything is flushed. There is no object to carry the attributes, so the change stays pending for
+	// the flush that has content, and close(2) must not fail.
+	t.Run("absence keeps the change pending", func(t *testing.T) {
+		t.Parallel()
+
+		backend := newFakeBackend()
+		w, err := vfs.NewWriter(context.Background(), backend)
+		if err != nil {
+			t.Fatalf("NewWriter: %v", err)
+		}
+
+		if err := w.SetAttr(context.Background(), "new", true, false, false,
+			vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+			t.Fatalf("SetAttr: %v", err)
+		}
+
+		if err := w.Flush("new"); err != nil {
+			t.Fatalf("flushing a chmod on a file with no object yet failed: %v", err)
+		}
+		if !w.Dirty("new") {
+			t.Error("the pending mode was discarded; the next flush with content will not carry it")
+		}
+	})
+
+	// A rejected request — AccessDenied on the copy, most likely — must surface. v0.10.0 incremented a
+	// counter and reported success.
+	t.Run("a rejected request surfaces", func(t *testing.T) {
+		t.Parallel()
+
+		backend := newFakeBackend()
+		backend.Put("f", []byte("contents"))
+		backend.setMetaErr = errors.New("AccessDenied: user is not authorized to perform s3:PutObject")
+
+		w, err := vfs.NewWriter(context.Background(), backend)
+		if err != nil {
+			t.Fatalf("NewWriter: %v", err)
+		}
+		if err = w.SetAttr(context.Background(), "f", true, false, false,
+			vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+			t.Fatalf("SetAttr: %v", err)
+		}
+
+		err = w.Flush("f")
+		if err == nil {
+			t.Fatal("a chmod the backend refused reported success")
+		}
+		if !strings.Contains(err.Error(), "persist attributes") {
+			t.Errorf("the error does not identify what failed: %v", err)
+		}
+		if !w.Dirty("f") {
+			t.Error("the refused change was discarded rather than kept for a retry")
+		}
+	})
+
+	// An unconfirmable one likewise: the request was accepted, but without the read-back this layer does
+	// not know what is stored, and vouching for it anyway is what a durability guarantee cannot do.
+	t.Run("an unconfirmable write surfaces", func(t *testing.T) {
+		t.Parallel()
+
+		backend := newFakeBackend()
+		backend.Put("f", []byte("contents"))
+
+		w, err := vfs.NewWriter(context.Background(), backend)
+		if err != nil {
+			t.Fatalf("NewWriter: %v", err)
+		}
+		if err = w.SetAttr(context.Background(), "f", true, false, false,
+			vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+			t.Fatalf("SetAttr: %v", err)
+		}
+
+		// Break HEAD only now, so the node's stored size was already taken and the failure is isolated to
+		// the confirmation.
+		backend.mu.Lock()
+		backend.headErr = errors.New("SlowDown: please reduce your request rate")
+		backend.mu.Unlock()
+
+		err = w.Flush("f")
+		if err == nil {
+			t.Fatal("a chmod that could not be confirmed reported success")
+		}
+		if !strings.Contains(err.Error(), "confirm attributes") {
+			t.Errorf("the error does not identify the confirmation step: %v", err)
+		}
+	})
+
+	// A size that moved is the corruption case. SetObjectMetadata must not touch the object's bytes, and
+	// an implementation that rewrote it — dropping a Content-Encoding, say — shows up here as a length
+	// that changed. A chmod that can corrupt a file must not be silent.
+	t.Run("a size that moved is an integrity failure", func(t *testing.T) {
+		t.Parallel()
+
+		backend := newFakeBackend()
+		backend.Put("f", []byte("contents"))
+
+		w, err := vfs.NewWriter(context.Background(), backend)
+		if err != nil {
+			t.Fatalf("NewWriter: %v", err)
+		}
+		if err = w.SetAttr(context.Background(), "f", true, false, false,
+			vfs.Attr{Mode: fs.FileMode(0o600)}); err != nil {
+			t.Fatalf("SetAttr: %v", err)
+		}
+
+		backend.mu.Lock()
+		moved := int64(3)
+		backend.headSize = &moved
+		backend.mu.Unlock()
+
+		err = w.Flush("f")
+		if !errors.Is(err, vfs.ErrIntegrity) {
+			t.Fatalf("a chmod that changed the object's length: %v, want ErrIntegrity", err)
+		}
+		if !strings.Contains(err.Error(), "size changed") {
+			t.Errorf("the error does not say the size moved: %v", err)
+		}
+	})
+}
+
+// TestNodeCreationFailurePropagates covers the one path every writer entry point shares.
+//
+// Each of Write, Truncate, SetAttr, ReadAt, and FileSize begins by resolving the key to a node, which
+// on first use HEADs the object for its stored attributes. If that fails for anything but absence, the
+// write path does not know the size it would splice against or the ownership it would preserve, and
+// proceeding would mean guessing at both. Every entry point has to report it, not just the one that
+// happened to be tested.
+func TestNodeCreationFailurePropagates(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.headErr = errors.New("SlowDown: please reduce your request rate")
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	ctx := context.Background()
+
+	calls := map[string]func() error{
+		"Write":    func() error { return w.Write("f", 0, []byte("x")) },
+		"Truncate": func() error { return w.Truncate(ctx, "f", 0) },
+		"SetAttr": func() error {
+			return w.SetAttr(ctx, "f", true, false, false, vfs.Attr{Mode: fs.FileMode(0o600)})
+		},
+		"ReadAt":   func() error { _, err := w.ReadAt(ctx, "f", make([]byte, 4), 0); return err },
+		"FileSize": func() error { _, err := w.FileSize(ctx, "f"); return err },
+	}
+
+	for name, call := range calls {
+		if err := call(); !errors.Is(err, vfs.ErrBackend) {
+			t.Errorf("%s with a failing HEAD returned %v, want ErrBackend. Treating it as absence would "+
+				"make the flush splice against a size it never confirmed.", name, err)
+		}
+	}
+}
+
+// TestSetAttrRejectsModeBitsOutsideThePermissionMask pins the refusal at the layer that owns Attr.
+//
+// vfs.Attr.Mode is documented as permission bits only, so setuid, setgid, and sticky have nowhere to be
+// stored. The FUSE shim refuses them too, with ENOTSUP — but this is the layer that would have to
+// persist them, so the invariant belongs here as well rather than only at the boundary that happens to
+// be in front of it today.
+func TestSetAttrRejectsModeBitsOutsideThePermissionMask(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.Put("f", []byte("contents"))
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	err = w.SetAttr(context.Background(), "f", true, false, false,
+		vfs.Attr{Mode: fs.ModeSetuid | 0o755})
+	if !errors.Is(err, vfs.ErrInvalid) {
+		t.Errorf("SetAttr with a setuid bit: %v, want ErrInvalid. Accepting it would promise an "+
+			"escalation this filesystem cannot perform.", err)
 	}
 }

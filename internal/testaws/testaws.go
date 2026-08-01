@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -167,7 +168,21 @@ func (ts *TestServer) Backend(mutate ...func(*s3.Config)) *s3.Backend {
 func (ts *TestServer) Client() *awss3.Client {
 	ts.t.Helper()
 
-	client, err := newClient(ts.URL)
+	return ts.ClientContext(context.Background())
+}
+
+// ClientContext is [TestServer.Client] with an explicit context for the credential and config
+// resolution the SDK performs while the client is built.
+//
+// It exists so that a method already holding a context does not have to construct its client from a
+// detached one. Nothing in the config chain here does I/O — the credentials are static and the
+// endpoint is a literal — so the context is not load-bearing today; the point is that a helper which
+// silently substitutes context.Background() teaches every caller above it to stop propagating, and
+// that habit is what produced several of the audit's cancellation findings.
+func (ts *TestServer) ClientContext(ctx context.Context) *awss3.Client {
+	ts.t.Helper()
+
+	client, err := newClient(ctx, ts.URL)
 	if err != nil {
 		ts.t.Fatalf("testaws: %v", err)
 	}
@@ -177,8 +192,8 @@ func (ts *TestServer) Client() *awss3.Client {
 
 // newClient builds a raw SDK client against an emulator endpoint. It returns an error rather than
 // calling t.Fatalf so [SharedServer], which has no *testing.T by design, can use it too.
-func newClient(endpoint string) (*awss3.Client, error) {
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+func newClient(ctx context.Context, endpoint string) (*awss3.Client, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(DefaultRegion),
 		awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(AccessKeyID, SecretAccessKey, ""),
@@ -287,6 +302,14 @@ type Capabilities struct {
 
 	// MultipartContentEncodingDetail explains a false MultipartContentEncoding.
 	MultipartContentEncodingDetail string
+
+	// MetadataReplace reports whether CopyObject honors MetadataDirective=REPLACE. When false, a
+	// self-copy answers 200 and carries the *source* object's metadata forward, so every
+	// attribute-only write — chmod, chown, touch — appears to succeed and stores nothing.
+	MetadataReplace bool
+
+	// MetadataReplaceDetail explains a false MetadataReplace.
+	MetadataReplaceDetail string
 }
 
 // Capabilities probes the running server once and caches the result.
@@ -312,7 +335,7 @@ func (ts *TestServer) probeCapabilities() Capabilities {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	out, err := ts.Client().GetObject(ctx, &awss3.GetObjectInput{
+	out, err := ts.ClientContext(ctx).GetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(ts.Bucket),
 		Key:    aws.String(probeKey),
 		Range:  aws.String("bytes=4-7"),
@@ -349,7 +372,87 @@ func (ts *TestServer) probeCapabilities() Capabilities {
 	caps.MultipartContentEncoding, caps.MultipartContentEncodingDetail =
 		ts.probeMultipartContentEncoding(ctx)
 
+	caps.MetadataReplace, caps.MetadataReplaceDetail = ts.probeMetadataReplace(ctx)
+
 	return caps
+}
+
+// probeMetadataReplace checks whether a self-copy with MetadataDirective=REPLACE actually replaces the
+// object's user metadata.
+//
+// This is the only way S3 offers to change metadata without re-uploading the body, so it is the path
+// every chmod, chown, and touch takes. The probe writes an object with one metadata value, replaces it
+// with another, and reads back: an endpoint that ignores the directive reports 200 and returns the
+// original value.
+func (ts *TestServer) probeMetadataReplace(ctx context.Context) (bool, string) {
+	ts.t.Helper()
+
+	const probeKey = ".objectfs-capability-probe-meta"
+
+	if _, err := ts.ClientContext(ctx).PutObject(ctx, &awss3.PutObjectInput{
+		Bucket:   aws.String(ts.Bucket),
+		Key:      aws.String(probeKey),
+		Body:     bytes.NewReader([]byte("probe")),
+		Metadata: map[string]string{"objectfs-probe": "before"},
+	}); err != nil {
+		return false, fmt.Sprintf("PutObject failed: %v", err)
+	}
+
+	if _, err := ts.ClientContext(ctx).CopyObject(ctx, &awss3.CopyObjectInput{
+		Bucket:            aws.String(ts.Bucket),
+		Key:               aws.String(probeKey),
+		CopySource:        aws.String(url.PathEscape(ts.Bucket + "/" + probeKey)),
+		MetadataDirective: s3types.MetadataDirectiveReplace,
+		Metadata:          map[string]string{"objectfs-probe": "after"},
+	}); err != nil {
+		return false, fmt.Sprintf("CopyObject with MetadataDirective=REPLACE failed: %v", err)
+	}
+
+	head, err := ts.ClientContext(ctx).HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(probeKey),
+	})
+	if err != nil {
+		return false, fmt.Sprintf("HeadObject after the replace failed: %v", err)
+	}
+
+	var got string
+	for k, v := range head.Metadata {
+		if strings.EqualFold(k, "objectfs-probe") {
+			got = v
+		}
+	}
+
+	if got != "after" {
+		return false, fmt.Sprintf(
+			"after a self-copy with MetadataDirective=REPLACE setting objectfs-probe=after, the object "+
+				"reports objectfs-probe=%q; the endpoint is ignoring the directive and carrying the "+
+				"source metadata forward", got)
+	}
+
+	return true, ""
+}
+
+// RequireMetadataReplace skips the test unless the endpoint honors MetadataDirective=REPLACE.
+//
+// Skipping rather than asserting, for the same reason as Range: against an endpoint that ignores the
+// directive, ObjectFS's attribute write path *correctly* reports an integrity failure — it reads the
+// metadata back and finds the old value — so the test cannot distinguish a working chmod from a broken
+// one. Both directions of assertion would be wrong.
+func (ts *TestServer) RequireMetadataReplace() {
+	ts.t.Helper()
+
+	if caps := ts.Capabilities(); !caps.MetadataReplace {
+		ts.t.Skipf("the test endpoint does not honor CopyObject MetadataDirective=REPLACE, which is the "+
+			"only way S3 offers to change an object's metadata without re-uploading it, so an "+
+			"attribute-only write here cannot be distinguished from one that never happened: %s\n"+
+			"The pinned substrate does honor it as of v0.82.0 (scttfrdmn/substrate#421), so reaching this "+
+			"skip means the endpoint under test is something else — an older substrate, or a third-party "+
+			"S3 implementation. Real S3 honors the directive and the live integration suite covers it.\n"+
+			"ObjectFS's own path verifies the metadata landed (internal/vfs.Flusher.attemptAttrOnly), which "+
+			"is why the skip is correct here rather than an assertion in either direction.",
+			caps.MetadataReplaceDetail)
+	}
 }
 
 // probeMultipartContentEncoding checks whether Content-Encoding survives a multipart upload.
@@ -363,7 +466,7 @@ func (ts *TestServer) probeMultipartContentEncoding(ctx context.Context) (bool, 
 
 	const probeKey = ".objectfs-capability-probe-mpu"
 
-	create, err := ts.Client().CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
+	create, err := ts.ClientContext(ctx).CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
 		Bucket:          aws.String(ts.Bucket),
 		Key:             aws.String(probeKey),
 		ContentEncoding: aws.String("zstd"),
@@ -372,7 +475,7 @@ func (ts *TestServer) probeMultipartContentEncoding(ctx context.Context) (bool, 
 		return false, fmt.Sprintf("CreateMultipartUpload failed: %v", err)
 	}
 
-	part, err := ts.Client().UploadPart(ctx, &awss3.UploadPartInput{
+	part, err := ts.ClientContext(ctx).UploadPart(ctx, &awss3.UploadPartInput{
 		Bucket:     aws.String(ts.Bucket),
 		Key:        aws.String(probeKey),
 		UploadId:   create.UploadId,
@@ -383,7 +486,7 @@ func (ts *TestServer) probeMultipartContentEncoding(ctx context.Context) (bool, 
 		return false, fmt.Sprintf("UploadPart failed: %v", err)
 	}
 
-	if _, err := ts.Client().CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
+	if _, err := ts.ClientContext(ctx).CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(ts.Bucket),
 		Key:      aws.String(probeKey),
 		UploadId: create.UploadId,
@@ -394,7 +497,7 @@ func (ts *TestServer) probeMultipartContentEncoding(ctx context.Context) (bool, 
 		return false, fmt.Sprintf("CompleteMultipartUpload failed: %v", err)
 	}
 
-	head, err := ts.Client().HeadObject(ctx, &awss3.HeadObjectInput{
+	head, err := ts.ClientContext(ctx).HeadObject(ctx, &awss3.HeadObjectInput{
 		Bucket: aws.String(ts.Bucket),
 		Key:    aws.String(probeKey),
 	})
@@ -511,6 +614,30 @@ func (ts *TestServer) ObjectMetadata(key string) map[string]string {
 	}
 
 	return meta
+}
+
+// ObjectStorageClass returns a key's storage class, normalizing the absent header to "STANDARD".
+//
+// S3 "returns this header for all objects except for S3 Standard storage class objects", so an empty
+// value is not unknown — it is STANDARD, and a test that treated the two differently would report a
+// tier demotion as a missing header. This matters because a demotion is silent and expensive: the
+// object keeps working and the bill changes.
+func (ts *TestServer) ObjectStorageClass(key string) string {
+	ts.t.Helper()
+
+	out, err := ts.Client().HeadObject(context.Background(), &awss3.HeadObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		ts.t.Fatalf("testaws: head %q: %v", key, err)
+	}
+
+	if out.StorageClass == "" {
+		return string(s3types.StorageClassStandard)
+	}
+
+	return string(out.StorageClass)
 }
 
 // ObjectSize returns a key's stored ContentLength — the compressed length for a compressed object,

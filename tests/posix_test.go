@@ -420,6 +420,7 @@ func (s *POSIXTestSuite) TestFilesystemStats() {
 
 type MockBackend struct {
 	files map[string][]byte
+	meta  map[string]map[string]string
 }
 
 func (m *MockBackend) GetObject(ctx context.Context, key string, offset, size int64) ([]byte, error) {
@@ -440,9 +441,24 @@ func (m *MockBackend) GetObject(ctx context.Context, key string, offset, size in
 	return data[offset:end], nil
 }
 
-func (m *MockBackend) PutObject(ctx context.Context, key string, data []byte) error {
+func (m *MockBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
 	m.files[key] = make([]byte, len(data))
 	copy(m.files[key], data)
+	if m.meta == nil {
+		m.meta = make(map[string]map[string]string)
+	}
+	m.meta[key] = copyMeta(meta)
+	return nil
+}
+
+func (m *MockBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
+	if _, ok := m.files[key]; !ok {
+		return os.ErrNotExist
+	}
+	if m.meta == nil {
+		m.meta = make(map[string]map[string]string)
+	}
+	m.meta[key] = copyMeta(meta)
 	return nil
 }
 
@@ -463,7 +479,7 @@ func (m *MockBackend) HeadObject(ctx context.Context, key string) (*types.Object
 		LastModified: time.Now(),
 		ETag:         "mock-etag",
 		ContentType:  "application/octet-stream",
-		Metadata:     make(map[string]string),
+		Metadata:     copyMeta(m.meta[key]),
 	}, nil
 }
 

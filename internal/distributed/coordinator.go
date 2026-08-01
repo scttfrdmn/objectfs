@@ -569,7 +569,7 @@ func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *N
 			result.Data = data
 		}
 	case OpTypePut:
-		if err := c.backend.PutObject(ctx, op.Key, op.Data); err != nil {
+		if err := c.backend.PutObject(ctx, op.Key, op.Data, nil); err != nil {
 			result.Error = err.Error()
 		} else {
 			result.Success = true

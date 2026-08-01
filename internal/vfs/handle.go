@@ -171,6 +171,17 @@ func (n *Node) Dirty() bool {
 	return n.dirtyContentLocked() || n.dirtyAttr
 }
 
+// DirtyAttr reports whether the node's attributes have changed without reaching storage.
+//
+// Separate from [Node.Dirty] because the two answers take different write paths: content goes up as a
+// PutObject, attributes alone as a metadata replace. A flush that could not tell them apart would
+// either re-upload a file to change its mode or skip the mode entirely.
+func (n *Node) DirtyAttr() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.dirtyAttr
+}
+
 func (n *Node) dirtyContentLocked() bool {
 	p, err := n.pending.Plan(n.storedSize)
 	if err != nil {

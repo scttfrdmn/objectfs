@@ -159,7 +159,7 @@ func TestBackendRoundTripsBytesUnchanged(t *testing.T) {
 			key := "roundtrip/" + sizeName(size)
 			want := testaws.DeterministicBytes(key, size)
 
-			if err := backend.PutObject(ctx, key, want); err != nil {
+			if err := backend.PutObject(ctx, key, want, nil); err != nil {
 				t.Fatalf("PutObject(%d bytes): %v", size, err)
 			}
 
@@ -293,7 +293,7 @@ func TestHeadObjectReportsTheStoredSize(t *testing.T) {
 	)
 
 	data := testaws.DeterministicBytes(key, size)
-	if err := backend.PutObject(ctx, key, data); err != nil {
+	if err := backend.PutObject(ctx, key, data, nil); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 

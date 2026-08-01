@@ -203,10 +203,36 @@ const (
 // metadata value makes an object permanently inaccessible, which is a worse failure than a wrong
 // mode. Callers wanting to know use [MetadataWarnings].
 func AttrFromMetadata(meta map[string]string, storedSize int64, lastModified time.Time, etag string) Attr {
+	return AttrFromMetadataWithDefaults(meta, storedSize, lastModified, etag, Attr{})
+}
+
+// AttrFromMetadataWithDefaults is [AttrFromMetadata] with caller-supplied fallbacks for the
+// attributes an object does not carry.
+//
+// It exists because "the object has no objectfs-uid" and "the object records objectfs-uid=0" are
+// different facts with different right answers, and only the caller knows the second one. A mount
+// reports the mounting user as the owner of objects written by other tools, because reporting root
+// makes every such file appear to belong to someone else in ls -l and makes cp -p and rsync
+// complain about ownership they cannot set. An object that genuinely records uid 0 still reports 0.
+//
+// Only Mode, UID, and GID are taken from defaults. Size, Mtime, ETag, and Checksum are facts about
+// the stored object with no sensible substitute, and Type is always [FileTypeRegular] here — a
+// common prefix has no metadata to read, so directories come from [DirAttr] instead. A zero
+// defaults.Mode means [DefaultFileMode].
+func AttrFromMetadataWithDefaults(
+	meta map[string]string, storedSize int64, lastModified time.Time, etag string, defaults Attr,
+) Attr {
+	mode := defaults.Mode.Perm()
+	if mode == 0 {
+		mode = DefaultFileMode
+	}
+
 	a := Attr{
 		Type:  FileTypeRegular,
 		Size:  storedSize,
-		Mode:  DefaultFileMode,
+		Mode:  mode,
+		UID:   defaults.UID,
+		GID:   defaults.GID,
 		Mtime: lastModified,
 		ETag:  etag,
 	}

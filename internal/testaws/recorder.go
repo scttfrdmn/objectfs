@@ -84,9 +84,25 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 	// the Host header, and NewSingleHostReverseProxy rewrites only the URL host, leaving Host as the
 	// proxy's own address — so the signature would cover a host the emulator never sees. SetURL
 	// rewrites Host to the target's, which is exactly what keeps the signature verifiable upstream.
+	//
+	// The proxy gets its own Transport rather than the nil that means http.DefaultTransport, and that
+	// is a correctness requirement, not tidiness. httptest.Server.Close calls
+	// http.DefaultTransport.CloseIdleConnections() unconditionally — the standard library says
+	// outright it is doing this to "help out" users of the standard transport — so with a shared
+	// transport, one fixture ending tore down connections belonging to every other fixture still
+	// running. Since tests here are parallel and each holds its own endpoint, that surfaced as
+	// "http: CloseIdleConnections called" against an unrelated test, roughly one run in six, blamed
+	// on whichever test happened to have a request in flight. A per-proxy transport cannot be closed
+	// by anyone else's teardown.
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(upstream)
+		},
+		Transport: &http.Transport{
+			// The emulator is in-process over loopback, so there is nothing to gain from a
+			// connection budget and something to lose: a cap below the harness's own concurrency
+			// would serialize requests and make a byte-count assertion measure queuing.
+			MaxIdleConnsPerHost: 100,
 		},
 	}
 

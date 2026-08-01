@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/objectfs/objectfs/pkg/types"
@@ -114,6 +115,43 @@ func (w *Writer) Truncate(ctx context.Context, key string, size int64) error {
 		return err
 	}
 	return n.Truncate(size)
+}
+
+// SetAttr records new attributes for key, to be persisted at flush. The three booleans say which of
+// mode, uid, and gid the caller is setting; a non-zero from.Mtime sets the modification time.
+//
+// The mask is the whole point. A Setattr call carries a FATTR bitmask saying which fields the kernel
+// actually set, and applying all of them unconditionally would have `touch` reset a file's mode to
+// whatever the caller's zero value happened to be. Passing the mask down to [Node.SetAttr] rather
+// than resolving it here keeps one owner for the merge.
+func (w *Writer) SetAttr(ctx context.Context, key string, mode, uid, gid bool, from Attr) error {
+	if key == "" {
+		return fmt.Errorf("%w: empty key", ErrInvalid)
+	}
+
+	n, err := w.node(ctx, key)
+	if err != nil {
+		return err
+	}
+	return n.SetAttr(mode, uid, gid, from)
+}
+
+// Attr returns key's current attributes, including changes not yet persisted, and whether the write
+// path holds any state for the key at all.
+//
+// A false second return is not an error: it means nothing is buffered, so the caller's own stored
+// metadata is the current answer. Reporting an empty Attr as authoritative instead would make a stat
+// of an unopened file report mode 0000 — which is the defect that made every directory untraversable
+// in v0.10.0.
+func (w *Writer) Attr(key string) (Attr, bool) {
+	w.mu.Lock()
+	n, ok := w.nodes[key]
+	w.mu.Unlock()
+
+	if !ok {
+		return Attr{}, false
+	}
+	return n.Attr(), true
 }
 
 // ReadAt fills buf with key's contents at offset, overlaying pending writes on the stored object,
@@ -299,11 +337,16 @@ func (w *Writer) Close() error {
 	return nil
 }
 
-// node returns the [Node] for key, creating it from the object's stored size on first use.
+// node returns the [Node] for key, creating it from the object's stored attributes on first use.
 //
-// The stored size is fetched once per key, not per write: it is the length read-modify-write splices
+// The stored state is fetched once per key, not per write: the size is what read-modify-write splices
 // against, and [Node] tracks it from there. Refetching would also reintroduce a race, since the size
 // could change under a pending write.
+//
+// The full attributes are read, not just the size. A node created with a default mode and a zero
+// uid/gid would persist those on the next flush, so writing to a file owned by someone else would
+// chown it to root — the write path became an attribute writer the moment attribute write-back landed,
+// and reading only the size is the shape of that defect.
 func (w *Writer) node(ctx context.Context, key string) (*Node, error) {
 	w.mu.Lock()
 	if n, ok := w.nodes[key]; ok {
@@ -314,9 +357,14 @@ func (w *Writer) node(ctx context.Context, key string) (*Node, error) {
 
 	// The HEAD runs outside the lock: it is a network call, and holding a mutex that every write on
 	// every path contends on across it would serialize the whole write path behind one stat.
-	storedSize, err := w.flusher.StoredSize(ctx, key)
+	attr, storedSize, warns, err := w.flusher.StoredAttr(ctx, key)
 	if err != nil {
 		return nil, err
+	}
+	for _, warn := range warns {
+		// Logged rather than returned: a bad metadata value must not make the file inaccessible, but
+		// silently discarding an attribute the user set is its own defect.
+		slog.Warn("ignoring unusable stored attribute", "key", key, "detail", warn)
 	}
 
 	w.mu.Lock()
@@ -328,7 +376,7 @@ func (w *Writer) node(ctx context.Context, key string) (*Node, error) {
 		return n, nil
 	}
 
-	n := NewNode(key, Attr{Type: FileTypeRegular, Size: storedSize, Mode: 0o644}, storedSize)
+	n := NewNode(key, attr, storedSize)
 	w.nodes[key] = n
 	return n, nil
 }

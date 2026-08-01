@@ -48,8 +48,13 @@ type mockBackend struct{}
 func (m *mockBackend) GetObject(_ context.Context, _ string, _, _ int64) ([]byte, error) {
 	return []byte("mock-data"), nil
 }
-func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte) error { return nil }
-func (m *mockBackend) DeleteObject(_ context.Context, _ string) error        { return nil }
+func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
+	return nil
+}
+func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (m *mockBackend) DeleteObject(_ context.Context, _ string) error { return nil }
 func (m *mockBackend) HeadObject(_ context.Context, key string) (*types.ObjectInfo, error) {
 	return &types.ObjectInfo{Key: key}, nil
 }
@@ -72,8 +77,13 @@ type errBackend struct{ err error }
 func (e *errBackend) GetObject(_ context.Context, _ string, _, _ int64) ([]byte, error) {
 	return nil, e.err
 }
-func (e *errBackend) PutObject(_ context.Context, _ string, _ []byte) error { return e.err }
-func (e *errBackend) DeleteObject(_ context.Context, _ string) error        { return e.err }
+func (e *errBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
+	return e.err
+}
+func (e *errBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return e.err
+}
+func (e *errBackend) DeleteObject(_ context.Context, _ string) error { return e.err }
 func (e *errBackend) HeadObject(_ context.Context, _ string) (*types.ObjectInfo, error) {
 	return nil, e.err
 }

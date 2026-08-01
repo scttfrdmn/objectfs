@@ -174,7 +174,7 @@ func benchmarkGetObject(b *testing.B, useAccelerate bool, objectSize int) {
 	// Setup: Create test object
 	data := make([]byte, objectSize)
 	key := fmt.Sprintf("benchmark-get-%d", time.Now().UnixNano())
-	if err := backend.PutObject(ctx, key, data); err != nil {
+	if err := backend.PutObject(ctx, key, data, nil); err != nil {
 		b.Fatalf("Failed to create test object: %v", err)
 	}
 	defer func() {
@@ -233,7 +233,7 @@ func benchmarkPutObject(b *testing.B, useAccelerate bool, objectSize int) {
 	for i := range b.N {
 		key := fmt.Sprintf("benchmark-put-%d-%d", time.Now().UnixNano(), i)
 		keys[i] = key
-		if err := backend.PutObject(ctx, key, data); err != nil {
+		if err := backend.PutObject(ctx, key, data, nil); err != nil {
 			b.Fatalf("PutObject failed: %v", err)
 		}
 	}
@@ -322,7 +322,7 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 
 		for i := range b.N {
 			key := fmt.Sprintf("benchmark-single-%d-%d", time.Now().UnixNano(), i)
-			if err := backend.PutObject(ctx, key, data); err != nil {
+			if err := backend.PutObject(ctx, key, data, nil); err != nil {
 				b.Fatalf("PutObject failed: %v", err)
 			}
 			if err := backend.DeleteObject(ctx, key); err != nil {
@@ -350,7 +350,7 @@ func BenchmarkSinglePartVsMultipart(b *testing.B) {
 
 		for i := range b.N {
 			key := fmt.Sprintf("benchmark-multi-%d-%d", time.Now().UnixNano(), i)
-			if err := backend.PutObject(ctx, key, data); err != nil {
+			if err := backend.PutObject(ctx, key, data, nil); err != nil {
 				b.Fatalf("PutObject failed: %v", err)
 			}
 			if err := backend.DeleteObject(ctx, key); err != nil {
@@ -399,7 +399,7 @@ func BenchmarkMultipartConcurrency(b *testing.B) {
 
 			for i := range b.N {
 				key := fmt.Sprintf("benchmark-concurrency-%d-%d-%d", concurrency, time.Now().UnixNano(), i)
-				if err := backend.PutObject(ctx, key, data); err != nil {
+				if err := backend.PutObject(ctx, key, data, nil); err != nil {
 					b.Fatalf("PutObject failed: %v", err)
 				}
 				if err := backend.DeleteObject(ctx, key); err != nil {

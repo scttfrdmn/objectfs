@@ -371,7 +371,7 @@ func TestChecksumVerificationAcceptsWhatObjectFSWrote(t *testing.T) {
 
 			key := "roundtrip/" + strings.ReplaceAll(tc.name, " ", "-")
 
-			if err := backend.PutObject(ctx, key, tc.data); err != nil {
+			if err := backend.PutObject(ctx, key, tc.data, nil); err != nil {
 				t.Fatalf("PutObject: %v", err)
 			}
 

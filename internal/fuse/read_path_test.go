@@ -71,11 +71,14 @@ func newReadPathFixture(t *testing.T) *readPathFixture {
 }
 
 // open returns a handle for an object that already exists in the bucket, as Open would build one.
+//
+// The handle carries the path and nothing else. It used to carry the size and mode read from
+// HeadObject at open time, which is what made a handle a second source of truth for two values that
+// change under it — see the OpenFile doc comment.
 func (f *readPathFixture) open(t *testing.T, key string) *FileHandle {
 	t.Helper()
 
-	info, err := f.fs.backend.HeadObject(context.Background(), key)
-	if err != nil {
+	if _, err := f.fs.backend.HeadObject(context.Background(), key); err != nil {
 		t.Fatalf("HeadObject(%q): %v", key, err)
 	}
 
@@ -84,8 +87,6 @@ func (f *readPathFixture) open(t *testing.T, key string) *FileHandle {
 		handle: 1,
 		file: &OpenFile{
 			path:        key,
-			mode:        0o644,
-			size:        info.Size,
 			lastAccess:  time.Now(),
 			accessCount: 1,
 		},
@@ -622,12 +623,7 @@ func TestGetattrReportsPendingSize(t *testing.T) {
 
 	original := f.srv.SeedRandom("grow.dat", 1024)
 
-	info, err := f.fs.backend.HeadObject(context.Background(), "grow.dat")
-	if err != nil {
-		t.Fatalf("HeadObject: %v", err)
-	}
-
-	node := &FileNode{fs: f.fs, path: "grow.dat", info: info}
+	node := &FileNode{fs: f.fs, path: "grow.dat"}
 	fh := f.open(t, "grow.dat")
 
 	appended := []byte("APPENDED")

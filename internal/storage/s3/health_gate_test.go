@@ -42,7 +42,7 @@ func TestReadsOfMissingObjectsDoNotDisableTheMount(t *testing.T) {
 	ctx := context.Background()
 
 	want := []byte("the file is right here")
-	if err := backend.PutObject(ctx, "present.bin", want); err != nil {
+	if err := backend.PutObject(ctx, "present.bin", want, nil); err != nil {
 		t.Fatalf("seeding an object: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestWritesSurviveReadsOfMissingObjects(t *testing.T) {
 	if !backend.IsWriteAvailable() {
 		t.Error("writes are unavailable after reads and stats of a missing key")
 	}
-	if err := backend.PutObject(ctx, "written.bin", []byte("data")); err != nil {
+	if err := backend.PutObject(ctx, "written.bin", []byte("data"), nil); err != nil {
 		t.Fatalf("write refused after reads of a missing key: %v", err)
 	}
 	if got := ts.GetObject("written.bin"); string(got) != "data" {
