@@ -1530,3 +1530,139 @@ func TestUncoveredEndOfAnEmptyRange(t *testing.T) {
 		})
 	}
 }
+
+// TestUncoveredStartOfAnEmptyRange is the mirror of TestUncoveredEndOfAnEmptyRange, and its answer is
+// the mirror too: hi, not lo. Between them [Node.ReadRange] gets start >= end and reports no fetch,
+// rather than a range running backwards — which reaches the backend as a negative length, and a
+// negative length is the C3 panic that takes the mount down with every open descriptor.
+func TestUncoveredStartOfAnEmptyRange(t *testing.T) {
+	t.Parallel()
+
+	var l ExtentList
+	if err := l.Add(0, []byte("covered")); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		lo, hi int64
+	}{
+		{"hi equals lo", 4, 4},
+		{"hi before lo", 8, 4},
+		{"both zero", 0, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := l.UncoveredStart(tc.lo, tc.hi); got != tc.hi {
+				t.Errorf("UncoveredStart(%d, %d) = %d, want %d", tc.lo, tc.hi, got, tc.hi)
+			}
+		})
+	}
+}
+
+// TestUncoveredStart walks the head-trimming cases, including the ones where it must not trim.
+//
+// Trimming too much is silent corruption: bytes the object has and the pending writes do not would be
+// skipped by the fetch and then read back as whatever the caller's buffer held, or as zeros. So the
+// clamp cases matter as much as the narrowing ones.
+func TestUncoveredStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		writes []struct {
+			off  int64
+			data string
+		}
+		lo, hi int64
+		want   int64
+	}{
+		{
+			name: "no writes: nothing to trim",
+			lo:   0, hi: 100, want: 0,
+		},
+		{
+			name: "a write at the head moves the start past it",
+			writes: []struct {
+				off  int64
+				data string
+			}{{0, "0123456789"}},
+			lo: 0, hi: 100, want: 10,
+		},
+		{
+			name: "a write starting after lo does not move the start",
+			writes: []struct {
+				off  int64
+				data string
+			}{{20, "0123456789"}},
+			lo: 0, hi: 100, want: 0,
+		},
+		{
+			name: "a write straddling lo moves the start to its end",
+			writes: []struct {
+				off  int64
+				data string
+			}{{5, "0123456789"}},
+			lo: 10, hi: 100, want: 15,
+		},
+		{
+			name: "a write covering the whole range collapses it to hi",
+			writes: []struct {
+				off  int64
+				data string
+			}{{0, "0123456789"}},
+			lo: 0, hi: 10, want: 10,
+		},
+		{
+			name: "the start never runs past hi",
+			writes: []struct {
+				off  int64
+				data string
+			}{{0, "0123456789"}},
+			lo: 0, hi: 4, want: 4,
+		},
+		{
+			// Extents are coalesced when they touch, so a contiguous pair is one extent and one step
+			// clears both. The point is that the answer is the far end, not the near one.
+			name: "adjacent writes are cleared in one step",
+			writes: []struct {
+				off  int64
+				data string
+			}{
+				{0, "aaaa"}, {4, "bbbb"},
+			},
+			lo: 0, hi: 100, want: 8,
+		},
+		{
+			// A gap stops the trimming: those bytes are only in the object.
+			name: "a gap after the first write stops the trim",
+			writes: []struct {
+				off  int64
+				data string
+			}{
+				{0, "aaaa"}, {8, "bbbb"},
+			},
+			lo: 0, hi: 100, want: 4,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var l ExtentList
+			for _, w := range tc.writes {
+				if err := l.Add(w.off, []byte(w.data)); err != nil {
+					t.Fatalf("Add(%d): %v", w.off, err)
+				}
+			}
+
+			if got := l.UncoveredStart(tc.lo, tc.hi); got != tc.want {
+				t.Errorf("UncoveredStart(%d, %d) = %d, want %d", tc.lo, tc.hi, got, tc.want)
+			}
+		})
+	}
+}

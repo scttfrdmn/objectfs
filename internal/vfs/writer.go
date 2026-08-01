@@ -152,7 +152,7 @@ func (w *Writer) ReadAt(ctx context.Context, key string, buf []byte, offset int6
 		}
 	}
 
-	return n.ReadInto(buf, offset, stored)
+	return n.ReadInto(buf, offset, r.Offset, stored)
 }
 
 // FileSize returns key's logical length including pending writes, which is what stat must report.

@@ -248,13 +248,7 @@ func (l *ExtentList) ReadAt(buf []byte, offset, storedSize int64) (int, error) {
 // consulting the cache and the backend but never the write buffer, so a read after a write returned
 // pre-write bytes for up to the cache's five-minute TTL.
 //
-// Only the tail is trimmed, not the head, and the asymmetry is deliberate rather than an oversight.
-// [Node.ReadInto] places the fetched bytes at the read's start offset, so a range that began later
-// would be spliced at the wrong position — silent corruption, and of the kind a test with uniform
-// fill bytes would not notice. Narrowing the head needs ReadInto to be told where the bytes begin,
-// which is a signature change belonging with the read-path work, not smuggled in here. The cost of
-// not doing it is fetching bytes that are about to be overwritten in the buffer: wasteful, never
-// wrong.
+// See [ExtentList.UncoveredStart] for the same question asked of the head.
 func (l *ExtentList) UncoveredEnd(lo, hi int64) int64 {
 	if hi <= lo {
 		return lo
@@ -271,6 +265,35 @@ func (l *ExtentList) UncoveredEnd(lo, hi int64) int64 {
 		hi = max(lo, l.extents[i].Offset)
 	}
 	return lo
+}
+
+// UncoveredStart returns the largest start offset in [lo, hi] such that every byte from lo to it is
+// already held by a pending write.
+//
+// The mirror of [ExtentList.UncoveredEnd]: together they trim both ends of a read down to the bytes
+// that genuinely have to be fetched. Returning hi means the whole range is covered.
+//
+// Narrowing the head is worth the trouble because the common write pattern makes it the covered end.
+// A program that writes a file header and then reads further into the object — an archive tool, a
+// database updating a page after its superblock — leaves the low bytes of every subsequent read
+// pending and the high bytes stored. Trimming only the tail fetches those low bytes anyway and then
+// overwrites them from the extent list: bytes paid for and immediately discarded.
+func (l *ExtentList) UncoveredStart(lo, hi int64) int64 {
+	if hi <= lo {
+		return hi
+	}
+
+	// Extents are sorted, disjoint, and never adjacent, so at most one can cover lo, and stepping
+	// forward to its end lands in a gap. The loop is for the invariant's benefit, not because a
+	// second iteration is expected.
+	for lo < hi {
+		i := sort.Search(len(l.extents), func(i int) bool { return l.extents[i].End() > lo })
+		if i == len(l.extents) || l.extents[i].Offset > lo {
+			return lo
+		}
+		lo = min(hi, l.extents[i].End())
+	}
+	return hi
 }
 
 // FlushPlan describes how to make an ExtentList durable against an object of a known size.

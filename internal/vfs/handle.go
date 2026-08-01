@@ -233,10 +233,9 @@ func (n *Node) Truncate(size int64) error {
 // fetched, and whether a fetch is needed at all.
 //
 // A read that pending writes fully cover needs no fetch, which is what makes read-after-write both
-// correct and free. Callers pass the fetched bytes to [Node.ReadInto].
-//
-// The range is trimmed at both ends but only narrowed at the tail: see [ExtentList.UncoveredEnd] for
-// why the head is left alone, and what it costs.
+// correct and free. Callers pass the fetched bytes to [Node.ReadInto] along with the returned range's
+// Offset, which is not necessarily the read's own offset: pending writes at the head of the range are
+// trimmed too, so the fetch can begin later than the read does.
 func (n *Node) ReadRange(offset int64, length int) (Range, bool, error) {
 	if offset < 0 {
 		return Range{}, false, fmt.Errorf("%w: negative read offset %d", ErrInvalid, offset)
@@ -253,39 +252,54 @@ func (n *Node) ReadRange(offset int64, length int) (Range, bool, error) {
 		return Range{}, false, nil
 	}
 
-	// Drop the part of the tail the pending writes already answer. A write that covers the whole
+	// Drop the parts of both ends the pending writes already answer. A write that covers the whole
 	// request makes this the entire range, and the read touches no network at all.
-	end = n.pending.UncoveredEnd(offset, end)
-	if end <= offset {
+	start := n.pending.UncoveredStart(offset, end)
+	end = n.pending.UncoveredEnd(start, end)
+
+	if end <= start {
 		return Range{}, false, nil
 	}
 
-	return Range{Offset: offset, Length: end - offset}, true, nil
+	return Range{Offset: start, Length: end - start}, true, nil
 }
 
 // ReadInto fills buf with the file's contents at offset and returns how many leading bytes are
 // valid — short at EOF, zero past it.
 //
-// stored must hold the bytes the object store returned for the range [Node.ReadRange] asked for, or
-// be nil when it reported no fetch was needed. Supplying fewer bytes than requested is allowed and
-// treated as the object being shorter than believed; supplying bytes from a different offset is a
-// caller bug this cannot detect, which is why ReadRange returns the range rather than leaving the
-// caller to compute it.
-func (n *Node) ReadInto(buf []byte, offset int64, stored []byte) (int, error) {
+// stored must hold the bytes the object store returned for the range [Node.ReadRange] asked for, and
+// storedOffset must be that range's Offset. They are separate arguments because the range can begin
+// after the read does: ReadRange trims pending writes off the head as well as the tail, so the fetched
+// bytes belong at buf[storedOffset-offset] and not at buf[0]. Passing the read's own offset for a range
+// that was narrowed splices the object's bytes too early and silently corrupts the result — which is
+// why the head narrowing and this parameter had to land together.
+//
+// When ReadRange reported no fetch was needed, pass a nil stored; storedOffset is then ignored.
+// Supplying fewer bytes than requested is allowed and treated as the object being shorter than
+// believed.
+func (n *Node) ReadInto(buf []byte, offset, storedOffset int64, stored []byte) (int, error) {
 	if offset < 0 {
 		return 0, fmt.Errorf("%w: negative read offset %d", ErrInvalid, offset)
+	}
+	if len(stored) > 0 && storedOffset < offset {
+		return 0, fmt.Errorf("%w: stored bytes start at %d, before the read's own offset %d",
+			ErrInvalid, storedOffset, offset)
 	}
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	copy(buf, stored)
+	if at := storedOffset - offset; len(stored) > 0 && at < int64(len(buf)) {
+		copy(buf[at:], stored)
+	}
 
 	// The object may be shorter than storedSize claims — it can have been replaced behind our back —
-	// so cap the stored extent at what actually arrived.
+	// so cap the stored extent at what actually arrived. A range narrowed at the tail also ends early,
+	// which caps this below the true stored size; that is harmless, because the tail is only narrowed
+	// when a pending write covers it, and [ExtentList.Size] takes the later of the two.
 	effective := n.storedSize
 	if len(stored) > 0 {
-		if got := offset + int64(len(stored)); got < effective {
+		if got := storedOffset + int64(len(stored)); got < effective {
 			effective = got
 		}
 	}

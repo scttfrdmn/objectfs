@@ -79,9 +79,13 @@ func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadMana
 	return ram
 }
 
-// OnRead records a read operation and triggers prefetching if patterns are detected
+// OnRead records a read operation and triggers prefetching if patterns are detected.
+//
+// Every read must be reported, hit or miss. The nil receiver is tolerated so that a caller with
+// read-ahead disabled — or a test that turned it off — does not need a guard at each call site; there
+// are two, and the one on the cache-hit path was originally missing altogether.
 func (ram *ReadAheadManager) OnRead(path string, offset, size int64) {
-	if !ram.config.Enabled {
+	if ram == nil || !ram.config.Enabled {
 		return
 	}
 
@@ -118,8 +122,32 @@ func (ram *ReadAheadManager) OnRead(path string, offset, size int64) {
 
 	// Trigger prefetch if pattern is strong enough
 	if pattern.sequentialHits >= ram.config.MinSequential && pattern.confidence > 0.5 {
-		ram.schedulePrefetch(path, pattern.predictedNext, ram.config.WindowSize)
+		ram.schedulePrefetch(path, pattern.predictedNext, ram.prefetchLength(size))
 	}
+}
+
+// prefetchLength is how much to read ahead for a reader whose last read was size bytes.
+//
+// It is at least one read's worth, because a prefetch shorter than the read it anticipates cannot
+// satisfy that read. The cache answers a Get only when it holds the whole requested range — a partial
+// hit is a miss, since it cannot tell a short object from a partially-cached one — so fetching 64 KiB
+// ahead of a 128 KiB reader produces an entry that every subsequent read walks straight past. The read
+// then fetches the full 128 KiB itself and the prefetched half is paid for twice: once in egress, once
+// in the cache capacity it occupies.
+//
+// That was the shipped default, and it is measurable rather than theoretical. Reading a 3 MiB file
+// sequentially at the kernel's 128 KiB MaxRead issued 24 reads plus 18 prefetches of 64 KiB, of which
+// zero were ever hit: 43 GETs and 4,325,644 bytes transferred for a 3,145,728-byte file, a 1.38x
+// amplification whose entire excess was prefetch. With the window at the read size, the same traversal
+// issues 24 GETs and exactly 3,145,728 bytes, and 3 of the 24 reads are served from cache.
+//
+// WindowSize remains the floor, so a deployment can prefetch further ahead than one read but not less.
+func (ram *ReadAheadManager) prefetchLength(size int64) int64 {
+	if size > ram.config.WindowSize {
+		return size
+	}
+
+	return ram.config.WindowSize
 }
 
 // schedulePrefetch schedules a prefetch operation
@@ -152,14 +180,38 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Check if data is already cached
-	if ram.fs.cache.Get(req.path, req.offset, req.size) != nil {
+	// Clamp to the end of the file, and drop a prefetch that starts at or past it.
+	//
+	// A sequential reader's predicted next offset runs off the end of the file by construction: the
+	// last read of every complete traversal is followed by a prediction one read beyond EOF. Sending
+	// that to S3 earns a 416 InvalidRange — a billed request, an error-log line, and a latency spike
+	// on the reliability path, for a range that cannot exist. Reading a 3 MiB file to its end produced
+	// exactly one, every time.
+	//
+	// The size comes from the write path so a file with pending writes is prefetched against its
+	// current length rather than the object's. If it cannot be determined, skip: a prefetch is an
+	// optimization and has no business failing a read or guessing at a bound.
+	size, err := ram.fs.buffer.FileSize(ctx, req.path)
+	if err != nil {
+		return
+	}
+
+	if req.offset >= size {
+		return
+	}
+
+	length := min(req.size, size-req.offset)
+
+	// Only now check the cache, against the clamped length rather than the requested one. Asking for
+	// the unclamped length would miss forever on the last stretch of every file — the cache holds what
+	// it was given and cannot answer for bytes past EOF — so each traversal would re-fetch that tail.
+	if ram.fs.cache.Get(req.path, req.offset, length) != nil {
 		return // Already cached
 	}
 
 	// Fetch data from backend
 	fetchStart := time.Now()
-	data, err := ram.fs.backend.GetObject(ctx, req.path, req.offset, req.size)
+	data, err := ram.fs.backend.GetObject(ctx, req.path, req.offset, length)
 	if err != nil {
 		return // Prefetch failed, not critical
 	}
@@ -170,8 +222,12 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 	// Record metrics using the captured start time (#104).
 	// time.Since(time.Now()) always evaluates to ~0 because time.Now() is
 	// evaluated at the point of the call, not at fetch start.
+	//
+	// The size reported is what was transferred, not what was asked for. Those differ on the last
+	// prefetch of every file, and a prefetch metric that overstates its own egress is the wrong number
+	// to tune a prefetcher with.
 	if ram.fs.metrics != nil {
-		ram.fs.metrics.RecordOperation("prefetch", time.Since(fetchStart), req.size, true)
+		ram.fs.metrics.RecordOperation("prefetch", time.Since(fetchStart), int64(len(data)), true)
 	}
 }
 

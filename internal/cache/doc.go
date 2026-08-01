@@ -142,6 +142,30 @@ Cache operations:
 	fmt.Printf("Hit rate: %.2f%%\n", stats.HitRate*100)
 	fmt.Printf("Utilization: %.2f%%\n", stats.Utilization*100)
 
+# What a Caller Must Know
+
+The full contract is on [github.com/objectfs/objectfs/pkg/types.Cache]. Three parts of it are easy to
+get wrong, and each was a shipped defect:
+
+Ask for the length you need, and no more. Get returns the requested range or nil; a partial hit is a
+miss. The cache is never told how long an object is, so it cannot tell "the object ends here" from
+"only this much is cached" — Get(key, 0, 131072) against a 10 KiB object that is fully cached must
+miss, because the alternative is handing back 10240 bytes for a 131072-byte request. A caller reading
+file content therefore has to clamp its request to the file size first, or it will miss on every read
+of every file shorter than its buffer. Passing size <= 0 means "whatever contiguous bytes are held
+from offset"; it exists for callers that genuinely cannot state a length, and a content reader is not
+one of them.
+
+Cached bytes go stale, so invalidate on write. Nothing in the cache observes writes. A caller that
+modifies an object and does not call Delete will read its own pre-write bytes back for up to the
+configured TTL. Delete removes every chunk of exactly the named object and nothing belonging to any
+other, including objects whose names it is a prefix of.
+
+Entry granularity is not Put granularity. Implementations cache in fixed-size chunks and coalesce
+adjacent runs, so a Put may be merged with bytes already held and one entry may answer many Gets. Do
+not infer entry counts from call counts, and do not assume a Put of N bytes is retrievable only as
+that same N-byte range.
+
 # Performance Optimization
 
 Multiple optimization strategies:

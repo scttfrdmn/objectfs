@@ -114,7 +114,7 @@ func (v *VFS) ReadAt(ctx context.Context, buf []byte, offset int64) (int, error)
 		}
 	}
 
-	n, err := v.handle.Node.ReadInto(buf, offset, stored)
+	n, err := v.handle.Node.ReadInto(buf, offset, r.Offset, stored)
 	if err != nil {
 		return 0, fmt.Errorf("difftest: vfs read at %d: %w", offset, err)
 	}

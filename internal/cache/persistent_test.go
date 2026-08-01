@@ -134,7 +134,7 @@ func TestPersistentCache_PutGet(t *testing.T) {
 	}
 
 	// Verify file was created
-	cacheKey := cache.makeCacheKey(key, offset, int64(len(data)))
+	cacheKey := entryKey(key, chunkIndexOf(offset))
 	item := cache.index[cacheKey]
 	if item == nil {
 		t.Fatal("item not in index")
@@ -221,7 +221,7 @@ func TestPersistentCache_Compression(t *testing.T) {
 			}
 
 			// Verify compression flag
-			cacheKey := cache.makeCacheKey(key, 0, int64(len(tt.data)))
+			cacheKey := entryKey(key, 0)
 			item := cache.index[cacheKey]
 			if item.Compressed != tt.compression {
 				t.Errorf("expected compressed=%v, got %v", tt.compression, item.Compressed)
@@ -274,25 +274,19 @@ func TestPersistentCache_Delete(t *testing.T) {
 		t.Fatalf("NewPersistentCache failed: %v", err)
 	}
 
-	// Add multiple items with same key prefix
+	// Two objects, one holding bytes in two different chunks. Entry counts are not asserted: how many
+	// entries a set of puts produces is a property of the chunking, not of Delete.
 	cache.Put("user:123", 0, []byte("data1"))
-	cache.Put("user:123", 100, []byte("data2"))
+	cache.Put("user:123", 2*ChunkSize, []byte("data2"))
 	cache.Put("user:456", 0, []byte("data3"))
 
-	if len(cache.index) != 3 {
-		t.Errorf("expected 3 items, got %d", len(cache.index))
-	}
-
-	// Delete by key prefix
 	cache.Delete("user:123")
 
-	// Should have only user:456 left
-	if len(cache.index) != 1 {
-		t.Errorf("expected 1 item after delete, got %d", len(cache.index))
-	}
-
 	if cache.Get("user:123", 0, 5) != nil {
-		t.Error("user:123:0 should be deleted")
+		t.Error("user:123 chunk 0 should be deleted")
+	}
+	if cache.Get("user:123", 2*ChunkSize, 5) != nil {
+		t.Error("user:123 chunk 2 should be deleted; Delete must remove every chunk of its object")
 	}
 	if cache.Get("user:456", 0, 5) == nil {
 		t.Error("user:456 should still exist")
@@ -340,9 +334,10 @@ func TestPersistentCache_EvictManual(t *testing.T) {
 		t.Fatalf("NewPersistentCache failed: %v", err)
 	}
 
-	// Add some items
+	// Five separate entries, one per chunk. Putting them at 100-byte spacing instead would coalesce
+	// into a single entry within chunk 0, leaving nothing for Evict to choose between.
 	for i := range 5 {
-		cache.Put("key", int64(i*100), make([]byte, 100))
+		cache.Put("key", int64(i)*ChunkSize, make([]byte, 100))
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -372,9 +367,9 @@ func TestPersistentCache_Clear(t *testing.T) {
 		t.Fatalf("NewPersistentCache failed: %v", err)
 	}
 
-	// Add multiple items
+	// Ten puts spread across ten chunks, so each is its own entry.
 	for i := range 10 {
-		cache.Put("key", int64(i*100), []byte("data"))
+		cache.Put("key", int64(i)*ChunkSize, []byte("data"))
 	}
 
 	if len(cache.index) != 10 {
@@ -491,7 +486,7 @@ func TestPersistentCache_ChecksumValidation(t *testing.T) {
 	cache.Put(key, 0, data)
 
 	// Get the cache file path
-	cacheKey := cache.makeCacheKey(key, 0, int64(len(data)))
+	cacheKey := entryKey(key, 0)
 	item := cache.index[cacheKey]
 
 	// Corrupt the file

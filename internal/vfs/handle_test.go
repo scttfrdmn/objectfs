@@ -214,7 +214,7 @@ func TestHandleTableSharesNodeAcrossHandles(t *testing.T) {
 
 	// POSIX requires a read through one descriptor to see a write through another.
 	buf := make([]byte, 14)
-	valid, err := h2.Node.ReadInto(buf, 0, nil)
+	valid, err := h2.Node.ReadInto(buf, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}
@@ -593,6 +593,61 @@ func TestNodeReadRange(t *testing.T) {
 			length:     0,
 			wantFetch:  false,
 		},
+		{
+			// The head narrowing. A pending write over the front of the read means those bytes come
+			// from memory, so the fetch starts after the read does — the case that made ReadInto need
+			// to be told where the fetched bytes belong.
+			name:       "a pending write at the head moves the fetch later",
+			storedSize: 100,
+			ops:        func(n *Node) error { _, err := n.Write(10, []byte("0123456789"), false); return err },
+			offset:     10,
+			length:     40,
+			wantFetch:  true,
+			wantRange:  Range{Offset: 20, Length: 30},
+		},
+		{
+			// Both ends at once, which is what an in-place page rewrite looks like: the low bytes are
+			// pending, the high bytes are pending, and only the middle has to be read.
+			name:       "pending writes at both ends narrow the fetch to the middle",
+			storedSize: 100,
+			ops: func(n *Node) error {
+				if _, err := n.Write(0, []byte("head"), false); err != nil {
+					return err
+				}
+				_, err := n.Write(40, []byte("tail"), false)
+				return err
+			},
+			offset:    0,
+			length:    44,
+			wantFetch: true,
+			wantRange: Range{Offset: 4, Length: 36},
+		},
+		{
+			// A gap between two pending writes still has to be fetched, so neither end narrowing may
+			// swallow it. Trimming the head to the first extent's end and the tail to the second's
+			// start leaves exactly the hole.
+			name:       "a hole between two pending writes is still fetched",
+			storedSize: 100,
+			ops: func(n *Node) error {
+				if _, err := n.Write(0, []byte("aaaa"), false); err != nil {
+					return err
+				}
+				_, err := n.Write(8, []byte("bbbb"), false)
+				return err
+			},
+			offset:    0,
+			length:    12,
+			wantFetch: true,
+			wantRange: Range{Offset: 4, Length: 4},
+		},
+		{
+			name:       "a pending write covering the whole read needs no fetch",
+			storedSize: 100,
+			ops:        func(n *Node) error { _, err := n.Write(10, []byte("0123456789"), false); return err },
+			offset:     10,
+			length:     10,
+			wantFetch:  false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -699,13 +754,13 @@ func TestNodeReadIntoRejectsNegativeOffset(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	if _, err := h.Node.ReadInto(make([]byte, 10), -1, nil); !errors.Is(err, ErrInvalid) {
+	if _, err := h.Node.ReadInto(make([]byte, 10), -1, -1, nil); !errors.Is(err, ErrInvalid) {
 		t.Errorf("ReadInto(offset=-1) = %v, want ErrInvalid", err)
 	}
 }
 
 // An object can be replaced behind our back and come back shorter than its recorded size. Trusting
-// storedSize over what actually arrived would hand the kernel uninitialised buffer as file content.
+// storedSize over what actually arrived would hand the kernel uninitialized buffer as file content.
 func TestNodeReadIntoToleratesShortStoredRead(t *testing.T) {
 	t.Parallel()
 
@@ -716,7 +771,7 @@ func TestNodeReadIntoToleratesShortStoredRead(t *testing.T) {
 	}
 
 	buf := bytes.Repeat([]byte{0xFE}, 100)
-	valid, err := h.Node.ReadInto(buf, 0, []byte("short"))
+	valid, err := h.Node.ReadInto(buf, 0, 0, []byte("short"))
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}
@@ -810,6 +865,52 @@ func TestNodeReadPath(t *testing.T) {
 			length: 10,
 			want:   "0123\x00\x00\x00\x00ZZ",
 		},
+		{
+			// A pending write at the head makes the fetch start later than the read. The stored bytes
+			// then belong at an offset into the buffer, and splicing them at its start instead shifts
+			// the whole object two bytes early — "AB456789" plus two stale poison bytes, with no error
+			// anywhere. Every stored byte here is distinct so a shift cannot pass.
+			name:   "a pending write at the head does not shift the stored bytes",
+			stored: "0123456789",
+			ops:    func(n *Node) error { _, err := n.Write(0, []byte("AB"), false); return err },
+			length: 10,
+			want:   "AB23456789",
+		},
+		{
+			name:   "pending writes at both ends leave the middle in place",
+			stored: "0123456789",
+			ops: func(n *Node) error {
+				if _, err := n.Write(0, []byte("A"), false); err != nil {
+					return err
+				}
+				_, err := n.Write(9, []byte("Z"), false)
+				return err
+			},
+			length: 10,
+			want:   "A12345678Z",
+		},
+		{
+			// The hole between two pending writes is the only part fetched, and it has to land in it.
+			name:   "the fetched hole lands between the pending writes",
+			stored: "0123456789",
+			ops: func(n *Node) error {
+				if _, err := n.Write(0, []byte("AA"), false); err != nil {
+					return err
+				}
+				_, err := n.Write(6, []byte("ZZ"), false)
+				return err
+			},
+			length: 10,
+			want:   "AA2345ZZ89",
+		},
+		{
+			name:   "a read fully covered by pending writes fetches nothing",
+			stored: "0123456789",
+			ops:    func(n *Node) error { _, err := n.Write(2, []byte("ABCD"), false); return err },
+			offset: 2,
+			length: 4,
+			want:   "ABCD",
+		},
 	}
 
 	for _, tc := range tests {
@@ -855,7 +956,7 @@ func readViaNode(t *testing.T, n *Node, stored []byte, offset int64, length int)
 
 	// Poisoned so any byte reported valid without being written shows up.
 	buf := bytes.Repeat([]byte{0xFE}, length)
-	valid, err := n.ReadInto(buf, offset, fetched)
+	valid, err := n.ReadInto(buf, offset, r.Offset, fetched)
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}
@@ -1408,7 +1509,7 @@ func TestHandleTableConcurrentAccess(t *testing.T) {
 					t.Errorf("worker %d: ReadRange: %v", w, err)
 					return
 				}
-				if _, err := n.ReadInto(buf, 0, nil); err != nil {
+				if _, err := n.ReadInto(buf, 0, 0, nil); err != nil {
 					t.Errorf("worker %d: ReadInto: %v", w, err)
 					return
 				}

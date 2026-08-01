@@ -321,6 +321,9 @@ func (n *DirectoryNode) Mkdir(ctx context.Context, name string, mode uint32, out
 		return nil, syscall.EIO
 	}
 
+	// A cached negative or stale entry for this path would outlive the directory's creation.
+	n.fs.invalidate(childPath)
+
 	return n.createDirectoryNode(name, childPath), 0
 }
 
@@ -342,6 +345,10 @@ func (n *DirectoryNode) Create(ctx context.Context, name string, flags uint32, m
 		slog.Error("create failed", "path", childPath, "error", err)
 		return nil, nil, 0, syscall.EIO
 	}
+
+	// Create truncates: whatever was cached for this path describes the object that was just replaced
+	// with an empty one. Leaving it would let a read return the old file's bytes at the old file's size.
+	n.fs.invalidate(childPath)
 
 	n.fs.stats.mu.Lock()
 	n.fs.stats.Creates++
@@ -435,11 +442,27 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 	}, 0, 0
 }
 
-// Getattr gets file attributes
+// Getattr gets file attributes.
+//
+// The size comes from the write path, which overlays pending writes on the stored object. Reporting
+// f.info.Size — the length the object had when it was looked up — understates a file being appended to,
+// and the kernel clamps reads to whatever stat said: a program that writes 1 MiB and reads it back
+// without closing sees only as much as the object held beforehand.
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = f.fs.config.DefaultMode
+
+	size := f.info.Size
+	if live, err := f.fs.buffer.FileSize(ctx, f.path); err == nil {
+		size = live
+	} else {
+		// Fall back to the stored length rather than failing the stat. A file whose size cannot be
+		// determined is still listable, and reporting the object's own length is wrong only while writes
+		// are pending.
+		slog.Warn("getattr: falling back to stored size", "path", f.path, "error", err)
+	}
+
 	// Safely convert int64 to uint64 to prevent integer overflow
-	out.Size = safeInt64ToUint64(f.info.Size)
+	out.Size = safeInt64ToUint64(size)
 	out.Uid = f.fs.config.DefaultUID
 	out.Gid = f.fs.config.DefaultGID
 
@@ -470,24 +493,93 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	fh.fs.stats.Reads++
 	fh.fs.stats.mu.Unlock()
 
-	// Update access tracking under the per-file mutex (#105).
+	// Update access tracking under the per-file mutex (#105), and read the dirty flag while holding it:
+	// it is written under the same lock by Write, and an unsynchronized read here was P-2, a live race
+	// ten lines from its own fix.
 	fh.file.accessMu.Lock()
 	fh.file.lastAccess = time.Now()
 	fh.file.accessCount++
+	dirty := fh.file.dirty
 	fh.file.accessMu.Unlock()
 
+	// A file with pending writes is served by the write path, which is the only component that holds
+	// them. Neither the cache nor the object store has seen them yet, so asking either returns pre-write
+	// bytes — the read-after-write defect. Nothing is cached from this path either: the bytes are not
+	// durable, and caching them would leave the cache authoritative for a version of the object that
+	// does not exist anywhere else and may yet fail to upload.
+	if dirty {
+		n, err := fh.fs.buffer.ReadAt(ctx, fh.file.path, dest, off)
+		if err != nil {
+			fh.fs.stats.mu.Lock()
+			fh.fs.stats.Errors++
+			fh.fs.stats.mu.Unlock()
+
+			slog.Error("read of pending writes failed", "path", fh.file.path, "offset", off, "error", err)
+
+			return nil, syscall.EIO
+		}
+
+		fh.fs.stats.mu.Lock()
+		fh.fs.stats.BytesRead += int64(n)
+		fh.fs.stats.mu.Unlock()
+
+		return fuse.ReadResultData(dest[:n]), 0
+	}
+
+	// Clamp the request to the end of the file before asking anyone for bytes.
+	//
+	// The kernel hands down a full buffer — 128 KiB by default — regardless of how much file is left, so
+	// off+len(dest) routinely runs past EOF. That over-ask has to be trimmed here because the cache
+	// cannot trim it: it is never told how long an object is, so it cannot distinguish "the object ends
+	// at 10240" from "only 10240 bytes are cached", and answering a 131072-byte request with 10240 bytes
+	// would be indistinguishable from a truncated file. It therefore misses, correctly, on every
+	// unclamped short read — which is why every file smaller than the read buffer was uncacheable in
+	// v0.10.0 no matter how many times it was read.
+	//
+	// The length comes from the write path rather than the handle's own size field, so that a file
+	// extended or truncated through another descriptor is not clamped against this handle's stale idea
+	// of where it ends.
+	size, err := fh.fs.buffer.FileSize(ctx, fh.file.path)
+	if err != nil {
+		fh.fs.stats.mu.Lock()
+		fh.fs.stats.Errors++
+		fh.fs.stats.mu.Unlock()
+
+		slog.Error("read failed: cannot determine file size", "path", fh.file.path, "error", err)
+
+		return nil, syscall.EIO
+	}
+
+	want := int64(len(dest))
+	if off+want > size {
+		want = size - off
+	}
+
+	if want <= 0 {
+		// At or past EOF. Nothing to fetch and nothing to cache; a zero-length read is the POSIX answer.
+		return fuse.ReadResultData(nil), 0
+	}
+
 	// Try cache first
-	if cachedData := fh.fs.cache.Get(fh.file.path, off, int64(len(dest))); cachedData != nil {
+	if cachedData := fh.fs.cache.Get(fh.file.path, off, want); cachedData != nil {
 		fh.fs.stats.mu.Lock()
 		fh.fs.stats.CacheHits++
 		fh.fs.stats.BytesRead += int64(len(cachedData))
 		fh.fs.stats.mu.Unlock()
 
+		// A hit is still a read, and the read-ahead detector has to see it. Recording only misses made
+		// the prefetcher defeat itself: a successful prefetch hid the next read from the detector, whose
+		// contiguity check then compared the read after it against the offset of the read before, found
+		// a gap, and reset the pattern to zero. Sequential-hit counts cycled 0→6→prefetch→0 forever, so
+		// exactly one prefetch landed per seven reads and a long sequential traversal never reached
+		// steady state. Measured on a 3 MiB file read at 128 KiB: 3 of 24 reads served from cache.
+		fh.fs.readAhead.OnRead(fh.file.path, off, int64(len(cachedData)))
+
 		return fuse.ReadResultData(cachedData), 0
 	}
 
 	// Read from backend
-	data, err := fh.fs.backend.GetObject(ctx, fh.file.path, off, int64(len(dest)))
+	data, err := fh.fs.backend.GetObject(ctx, fh.file.path, off, want)
 	if err != nil {
 		fh.fs.stats.mu.Lock()
 		fh.fs.stats.Errors++
@@ -503,28 +595,21 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	fh.fs.stats.BytesRead += int64(len(data))
 	fh.fs.stats.mu.Unlock()
 
-	// Cache at chunk granularity so partial hits avoid redundant S3 fetches.
-	// Chunk size matches the S3 parallel-read chunk size (default 16 MB).
-	// Single-entry put for reads smaller than the chunk boundary.
-	const cacheChunkSize = 16 * 1024 * 1024 // 16 MB — mirrors ReadChunkSize default
-	if int64(len(data)) > cacheChunkSize {
-		for chunkOff := int64(0); chunkOff < int64(len(data)); chunkOff += cacheChunkSize {
-			end := min(chunkOff+cacheChunkSize, int64(len(data)))
-			fh.fs.cache.Put(fh.file.path, off+chunkOff, data[chunkOff:end])
-		}
-	} else {
-		fh.fs.cache.Put(fh.file.path, off, data)
-	}
+	// Hand the whole read to the cache and let it choose its own entry granularity.
+	//
+	// This used to split reads larger than 16 MB into per-chunk Puts itself. That loop never ran — the
+	// kernel's largest read is MaxRead, two orders of magnitude below the threshold — and splitting here
+	// would be the wrong layer anyway: the cache already stores at a fixed chunk size and coalesces
+	// adjacent runs, so a caller that pre-splits only guesses at a boundary the cache is free to change.
+	fh.fs.cache.Put(fh.file.path, off, data)
 
 	// Record metrics
 	if fh.fs.metrics != nil {
 		fh.fs.metrics.RecordCacheMiss(fh.file.path, int64(len(data)))
 	}
 
-	// Trigger read-ahead analysis
-	if fh.fs.readAhead != nil {
-		fh.fs.readAhead.OnRead(fh.file.path, off, int64(len(data)))
-	}
+	// Trigger read-ahead analysis. OnRead tolerates a nil manager.
+	fh.fs.readAhead.OnRead(fh.file.path, off, int64(len(data)))
 
 	return fuse.ReadResultData(data), 0
 }
@@ -590,9 +675,15 @@ func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 
+	// Drop what the cache holds for this path now that the object has changed underneath it. Ordered
+	// after the flush, not before: invalidating first would leave a window in which a concurrent read
+	// re-populates the cache from the old object and the flush then makes that entry stale again.
+	fh.fs.invalidate(fh.file.path)
+
 	fh.file.accessMu.Lock()
 	fh.file.dirty = false
 	fh.file.accessMu.Unlock()
+
 	return 0
 }
 
@@ -651,20 +742,37 @@ func (n *DirectoryNode) createDirectoryNode(name, path string) *fs.Inode {
 
 // Helper methods for FileSystem
 
+// metaCacheKey is the cache key under which a path's marshaled ObjectInfo is held.
+//
+// The "__meta__" prefix shares a keyspace with object content, which is safe only because no S3 object
+// key can begin with it and also name a real object this filesystem serves — the mount's own paths never
+// carry it. Invalidation depends on that: invalidateMetadata deletes this key, and Delete is exact, so
+// flushing a path's attributes cannot flush its content or vice versa.
+func metaCacheKey(path string) string {
+	return "__meta__" + path
+}
+
 func (fs *FileSystem) getCachedInfo(path string) *types.ObjectInfo {
 	if fs.cache == nil {
 		return nil
 	}
-	metaKey := "__meta__" + path
-	// 8 KiB is generous for any realistic ObjectInfo JSON payload.
-	cachedData := fs.cache.Get(metaKey, 0, 8192)
+
+	// A size of zero asks for whatever contiguous bytes are held from offset 0, which is the one shape
+	// that fits a caller storing a whole value of a length only the writer knows. Asking for a fixed
+	// 8192 instead — as v0.10.0 did — could never hit: a ~138-byte ObjectInfo is all that was ever
+	// stored, and the cache correctly refuses to answer a 8192-byte request with 138 bytes, since it
+	// cannot tell a short value from a partially-cached one. The result was one S3 HEAD per path
+	// component on every stat, forever, with the metadata cache reporting a 0% hit rate.
+	cachedData := fs.cache.Get(metaCacheKey(path), 0, 0)
 	if cachedData == nil {
 		return nil
 	}
+
 	var info types.ObjectInfo
 	if err := json.Unmarshal(cachedData, &info); err != nil {
 		return nil
 	}
+
 	return &info
 }
 
@@ -672,12 +780,32 @@ func (fs *FileSystem) cacheInfo(path string, info *types.ObjectInfo) {
 	if fs.cache == nil || info == nil {
 		return
 	}
-	metaKey := "__meta__" + path
+
 	data, err := json.Marshal(info)
 	if err != nil {
 		return
 	}
-	fs.cache.Put(metaKey, 0, data)
+
+	fs.cache.Put(metaCacheKey(path), 0, data)
+}
+
+// invalidate drops everything cached for a path: its content bytes and its attributes.
+//
+// Every mutation must call this. Nothing in the cache observes writes, so a modified path keeps serving
+// its pre-write bytes and its pre-write size until the TTL expires — up to five minutes on the default
+// config. v0.10.0 had no call to cache.Delete anywhere in this package, which is why writing to a file
+// and reading it back on the same descriptor returned the old contents.
+//
+// Content and metadata are separate keys, and both go: a write changes the bytes, and it also changes
+// the size and mtime that Lookup reports. Dropping only one leaves the two disagreeing, which surfaces
+// as a file whose stat size does not match what read returns.
+func (fs *FileSystem) invalidate(path string) {
+	if fs.cache == nil {
+		return
+	}
+
+	fs.cache.Delete(path)
+	fs.cache.Delete(metaCacheKey(path))
 }
 
 func (fs *FileSystem) recordLookupTime(duration time.Duration) {

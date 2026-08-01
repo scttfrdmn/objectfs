@@ -85,6 +85,14 @@ func (m *mockWriteBuffer) Write(key string, offset int64, data []byte) error {
 	return nil
 }
 
+func (m *mockWriteBuffer) ReadAt(ctx context.Context, key string, buf []byte, offset int64) (int, error) {
+	return 0, nil
+}
+
+func (m *mockWriteBuffer) FileSize(ctx context.Context, key string) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockWriteBuffer) Flush(key string) error {
 	return nil
 }

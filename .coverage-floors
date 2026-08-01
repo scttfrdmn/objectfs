@@ -13,7 +13,7 @@
 # there. The gap is concentrated in the packages the refactor is about to rewrite, which is where
 # raising a floor before the rewrite would buy tests of code that is being deleted:
 #
-#   internal/fuse       17.7%  — becomes a thin shim over internal/vfs (task #22)
+#   internal/fuse       37.7%  — becomes a thin shim over internal/vfs (task #22)
 #   internal/adapter    45.7%  — the write path is being rebuilt around dirty ranges (task #20)
 #   internal/health     45.0%  — reachable now that pkg/health's probe path exists
 #   pkg/errors          48.3%  — mostly classification tables; needs table tests, not design work
@@ -32,7 +32,6 @@
 internal/analytics       96
 internal/archive         90
 internal/awsname         100
-internal/cache           74
 internal/cache/redis     87
 internal/circuit         96
 internal/compression     87
@@ -53,16 +52,29 @@ internal/vfs             98
 # will churn it substantially; 40 is the level below which it has genuinely regressed.
 internal/adapter         40
 
-# internal/fuse is lowered from 24 to 17 by the write-path rebuild, and this is the one shape of
-# lowering that is not a weakened gate: the drop is the deletion of tests for deleted code. The
-# WriteCoalescer and its thirteen tests are gone — the type corrupted data on a routine overwrite
-# while every one of those tests passed — so the numerator and the denominator both fell, and the
-# statements that remain are covered exactly as well as they were before.
+# internal/fuse was lowered from 24 to 17 by the write-path rebuild — the one shape of lowering that
+# is not a weakened gate, because the drop was the deletion of tests for deleted code. The
+# WriteCoalescer and its thirteen tests went with it (the type corrupted data on a routine overwrite
+# while every one of those tests passed), so numerator and denominator both fell and the statements
+# that remained were covered exactly as well as before.
 #
-# 17 is not a target. This package is a 727-line coupling of POSIX semantics to go-fuse types with
-# no seam to test at, which is what task #22 is for: once it is a translation shim over
+# The read-path work raises it to 37: nine tests driving FileHandle.Read and the metadata cache
+# against a real byte-range cache, a real write path, and a substrate-backed S3 endpoint. Those are
+# the paths where the cache-keying and prefetch defects lived, and they were previously reachable in
+# tests only through a map-backed stub that answered every request regardless of length.
+#
+# 37 is still not a target. This package remains a coupling of POSIX semantics to go-fuse types with
+# little seam to test at, which is what task #22 is for: once it is a translation shim over
 # internal/vfs (98%), its floor goes up with the rewrite rather than ahead of it.
-internal/fuse            17
+internal/fuse            37
+
+# internal/cache goes from 74 to 76 with the re-keying work. The rise is small and the reason it is
+# small is worth stating: the chunking logic the two caches now share is one 250-line file that is
+# covered exhaustively, but the package also holds the multi-level, predictive, and analytics caches,
+# which are not on the read path and are not what this task touched. The number that moved is the one
+# that matters — the byte-range keying, splitting, coalescing, and coverage checks are now covered by
+# 27 tests and a fuzz target, where before they were two copies of the same untested sprintf.
+internal/cache           76
 
 pkg/api                  73
 pkg/errors               48
