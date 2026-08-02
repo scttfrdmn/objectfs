@@ -96,10 +96,17 @@ Flexible mount configuration options:
 		},
 	}
 
-`MountOptions.MaxRead` exists and is not plumbed anywhere: `fuse.MountOptions` in go-fuse v2.11.0
-has no corresponding field, so there is nothing to pass it to. It is retained only because removing
-a YAML key breaks existing config files. Set `MaxWrite` instead; the read size is negotiated by the
-kernel.
+Every option above takes effect. That is now a property of the type rather than a claim about this
+example: `MountOptions` and `Config` between them carried fourteen fields — `MaxRead`, `DirectIO`,
+`KeepCache`, `BigWrites`, `AsyncRead`, `WritebackCache`, the three splice flags, `AllowOther` on
+`Config`, `ReadAhead`, `WriteBuffer`, and `Concurrency` — that were read by nothing, and they are
+gone. `MaxWrite` is the only size that is settable: go-fuse derives `max_read` and `MaxPages` from
+it, so the read size is not independently configurable.
+
+The yaml tags on these structs bind to nothing, and never did. Configuration is decoded into
+[config.Configuration], which has no FUSE section, so a mount is configured by the code above and by
+`internal/adapter`, not by a `fuse:` block in a config file. #180 tracks plumbing the four removed
+flags that name real go-fuse capabilities, along with the tests that would show they took effect.
 
 # Usage Examples
 

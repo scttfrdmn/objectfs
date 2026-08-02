@@ -93,13 +93,41 @@ func TestDocumentedConfigYAMLMatchesTheSchema(t *testing.T) {
 	}
 }
 
+// nestedSectionNames are keys that appear *below* the top level of the schema and nowhere else in
+// this repository's YAML, so a block rooted at one of them is a misplaced ObjectFS config rather
+// than some other document.
+//
+// This exists because the admission test below was too strict in one direction while being loose in
+// the other, and the gap had a real cost. docs/features/multipart-uploads.md carried five blocks
+// rooted at a bare `s3:` — the right keys at the wrong depth, since the schema nests them under
+// `storage.s3`. Not one of them was checked: `s3` is not a top-level key, so the block did not
+// "claim to be ObjectFS config", so it was skipped, so its four *invented* keys
+// (multipart_threshold, target_throughput, optimization_level, enable_cargoship_optimization) went
+// unnoticed through the exact test written to notice that. A reader copying any of them got a
+// startup failure.
+//
+// The lesson generalizes past this one file: an admission test that decides what to check is itself
+// load-bearing, and "the check passed" means nothing until you know the check ran.
+var nestedSectionNames = map[string]bool{
+	"s3":               true, // belongs under storage:
+	"multipart":        true, // belongs under storage.s3:
+	"persistent_cache": true, // belongs under cache:
+	"circuit_breaker":  true, // belongs under network:
+	"retry":            true, // belongs under network:
+	"compression":      true, // belongs under performance:
+}
+
 // claimsToBeObjectFSConfig reports whether a YAML block is trying to be a Configuration document.
 //
-// The test is "does it use at least one key from the schema at the top level", which is
-// deliberately loose in the direction of checking too much rather than too little: a block using
-// one real key and four invented ones is exactly the failure worth catching, and it would escape a
-// stricter admission test. Blocks that parse as something other than a mapping — a list, a scalar,
-// a Go snippet mislabelled as yaml — are not configuration and are skipped.
+// The test is "does it use at least one key the schema recognizes", which is deliberately loose in
+// the direction of checking too much rather than too little: a block using one real key and four
+// invented ones is exactly the failure worth catching, and it would escape a stricter admission
+// test. Blocks that parse as something other than a mapping — a list, a scalar, a Go snippet
+// mislabelled as yaml — are not configuration and are skipped.
+//
+// A block rooted at a nested section name counts too, and fails: being at the wrong depth is a
+// defect of the same kind as naming a key that does not exist, and has the same consequence for
+// someone who copies it.
 func claimsToBeObjectFSConfig(block string, schema map[string]bool) bool {
 	var top map[string]any
 	if err := yaml.Unmarshal([]byte(block), &top); err != nil {
@@ -107,7 +135,7 @@ func claimsToBeObjectFSConfig(block string, schema map[string]bool) bool {
 	}
 
 	for k := range top {
-		if schema[k] {
+		if schema[k] || nestedSectionNames[k] {
 			return true
 		}
 	}
@@ -118,15 +146,15 @@ func claimsToBeObjectFSConfig(block string, schema map[string]bool) bool {
 // docsExemptFromConfigSchema names markdown files whose YAML deliberately does not match the
 // current schema, with the reason.
 //
-// Historical release notes are the honest case: RELEASE_NOTES_v0.4.0.md documents what v0.4.0
-// accepted, and rewriting it to match v0.11.0's schema would make it a false record of that
-// release. The right fix for those is deletion — they are local tracking files, which CLAUDE.md
-// says belong on GitHub — and that is tracked separately; until then, exempting them by name with
-// a reason keeps the check meaningful for the files a user is actually likely to copy from.
+// It is down to one entry. The other two were historical release notes — documents describing what
+// v0.4.0 accepted, which could not be corrected to today's schema without falsifying the record of
+// that release, and so were exempted rather than fixed. They are now deleted instead, which is what
+// CLAUDE.md asks for: tracking belongs on GitHub, not in local markdown. Deletion is the better
+// outcome for an exemption of that shape, because an exemption keeps a file a user can still find
+// and copy from while removing the one check that would have told them it no longer loads.
+//
+// An entry here must name a file whose YAML is wrong *on purpose*. Anything else belongs fixed.
 var docsExemptFromConfigSchema = map[string]string{
-	"RELEASE_NOTES_v0.4.0.md": "a historical release note describing the v0.4.0 schema; " +
-		"rewriting it to today's schema would falsify the record. Slated for deletion",
-	"docs/v0.4.0-COMPLETION-SUMMARY.md": "same: a v0.4.0-era document. Slated for deletion",
 	"OBJECTFS.md": "a design document describing a proposed schema (mount:, latency_profile:, " +
 		"security.kms_key) that was never implemented; the gap is the finding, not the file",
 }

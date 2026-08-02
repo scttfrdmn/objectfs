@@ -180,7 +180,6 @@ func (a *Adapter) Start(ctx context.Context) error {
 		Options: &fuse.MountOptions{
 			FSName:   "objectfs",
 			Subtype:  "s3",
-			MaxRead:  128 * 1024,
 			MaxWrite: 128 * 1024,
 			Debug:    false,
 		},

@@ -74,7 +74,6 @@ func (s *POSIXTestSuite) SetupSuite() {
 		Options: &fuse.MountOptions{
 			FSName:   "objectfs-test",
 			Subtype:  "s3",
-			MaxRead:  128 * 1024,
 			MaxWrite: 128 * 1024,
 			Debug:    false,
 		},

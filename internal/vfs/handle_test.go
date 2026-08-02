@@ -1474,8 +1474,10 @@ func resizeModel(file []byte, size int64) []byte {
 }
 
 // Concurrent opens, writes, reads, flushes, and releases on the same path. Run under -race, this is
-// what would have caught the sixteen concurrency bugs filed after RACE_CONDITION_AUDIT.md declared
-// the codebase race-free.
+// what would have caught the sixteen concurrency bugs (#98, #101-104, #106-111, #113-117) that were
+// filed and fixed after a hand-written audit declared the codebase race-free — most of them in files
+// that audit had individually marked safe. A checked-in document asserting an absence of races is not
+// the same artifact as a test that would fail in their presence.
 func TestHandleTableConcurrentAccess(t *testing.T) {
 	t.Parallel()
 

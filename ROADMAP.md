@@ -1,14 +1,30 @@
 # ObjectFS Product Roadmap
 
-**Version:** 1.0
 **Last Updated:** October 15, 2025
-**Current Release:** v0.3.0
+**Current release:** see [releases](https://github.com/scttfrdmn/objectfs/releases); the
+authority in-tree is the `version` constant in `cmd/objectfs/main.go`
+
+> **This document's schedule is stale, and its feature-to-version mapping no longer holds.**
+>
+> It was written against v0.3.0 in October 2025 and plans v0.4.0 for Q1 2026 through v1.0 for Q2
+> 2027. Every version through v0.10.0 has since shipped, on a different order and with different
+> contents: the multi-protocol work planned for v0.6.0–v0.8.0 has not started (it is now
+> [#181](https://github.com/scttfrdmn/objectfs/issues/181)), while a large amount of unplanned
+> integrity work has. Read the dates and the version numbers here as the intent at the time, not as
+> a commitment.
+>
+> **The current plan lives on GitHub**, in
+> [milestones](https://github.com/scttfrdmn/objectfs/milestones) and the issues assigned to them.
+> Per `CLAUDE.md`, that is where work is tracked; a checked-in roadmap cannot be told that its dates
+> have passed. This file is kept for the strategic framing and the feature analysis, which are still
+> useful, and it should either be rewritten against the milestones or deleted rather than
+> re-dated — bumping "Last Updated" would make it look maintained without making it true.
 
 ---
 
 ## Executive Summary
 
-ObjectFS is positioned as the **enterprise-grade, cost-intelligent S3 filesystem** that bridges the gap between Amazon File Cache's premium performance and basic S3 filesystem tools. This roadmap outlines our path from the current stable v0.3.0 release to a comprehensive **multi-protocol enterprise data platform** integrated with CargoShip for complete data lifecycle management.
+ObjectFS is positioned as the **enterprise-grade, cost-intelligent S3 filesystem** that bridges the gap between Amazon File Cache's premium performance and basic S3 filesystem tools. This roadmap outlines our path from the current release to a comprehensive **multi-protocol enterprise data platform** integrated with CargoShip for complete data lifecycle management.
 
 ### Strategic Vision
 
@@ -23,21 +39,21 @@ ObjectFS is positioned as the **enterprise-grade, cost-intelligent S3 filesystem
 ## Release Timeline Overview
 
 ```
-v0.3.0 (Current) ──► v0.4.0 ──► v0.5.0 ──► v0.6.0 ──► v0.7.0 ──► v0.8.0 ──► v1.0
-  Oct 2025       Q1 2026    Q2 2026    Q3 2026    Q4 2026    Q1 2027    Q2 2027
-                    │          │          │          │          │          │
-                    │          │          │          │          │          └─ Multi-Protocol
-                    │          │          │          │          │             Enterprise Platform
-                    │          │          │          │          └─ NFS Support +
-                    │          │          │          │             Advanced Features
-                    │          │          │          └─ Production SMB +
-                    │          │          │             Enterprise Auth
-                    │          │          └─ Basic SMB Implementation +
-                    │          │             Multi-Protocol Architecture
-                    │          └─ CargoShip Integration +
-                    │             Advanced Features
-                    └─ User Feedback +
-                       Performance & Reliability
+v0.3.0 ──► v0.4.0 ──► v0.5.0 ──► v0.6.0 ──► v0.7.0 ──► v0.8.0 ──► v1.0
+Oct 2025   Q1 2026    Q2 2026    Q3 2026    Q4 2026    Q1 2027    Q2 2027
+          │          │          │          │          │          │
+          │          │          │          │          │          └─ Multi-Protocol
+          │          │          │          │          │             Enterprise Platform
+          │          │          │          │          └─ NFS Support +
+          │          │          │          │             Advanced Features
+          │          │          │          └─ Production SMB +
+          │          │          │             Enterprise Auth
+          │          │          └─ Basic SMB Implementation +
+          │          │             Multi-Protocol Architecture
+          │          └─ CargoShip Integration +
+          │             Advanced Features
+          └─ User Feedback +
+             Performance & Reliability
 ```
 
 ---
@@ -623,7 +639,7 @@ v0.3.0 (Current) ──► v0.4.0 ──► v0.5.0 ──► v0.6.0 ──► v0
 
 ## Competitive Positioning Evolution
 
-### Current State (v0.3.0)
+### Current State
 
 **Position:** Best-in-class S3 filesystem with cost optimization
 

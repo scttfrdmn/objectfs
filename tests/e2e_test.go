@@ -5,6 +5,10 @@ package tests
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -159,17 +163,44 @@ func (s *E2ETestSuite) TestReleaseReadiness() {
 	t.Logf("   - Interface compliance: ✅ Working")
 }
 
+// TestVersionAndBuildInfo builds the binary and asks it what version it is.
+//
+// This test used to log `✅ Version: 0.4.0 (defined in main.go)` and assert nothing, having
+// concluded in a comment that "we can't test it directly here". It can: build the binary, run
+// `--version`, and compare against the constant in the source. What the old form actually did was
+// hardcode a fifth answer to the version question — main.go said 0.10.0 — and print a checkmark
+// next to it, which is worse than not testing at all, because the checkmark is evidence to a
+// reader that something was verified.
 func (s *E2ETestSuite) TestVersionAndBuildInfo() {
 	t := s.T()
 
-	t.Logf("ℹ️  Testing version and build information")
+	root, err := filepath.Abs("..")
+	require.NoError(t, err)
 
-	// The version is set in main.go as const version = "0.4.0"
-	// We can't test it directly here, but we validate that the binary
-	// would have version information available
+	// The constant is unexported in package main, so there is nothing to import; read it. This
+	// same inability to import it is why the number kept being copied into prose by hand.
+	mainGo, err := os.ReadFile(filepath.Join(root, "cmd", "objectfs", "main.go"))
+	require.NoError(t, err)
 
-	t.Logf("✅ Version: 0.4.0 (defined in main.go)")
-	t.Logf("✅ Build info available in binary")
+	m := regexp.MustCompile(`(?m)^\s*version\s*=\s*"([^"]+)"`).FindSubmatch(mainGo)
+	require.NotNil(t, m, "cmd/objectfs/main.go no longer declares `version = \"…\"`")
+	declared := string(m[1])
+
+	bin := filepath.Join(t.TempDir(), "objectfs")
+
+	build := exec.CommandContext(s.ctx, "go", "build", "-o", bin, "./cmd/objectfs")
+	build.Dir = root
+
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "building the binary: %s", out)
+
+	out, err = exec.CommandContext(s.ctx, bin, "--version").CombinedOutput()
+	require.NoError(t, err, "running --version: %s", out)
+
+	require.Equal(t, "ObjectFS version "+declared+"\n", string(out),
+		"the binary reports a different version than the constant it is built from")
+
+	t.Logf("✅ binary reports version %s, matching cmd/objectfs/main.go", declared)
 }
 
 // TestV040Features validates all v0.4.0 specific features

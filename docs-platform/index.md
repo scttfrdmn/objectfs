@@ -41,8 +41,9 @@ features:
     details: Comprehensive metrics, health monitoring, distributed tracing, and real-time performance dashboards.
 
   - icon: 🛡️
-    title: Secure & Compliant
-    details: End-to-end encryption, RBAC, audit logging, and compliance frameworks for GDPR, HIPAA, and SOC2.
+    title: Server-side encryption
+    details: SSE-S3 and SSE-KMS on every write, with bucket keys. Access control is IAM's — ObjectFS
+      adds no RBAC layer of its own, no audit log, and holds no compliance certification.
 ---
 
 ## Quick Start
@@ -78,10 +79,14 @@ cat /mnt/data/test.txt
 
 ## Performance Comparison
 
-<PerformanceChart
-  :data="performanceData"
-  title="ObjectFS vs Traditional Storage"
-/>
+A chart used to sit here. It rendered from an array of numbers written by hand in this file — NFS
+at 100 across the board, ObjectFS at up to 500 — and nothing produced those numbers but the
+sentence "ObjectFS looks good on a chart". No benchmark generated them, no run is reproducible
+from them, and a reader had no way to tell them apart from a measurement.
+
+Real numbers belong here, and there is machinery for producing them: `benchmarks/` has a suite and
+`benchstat` comparison instructions. Until this page can plot output from that suite against a
+named bucket, region, and object size, it will say nothing about throughput rather than invent it.
 
 ## Use Cases
 
@@ -272,24 +277,3 @@ ObjectFS provides native SDKs for popular programming languages:
 }
 </style>
 
-<script setup>
-import { ref } from 'vue'
-
-const performanceData = ref({
-  categories: ['Sequential Read', 'Sequential Write', 'Random Read', 'Random Write', 'Metadata Ops'],
-  series: [
-    {
-      name: 'Traditional NFS',
-      data: [100, 100, 100, 100, 100]
-    },
-    {
-      name: 'ObjectFS (Cold)',
-      data: [80, 85, 60, 70, 150]
-    },
-    {
-      name: 'ObjectFS (Warm Cache)',
-      data: [300, 250, 400, 300, 500]
-    }
-  ]
-})
-</script>

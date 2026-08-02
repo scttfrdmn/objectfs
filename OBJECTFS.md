@@ -1,11 +1,31 @@
-# ObjectFS
-## Enterprise-Grade High-Performance POSIX Filesystem for Object Storage
+# ObjectFS — original design document
+
+> **This is a design document, not documentation. Most of what it describes does not exist.**
+>
+> It was written before implementation as a proposal for what ObjectFS might be, and it has been
+> kept because it records the original intent and because several code comments cite it when
+> explaining why a config key exists that nothing reads. It is *not* a description of the shipped
+> system and must not be read as one.
+>
+> Concretely, known to be false here:
+>
+> - **The Go in the later sections does not compile.** Roughly 700 lines of it — `OptimizationProfile`,
+>   `contentProfiles`, `LatencyProfile`, and the types they reference — name nothing that exists in
+>   the tree, and some of it is not valid Go.
+> - **The YAML schema is proposed, not implemented.** `mount:`, `latency_profile:`, and
+>   `security.kms_key` are not keys the loader has; with strict decoding a config file using them
+>   fails to start. `internal/config/docs_test.go` exempts this file from the schema check for
+>   exactly this reason.
+> - **"POSIX-compliant" is wrong.** ObjectFS presents a POSIX interface over object storage. There is
+>   no rename, no links, no locking. See the README's supported-operations table.
+> - **The performance and coverage figures are aspirations**, including a "95%" coverage badge and a
+>   "10-100x" speedup, neither of which was measured.
+>
+> For what ObjectFS actually does, read the [README](README.md), the package documentation, and
+> [CHANGELOG.md](CHANGELOG.md). For where it is going, [ROADMAP.md](ROADMAP.md).
 
 [![Go Version](https://img.shields.io/badge/Go-1.19+-blue.svg)](https://golang.org/dl/)
-[![Go Report Card](https://goreportcard.com/badge/github.com/scttfrdmn/objectfs)](https://goreportcard.com/report/github.com/scttfrdmn/objectfs)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)](#)
-[![Coverage](https://img.shields.io/badge/Coverage-95%25-brightgreen.svg)](#)
 
 ---
 

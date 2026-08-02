@@ -2,12 +2,16 @@
 
 ## Project
 
-Enterprise-grade POSIX-compliant FUSE filesystem for AWS S3, optimized for research computing and institutional deployments.
+FUSE filesystem presenting a POSIX interface over AWS S3, for research computing and institutional
+deployments. Not a POSIX-compliant filesystem — see the supported-operations table in `README.md`
+for what works, what fails by design, and which tools are known not to work.
 
 - **Module**: `github.com/objectfs/objectfs`
 - **Go version**: 1.26.0
 - **License**: Apache 2.0, Copyright 2025-2026 Scott Friedman
-- **Current version**: 0.7.0
+- **Current version**: the `version` constant in `cmd/objectfs/main.go` is the only authority. Do
+  not restate it here or in any roadmap: five files claimed five different versions (0.10.0, 0.7.0,
+  v0.3.0, v0.2.0 twice), and a number copied into prose has no way to be told it is stale
 
 ## Project Tracking
 

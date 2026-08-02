@@ -205,8 +205,6 @@ func TestFUSEOptimizations(t *testing.T) {
 		DefaultUID:  1000,
 		DefaultGID:  1000,
 		DefaultMode: 0644,
-		ReadAhead:   64 * 1024,
-		WriteBuffer: 32 * 1024,
 	}
 
 	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, fuseConfig)

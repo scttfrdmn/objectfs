@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -43,15 +44,32 @@ func clientOptions(cfg *Config) func(*s3.Options) {
 
 // ClientManager handles S3 client creation and management
 type ClientManager struct {
+	// accelMu guards client and accelerationActive, the only mutable state on this struct.
+	//
+	// DisableAcceleration is called from executeWithAccelerationFallback, which is on the path of
+	// every GET and PUT, so any request goroutine can write these two fields while every other
+	// in-flight request reads them through IsAccelerationActive and GetAcceleratedClient. There was
+	// no lock, and -race reports the write/read pair immediately once the two are driven
+	// concurrently (TestAccelerationFallbackIsRaceFree).
+	//
+	// The window is not narrow in practice: a bucket that lacks the Transfer Acceleration
+	// configuration returns InvalidRequest for *every* request, so the first burst of concurrent
+	// reads on such a mount takes the write path on many goroutines at once — under load, which is
+	// when a torn read of client hands an operation a pointer that is neither client.
+	//
+	// The clients themselves are immutable after construction and safe for concurrent use; only the
+	// two fields naming which one is current need guarding.
+	accelMu            sync.RWMutex
 	client             *s3.Client
-	acceleratedClient  *s3.Client // Client with Transfer Acceleration enabled
-	standardClient     *s3.Client // Fallback client without acceleration
-	pool               *ConnectionPool
-	transporter        *cargoships3.Transporter
-	config             *Config
-	logger             *slog.Logger
-	accelerationActive bool             // Tracks if acceleration is currently active
-	networkMonitor     *network.Monitor // Tracks bytes/connections for this client
+	accelerationActive bool // Tracks if acceleration is currently active
+
+	acceleratedClient *s3.Client // Client with Transfer Acceleration enabled
+	standardClient    *s3.Client // Fallback client without acceleration
+	pool              *ConnectionPool
+	transporter       *cargoships3.Transporter
+	config            *Config
+	logger            *slog.Logger
+	networkMonitor    *network.Monitor // Tracks bytes/connections for this client
 
 	// transport is retained so Close can release the sockets it is holding idle.
 	//
@@ -214,8 +232,12 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	}, nil
 }
 
-// GetClient returns the main S3 client
+// GetClient returns the main S3 client — whichever of the accelerated and standard clients is
+// currently in use, which the fallback path can change at any time.
 func (cm *ClientManager) GetClient() *s3.Client {
+	cm.accelMu.RLock()
+	defer cm.accelMu.RUnlock()
+
 	return cm.client
 }
 
@@ -304,26 +326,51 @@ func (cm *ClientManager) GetStats() PoolStats {
 	return cm.pool.Stats()
 }
 
-// GetAcceleratedClient returns the accelerated client if acceleration is active
+// GetAcceleratedClient returns the accelerated client if acceleration is active, and nil otherwise.
+//
+// Prefer this over checking IsAccelerationActive and then reading the client: between those two
+// calls the fallback path may have run, and only the combined check under one lock can report
+// "active, and here is the client" as a single fact. Callers must still handle nil.
 func (cm *ClientManager) GetAcceleratedClient() *s3.Client {
+	cm.accelMu.RLock()
+	defer cm.accelMu.RUnlock()
+
 	if cm.accelerationActive && cm.acceleratedClient != nil {
 		return cm.acceleratedClient
 	}
+
 	return nil
 }
 
-// GetStandardClient returns the standard (non-accelerated) client
+// GetStandardClient returns the standard (non-accelerated) client.
+//
+// Immutable after construction, so it needs no lock — unlike GetClient, which returns whichever
+// client is currently selected.
 func (cm *ClientManager) GetStandardClient() *s3.Client {
 	return cm.standardClient
 }
 
-// IsAccelerationActive returns whether Transfer Acceleration is currently active
+// IsAccelerationActive returns whether Transfer Acceleration is currently active.
+//
+// A point-in-time answer: the fallback path can flip it on any request. Treat it as a metric, not
+// as a precondition for a later read of the client.
 func (cm *ClientManager) IsAccelerationActive() bool {
+	cm.accelMu.RLock()
+	defer cm.accelMu.RUnlock()
+
 	return cm.accelerationActive
 }
 
-// DisableAcceleration temporarily disables Transfer Acceleration and falls back to standard client
+// DisableAcceleration temporarily disables Transfer Acceleration and falls back to standard client.
+//
+// Idempotent under concurrency: the flag is re-checked under the write lock, so a burst of
+// acceleration errors across many goroutines logs once rather than once per request. This is the
+// common case — a bucket without the acceleration configuration fails every request — and the
+// unsynchronized version could log a hundred identical warnings for one condition.
 func (cm *ClientManager) DisableAcceleration(reason string) {
+	cm.accelMu.Lock()
+	defer cm.accelMu.Unlock()
+
 	if cm.accelerationActive {
 		cm.logger.Warn("Disabling S3 Transfer Acceleration",
 			"reason", reason,
@@ -333,8 +380,18 @@ func (cm *ClientManager) DisableAcceleration(reason string) {
 	}
 }
 
-// EnableAcceleration re-enables Transfer Acceleration if configured
+// EnableAcceleration re-enables Transfer Acceleration if configured.
+//
+// Nothing in ObjectFS calls this. The fallback is one-way for the life of the mount: once an
+// acceleration error is seen, every subsequent request uses the standard endpoint until restart.
+// docs/s3-acceleration.md claimed an "automatic re-enable after successful standard operations";
+// there is no such path, and the doc now says so. Kept as the supported way to re-enable for an
+// embedder that wants to retry periodically, since the alternative — deleting it — leaves callers
+// with no way to undo a fallback at all.
 func (cm *ClientManager) EnableAcceleration() {
+	cm.accelMu.Lock()
+	defer cm.accelMu.Unlock()
+
 	if cm.config.UseAccelerate && cm.acceleratedClient != nil && !cm.accelerationActive {
 		cm.logger.Info("Re-enabling S3 Transfer Acceleration")
 		cm.accelerationActive = true

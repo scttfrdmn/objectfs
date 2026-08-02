@@ -20,17 +20,21 @@ Multipart uploads allow large files to be uploaded to S3 in chunks, enabling:
 ObjectFS allows you to configure when multipart uploads are used and how they're chunked:
 
 ```yaml
-s3:
-  multipart_threshold: 33554432    # 32MB - files larger than this use multipart
-  multipart_chunk_size: 16777216   # 16MB - default chunk size
-  multipart_concurrency: 8         # Number of concurrent part uploads
+storage:
+  s3:
+    multipart:
+      threshold: "32MB"   # objects larger than this are uploaded in parts
+      chunk_size: "16MB"  # size of each part
+      concurrency: 8      # parts uploaded at once
 ```
 
-**Default Configuration:**
+Sizes are strings with a unit, not byte counts. Leave a key out and the backend's own default
+applies; `threshold: "32MB"`, `chunk_size: "16MB"`, and `concurrency: 8` are those defaults, so the
+block above changes nothing and exists to name the keys.
 
-- **Threshold**: 32MB - Files larger than this trigger multipart uploads
-- **Chunk Size**: 16MB - Optimal for most network conditions
-- **Concurrency**: 8 - Matches the default connection pool size
+`chunk_size` has a floor rather than a range: S3 rejects any non-final part below 5 MB with
+`EntityTooSmall`, and a smaller value is raised to 5 MB rather than being passed through to fail at
+upload time.
 
 ### 2. Intelligent Chunking
 
@@ -159,12 +163,17 @@ When CargoShip optimization is enabled, multipart uploads benefit from:
 - **Network-aware optimization**
 
 ```yaml
-s3:
-  enable_cargoship_optimization: true
-  target_throughput: 800.0  # MB/s
-  optimization_level: "standard"
-  multipart_concurrency: 8  # Used by CargoShip for parallel uploads
+storage:
+  s3:
+    use_cargoship: true
+    multipart:
+      concurrency: 8
 ```
+
+There is no throughput target or optimization level to set. Earlier versions of this page showed
+`target_throughput: 800.0` and `optimization_level: "standard"`; neither key exists in the schema,
+and with the loader now decoding strictly, a config containing them fails to start rather than
+ignoring them. CargoShip sizes its own transfers.
 
 ## Configuration Examples
 
@@ -173,12 +182,13 @@ s3:
 For environments with high bandwidth and large files:
 
 ```yaml
-s3:
-  multipart_threshold: 52428800     # 50MB
-  multipart_chunk_size: 33554432    # 32MB
-  multipart_concurrency: 16         # Higher concurrency
-  enable_cargoship_optimization: true
-  target_throughput: 1600.0         # 1.6 GB/s
+storage:
+  s3:
+    use_cargoship: true
+    multipart:
+      threshold: "50MB"
+      chunk_size: "32MB"
+      concurrency: 16
 ```
 
 ### Conservative Configuration
@@ -186,27 +196,35 @@ s3:
 For environments with limited bandwidth or small files:
 
 ```yaml
-s3:
-  multipart_threshold: 104857600    # 100MB (higher threshold)
-  multipart_chunk_size: 8388608     # 8MB (smaller chunks)
-  multipart_concurrency: 4          # Lower concurrency
-  enable_cargoship_optimization: true
-  target_throughput: 200.0          # 200 MB/s
+storage:
+  s3:
+    use_cargoship: true
+    multipart:
+      threshold: "100MB"  # higher threshold: fewer objects go multipart
+      chunk_size: "8MB"   # smaller parts
+      concurrency: 4      # fewer at once
 ```
 
 ### Development/Testing Configuration
 
-For local development with LocalStack or MinIO:
+For local development against MinIO or another S3-compatible endpoint:
 
 ```yaml
-s3:
-  endpoint: "http://localhost:4566"
-  force_path_style: true
-  multipart_threshold: 10485760     # 10MB
-  multipart_chunk_size: 5242880     # 5MB
-  multipart_concurrency: 2
-  enable_cargoship_optimization: false
+storage:
+  s3:
+    endpoint: "http://localhost:9000"
+    force_path_style: true
+    use_cargoship: false
+    multipart:
+      threshold: "10MB"
+      chunk_size: "5MB"   # the S3 floor; anything smaller is raised to it
+      concurrency: 2
 ```
+
+ObjectFS's own tests do not use a container for this. `internal/testaws` runs a
+[substrate](https://github.com/scttfrdmn/substrate) endpoint in-process over real HTTP — no
+network, no credentials, no AWS account — which is both faster and closer to the real thing than a
+mock. See `docs/development/testing.md`.
 
 ## Performance Considerations
 

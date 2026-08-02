@@ -102,18 +102,22 @@ Advanced cost optimization capabilities:
 Intelligent Tier Selection:
 The system analyzes access patterns and automatically recommends optimal storage tiers:
 
-	// Analyze object for optimal tier
-	optimizer := &CostOptimizer{backend: s3Backend}
+Access patterns are recorded by GetObject as reads happen; the report is derived from what has been
+observed, so a freshly-opened backend has nothing to say yet.
 
-	pattern := &AccessPattern{
-		ObjectSize:   1024 * 1024, // 1MB
-		AccessCount:  5,
-		LastAccess:   time.Now().Add(-30 * 24 * time.Hour),
+	report := backend.GetCostOptimizationReport()
+
+	for _, o := range report.OptimizationResults {
+		fmt.Printf("%s: %s → %s (%s), $%.2f/month, confidence %.0f%%\n",
+			o.ObjectKey, o.FromTier, o.ToTier, o.Reason,
+			o.EstimatedMonthlySavings, o.ConfidenceLevel*100)
 	}
 
-	optimization := optimizer.AnalyzeObject(pattern)
-	fmt.Printf("Recommended tier: %s", optimization.RecommendedTier)
-	fmt.Printf("Potential savings: $%.2f/month", optimization.MonthlySavings)
+	fmt.Printf("%d objects, $%.2f/month total\n",
+		report.TotalObjects, report.TotalPotentialSavings)
+
+Note that recording is gated on Config.MonitorAccessPatterns, which defaults false — with it off,
+the report is empty rather than wrong.
 
 Enterprise Pricing Support:
 - Volume discount calculation
@@ -157,8 +161,12 @@ Basic backend initialization:
 
 Object operations with automatic optimization:
 
-	// Put object with automatic tier selection
-	err := backend.PutObject(ctx, "data/file.txt", data)
+	// Put object with automatic tier selection. The final argument is user metadata, stored as
+	// x-amz-meta-* headers; nil is fine. ObjectFS writes its own integrity keys there
+	// (objectfs-sha256, objectfs-original-size) last, so those two names win over anything you
+	// supply under them — they describe the bytes actually uploaded, which after compression are
+	// not the bytes you handed in.
+	err := backend.PutObject(ctx, "data/file.txt", data, nil)
 
 	// Get object with CargoShip optimization
 	data, err := backend.GetObject(ctx, "data/file.txt", 0, -1)

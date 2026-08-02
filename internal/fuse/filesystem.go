@@ -75,19 +75,21 @@ type FileSystem struct {
 	readAhead *ReadAheadManager
 }
 
-// Config represents FUSE filesystem configuration
+// Config represents FUSE filesystem configuration.
+//
+// Every field here is read on the mount path. That is a property worth stating, because it was not
+// true: this struct carried AllowOther, DirectIO, KeepCache, BigWrites, MaxRead, MaxWrite, ReadAhead,
+// WriteBuffer, and Concurrency, and not one of them was read by anything. Each carried a yaml tag,
+// which is what made them look plumbed — but no decoder targets this type. Configuration is decoded
+// into [config.Configuration], whose ten top-level keys include no FUSE section, so the tags never
+// bound to anything a user could set.
+//
+// See [MountOptions] for the same note about the mount-time options, and #180 for the four that
+// name real go-fuse capabilities and are worth having for real.
 type Config struct {
 	// Mount options
 	MountPoint string `yaml:"mount_point"`
 	ReadOnly   bool   `yaml:"read_only"`
-	AllowOther bool   `yaml:"allow_other"`
-
-	// FUSE options
-	DirectIO  bool   `yaml:"direct_io"`
-	KeepCache bool   `yaml:"keep_cache"`
-	BigWrites bool   `yaml:"big_writes"`
-	MaxRead   uint32 `yaml:"max_read"`
-	MaxWrite  uint32 `yaml:"max_write"`
 
 	// Filesystem behavior.
 	//
@@ -109,11 +111,6 @@ type Config struct {
 
 	// CacheTTL is how long the kernel may cache an attribute set, as returned by Getattr and Setattr.
 	CacheTTL time.Duration `yaml:"cache_ttl"`
-
-	// Performance settings
-	ReadAhead   uint32 `yaml:"read_ahead"`
-	WriteBuffer uint32 `yaml:"write_buffer"`
-	Concurrency int    `yaml:"concurrency"`
 }
 
 // OpenFile is the per-descriptor state one open(2) produced.
@@ -219,9 +216,6 @@ func NewFileSystem(backend types.Backend, cache types.Cache, buffer *vfs.Writer,
 			DefaultMode:    0644,
 			DefaultDirMode: 0755,
 			CacheTTL:       5 * time.Minute,
-			ReadAhead:      128 * 1024,
-			WriteBuffer:    64 * 1024,
-			Concurrency:    16,
 		}
 	}
 

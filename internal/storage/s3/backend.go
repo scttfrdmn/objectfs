@@ -2182,8 +2182,12 @@ func (b *Backend) executeWithAccelerationFallback(
 	operation string,
 	fn func(client *s3.Client) error,
 ) error {
-	// If acceleration is not active, just execute with standard client
-	if !b.clientManager.IsAccelerationActive() {
+	// One call, not IsAccelerationActive followed by GetAcceleratedClient: the fallback path can run
+	// between the two, and it does — under concurrent load a single acceleration error disables
+	// acceleration for every in-flight request at once. Asking for the client and testing the result
+	// gets "active, and here it is" as one answer under one lock.
+	acceleratedClient := b.clientManager.GetAcceleratedClient()
+	if acceleratedClient == nil {
 		client, err := b.clientManager.GetPooledClient()
 		if err != nil {
 			return fmt.Errorf("%s: %w", operation, err)
@@ -2193,39 +2197,31 @@ func (b *Backend) executeWithAccelerationFallback(
 		return fn(client)
 	}
 
-	// Try with accelerated client first
-	acceleratedClient := b.clientManager.GetAcceleratedClient()
-	if acceleratedClient != nil {
-		start := time.Now()
-		err := fn(acceleratedClient)
-		duration := time.Since(start)
+	start := time.Now()
+	err := fn(acceleratedClient)
+	duration := time.Since(start)
 
-		if err == nil {
-			// Success with acceleration
-			b.metricsCollector.RecordAcceleratedRequest(0, duration)
-			return nil
-		}
+	if err == nil {
+		// Success with acceleration
+		b.metricsCollector.RecordAcceleratedRequest(0, duration)
 
-		// Check if this is an acceleration-specific error
-		if b.isAccelerationError(err) {
-			b.logger.Warn("S3 Transfer Acceleration error detected, falling back to standard endpoint",
-				"operation", operation,
-				"error", err.Error())
-			b.metricsCollector.RecordFallbackEvent()
-			b.clientManager.DisableAcceleration(fmt.Sprintf("acceleration error: %v", err))
+		return nil
+	}
 
-			// Retry with standard client
-			standardClient := b.clientManager.GetStandardClient()
-			return fn(standardClient)
-		}
-
-		// Not an acceleration error, return as-is
+	// Not an acceleration error: the caller's retry and circuit-breaker wrappers own it.
+	if !b.isAccelerationError(err) {
 		return err
 	}
 
-	// No accelerated client available, use standard
-	standardClient := b.clientManager.GetStandardClient()
-	return fn(standardClient)
+	b.logger.Warn("S3 Transfer Acceleration error detected, falling back to standard endpoint",
+		"operation", operation,
+		"error", err.Error())
+	b.metricsCollector.RecordFallbackEvent()
+	b.clientManager.DisableAcceleration(fmt.Sprintf("acceleration error: %v", err))
+
+	// Retry with the standard client. This fallback is for the life of the mount — nothing
+	// re-enables acceleration afterwards.
+	return fn(b.clientManager.GetStandardClient())
 }
 
 // putObjectMultipart performs a multipart upload for large objects with parallel

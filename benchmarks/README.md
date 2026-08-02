@@ -286,4 +286,4 @@ When adding new benchmarks:
 
 - [Go Benchmarking Guide](https://golang.org/pkg/testing/#hdr-Benchmarks)
 - [AWS S3 Transfer Acceleration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/transfer-acceleration.html)
-- [ObjectFS v0.4.0 Release Notes](../RELEASE_NOTES_v0.4.0.md)
+- [ObjectFS releases](https://github.com/scttfrdmn/objectfs/releases)
