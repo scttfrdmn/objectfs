@@ -91,6 +91,19 @@ type Fault struct {
 	// matches any request, ranged or not.
 	RangePrefix string
 
+	// QueryKey matches when the request's query string carries this parameter, whatever its value.
+	//
+	// It is what distinguishes the sub-operations of a multipart upload, and without it they
+	// cannot be told apart: CreateMultipartUpload and CompleteMultipartUpload are both a POST to
+	// "/bucket/key", differing only in "?uploads" versus "?uploadId=...". A Fault aimed at
+	// Complete by method and path alone fires on the create instead — the upload then never
+	// exists, so a test asserting "no orphaned upload was left behind" passes because nothing was
+	// ever started. That is not a hypothetical; it is how this field came to be added.
+	//
+	// The useful values: "uploads" for the create, "uploadId" for the complete (a POST) or the
+	// abort (a DELETE), "partNumber" for an UploadPart.
+	QueryKey string
+
 	// Status is the HTTP status to answer with. Defaults to 500, which the AWS SDK treats as a
 	// retryable server error.
 	Status int
@@ -137,6 +150,10 @@ func (f *fault) matches(r *http.Request) bool {
 	}
 
 	if f.spec.RangePrefix != "" && !strings.HasPrefix(r.Header.Get("Range"), f.spec.RangePrefix) {
+		return false
+	}
+
+	if f.spec.QueryKey != "" && !r.URL.Query().Has(f.spec.QueryKey) {
 		return false
 	}
 

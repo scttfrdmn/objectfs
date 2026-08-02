@@ -2175,6 +2175,26 @@ func (b *Backend) executeWithAccelerationFallback(
 // uncompressed content, plus the original size when compressed). It must not be
 // recomputed here: data is the post-compression payload, so hashing it would
 // store a checksum of the compressed bytes and diverge from the single-part path.
+//
+// # Every exit that is not a completed upload aborts it
+//
+// An initiated upload holds its parts in the bucket, billed at the storage rate, until it is
+// completed or aborted. They are invisible: they do not appear in ListObjects, a HeadObject of the
+// key reports the object absent, and nothing in ObjectFS ever called ListMultipartUploads, so an
+// abandoned upload was undiscoverable from inside the filesystem and reapable only by an S3 lifecycle
+// rule the operator had to know to write.
+//
+// The failure this fixes is the one where the leak is largest. The part-upload failure path aborted,
+// but the Complete failure path did not — and Complete fails *after* every part has landed, so the
+// case that leaked the whole object was the only case that leaked at all (audit finding H10). It also
+// dropped the only record of the upload on the way out, via a deferred RemoveUpload, so nothing could
+// clean up afterwards either.
+//
+// So the abort is a defer keyed on a completion flag rather than a call on each error path: a path
+// that forgets to abort is the defect, and the only way to stop adding new ones is to make aborting
+// the default. It runs on a fresh context for the same reason — the common cause of a failed upload
+// is the caller's context being canceled, and an abort issued on that context cannot be sent, which
+// would leak on exactly the failure that happens most.
 func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier, contentEncoding string, objectMeta map[string]string) error {
 	dataSize := int64(len(data))
 	chunkSize := CalculateOptimalChunkSize(dataSize, b.config.MultipartThreshold, b.config.MultipartChunkSize)
@@ -2191,25 +2211,33 @@ func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byt
 
 	uploadState := NewMultipartUploadState(uploadID, b.bucket, key, dataSize, chunkSize)
 	b.multipartManager.TrackUpload(uploadState)
-	defer b.multipartManager.RemoveUpload(uploadID)
+
+	var completed bool
+
+	defer func() {
+		b.multipartManager.RemoveUpload(uploadID)
+
+		if completed {
+			return
+		}
+
+		b.multipartManager.MarkUploadFailed(uploadID)
+		b.abandonMultipartUpload(ctx, key, uploadID)
+	}()
 
 	totalParts := CalculatePartCount(dataSize, chunkSize)
 	b.logger.Debug("Multipart upload initiated", "upload_id", uploadID, "total_parts", totalParts)
 
 	completedParts, totalBytesUploaded, err := b.uploadParts(ctx, key, uploadID, data, chunkSize, totalParts, uploadState)
 	if err != nil {
-		b.multipartManager.MarkUploadFailed(uploadID)
-		if abortErr := b.abortMultipartUpload(ctx, key, uploadID); abortErr != nil {
-			b.logger.Warn("Failed to abort multipart upload after part failures",
-				"upload_id", uploadID, "abort_error", abortErr)
-		}
 		return fmt.Errorf("multipart upload failed: %w", err)
 	}
 
 	if err := b.completeMultipartUpload(ctx, key, uploadID, completedParts); err != nil {
-		b.multipartManager.MarkUploadFailed(uploadID)
 		return fmt.Errorf("failed to complete multipart upload: %w", err)
 	}
+
+	completed = true
 
 	b.multipartManager.MarkUploadCompleted(uploadID)
 	b.metricsCollector.RecordBytesUploaded(totalBytesUploaded)

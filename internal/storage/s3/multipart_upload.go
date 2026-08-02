@@ -6,7 +6,7 @@ package s3
 //
 //  1. initiateMultipartUpload  – CreateMultipartUpload → uploadID
 //  2. uploadParts              – concurrent UploadPart fan-out
-//  3. abortMultipartUpload     – AbortMultipartUpload on failure (cleanup)
+//  3. abandonMultipartUpload   – AbortMultipartUpload on any non-completing exit (cleanup)
 //  4. completeMultipartUpload  – CompleteMultipartUpload on success
 //
 // partSlice and partResult are pure helpers used by uploadParts.
@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -167,6 +168,38 @@ func (b *Backend) uploadParts(
 
 	return completedParts, totalBytes, nil
 }
+
+// abandonMultipartUpload releases an upload that will not be completed, on a context of its own.
+//
+// The detachment is the point. The most common reason a multipart upload fails is that the caller's
+// context was canceled — an unmount, a FUSE interrupt, a deadline — and an AbortMultipartUpload
+// issued on a canceled context is never sent, so cleanup would be skipped on exactly the failure that
+// happens most. context.WithoutCancel keeps the values (the SDK reads request-scoped configuration
+// from there) while shedding the cancellation, and a short timeout of its own bounds it, since an
+// abort that hangs would hold up an unmount for no benefit.
+//
+// It logs rather than returning an error because there is nothing the caller could do with one: the
+// upload it was asked for has already failed, and reporting the abort's failure instead would replace
+// the diagnosis with a symptom. The message names the upload ID, which is what an operator needs to
+// abort it by hand or to recognize it in ListMultipartUploads.
+func (b *Backend) abandonMultipartUpload(ctx context.Context, key, uploadID string) {
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), multipartAbortTimeout)
+	defer cancel()
+
+	if err := b.abortMultipartUpload(abortCtx, key, uploadID); err != nil {
+		b.logger.Warn("Failed to abort an incomplete multipart upload; its parts remain in the "+
+			"bucket and are billed as storage until a lifecycle rule or a manual abort removes them",
+			"key", key, "upload_id", uploadID, "abort_error", err)
+
+		return
+	}
+
+	b.logger.Debug("Aborted an incomplete multipart upload", "key", key, "upload_id", uploadID)
+}
+
+// multipartAbortTimeout bounds the cleanup abort. It is deliberately short: the operation is one
+// request against an upload that has already failed, and the caller — often an unmount — is waiting.
+const multipartAbortTimeout = 30 * time.Second
 
 // abortMultipartUpload calls AbortMultipartUpload to release S3 resources after
 // a failed upload.

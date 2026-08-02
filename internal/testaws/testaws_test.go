@@ -745,3 +745,88 @@ func TestFaultDefaultsAreTheUsefulOnes(t *testing.T) {
 		t.Errorf("the request after a single-fire fault read %q, want %q", got, "payload")
 	}
 }
+
+// TestFaultQueryKeyDistinguishesMultipartSubOperations covers the matcher dimension that method and
+// path cannot supply.
+//
+// CreateMultipartUpload and CompleteMultipartUpload are both a POST to "/bucket/key". They differ
+// only in the query string, so a Fault written without QueryKey and aimed at Complete fires on the
+// create instead — and a test asserting "the failed upload left no orphan behind" then passes
+// because the create failed and no upload was ever started. That happened; QueryKey exists because
+// a mutation that removed the abort under test entirely did not fail the test that was meant to
+// catch it.
+func TestFaultQueryKeyDistinguishesMultipartSubOperations(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const key = "multipart/query-key"
+
+	client := ts.Client()
+
+	// Armed for the complete. If QueryKey were ignored, this create would be what fails.
+	ts.InjectFault(testaws.Fault{
+		Method:    "POST",
+		KeySuffix: key,
+		QueryKey:  "uploadId",
+	})
+
+	created, err := client.CreateMultipartUpload(context.Background(), &awss3.CreateMultipartUploadInput{
+		Bucket: aws.String(ts.Bucket), Key: aws.String(key),
+	}, noRetry)
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload failed against a fault armed for uploadId; QueryKey did not "+
+			"discriminate, so the two POSTs of a multipart upload are indistinguishable: %v", err)
+	}
+	if fired := ts.FaultsFired(); fired != 0 {
+		t.Fatalf("the fault fired %d times on the create, want 0", fired)
+	}
+
+	uploadID := aws.ToString(created.UploadId)
+
+	// A part is a PUT carrying partNumber, so neither armed matcher should touch it.
+	part, err := client.UploadPart(context.Background(), &awss3.UploadPartInput{
+		Bucket: aws.String(ts.Bucket), Key: aws.String(key), UploadId: aws.String(uploadID),
+		PartNumber: aws.Int32(1), Body: bytes.NewReader(testaws.DeterministicBytes(key, 5*1024*1024)),
+	}, noRetry)
+	if err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+
+	_, err = client.CompleteMultipartUpload(context.Background(), &awss3.CompleteMultipartUploadInput{
+		Bucket: aws.String(ts.Bucket), Key: aws.String(key), UploadId: aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{
+			Parts: []s3types.CompletedPart{{PartNumber: aws.Int32(1), ETag: part.ETag}},
+		},
+	}, noRetry)
+	if err == nil {
+		t.Fatal("CompleteMultipartUpload succeeded against a fault armed for uploadId")
+	}
+	if fired := ts.FaultsFired(); fired != 1 {
+		t.Errorf("FaultsFired = %d after the complete, want 1", fired)
+	}
+}
+
+// TestFaultQueryKeyMatchesRegardlessOfValue pins the matcher to presence rather than equality,
+// which is what makes it usable: an upload ID is generated per upload, so a test cannot know the
+// value to match, and "?uploadId=<whatever>" is the only form that is ever needed.
+func TestFaultQueryKeyMatchesRegardlessOfValue(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const key = "query-key/presence"
+	ts.PutObject(key, []byte("payload"))
+	ts.ResetRequests()
+
+	// partNumber is absent from a plain GET, so this must not fire.
+	ts.InjectFault(testaws.Fault{Method: "GET", KeySuffix: key, QueryKey: "partNumber"})
+
+	if got := ts.GetObject(key); string(got) != "payload" {
+		t.Errorf("GetObject = %q, want %q — a fault requiring an absent query key fired anyway",
+			got, "payload")
+	}
+	if fired := ts.FaultsFired(); fired != 0 {
+		t.Errorf("FaultsFired = %d, want 0", fired)
+	}
+}
