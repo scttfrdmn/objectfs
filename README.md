@@ -1,6 +1,6 @@
 # ObjectFS
 
-<!-- Badges: each one must report something real. Three were removed rather than fixed, because a
+<!-- Badges: each one must report something real. Two are still removed rather than fixed, because a
      badge that renders "unknown" or "retired" is worse than no badge — it reads as a broken project
      to anyone who looks, and as a passing check to anyone who does not.
 
@@ -9,18 +9,21 @@
          .coverage-floors, which is a job in ci.yml, so the CI badge already covers it. There is no
          separate percentage to display and no service to display it.
        - Go Report Card rendered "retired": the service no longer reports for this module.
-       - Go Reference (pkg.go.dev) rendered empty. go.mod used to declare
-         github.com/objectfs/objectfs, which is not this project — it is an unrelated Python
-         repository from 2017 — so the module could not be fetched under the name it gave for
-         itself and pkg.go.dev had nothing to index (#213). The path is fixed; this badge should be
-         restored once a tag has been published under the corrected path and pkg.go.dev has indexed
-         it, which is not something to assert in advance.
+
+     Go Reference is back, below. It rendered empty until v0.10.2 because go.mod declared
+     github.com/objectfs/objectfs, which is not this project — it is an unrelated Python repository
+     from 2017 — so the module could not be fetched under the name it gave for itself and pkg.go.dev
+     had nothing to index (#213). Restored only after checking what a reader actually gets: the page
+     resolves for v0.10.2 and documents the 16 packages under pkg/ and sdks/go, which is the whole
+     public surface. Most of this module is internal/ and pkg.go.dev does not document that, by
+     design — so the badge points at a real API reference rather than at an empty shell (#219).
 
      The GitHub stars badge is also gone: a star count is not a property of the software. -->
 
 [![CI](https://github.com/scttfrdmn/objectfs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/scttfrdmn/objectfs/actions/workflows/ci.yml)
 [![Security](https://github.com/scttfrdmn/objectfs/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/scttfrdmn/objectfs/actions/workflows/security.yml)
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/scttfrdmn/objectfs.svg)](https://pkg.go.dev/github.com/scttfrdmn/objectfs)
 [![Release](https://img.shields.io/github/v/release/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/scttfrdmn/objectfs)](go.mod)
