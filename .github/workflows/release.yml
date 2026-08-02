@@ -12,76 +12,44 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# The release page is published *last*, after every artifact exists.
+#
+# It used to be created first, by `actions/create-release@v1`, with every other job depending on it for
+# an `upload_url`. So the outward-facing, hard-to-retract half of a release happened before anything had
+# been built — and when a build then failed, the release page stayed up with nothing attached to it.
+# That is not hypothetical: **v0.10.0's published release has zero assets**, because the darwin/arm64
+# build failed, the other six matrix entries were cancelled with it, and `Create Release` had already
+# succeeded. Every release this project has ever cut failed, and every one left a page up.
+#
+# Now `build` produces artifacts, `publish` needs it, and a failed build means no release page at all —
+# which is recoverable by fixing the build and re-pushing the tag. `gh release create` also replaces
+# both `actions/create-release@v1` and `actions/upload-release-asset@v1`: they are archived, run on
+# Node 12, and were the reason the upload half needed an `upload_url` handed between jobs.
+#
+# Three jobs were removed rather than fixed, and none should come back in the shape it had:
+#
+#   - `update-packages` had three steps whose entire body was `echo "Would update the Homebrew
+#     formula..."` and a comment reading "Implementation would go here". It published nothing, and its
+#     green check said a release had reached Homebrew, APT, and RPM. When any of those is real it needs
+#     a job that actually pushes to a tap or a repository; until then, no job is more honest than one
+#     that reports success for work it does not do.
+#   - `update-docs` deployed a generated site to GitHub Pages. **Pages is not enabled on this
+#     repository** (`has_pages: false`), so `actions/deploy-pages` could only ever fail — and its
+#     generator wrote `README.md`/`CHANGELOG.md` while the index it wrote alongside them linked
+#     `README.html`/`CHANGELOG.html`, i.e. every link on the page was broken by construction. There is
+#     an `mkdocs.yml` in the repo; publishing docs means using it, from its own workflow, after Pages
+#     is turned on.
+#   - `notify` posted to Slack behind `if: env.SLACK_WEBHOOK_URL != ''` and then wrote a summary
+#     asserting five tasks complete — including "Performed security scans" and "Updated documentation"
+#     — as unconditional text, regardless of what ran. `publish` now summarizes what it actually
+#     attached.
 jobs:
-  # Create GitHub Release
-  create-release:
-    name: Create Release
+  # Build release binaries. No release exists yet; artifacts are handed to `publish` below.
+  build:
+    name: Build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Generate changelog
-      id: changelog
-      run: |
-        # Extract version from tag
-        VERSION=${GITHUB_REF#refs/tags/}
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-        # Generate changelog from commits since last tag
-        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-        if [ -n "$PREVIOUS_TAG" ]; then
-          CHANGELOG=$(git log --pretty=format:"* %s (%h)" $PREVIOUS_TAG..HEAD)
-        else
-          CHANGELOG=$(git log --pretty=format:"* %s (%h)")
-        fi
-
-        # Save changelog to file
-        echo "## Changes" > changelog.md
-        echo "$CHANGELOG" >> changelog.md
-
-        # Set output for use in release
-        {
-          echo 'CHANGELOG<<EOF'
-          cat changelog.md
-          echo EOF
-        } >> $GITHUB_OUTPUT
-
-    - name: Validate semantic version
-      run: |
-        VERSION=${GITHUB_REF#refs/tags/}
-        if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$ ]]; then
-          echo "Invalid semantic version: $VERSION"
-          exit 1
-        fi
-        echo "Valid semantic version: $VERSION"
-
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        body: ${{ steps.changelog.outputs.CHANGELOG }}
-        draft: false
-        prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
-
-  # Build and upload release binaries
-  build-and-upload:
-    name: Build and Upload
-    runs-on: ubuntu-latest
-    needs: create-release
-    permissions:
-      contents: write
+      contents: read
     # Linux and macOS only, because that is what builds. `internal/fuse` carries
     # `//go:build linux || darwin` and `platform_unsupported.go` fails the build on anything else by
     # design, so windows/amd64 and freebsd/amd64 could never have produced an artifact — and
@@ -107,22 +75,23 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # setup-go's own cache, matching ci.yml. The hand-rolled actions/cache@v3 block this replaces
+    # keyed on go.mod and go.sum but cached only ~/go/pkg/mod, leaving the build cache out — so
+    # every release rebuilt the whole standard library four times over.
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('go.mod') }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-${{ hashFiles('go.mod') }}-
-
-    - name: Verify the tag matches the version the binary reports
+    - name: Verify the tag is a semantic version matching the version the binary reports
       run: |
         TAG=${GITHUB_REF#refs/tags/}
+        if [[ ! $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$ ]]; then
+          echo "::error::tag $TAG is not a semantic version"
+          exit 1
+        fi
+
         DECLARED=$(sed -n 's/^[[:space:]]*version = "\(.*\)"/\1/p' cmd/objectfs/main.go)
         if [ "$TAG" != "v$DECLARED" ]; then
           echo "::error::tag $TAG does not match cmd/objectfs/main.go version \"$DECLARED\""
@@ -150,25 +119,28 @@ jobs:
 
         cd dist
         tar -czf "$BINARY_NAME.tar.gz" "$BINARY_NAME"
-        echo "ASSET_PATH=dist/$BINARY_NAME.tar.gz" >> $GITHUB_ENV
-        echo "ASSET_NAME=$BINARY_NAME.tar.gz" >> $GITHUB_ENV
-        echo "ASSET_CONTENT_TYPE=application/gzip" >> $GITHUB_ENV
 
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # A checksum per asset, so a download can be verified without trusting the transport.
+        # Named alongside the archive rather than collected into one SHA256SUMS file, because the
+        # matrix jobs run concurrently and have nowhere to append to.
+        sha256sum "$BINARY_NAME.tar.gz" > "$BINARY_NAME.tar.gz.sha256"
+        rm "$BINARY_NAME"
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
       with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ${{ env.ASSET_PATH }}
-        asset_name: ${{ env.ASSET_NAME }}
-        asset_content_type: ${{ env.ASSET_CONTENT_TYPE }}
+        name: release-${{ matrix.name }}
+        path: dist/*
+        if-no-files-found: error
+        retention-days: 7
 
-  # Build and push Docker images
+  # Build and push Docker images.
+  #
+  # Independent of `build`: an image failure should not withhold the binaries, and vice versa. Both
+  # gate `publish`, so neither reaches users without the other.
   docker-build-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: create-release
     permissions:
       contents: read
       packages: write
@@ -209,165 +181,184 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        # VERSION only. COMMIT and BUILD_TIME were passed to `-X` flags naming symbols that do not
+        # exist, so they were silently dropped — and BUILD_TIME was set to `steps.meta.outputs.json`,
+        # a multi-line JSON document, not a timestamp. VERSION now drives an assertion inside the
+        # Dockerfile that the built binary reports the tag, rather than a link-time injection that
+        # could not work; the tag and the version constant are already checked against each other in
+        # `build`, and this makes the image subject to the same check.
         build-args: |
           VERSION=${{ github.ref_name }}
-          COMMIT=${{ github.sha }}
-          BUILD_TIME=${{ steps.meta.outputs.json }}
 
-  # Security scan of release artifacts
+  # Scan the artifact that is about to be published, before it is published.
+  #
+  # It used to `wget` the asset from the release page — which required the release to already exist, and
+  # so could only ever scan something users could already download. Now it scans the same artifact
+  # `publish` will attach, and a finding blocks the release instead of annotating it after the fact.
   security-scan:
     name: Security Scan Release
     runs-on: ubuntu-latest
-    needs: [create-release, build-and-upload]
+    needs: build
     permissions:
+      contents: read
       security-events: write
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Download release assets
-      run: |
-        # Download and scan release binaries
-        wget -q "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/objectfs-linux-amd64.tar.gz"
-        tar -xzf objectfs-linux-amd64.tar.gz
+    - name: Download the linux/amd64 artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: release-linux-amd64
+        path: scan
+
+    - name: Unpack
+      run: tar -xzf scan/objectfs-linux-amd64.tar.gz -C scan
 
     - name: Run Trivy vulnerability scanner on binary
-      uses: aquasecurity/trivy-action@master
+      uses: aquasecurity/trivy-action@0.28.0
       with:
-        scan-type: fs
-        scan-ref: ./objectfs-linux-amd64
+        scan-type: rootfs
+        scan-ref: scan/objectfs-linux-amd64
         format: sarif
         output: trivy-binary.sarif
 
     - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: trivy-binary.sarif
 
-  # Update package repositories
-  update-packages:
-    name: Update Package Repositories
+  # Publish the release, last, from artifacts that already exist.
+  publish:
+    name: Publish Release
     runs-on: ubuntu-latest
-    needs: [create-release, build-and-upload]
-    if: ${{ !contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Update Homebrew formula
-      run: |
-        # This would update the Homebrew formula
-        echo "Would update Homebrew formula for version ${{ github.ref_name }}"
-        # Implementation would go here
-
-    - name: Update APT repository
-      run: |
-        # This would update the APT repository
-        echo "Would update APT repository for version ${{ github.ref_name }}"
-        # Implementation would go here
-
-    - name: Update RPM repository
-      run: |
-        # This would update the RPM repository
-        echo "Would update RPM repository for version ${{ github.ref_name }}"
-        # Implementation would go here
-
-  # Create GitHub Pages release
-  update-docs:
-    name: Update Documentation
-    runs-on: ubuntu-latest
-    needs: create-release
-    if: ${{ !contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
+    needs: [build, docker-build-push, security-scan]
     permissions:
-      contents: read
-      pages: write
-      id-token: write
+      contents: write
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
       with:
-        go-version-file: ${{ env.GO_VERSION_FILE }}
+        pattern: release-*
+        merge-multiple: true
+        path: dist
 
-    - name: Generate documentation
+    - name: Extract the release notes from CHANGELOG.md
       run: |
-        mkdir -p site
+        VERSION=${GITHUB_REF#refs/tags/v}
+        CHANGELOG_URL="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
 
-        # Generate API documentation
-        go doc -all ./... > site/api.md
+        # The CHANGELOG section for this version, not a `git log` dump. The dump was what every previous
+        # release shipped as its notes: a list of commit subjects, including the ones that fixed
+        # mistakes made earlier in the same release, in reverse order, with no indication of what any
+        # of it means to someone deciding whether to upgrade. CHANGELOG.md is already maintained in
+        # Keep a Changelog format and already says what changed and why.
+        #
+        # Absence is an error, not a fallback to the dump: a release whose changes are not written down
+        # is not ready to publish, and silently substituting something worse is how the dump survived.
+        awk -v ver="$VERSION" '
+          $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+          found && /^## \[/        { exit }
+          found                    { print }
+        ' CHANGELOG.md > section.md
 
-        # Copy documentation files
-        cp README.md site/
-        cp CHANGELOG.md site/
-        cp CONTRIBUTING.md site/
+        if [ ! -s section.md ]; then
+          echo "::error::CHANGELOG.md has no '## [$VERSION]' section with content"
+          echo "Add one before tagging; it is the release notes."
+          exit 1
+        fi
 
-        # Create index page
-        cat > site/index.html << 'EOF'
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>ObjectFS Documentation</title>
-            <meta charset="utf-8">
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.min.css">
-            <style>
-                .markdown-body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; }
-                @media (max-width: 767px) { .markdown-body { padding: 15px; } }
-            </style>
-        </head>
-        <body>
-            <article class="markdown-body">
-                <h1>ObjectFS Documentation</h1>
-                <ul>
-                    <li><a href="README.html">README</a></li>
-                    <li><a href="CHANGELOG.html">Changelog</a></li>
-                    <li><a href="CONTRIBUTING.html">Contributing</a></li>
-                    <li><a href="api.html">API Documentation</a></li>
-                </ul>
-            </article>
-        </body>
-        </html>
-        EOF
+        # A release body has a length limit (125,000 characters), and this project's sections can exceed
+        # it: v0.10.1's is ~175 KB across ~200 entries, because each entry records what was wrong and
+        # how it was proven rather than naming a change. Passing that whole thing to the API fails the
+        # publish step — after the artifacts are built and the image is pushed, at the last possible
+        # moment. So the size is decided here, and the fallback is a summary that points at the full
+        # text rather than a body silently cut mid-sentence.
+        LIMIT=120000
 
-    - name: Setup Pages
-      uses: actions/configure-pages@v3
+        if [ "$(wc -c < section.md)" -le "$LIMIT" ]; then
+          cp section.md notes.md
+        else
+          echo "notes: CHANGELOG section is $(wc -c < section.md) bytes, over the $LIMIT budget; summarizing"
 
-    - name: Upload to GitHub Pages
-      uses: actions/upload-pages-artifact@v2
-      with:
-        path: site
+          # The prose before the first category heading: the part that says what the release *is*.
+          awk '/^### /{exit} {print}' section.md > notes.md
 
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v2
+          # Then one line per category with its entry count, so the shape of the release is visible
+          # without the body.
+          {
+            echo "### What changed"
+            echo ""
+            awk '
+              /^### / { heading = substr($0, 5); order[++n] = heading; next }
+              /^- /   { if (n) count[order[n]]++ }
+              END {
+                for (i = 1; i <= n; i++) {
+                  c = count[order[i]]
+                  printf "- **%s** — %d %s\n", order[i], c, (c == 1 ? "entry" : "entries")
+                }
+              }
+            ' section.md
+            echo ""
+            echo "The full text of each entry is in [CHANGELOG.md]($CHANGELOG_URL), under \`[$VERSION]\`."
+            echo "It is long by intent: an entry records what was wrong and how the fix was verified,"
+            echo "which is the evidence a filesystem release has to carry."
+          } >> notes.md
+        fi
 
-  # Notify about release
-  notify:
-    name: Notify Release
-    runs-on: ubuntu-latest
-    needs: [create-release, build-and-upload, docker-build-push]
-    if: success()
-    steps:
-    - name: Notify Slack
-      if: env.SLACK_WEBHOOK_URL != ''
+        {
+          echo ""
+          echo "---"
+          echo ""
+          echo "Verify a download:"
+          echo ""
+          echo '```'
+          echo "sha256sum -c objectfs-<platform>.tar.gz.sha256"
+          echo '```'
+          echo ""
+          echo "Container image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION\`"
+          echo ""
+          echo "Full changelog: <$CHANGELOG_URL>"
+        } >> notes.md
+
+        echo "notes: $(wc -c < notes.md) bytes"
+
+    - name: Create the release with its assets
       env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        curl -X POST -H 'Content-type: application/json' \
-          --data "{\"text\":\"🚀 ObjectFS ${{ github.ref_name }} has been released! https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}\"}" \
-          $SLACK_WEBHOOK_URL
+        TAG=${GITHUB_REF#refs/tags/}
+
+        PRERELEASE=""
+        case "$TAG" in
+          *-alpha*|*-beta*|*-rc*) PRERELEASE="--prerelease" ;;
+        esac
+
+        # One command creates the release and attaches every asset, so there is no window in which the
+        # page exists empty. `gh` is preinstalled on every GitHub-hosted runner.
+        gh release create "$TAG" \
+          --title "ObjectFS $TAG" \
+          --notes-file notes.md \
+          $PRERELEASE \
+          dist/*
 
     - name: Create summary
       run: |
-        echo "## 🎉 Release Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Version:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### ✅ Completed Tasks" >> $GITHUB_STEP_SUMMARY
-        echo "- [x] Created GitHub release" >> $GITHUB_STEP_SUMMARY
-        echo "- [x] Built and uploaded binaries for multiple platforms" >> $GITHUB_STEP_SUMMARY
-        echo "- [x] Built and pushed Docker images" >> $GITHUB_STEP_SUMMARY
-        echo "- [x] Performed security scans" >> $GITHUB_STEP_SUMMARY
-        echo "- [x] Updated documentation" >> $GITHUB_STEP_SUMMARY
+        {
+          echo "## Released ${{ github.ref_name }}"
+          echo ""
+          echo "<https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}>"
+          echo ""
+          echo "### Assets"
+          echo ""
+          for f in dist/*.tar.gz; do
+            echo "- \`$(basename "$f")\`"
+          done
+          echo ""
+          echo "### Image"
+          echo ""
+          echo "\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${GITHUB_REF#refs/tags/v}\` (linux/amd64, linux/arm64)"
+        } >> $GITHUB_STEP_SUMMARY
