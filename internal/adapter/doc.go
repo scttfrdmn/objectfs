@@ -4,7 +4,8 @@ Package adapter provides the central orchestration component that integrates all
 The Adapter serves as the main coordination point for ObjectFS, managing the lifecycle and
 interactions between the storage backend, caching layers, write buffering, FUSE filesystem,
 and monitoring systems. It implements the primary business logic for mounting object storage
-as a POSIX-compliant filesystem.
+behind a POSIX interface. Not a POSIX-compliant filesystem — see the supported-operations table
+in README.md for what works, what is refused, and what is absent.
 
 # Architecture Role
 
@@ -50,8 +51,8 @@ Manages intelligent write buffering with configurable flush policies,
 compression, and batch operations to minimize API calls and improve throughput.
 
 Platform Filesystem:
-Coordinates cross-platform FUSE implementation providing POSIX compliance
-across Linux, macOS, and Windows with platform-specific optimizations.
+Coordinates the go-fuse binding on Linux and macOS, with platform-specific mount options.
+Windows is not supported: every file in internal/fuse carries //go:build linux || darwin.
 
 Metrics Collection:
 Integrates comprehensive monitoring with Prometheus metrics, health checks,

@@ -4,6 +4,22 @@ Welcome to the ObjectFS Playground! This interactive environment lets you explor
 S3 integration, test API endpoints, and experiment with configurations without needing a local
 installation.
 
+> **The shell commands on this page were written against a CLI ObjectFS does not have.** The binary
+> takes exactly two positional arguments — bucket URI and mount point — and has **no subcommands**,
+> so `objectfs mount`, `objectfs unmount`, `objectfs list-mounts`, `objectfs status`, and
+> `objectfs metrics --watch` all exit with an argument error. `list-mounts` and `status` are not
+> planned anywhere; `mount`, `unmount`, and `version` are proposed in
+> [#134](https://github.com/scttfrdmn/objectfs/issues/134). The commands below are corrected to what
+> `objectfs --help` accepts.
+>
+> The Python, JavaScript, and Go blocks are unchanged and are **not** corrected. Marking each
+> divergence individually would be noise when the containing page cannot render: the Go example
+> imports `pkg/client`, which does not exist, and this whole documentation tree fails to build for
+> four independent reasons recorded in
+> [#214](https://github.com/scttfrdmn/objectfs/issues/214). Whether it is repaired or deleted is that
+> issue's decision. The shell commands are fixed here because they are read on GitHub whether or not
+> the site builds, and a wrong command is something a reader will type.
+
 ## Interactive API Explorer
 
 Try ObjectFS API endpoints directly in your browser:
@@ -17,14 +33,14 @@ Try ObjectFS API endpoints directly in your browser:
 <CodeRunner language="bash" :executable="true">
 
 ```bash
-# Mount an S3 bucket
-objectfs mount s3://demo-bucket /mnt/demo
+# Mount an S3 bucket — two positional arguments, no subcommand
+objectfs s3://demo-bucket /mnt/demo
 
-# List mounted filesystems
-objectfs list-mounts
+# List mounted filesystems: the platform's own tool, not an objectfs command
+mount | grep objectfs
 
-# Check mount status
-objectfs status /mnt/demo
+# Check mount status: the health endpoint the mount process serves
+curl http://localhost:8081/health
 ```
 
 </CodeRunner>
@@ -221,19 +237,22 @@ echo
 for cache_size in "1GB" "4GB" "8GB" "16GB"; do
     echo "Testing cache size: $cache_size"
 
-    # Mount with specific cache size
-    objectfs mount s3://benchmark-bucket /mnt/test \
-        --cache-size "$cache_size" \
-        --log-level warn
+    # Mount with a specific cache size, in the background
+    objectfs --cache-size "$cache_size" --log-level WARN \
+        s3://benchmark-bucket /mnt/test &
+    objectfs_pid=$!
+    sleep 2
 
     # Run benchmark
     time dd if=/dev/zero of=/mnt/test/testfile bs=1M count=100 2>/dev/null
     sync
     time dd if=/mnt/test/testfile of=/dev/null bs=1M 2>/dev/null
 
-    # Cleanup
-    rm -f /mnt/test/testfile
-    objectfs unmount /mnt/test
+    # Cleanup. rm returns EROFS on a mount today, so remove the object at the
+    # source; unmount by signalling the process, which flushes on the way out.
+    aws s3 rm s3://benchmark-bucket/testfile
+    kill -TERM "$objectfs_pid"
+    wait "$objectfs_pid" 2>/dev/null
 
     echo "---"
 done
@@ -304,7 +323,7 @@ Learn the fundamentals of ObjectFS by following this step-by-step tutorial.
 1. **Mount a filesystem**
 
    ```bash
-   objectfs mount s3://tutorial-bucket /mnt/tutorial
+   objectfs s3://tutorial-bucket /mnt/tutorial &
    ```
 
 2. **Create and write to a file**
@@ -325,10 +344,10 @@ Learn the fundamentals of ObjectFS by following this step-by-step tutorial.
    ls -la /mnt/tutorial/
    ```
 
-5. **Unmount**
+5. **Unmount** — the platform's own tool, or signal the mount process
 
    ```bash
-   objectfs unmount /mnt/tutorial
+   fusermount -u /mnt/tutorial   # Linux; on macOS, umount /mnt/tutorial
    ```
 
 </InteractiveExample>
@@ -351,14 +370,16 @@ Optimize ObjectFS for your specific workload patterns.
    ```yaml
    performance:
      cache_size: 8GB
-     predictive_caching: true
      multilevel_caching: true
    ```
+
+   `predictive_caching: true` was a third key here. It is a valid schema key that changes nothing:
+   the predictor it selects is never installed on the mount path.
 
 3. **Monitor and adjust**
 
    ```bash
-   objectfs metrics --watch
+   watch -n2 'curl -s http://localhost:9090/metrics | grep objectfs_cache'
    ```
 
 </InteractiveExample>
@@ -419,7 +440,7 @@ grep "ERROR" /var/log/objectfs.log | head -20
 # Trace network calls to object storage
 # This shows the actual HTTP requests ObjectFS makes
 
-strace -e trace=network objectfs mount s3://bucket /mnt/test 2>&1 | \
+strace -e trace=network objectfs s3://bucket /mnt/test 2>&1 | \
     grep -E "(connect|send|recv)"
 ```
 

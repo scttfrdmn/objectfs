@@ -16,8 +16,10 @@
 >   `security.kms_key` are not keys the loader has; with strict decoding a config file using them
 >   fails to start. `internal/config/docs_test.go` exempts this file from the schema check for
 >   exactly this reason.
-> - **"POSIX-compliant" is wrong.** ObjectFS presents a POSIX interface over object storage. There is
->   no rename, no links, no locking. See the README's supported-operations table.
+> - **"POSIX-compliant" was wrong** and is corrected in the body rather than only noted here — a
+>   banner a reader may skip is weaker than a sentence that no longer makes the claim. ObjectFS
+>   presents a POSIX interface over object storage. There is no rename, no links, no locking. See the
+>   README's supported-operations table.
 > - **The performance and coverage figures are aspirations**, including a "95%" coverage badge and a
 >   "10-100x" speedup, neither of which was measured.
 >
@@ -53,12 +55,12 @@
 
 ### Project Vision
 
-ObjectFS transforms AWS S3 into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows. This enterprise-grade solution addresses the growing need for scalable, cost-effective storage that maintains compatibility with existing tools and processes.
+ObjectFS transforms AWS S3 into a high-performance filesystem presenting a POSIX interface, enabling seamless integration of cloud storage with traditional applications and workflows. This enterprise-grade solution addresses the growing need for scalable, cost-effective storage that maintains compatibility with existing tools and processes.
 
 ### Key Value Propositions
 
 - **Performance**: 10-100x faster than traditional S3 tools through intelligent caching and prefetching
-- **Compatibility**: Full POSIX compliance enabling drop-in replacement for traditional filesystems
+- **Compatibility**: a POSIX interface covering the operations most tools need — not full POSIX compliance, which S3 cannot support (see the README's supported-operations table)
 - **Scalability**: Handles petabytes of data with linear performance scaling
 - **Cost Efficiency**: Reduces S3 API costs by 80-90% through intelligent batching and caching
 - **Multi-Client**: Thread-safe design supporting thousands of concurrent users
@@ -176,7 +178,7 @@ ObjectFS is built on modern Go architecture utilizing:
 1. **Performance First**: Every component optimized for maximum throughput and minimum latency
 2. **Scalability**: Linear scaling with resources and concurrent users
 3. **Reliability**: Fault-tolerant design with graceful degradation
-4. **Compatibility**: Full POSIX compliance for seamless application integration
+4. **Compatibility**: a POSIX interface broad enough for seamless application integration, without claiming full compliance
 5. **Observability**: Comprehensive metrics and monitoring capabilities
 6. **Security**: Enterprise-grade security with AWS IAM integration
 

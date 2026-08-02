@@ -3,27 +3,40 @@
 This guide will get you up and running with ObjectFS in minutes. We'll walk through
 installation, basic configuration, and your first mount.
 
+> **This page previously described four install channels and a `mount` subcommand, none of which
+> exist.** The first command was `curl -sSL https://get.objectfs.io | sh` — a getting-started guide
+> whose opening line is a domain that has never served anything. Also gone: an apt repository at
+> `packages.objectfs.io`, a Homebrew tap, an AUR package, and "Windows with WSL2" as a supported
+> prerequisite. Windows is not supported: every file in `internal/fuse` carries
+> `//go:build linux || darwin`.
+>
+> The commands below were checked against `objectfs --help`. Everything on this page that names a
+> flag or an argument now matches the binary.
+
 ## Prerequisites
 
 Before you begin, ensure you have:
 
-- Linux, macOS, or Windows with WSL2
-- Root access (for FUSE mounting)
+- Linux, or macOS with [macFUSE](https://macfuse.io) installed
+- Permission to mount a FUSE filesystem (membership in the `fuse` group on Linux)
 - An AWS account with S3 access
 - Basic familiarity with command-line operations
 
 ## Installation
 
-### Option 1: Quick Install Script
+Build from source, or install with `go install`. Release binaries are attached to the
+[GitHub releases page](https://github.com/scttfrdmn/objectfs/releases); that is the only prebuilt
+artifact, and the release workflow builds no packages.
 
 <CodeRunner language="bash">
 
 ```bash
-# Download and install ObjectFS
-curl -sSL https://get.objectfs.io | sh
+git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs
+make build          # produces ./bin/objectfs
 
-# Add to PATH (if not done automatically)
-export PATH="/usr/local/bin:$PATH"
+# or, without a checkout
+go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 
 # Verify installation
 objectfs --version
@@ -31,51 +44,12 @@ objectfs --version
 
 </CodeRunner>
 
-### Option 2: Package Manager
-
-#### Ubuntu/Debian
+On macOS, install macFUSE first — ObjectFS cannot mount without it:
 
 <CodeRunner language="bash">
 
 ```bash
-# Add ObjectFS repository
-curl -fsSL https://packages.objectfs.io/gpg | sudo apt-key add -
-echo "deb https://packages.objectfs.io/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/objectfs.list
-
-# Install ObjectFS
-sudo apt update
-sudo apt install objectfs
-```
-
-</CodeRunner>
-
-#### macOS (Homebrew)
-
-<CodeRunner language="bash">
-
-```bash
-# Install via Homebrew
-brew tap objectfs/tap
-brew install objectfs
-
-# Install macFUSE dependency
 brew install --cask macfuse
-```
-
-</CodeRunner>
-
-#### Arch Linux
-
-<CodeRunner language="bash">
-
-```bash
-# Install from AUR
-yay -S objectfs-bin
-
-# Or using makepkg
-git clone https://aur.archlinux.org/objectfs-bin.git
-cd objectfs-bin
-makepkg -si
 ```
 
 </CodeRunner>
@@ -119,14 +93,12 @@ sudo chown $(whoami):$(whoami) /mnt/objectfs
 <CodeRunner language="bash">
 
 ```bash
-# Mount an S3 bucket
-objectfs mount s3://your-bucket-name /mnt/objectfs
+# Mount an S3 bucket. There are no subcommands: the binary takes exactly two
+# positional arguments, the bucket URI and the mount point.
+objectfs s3://your-bucket-name /mnt/objectfs
 
-# Mount with custom configuration
-objectfs mount s3://your-bucket-name /mnt/objectfs \
-  --cache-size 8GB \
-  --log-level info \
-  --foreground
+# Mount with a few flags
+objectfs --cache-size 8GB --log-level INFO s3://your-bucket-name /mnt/objectfs
 ```
 
 </CodeRunner>
@@ -164,13 +136,20 @@ cp /path/to/local/file.txt /mnt/objectfs/
 
 # Create directories
 mkdir /mnt/objectfs/my-folder
-
-# Move files
-mv /mnt/objectfs/old-name.txt /mnt/objectfs/new-name.txt
-
-# Delete files
-rm /mnt/objectfs/unwanted-file.txt
 ```
+
+Two operations this section used to show do **not** work, and fail loudly rather than silently:
+
+```bash
+mv /mnt/objectfs/old.txt /mnt/objectfs/new.txt   # ENOTSUP — there is no rename
+rm /mnt/objectfs/unwanted-file.txt               # EROFS   — delete is not implemented
+```
+
+`rm` returning an error is deliberate. go-fuse defaults an unimplemented `Unlink` to *success*, so
+without the refusal `rm` would exit 0 while the object survived in S3 — the user believes the file is
+gone and it is still there and still billing. The
+[supported-operations table](https://github.com/scttfrdmn/objectfs#supported-operations) is the
+authority on which operations are in which state.
 
 </CodeRunner>
 
@@ -217,13 +196,21 @@ ObjectFS can be configured using command-line options, configuration files, or e
 <CodeRunner language="bash">
 
 ```bash
-objectfs mount s3://bucket /mnt/objectfs \
+# The complete flag set, from `objectfs --help`. Everything else is configuration-file only.
+objectfs \
   --cache-size 8GB \
   --max-concurrency 100 \
-  --log-level debug \
-  --enable-predictive-caching \
-  --cost-optimization
+  --log-level DEBUG \
+  s3://bucket /mnt/objectfs
+
+# Validate a configuration and exit without mounting
+objectfs --dry-run --config ~/.objectfs/config.yaml s3://bucket /mnt/objectfs
 ```
+
+There is no `--enable-predictive-caching` and no `--cost-optimization` flag; both appeared here and
+neither is parsed. Predictive caching is a configuration key. Cost optimization has a configuration
+key and no code path reaches it — see the
+[Not yet wired up table](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md#not-yet-wired-up).
 
 </CodeRunner>
 
@@ -261,62 +248,60 @@ monitoring:
 
 </CodeRunner>
 
+Every key above is one the loader defines, which is checked by
+`TestDocumentedConfigYAMLMatchesTheSchema` — configuration is decoded strictly, so a key the schema
+does not have fails at startup with the key named. Two of them set a value nothing reads:
+`cost_optimization` is not mapped onto the backend (`internal/adapter/adapter.go` records why: the
+config and backend types are disjoint), and `predictive_caching` reaches the cache but the predictor
+it selects is never installed on the mount path.
+
 <CodeRunner language="bash">
 
 ```bash
 # Use configuration file
-objectfs mount s3://bucket /mnt/objectfs --config ~/.objectfs/config.yaml
+objectfs --config ~/.objectfs/config.yaml s3://bucket /mnt/objectfs
 ```
 
 </CodeRunner>
 
 ## Monitoring
 
-ObjectFS provides comprehensive monitoring capabilities:
-
-### Health Check
+Two HTTP endpoints, both served by the mount process itself. There is no `objectfs health` or
+`objectfs metrics` command — the binary has no subcommands, so `curl` is the interface.
 
 <CodeRunner language="bash">
 
 ```bash
-# Check health status
+# Health, on monitoring.health_check_addr (:8081 by default)
 curl http://localhost:8081/health
 
-# Detailed health information
-objectfs health --endpoint http://localhost:8081
-```
-
-</CodeRunner>
-
-### Metrics
-
-<CodeRunner language="bash">
-
-```bash
-# View metrics
+# Prometheus metrics, on monitoring.metrics_addr (:9090 in the config above)
 curl http://localhost:9090/metrics
-
-# Using ObjectFS CLI
-objectfs metrics --format table
-objectfs metrics --format json
 ```
 
 </CodeRunner>
+
+Both listeners bind all interfaces and are unauthenticated. [SECURITY.md](https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md)
+documents that and the switches that turn each off.
 
 ## Unmounting
 
-When you're done, unmount the filesystem:
+When you're done, unmount the filesystem with the platform's own tool. `objectfs unmount` is not a
+command:
 
 <CodeRunner language="bash">
 
 ```bash
-# Graceful unmount
-objectfs unmount /mnt/objectfs
+# Linux
+fusermount -u /mnt/objectfs
 
-# Force unmount if needed
-objectfs unmount /mnt/objectfs --force
+# macOS
+umount /mnt/objectfs
 
-# Verify unmount
+# Or signal the mount process, which unmounts and flushes on the way out
+kill -TERM "$(pgrep -f 'objectfs .*/mnt/objectfs')"
+
+# Verify
 mount | grep objectfs
 ```
 
@@ -358,16 +343,20 @@ sudo fusermount -u /mnt/objectfs
 
 ```bash
 # Increase cache size
-objectfs mount s3://bucket /mnt/objectfs --cache-size 16GB
+objectfs --cache-size 16GB s3://bucket /mnt/objectfs
 
-# Enable predictive caching
-objectfs mount s3://bucket /mnt/objectfs --enable-predictive-caching
+# Raise concurrency
+objectfs --max-concurrency 200 s3://bucket /mnt/objectfs
 
 # Check metrics for bottlenecks
-objectfs metrics --format table
+curl -s http://localhost:9090/metrics | grep objectfs_
 ```
 
 </CodeRunner>
+
+Predictive caching is not a flag, and turning the configuration key on does not enable it: the
+predictor is never installed on the mount path. It is listed in the
+[Not yet wired up table](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md#not-yet-wired-up).
 
 ## Next Steps
 
