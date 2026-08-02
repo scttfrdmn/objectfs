@@ -294,16 +294,33 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 	// "http: CloseIdleConnections called" against an unrelated test, roughly one run in six, blamed
 	// on whichever test happened to have a request in flight. A per-proxy transport cannot be closed
 	// by anyone else's teardown.
+	upstreamTransport := &http.Transport{
+		// The emulator is in-process over loopback, so there is nothing to gain from a
+		// connection budget and something to lose: a cap below the harness's own concurrency
+		// would serialize requests and make a byte-count assertion measure queuing.
+		MaxIdleConnsPerHost: 100,
+	}
+
+	// Release those idle connections before the emulator's own shutdown waits on them.
+	//
+	// Cleanups run last-registered-first, and emulator.StartTestServer registers its Server.Stop before
+	// this function is ever called — so this necessarily runs ahead of it, which is the ordering that
+	// matters. Stop calls http.Server.Shutdown, which polls until every connection is idle *or closed*,
+	// and net/http gives a connection in StateNew — dialed, no request sent — a hardcoded 5-second grace
+	// before it stops waiting (go.dev/issue/22682). This transport parks exactly that: a connection
+	// opened by a dial race whose winner answered the request first.
+	//
+	// Which turned a 7 ms test into a 5.4-second one, entirely in teardown, and only when requests were
+	// concurrent enough to lose such a race — so it appeared and vanished with the pacing of the test
+	// rather than with anything it asserted. Closing the client end here means Shutdown observes zero
+	// connections on its first poll.
+	t.Cleanup(upstreamTransport.CloseIdleConnections)
+
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(upstream)
 		},
-		Transport: &http.Transport{
-			// The emulator is in-process over loopback, so there is nothing to gain from a
-			// connection budget and something to lose: a cap below the harness's own concurrency
-			// would serialize requests and make a byte-count assertion measure queuing.
-			MaxIdleConnsPerHost: 100,
-		},
+		Transport: upstreamTransport,
 	}
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {

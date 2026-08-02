@@ -209,15 +209,39 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 		return // Already cached
 	}
 
-	// Fetch through the shared path, which caches what it reads and collapses this request into an
-	// identical one already in flight.
+	// Trim this prefetch past the end of any read already in flight, and drop it if nothing is left.
+	//
+	// [FileSystem.fetch] deduplicates by containment, which covers a prefetch that arrives while a read
+	// is in flight and a read that arrives while a prefetch is. What neither covers is the third case: a
+	// prefetch whose range *contains* an in-flight read but is not contained by it. Nothing can serve
+	// that from the read's result — the read holds fewer bytes than the prefetch wants — so it issues a
+	// second, overlapping GET and the bytes the read is already fetching are paid for twice. Measured on
+	// a 16 KiB file read in 1 KiB steps with the reader winning every race: 17,408 bytes for a 16,384
+	// byte file.
+	//
+	// Trimming rather than skipping, and that distinction is the whole value of this block. Skipping
+	// entirely also produces the right byte count — but by never prefetching at all, since a reader that
+	// consistently wins the race has a read in flight every time a prefetch is scheduled: the same
+	// traversal then issues 16 GETs of 1 KiB instead of 7, one per read, with the prefetcher contributing
+	// nothing. Advancing past the in-flight read keeps the read-ahead while fetching each byte once.
+	if start := ram.fs.fetches.unclaimedStart(req.path, req.offset); start > req.offset {
+		length -= start - req.offset
+		req.offset = start
+
+		if length <= 0 {
+			return
+		}
+	}
+
+	// Fetch through the shared path, which caches what it reads and joins a covering request already in
+	// flight rather than duplicating it.
 	//
 	// That sharing is the point here rather than an incidental benefit. A prefetch is issued for the
-	// range the reader is predicted to want next, at the length of the read that predicted it, so the
-	// read that follows is the same request — and whichever of the two reaches S3 second used to fetch
-	// the same bytes again. Under load the reader wins that race, which is when prefetch stops helping
-	// and starts doubling every read: measured at 5,373,952 bytes for a 3,145,728-byte sequential
-	// traversal, exactly 41 GETs where 24 were needed.
+	// range the reader is predicted to want next, so the read that follows wants bytes this request is
+	// already fetching — and whichever of the two reaches S3 second used to fetch them again. Under load
+	// the reader wins that race, which is when prefetch stops helping and starts doubling every read:
+	// measured at 5,373,952 bytes for a 3,145,728-byte sequential traversal, exactly 41 GETs where 24
+	// were needed.
 	fetchStart := time.Now()
 	data, err := ram.fs.fetch(ctx, req.path, req.offset, length)
 	if err != nil {

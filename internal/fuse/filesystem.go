@@ -5,7 +5,6 @@ package fuse
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	iofs "io/fs"
 	"log/slog"
 	"os"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/objectfs/objectfs/internal/vfs"
 	"github.com/objectfs/objectfs/pkg/types"
@@ -76,27 +74,82 @@ type FileSystem struct {
 	// Performance optimizations
 	readAhead *ReadAheadManager
 
-	// fetches collapses concurrent GETs of the same byte range into one.
+	// fetches collapses a GET into one already in flight that covers it.
 	//
-	// The prefetcher and the reader ask for exactly the same range by construction: a prefetch is
-	// issued for the offset the reader is predicted to want next, at the length of the read that
-	// predicted it, so the read that arrives is byte-identical to the prefetch already in flight.
-	// Whether the reader finds it in the cache is then a race between an S3 round trip and the
-	// application's next read(2), and losing that race means both fetch the same bytes: the prefetch
-	// stops being an optimization and becomes a second copy of every read.
+	// The prefetcher and the reader race for the same bytes. A prefetch is issued for the offset the
+	// reader is predicted to want next, so whether the reader finds those bytes in the cache is a race
+	// between an S3 round trip and the application's next read(2) — and losing it means both fetch the
+	// same bytes: the prefetch stops being an optimization and becomes a second copy of every read.
 	//
 	// This was measured, not theorized. A sequential traversal of a 3 MiB file at 128 KiB reads issues
 	// 24 reads and 17 prefetches; on an unloaded machine nearly every prefetch lands first and the
 	// traversal transfers 3,145,728 bytes, but under CI's load the reads win and it transfers
-	// 5,373,952 — exactly 41 × 131072, every prefetch paid for twice. A test asserting the byte count
-	// therefore passed locally and failed in CI, which is the correct outcome for a real defect that
-	// only appears when the machine is busy.
+	// 5,373,952 — exactly 41 × 131072, every prefetch paid for twice.
 	//
-	// Deduplicating in flight rather than serializing: the second caller waits on the first's result
-	// instead of issuing its own request, so the bytes are transferred once and both callers are
-	// answered. That makes the byte count a property of the read pattern rather than of scheduling
-	// luck, which is what makes it assertable at all.
-	fetches singleflight.Group
+	// # Why containment and not equality
+	//
+	// This was a singleflight.Group keyed on (path, offset, length), on the stated grounds that the
+	// two requests are byte-identical "by construction". They are not. prefetchLength floors the
+	// prefetch at ReadAheadConfig.WindowSize — 64 KiB by default — so a reader whose reads are
+	// *smaller* than the window gets a prefetch that is a strict superset of its next read, and two
+	// overlapping-but-unequal ranges hash to different keys and collapse into nothing.
+	//
+	// Every earlier measurement used 128 KiB reads against the 64 KiB window, where the floor never
+	// engages and the ranges really are equal, so the case went unexercised until a 16 KiB file read in
+	// 1 KiB steps transferred 27,648 bytes — 1.7×, entirely duplicate:
+	//
+	//	GET bytes=6144-7167    reader, 1 KiB
+	//	GET bytes=6144-16383   prefetch, the whole tail — same start, superset, no collapse
+	//	GET bytes=7168-16383   prefetch again, nested inside the one above
+	//	GET bytes=7168-8191    reader, inside both
+	//
+	// Containment answers all four from one transfer, and it subsumes equality, since a range contains
+	// itself. Partial overlap that is not containment still issues its own GET: deduplicating it would
+	// mean splicing two in-flight results, and an unaligned reader is not the pattern this exists for.
+	//
+	// A follower whose leader fails issues its own request rather than inheriting the error. Prefetches
+	// carry a 5-second timeout and reads do not, so an inherited failure would let a prefetch's
+	// deadline fail a read that had no deadline of its own.
+	fetches inflightFetches
+}
+
+// inflightFetches tracks GETs in flight so an overlapping one can wait instead of duplicating it.
+type inflightFetches struct {
+	mu sync.Mutex
+
+	// byPath is keyed by object key, because containment is only meaningful within one object and a
+	// flat list would be scanned across every concurrently-read file.
+	byPath map[string][]*inflightFetch
+}
+
+// inflightFetch is one GET in flight, and its result once done is closed.
+type inflightFetch struct {
+	off    int64
+	length int64
+
+	done chan struct{}
+	data []byte
+	err  error
+}
+
+// covers reports whether this fetch's range contains [off, off+length) entirely.
+func (f *inflightFetch) covers(off, length int64) bool {
+	return off >= f.off && off+length <= f.off+f.length
+}
+
+// slice returns the sub-range of a completed fetch's data, and whether it is actually present.
+//
+// The presence check is not defensive padding: a GET at EOF returns fewer bytes than its range asked
+// for, so a leader whose read was short does not in fact hold every byte its range claimed. A follower
+// in that position has to issue its own request — which will also come up short, and correctly so —
+// rather than be handed a truncated slice as though it were the whole answer.
+func (f *inflightFetch) slice(off, length int64) ([]byte, bool) {
+	start := off - f.off
+	if start < 0 || start+length > int64(len(f.data)) {
+		return nil, false
+	}
+
+	return f.data[start : start+length], true
 }
 
 // Config represents FUSE filesystem configuration.
@@ -764,68 +817,195 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 
 // fetch returns [off, off+length) of an object, from the backend, and caches what it read.
 //
-// Concurrent callers asking for the same range of the same object share one request. That is not a
-// general-purpose optimization — it exists because there are exactly two callers and they ask for
-// identical ranges by design. The prefetcher issues a GET for the offset the reader is predicted to
-// want next, at the length of the read that predicted it, so the read that follows is byte-for-byte
-// the same request. Which of them reaches S3 first is a race between a network round trip and the
-// application's next read(2): win it and the prefetch was useful, lose it and the same bytes are
-// fetched and billed twice.
+// A caller whose range is already covered by a GET in flight waits for that GET and takes its slice,
+// rather than issuing a duplicate. There are two callers — the reader and the prefetcher — and they
+// contend for the same bytes by design: a prefetch is issued for the offset the reader is predicted to
+// want next, so which of them reaches S3 first is a race between a network round trip and the
+// application's next read(2). Win it and the prefetch was useful; lose it and, without this, the same
+// bytes are fetched and billed twice. Waiting makes total bytes transferred a function of the read
+// pattern rather than of how loaded the machine is, which is what makes it assertable in a test.
 //
-// Sharing the flight makes the outcome the same either way. The reader waits on the prefetch it would
-// otherwise have duplicated, and total bytes transferred becomes a function of the read pattern
-// instead of of how loaded the machine is.
+// Containment rather than equality, because the two callers do not ask for equal ranges: see the
+// inflightFetches field on FileSystem for the measurement that established that, and for why the
+// stronger claim held right up until a reader read in steps smaller than the prefetch window.
 //
-// The key must include the length. A prefetch of [1 MiB, +128 KiB) and a read of [1 MiB, +4 KiB) are
-// different requests, and answering the second with the first's result would hand back 128 KiB to a
-// caller expecting 4 KiB.
-//
-// The returned slice is shared between every caller of one flight and must not be modified. Read
-// hands it to fuse.ReadResultData, which copies into the kernel's buffer, and performPrefetch only
-// measures its length.
+// The returned slice aliases the leader's buffer and must not be modified. Read hands it to
+// fuse.ReadResultData, which copies into the kernel's buffer, and performPrefetch only measures its
+// length.
 func (fs *FileSystem) fetch(ctx context.Context, path string, off, length int64) ([]byte, error) {
-	key := fmt.Sprintf("%s\x00%d\x00%d", path, off, length)
+	// Serve from an in-flight GET that covers this range, if there is one.
+	if leader := fs.fetches.join(path, off, length); leader != nil {
+		<-leader.done
 
-	data, err, _ := fs.fetches.Do(key, func() (any, error) {
-		// Re-check the cache inside the flight. A caller that missed, then blocked here behind an
-		// unrelated flight, may find the bytes already stored by the time it runs — and a GET issued
-		// for bytes now in cache is the exact waste this function exists to remove.
-		if cached := fs.cache.Get(path, off, length); cached != nil {
-			return cached, nil
+		if leader.err == nil {
+			if data, ok := leader.slice(off, length); ok {
+				return data, nil
+			}
 		}
+		// Fall through: the leader failed, or came up short of the range it asked for. Either way this
+		// caller issues its own request rather than inheriting a result that is not its answer.
+	}
 
-		data, err := fs.backend.GetObject(ctx, path, off, length)
-		if err != nil {
-			return nil, err
+	self, leader := fs.fetches.start(path, off, length)
+	if leader != nil {
+		// A covering GET started between the join above and here.
+		<-leader.done
+
+		if leader.err == nil {
+			if data, ok := leader.slice(off, length); ok {
+				fs.fetches.finish(path, self, nil, nil)
+
+				return data, nil
+			}
 		}
+	}
 
-		// Hand the whole read to the cache and let it choose its own entry granularity.
-		//
-		// The read path used to split reads larger than 16 MB into per-chunk Puts itself. That loop
-		// never ran — the kernel's largest read is MaxRead, two orders of magnitude below the
-		// threshold — and splitting here would be the wrong layer anyway: the cache already stores at
-		// a fixed chunk size and coalesces adjacent runs, so a caller that pre-splits only guesses at
-		// a boundary the cache is free to change.
-		//
-		// Inside the flight, so the bytes are cached once no matter how many callers shared it, and so
-		// a follower returning from Do sees a cache that already holds what it was just handed.
-		fs.cache.Put(path, off, data)
+	data, err := fs.fetchUncached(ctx, path, off, length)
 
-		return data, nil
-	})
+	// Publish before returning, so a waiter is released whether this succeeded or not.
+	fs.fetches.finish(path, self, data, err)
+
 	if err != nil {
 		return nil, err
 	}
 
-	bytes, ok := data.([]byte)
-	if !ok {
-		// Unreachable: the closure above returns []byte or an error. Checked rather than asserted
-		// because a failed type assertion here would panic inside a FUSE read and take the mount
-		// down with every open descriptor on it.
-		return nil, fmt.Errorf("internal error: fetch of %s returned %T, not []byte", path, data)
+	return data, nil
+}
+
+// fetchUncached does the actual GET, checking the cache once more first.
+func (fs *FileSystem) fetchUncached(ctx context.Context, path string, off, length int64) ([]byte, error) {
+	// A caller that missed the cache, then blocked on an overlapping flight, may find the bytes already
+	// stored by the time it runs — and a GET issued for bytes now in cache is the exact waste this
+	// function exists to remove.
+	if cached := fs.cache.Get(path, off, length); cached != nil {
+		return cached, nil
 	}
 
-	return bytes, nil
+	data, err := fs.backend.GetObject(ctx, path, off, length)
+	if err != nil {
+		return nil, err
+	}
+
+	// Hand the whole read to the cache and let it choose its own entry granularity.
+	//
+	// The read path used to split reads larger than 16 MB into per-chunk Puts itself. That loop never
+	// ran — the kernel's largest read is MaxRead, two orders of magnitude below the threshold — and
+	// splitting here would be the wrong layer anyway: the cache already stores at a fixed chunk size and
+	// coalesces adjacent runs, so a caller that pre-splits only guesses at a boundary the cache is free
+	// to change.
+	fs.cache.Put(path, off, data)
+
+	return data, nil
+}
+
+// join returns an in-flight fetch covering [off, off+length), or nil if there is none.
+func (i *inflightFetches) join(path string, off, length int64) *inflightFetch {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return i.coveringLocked(path, off, length)
+}
+
+// unclaimedStart returns the first offset at or after off that no in-flight fetch is already reading.
+//
+// This answers a different question from join's, for a caller that may adjust its range rather than
+// waiting: not "can another request answer mine" but "where do the bytes nobody is fetching begin".
+// Only [ReadAheadManager.performPrefetch] asks, because only a prefetch is free to move.
+//
+// It advances repeatedly rather than once, since the fetch it skips past may itself land inside a
+// third — a reader one step ahead of the prefetcher produces exactly that chain.
+//
+// Overlap that begins *after* off is deliberately not considered. Truncating there would cut the
+// read-ahead short at a single small read the reader happens to have outstanding in the middle of the
+// window, giving up the whole tail to avoid duplicating a kilobyte; splitting the range into the gaps
+// around it would mean issuing several GETs where the point of read-ahead is to issue one. The front
+// is where the duplication actually occurs, because a prefetch is predicted from the read that is
+// still in flight.
+func (i *inflightFetches) unclaimedStart(path string, off int64) int64 {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	flights := i.byPath[path]
+
+	// Bounded by the number of in-flight fetches: each pass either advances past one of them or stops,
+	// and a fetch cannot be passed twice because off only ever increases.
+	for range flights {
+		advanced := false
+
+		for _, f := range flights {
+			if f.off <= off && off < f.off+f.length {
+				off = f.off + f.length
+				advanced = true
+
+				break
+			}
+		}
+
+		if !advanced {
+			break
+		}
+	}
+
+	return off
+}
+
+// start registers a fetch for this range and returns it, unless a covering one appeared first — in
+// which case the caller waits on that one instead and self is still returned so it can be retired.
+func (i *inflightFetches) start(path string, off, length int64) (self, leader *inflightFetch) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	// Look before registering. A range contains itself, so a self that were already in the list would
+	// be its own covering match and would then wait forever on its own done channel.
+	leader = i.coveringLocked(path, off, length)
+
+	self = &inflightFetch{off: off, length: length, done: make(chan struct{})}
+
+	if i.byPath == nil {
+		i.byPath = make(map[string][]*inflightFetch)
+	}
+	i.byPath[path] = append(i.byPath[path], self)
+
+	return self, leader
+}
+
+// coveringLocked finds an in-flight fetch containing this range. i.mu must be held.
+func (i *inflightFetches) coveringLocked(path string, off, length int64) *inflightFetch {
+	for _, f := range i.byPath[path] {
+		if f.covers(off, length) {
+			return f
+		}
+	}
+
+	return nil
+}
+
+// finish publishes a fetch's result and stops advertising it.
+//
+// Removing it before closing done, so that a caller which has already selected this fetch as its leader
+// is not joined by a new one after the result is known: a fetch still in the map after it completes
+// would be matched by join, whose waiter would then read a result it cannot distinguish from one still
+// pending.
+func (i *inflightFetches) finish(path string, f *inflightFetch, data []byte, err error) {
+	i.mu.Lock()
+
+	flights := i.byPath[path]
+	for n, candidate := range flights {
+		if candidate == f {
+			i.byPath[path] = append(flights[:n], flights[n+1:]...)
+			break
+		}
+	}
+
+	if len(i.byPath[path]) == 0 {
+		delete(i.byPath, path)
+	}
+
+	f.data, f.err = data, err
+
+	i.mu.Unlock()
+
+	close(f.done)
 }
 
 // Write writes data to the file

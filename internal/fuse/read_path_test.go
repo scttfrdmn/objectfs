@@ -399,16 +399,29 @@ func TestConcurrentIdenticalReadsShareOneGET(t *testing.T) {
 	}
 }
 
-// TestPrefetchStopsAtEndOfFile is the 416 InvalidRange at the end of every traversal.
+// TestPrefetchStopsAtEndOfFile is the tail of a traversal: the 416 past EOF, and the tail fetched twice.
 //
 // A sequential reader's predicted next offset runs past EOF by construction — the last read of a
 // complete traversal is followed by a prediction one read beyond the end. v0.10.0 sent it, so reading
 // any file to its end billed one guaranteed-failing request and logged an error for a range that cannot
 // exist.
+//
+// # Why the pacing is a table dimension
+//
+// The reads are 1 KiB against a 64 KiB read-ahead window, which is the case where prefetchLength's floor
+// engages and the prefetch asks for a strict *superset* of the read it anticipates. Whether that costs
+// anything depends entirely on who wins the race, so the pacing is the variable and both ends of it are
+// asserted:
+//
+//   - paused, the prefetch lands first and the reads that follow are cache hits
+//   - unpaused, the reader wins and the prefetch is issued while its own trigger is still in flight
+//
+// The second is what CI runs, and it is the case a single 20 ms pause hid. This test asserted the right
+// property from the start and passed locally at every -cpu setting, in a container, and 10 times in a
+// row; CI's load removed the pause's protection and it reported 17408 bytes for a 16384-byte file. With
+// the pause deleted locally it was 27648 — 1.7x, every byte of the excess duplicate.
 func TestPrefetchStopsAtEndOfFile(t *testing.T) {
 	t.Parallel()
-
-	f := newReadPathFixture(t)
 
 	// The file has to be long enough for the detector to reach its prefetch threshold and still have
 	// reads left to run off the end. A prefetch needs sequentialHits >= MinSequential (3) *and*
@@ -420,28 +433,57 @@ func TestPrefetchStopsAtEndOfFile(t *testing.T) {
 		size = 16 * step
 	)
 
-	f.srv.SeedRandom("eof.dat", size)
-	fh := f.open(t, "eof.dat")
+	for _, pause := range []time.Duration{0, 20 * time.Millisecond} {
+		t.Run(fmt.Sprintf("pause=%s", pause), func(t *testing.T) {
+			t.Parallel()
 
-	for off := int64(0); off < size; off += step {
-		f.read(t, fh, off, step)
-		time.Sleep(20 * time.Millisecond)
-	}
+			f := newReadPathFixture(t)
 
-	time.Sleep(300 * time.Millisecond)
+			f.srv.SeedRandom("eof.dat", size)
+			fh := f.open(t, "eof.dat")
 
-	for _, req := range f.srv.GETs("eof.dat") {
-		if req.Status == 416 {
-			t.Errorf("reading a %d-byte file to its end issued a GET for %s, answered 416 InvalidRange. "+
-				"A prefetch past EOF is a billed request and a logged error for a range that cannot "+
-				"exist; the predicted offset has to be checked against the file's length.",
-				size, req.Range)
-		}
-	}
+			for off := int64(0); off < size; off += step {
+				f.read(t, fh, off, step)
+				time.Sleep(pause)
+			}
 
-	if got := f.srv.BytesRead("eof.dat"); got != size {
-		t.Errorf("reading a %d-byte file to its end transferred %d bytes across %d GETs, want exactly "+
-			"the file", size, got, len(f.srv.GETs("eof.dat")))
+			// Let anything still queued finish, so a late prefetch is counted rather than missed.
+			time.Sleep(300 * time.Millisecond)
+
+			for _, req := range f.srv.GETs("eof.dat") {
+				if req.Status == 416 {
+					t.Errorf("reading a %d-byte file to its end issued a GET for %s, answered 416 "+
+						"InvalidRange. A prefetch past EOF is a billed request and a logged error for a "+
+						"range that cannot exist; the predicted offset has to be checked against the "+
+						"file's length.", size, req.Range)
+				}
+			}
+
+			gets := f.srv.GETs("eof.dat")
+
+			if got := f.srv.BytesRead("eof.dat"); got != size {
+				ranges := make([]string, 0, len(gets))
+				for _, req := range gets {
+					ranges = append(ranges, req.Range)
+				}
+
+				t.Errorf("reading a %d-byte file to its end transferred %d bytes (%.2fx) across %d GETs, "+
+					"want exactly the file. The reads are smaller than the read-ahead window, so each "+
+					"prefetch is a superset of the read that predicted it: a prefetch issued while that "+
+					"read is still in flight fetches its bytes a second time unless it stands off. "+
+					"Ranges: %v", size, got, float64(got)/float64(size), len(gets), ranges)
+			}
+
+			// A prefetch that stands off the in-flight read must trim its range, not abandon it. Skipping
+			// outright also transfers exactly the file — by never prefetching at all, one GET per read.
+			// The tail is read-ahead's whole contribution here, so if it is gone the feature is off.
+			if len(gets) >= size/step {
+				t.Errorf("reading a %d-byte file in %d-byte steps issued %d GETs, want fewer than the "+
+					"%d reads. Read-ahead is contributing nothing: every read is fetching its own range, "+
+					"which is what a prefetch that skips instead of trimming leaves behind",
+					size, step, len(gets), size/step)
+			}
+		})
 	}
 }
 
