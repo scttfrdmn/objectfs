@@ -17,15 +17,20 @@ JavaScript/TypeScript API support.
 
 ## Installation
 
+> **`@objectfs/sdk` is not on npm.** The registry returns 404 for it, and no workflow in this
+> repository publishes it, so `npm install @objectfs/sdk` fails. Unlike the Python SDK — where the
+> name is taken by an unrelated package and the install silently succeeds with someone else's code —
+> this one at least fails loudly. Install from this repository instead. The `@objectfs/sdk` import
+> specifier in the examples below is what the package name will be if it is published; today, use a
+> relative import or `npm link`.
+
 ```bash
-npm install @objectfs/sdk
+git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs/sdks/javascript
+npm install && npm run build
 ```
 
-For TypeScript projects:
-
-```bash
-npm install @objectfs/sdk @types/node
-```
+For TypeScript projects, add `@types/node`.
 
 ## Quick Start
 
@@ -512,5 +517,5 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution guidelines.
 ## Support
 
 - GitHub Issues: <https://github.com/scttfrdmn/objectfs/issues>
-- Documentation: <https://docs.objectfs.io/javascript>
-- NPM Package: <https://www.npmjs.com/package/@objectfs/sdk>
+- Documentation: the `docs/` tree in this repository
+- NPM Package: not published — see [Installation](#installation)

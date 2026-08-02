@@ -110,7 +110,7 @@ body:
     placeholder: |
       - File: docs/configuration/cache.md
       - Section: "Cache Configuration"
-      - URL: https://objectfs.io/docs/config/cache
+      - Line: 42
 
       OR: Should be added to docs/guides/cache-strategies.md (doesn't exist)
 

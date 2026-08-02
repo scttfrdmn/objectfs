@@ -159,14 +159,14 @@ ObjectFS provides native SDKs for popular programming languages:
     <p>Source code, issues, and contributions</p>
   </a>
 
-  <a href="https://community.objectfs.io" class="community-link">
-    <h4>💬 Community Forum</h4>
+  <a href="https://github.com/scttfrdmn/objectfs/discussions" class="community-link">
+    <h4>💬 Discussions</h4>
     <p>Ask questions and share experiences</p>
   </a>
 
-  <a href="https://docs.objectfs.io/api" class="community-link">
-    <h4>🔧 API Reference</h4>
-    <p>Complete API documentation</p>
+  <a href="https://github.com/scttfrdmn/objectfs/tree/main/docs" class="community-link">
+    <h4>🔧 Documentation</h4>
+    <p>Guides and package documentation</p>
   </a>
 </div>
 

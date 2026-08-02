@@ -20,14 +20,17 @@ setup(
     description='ObjectFS Python SDK - High-performance POSIX filesystem for object storage',
     long_description=read_long_description(),
     long_description_content_type='text/markdown',
-    author='ObjectFS Team',
-    author_email='team@objectfs.io',
+    author='Scott Friedman',
     url='https://github.com/scttfrdmn/objectfs',
+    license='Apache-2.0',
     packages=find_packages(),
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
-        'License :: OSI Approved :: MIT License',
+        # Apache 2.0, matching LICENSE and the Java SDK's pom. This said MIT, which is a different
+        # licence than the one the code is under — and package metadata is what downstream tooling
+        # reads, so a licence scanner would have reported MIT for an Apache 2.0 project.
+        'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',

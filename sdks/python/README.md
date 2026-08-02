@@ -15,21 +15,20 @@ Python API support.
 
 ## Installation
 
-```bash
-pip install objectfs
-```
-
-For development:
-
-```bash
-pip install objectfs[dev]
-```
-
-For monitoring features:
+> **`pip install objectfs` installs someone else's package.** This SDK has never been published to
+> PyPI — no workflow in this repository publishes it — and the name `objectfs` is already taken
+> there by an unrelated "Simple Python VFS module" from 2015 by a different author. So the three
+> `pip install objectfs...` commands documented here did not fail; they succeeded and installed
+> different software, which is the worse outcome. Install from this repository instead.
 
 ```bash
-pip install objectfs[monitoring]
+git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs/sdks/python
+pip install -e .
 ```
+
+For development and monitoring extras, `pip install -e '.[dev]'` and `pip install -e '.[monitoring]'`
+from that same directory.
 
 ## Quick Start
 
@@ -375,5 +374,5 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution guidelines.
 ## Support
 
 - GitHub Issues: <https://github.com/scttfrdmn/objectfs/issues>
-- Documentation: <https://docs.objectfs.io/python>
-- Community: <https://community.objectfs.io>
+- Documentation: the `docs/` tree in this repository
+- Discussions: <https://github.com/scttfrdmn/objectfs/discussions>

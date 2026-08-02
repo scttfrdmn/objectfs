@@ -1,5 +1,9 @@
 site_name: ObjectFS Documentation
-site_url: https://objectfs.io
+# No site is published. objectfs.io is a parked registrar page, there is no Pages deploy workflow
+# for either documentation tree, and this value only affects canonical links and the sitemap in a
+# built site — so it named a domain this project does not serve. Pointed at the repository, which
+# is where the documentation actually is. Change it when a site is deployed, not before.
+site_url: https://github.com/scttfrdmn/objectfs
 site_description: High-performance FUSE filesystem for S3-compatible object storage
 site_author: ObjectFS Team
 

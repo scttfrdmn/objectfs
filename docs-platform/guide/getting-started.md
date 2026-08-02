@@ -373,7 +373,7 @@ If you encounter issues or need help:
 
 - Check our [troubleshooting guide](/guide/troubleshooting)
 - Search [GitHub issues](https://github.com/scttfrdmn/objectfs/issues)
-- Ask questions on our [community forum](https://community.objectfs.io)
+- Ask questions in [GitHub Discussions](https://github.com/scttfrdmn/objectfs/discussions)
 - Review the [API documentation](/api/)
 
 <InteractiveExample>

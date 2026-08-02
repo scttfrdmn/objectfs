@@ -38,8 +38,8 @@
     "typescript",
     "javascript"
   ],
-  "author": "ObjectFS Team <team@objectfs.io>",
-  "license": "MIT",
+  "author": "Scott Friedman",
+  "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/scttfrdmn/objectfs/issues"
   },
