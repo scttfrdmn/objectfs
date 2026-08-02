@@ -194,7 +194,15 @@ jobs:
   #
   # It used to `wget` the asset from the release page — which required the release to already exist, and
   # so could only ever scan something users could already download. Now it scans the same artifact
-  # `publish` will attach, and a finding blocks the release instead of annotating it after the fact.
+  # `publish` will attach.
+  #
+  # `exit-code` is deliberately left unset, which is trivy-action's default and means a finding
+  # annotates the release rather than blocking it. That is the honest setting for now: the first real
+  # run of this scan found GHSA-xmrv-pmrh-hhx2 (MODERATE) in the pinned aws-sdk-go-v2, which needs a
+  # dependency bump this release does not carry, and a gate that fails on it would make every release
+  # from here on contingent on a scan nobody had yet seen the output of. The findings go to the
+  # security tab via SARIF. Turning this into a gate — `exit-code: 1` with an explicit severity floor
+  # — is worth doing once the current findings are triaged, not before.
   security-scan:
     name: Security Scan Release
     runs-on: ubuntu-latest
@@ -216,7 +224,11 @@ jobs:
       run: tar -xzf scan/objectfs-linux-amd64.tar.gz -C scan
 
     - name: Run Trivy vulnerability scanner on binary
-      uses: aquasecurity/trivy-action@0.28.0
+      # The tag carries a `v`. Pinned as `@0.28.0` on the first attempt at this file, which does not
+      # resolve — and an unresolvable action fails at "Set up job", before any step exists to log it,
+      # so the failure reads as an infrastructure problem rather than a typo. Verified against
+      # `repos/aquasecurity/trivy-action/tags`: every tag from v0.26.0 to v0.36.0 is v-prefixed.
+      uses: aquasecurity/trivy-action@v0.36.0
       with:
         scan-type: rootfs
         scan-ref: scan/objectfs-linux-amd64
