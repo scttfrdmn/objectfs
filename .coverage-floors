@@ -155,6 +155,16 @@ internal/cache           82
 pkg/api                  73
 pkg/errors               48
 pkg/health               93
+# pkg/memmon was the first package to fail this gate for a reason other than someone deleting a test:
+# it measured 51.0% or 50.6% depending on garbage-collector timing, against a floor of 51, so a commit
+# touching only YAML went red. The variance was one statement — the memory-growth alert branch in
+# analyzeMemory, which fired only when the test's own allocations happened to push `Alloc` past the
+# threshold between two samples. TestMemoryMonitor_MemoryGrowthDetection now drives that branch from
+# seeded samples, so it is exercised on every run: 15 consecutive runs measure 51.9% exactly.
+#
+# Worth recording, because the flake was the smaller half of the finding. The old test allocated 100 MB
+# and then accepted either outcome with `t.Log("No alerts generated (may be normal...)")` — deleting the
+# entire growth-detection branch left it green. A gate with zero margin is what made that visible.
 pkg/memmon               51
 pkg/profiling            75
 pkg/recovery             86

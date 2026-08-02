@@ -60,11 +60,38 @@ jobs:
     - name: Fix Gosec SARIF format
       if: always()
       run: |
-        # Remove the problematic 'fixes' field from SARIF output
-        # gosec generates invalid artifactChanges that GitHub rejects
+        # Two things GitHub's SARIF ingester rejects, both from gosec rather than from our code.
+        #
+        # `fixes`: gosec emits artifactChanges GitHub considers invalid. This part predates the
+        # rewrite of this file and was presumably arrived at the hard way.
+        #
+        # Empty `artifactLocation`: gosec reports three G115 integer-conversion findings with no file
+        # path at all — `"artifactLocation": {}` — and the upload fails whole with
+        # `locationFromSarifResult: expected artifact location`, discarding the other 45 findings with
+        # them. They come from `sdks/c/main.go`, which is cgo: gosec analyses the generated
+        # intermediate and cannot map the location back to a real file. So there is nothing to point
+        # a reviewer at, and a result with no location is not a finding anyone can act on.
+        #
+        # This is the first time either has been observed, because the workflow was
+        # `disabled_inactivity` from January 2026 until it was rewritten — the `fixes` deletion was
+        # carried forward untested along with everything else in the file.
+        #
+        # Dropped rather than back-filled with a placeholder path: inventing a location would put a
+        # finding on a line that has nothing to do with it. The G115 conversions in sdks/c are worth
+        # auditing by hand; a SARIF entry pointing at the wrong file is not how to remember that.
         if [ -f gosec.sarif ]; then
-          jq 'del(.runs[].results[].fixes)' gosec.sarif > gosec-fixed.sarif
+          jq '
+            del(.runs[].results[].fixes)
+            | .runs[].results |= map(
+                select(
+                  (.locations // []) | length > 0 and
+                  ((.[0].physicalLocation.artifactLocation.uri // "") != "")
+                )
+              )
+          ' gosec.sarif > gosec-fixed.sarif
           mv gosec-fixed.sarif gosec.sarif
+
+          echo "gosec: $(jq '[.runs[].results[]] | length' gosec.sarif) results after filtering"
         fi
 
     - name: Upload Gosec SARIF file

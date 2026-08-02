@@ -63,44 +63,215 @@ func TestMemoryMonitor_TakeSample(t *testing.T) {
 	}
 }
 
+// TestMemoryMonitor_MemoryGrowthDetection drives analyzeMemory from seeded samples rather than from
+// real allocations.
+//
+// The version this replaces started the monitor, allocated 100 MB, slept 200 ms, and then accepted
+// either outcome:
+//
+//	alerts := monitor.GetAlerts()
+//	if len(alerts) == 0 {
+//	    t.Log("No alerts generated (may be normal if memory growth is small)")
+//	}
+//
+// So it asserted nothing. Deleting the entire growth-detection branch left it green, which makes it a
+// test of the allocator's mood rather than of the code — and its own coverage flickered with GC
+// timing: `analyzeMemory` measured 87.0% or 82.6% depending on whether `Alloc` happened to cross the
+// threshold between two samples, in roughly one run in four. That is what put pkg/memmon below its
+// coverage floor in CI on a commit that changed only YAML.
+//
+// Seeding baselineSample/currentSample makes the growth arithmetic the only variable, so the
+// threshold comparison is exercised on every run and the assertions can be exact.
 func TestMemoryMonitor_MemoryGrowthDetection(t *testing.T) {
+	t.Parallel()
+
+	const (
+		baselineAlloc = 100 * 1024 * 1024
+		growthPct     = 50.0
+	)
+
+	tests := []struct {
+		name         string
+		threshold    float64
+		currentAlloc uint64
+		wantAlert    bool
+	}{
+		{
+			name:         "growth over threshold alerts",
+			threshold:    10.0,
+			currentAlloc: baselineAlloc * 3 / 2, // +50%, well past 10%
+			wantAlert:    true,
+		},
+		{
+			name:         "growth under threshold is silent",
+			threshold:    75.0, // +50% does not reach it
+			currentAlloc: baselineAlloc * 3 / 2,
+			wantAlert:    false,
+		},
+		{
+			name: "growth exactly at threshold is silent",
+			// The comparison is `>`, not `>=`. Pinned because which one it is decides whether a
+			// monitor configured at its steady-state growth rate alerts continuously or never.
+			threshold:    growthPct,
+			currentAlloc: baselineAlloc * 3 / 2,
+			wantAlert:    false,
+		},
+		{
+			name:         "shrinking memory does not alert",
+			threshold:    10.0,
+			currentAlloc: baselineAlloc / 2,
+			wantAlert:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := DefaultMonitorConfig()
+			config.AlertThreshold = tt.threshold
+			monitor := NewMemoryMonitor(config)
+
+			// analyzeMemory reads baselineSample and currentSample, and returns early unless the
+			// baseline is set and at least two samples exist.
+			baseline := MemorySample{Alloc: baselineAlloc, NumGoroutine: 10}
+			current := MemorySample{Alloc: tt.currentAlloc, NumGoroutine: 10}
+
+			monitor.mu.Lock()
+			monitor.baselineSet = true
+			monitor.baselineSample = baseline
+			monitor.currentSample = current
+			monitor.samples = []MemorySample{baseline, current}
+			monitor.mu.Unlock()
+
+			monitor.analyzeMemory()
+
+			var growth []MemoryAlert
+			for _, a := range monitor.GetAlerts() {
+				if a.AlertType == AlertTypeMemoryGrowth {
+					growth = append(growth, a)
+				}
+			}
+
+			if !tt.wantAlert {
+				if len(growth) != 0 {
+					t.Fatalf("got %d memory-growth alerts, want none: %+v", len(growth), growth)
+				}
+
+				return
+			}
+
+			if len(growth) != 1 {
+				t.Fatalf("got %d memory-growth alerts, want exactly 1: %+v", len(growth), growth)
+			}
+
+			// The alert has to carry the numbers it was raised from, or it tells an operator that
+			// something grew without saying from what to what.
+			got := growth[0]
+			if got.BaselineMem != baselineAlloc {
+				t.Errorf("BaselineMem = %d, want %d", got.BaselineMem, uint64(baselineAlloc))
+			}
+			if got.CurrentMem != tt.currentAlloc {
+				t.Errorf("CurrentMem = %d, want %d", got.CurrentMem, tt.currentAlloc)
+			}
+			if got.GrowthPct != growthPct {
+				t.Errorf("GrowthPct = %v, want %v", got.GrowthPct, growthPct)
+			}
+			if got.Message == "" {
+				t.Error("Message is empty")
+			}
+		})
+	}
+}
+
+// TestMemoryMonitor_AnalyzeMemoryNeedsTwoSamples pins the early return. A monitor that has taken one
+// sample has no baseline to compare against, and comparing a sample to itself would report 0% growth
+// as a fact rather than as an absence of data.
+func TestMemoryMonitor_AnalyzeMemoryNeedsTwoSamples(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		baselineSet bool
+		samples     int
+	}{
+		{name: "no baseline", baselineSet: false, samples: 2},
+		{name: "one sample", baselineSet: true, samples: 1},
+		{name: "no samples", baselineSet: true, samples: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := DefaultMonitorConfig()
+			config.AlertThreshold = 1.0 // Would alert readily if it got that far.
+			monitor := NewMemoryMonitor(config)
+
+			sample := MemorySample{Alloc: 1024, NumGoroutine: 10}
+
+			monitor.mu.Lock()
+			monitor.baselineSet = tt.baselineSet
+			monitor.baselineSample = sample
+			monitor.currentSample = MemorySample{Alloc: 1024 * 1024, NumGoroutine: 10_000}
+			monitor.samples = make([]MemorySample, tt.samples)
+			monitor.mu.Unlock()
+
+			monitor.analyzeMemory()
+
+			if alerts := monitor.GetAlerts(); len(alerts) != 0 {
+				t.Fatalf("got %d alerts from an incomplete sample set, want none: %+v", len(alerts), alerts)
+			}
+		})
+	}
+}
+
+// TestMemoryMonitor_LiveSampling exercises the real Start/sample/Stop loop, which the seeded tests
+// above deliberately bypass. It asserts on what is actually deterministic there — that sampling
+// happens and a baseline is established — and not on whether any alert fired, which depends on the
+// allocator.
+func TestMemoryMonitor_LiveSampling(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultMonitorConfig()
-	config.AlertThreshold = 10.0 // 10% growth threshold
-	config.SampleInterval = 50 * time.Millisecond
+	config.SampleInterval = 10 * time.Millisecond
 	monitor := NewMemoryMonitor(config)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Start monitoring
 	if err := monitor.Start(ctx); err != nil {
-		t.Fatalf("Failed to start monitor: %v", err)
+		t.Fatalf("Start: %v", err)
 	}
 
-	// Take baseline sample
-	time.Sleep(100 * time.Millisecond)
-
-	// Allocate memory to trigger growth detection
-	allocations := make([][]byte, 100)
-	for i := range 100 {
-		allocations[i] = make([]byte, 1024*1024) // 1MB each
+	// Allocate while sampling runs, so the loop has something to observe.
+	allocations := make([][]byte, 64)
+	for i := range allocations {
+		allocations[i] = make([]byte, 1024*1024)
 	}
 
-	// Wait for monitoring to detect growth
-	time.Sleep(200 * time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for {
+		monitor.mu.RLock()
+		n := len(monitor.samples)
+		set := monitor.baselineSet
+		monitor.mu.RUnlock()
 
-	// Stop monitoring
+		if n >= 2 && set {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("monitor took %d samples in 1s at a 10ms interval, baselineSet=%v; want at least 2", n, set)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	if err := monitor.Stop(); err != nil {
-		t.Logf("Error stopping monitor: %v", err)
+		t.Fatalf("Stop: %v", err)
 	}
 
-	// Verify alerts were generated
-	alerts := monitor.GetAlerts()
-	if len(alerts) == 0 {
-		t.Log("No alerts generated (may be normal if memory growth is small)")
-	}
-
-	// Keep allocations in scope
 	_ = allocations
 }
 
