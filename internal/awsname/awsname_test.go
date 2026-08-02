@@ -275,4 +275,66 @@ func TestRegionIsResolvable(t *testing.T) {
 			t.Error("a zero-length config file supplies no region, so it must not count as a source")
 		}
 	})
+
+	t.Run("a directory is not a source", func(t *testing.T) {
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", t.TempDir())
+
+		if RegionIsResolvable("") {
+			t.Error("a directory at AWS_CONFIG_FILE supplies no region. The stat succeeds, so " +
+				"without the IsDir check this would report resolvable and hand the SDK a path it " +
+				"cannot read")
+		}
+	})
+
+	// The default path — AWS_CONFIG_FILE unset, so ~/.aws/config is consulted. Every case above sets
+	// the variable explicitly, deliberately, so that the result does not depend on whether the machine
+	// running the test has a config file; the cost is that the fallback itself, and the
+	// UserHomeDir-failed arm below it, were the only statements in this package with no test at all.
+	//
+	// HOME is redirected instead, which makes the fallback observable while keeping it hermetic:
+	// os.UserHomeDir reads $HOME on Unix, so pointing it at a temporary directory decides what
+	// ~/.aws/config means for the duration of the subtest.
+	t.Run("the default path is consulted when AWS_CONFIG_FILE is unset", func(t *testing.T) {
+		home := t.TempDir()
+
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", "")
+		t.Setenv("HOME", home)
+
+		if RegionIsResolvable("") {
+			t.Error("with no config file under a redirected HOME, nothing supplies a region")
+		}
+
+		if err := os.MkdirAll(filepath.Join(home, ".aws"), 0o700); err != nil {
+			t.Fatalf("creating the .aws directory: %v", err)
+		}
+
+		path := filepath.Join(home, ".aws", "config")
+		if err := os.WriteFile(path, []byte("[default]\nregion = us-west-2\n"), 0o600); err != nil {
+			t.Fatalf("writing the default-path fixture: %v", err)
+		}
+
+		if !RegionIsResolvable("") {
+			t.Errorf("a config file at the default path (%s) must count as a source: it is where the "+
+				"SDK looks when AWS_CONFIG_FILE is unset, which is the common case", path)
+		}
+	})
+
+	// The os.UserHomeDir failure arm. Unix-only: it fails when HOME is empty, and Windows resolves the
+	// home directory from a different variable — but this package builds for linux and darwin only, so
+	// there is no third case to guard for.
+	t.Run("an unresolvable home directory is not a source", func(t *testing.T) {
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", "")
+		t.Setenv("HOME", "")
+
+		if RegionIsResolvable("") {
+			t.Error("with no home directory to resolve, there is no default config path to stat and " +
+				"nothing to report as a source")
+		}
+	})
 }

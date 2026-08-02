@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,16 +252,28 @@ func TestSequentialReadIsCachedWholesale(t *testing.T) {
 	}
 }
 
-// TestPrefetchDoesNotAmplifyReads pins the prefetch window against the read size.
+// TestPrefetchDoesNotAmplifyReads pins total bytes transferred for a sequential traversal.
 //
-// A prefetch shorter than the read it anticipates cannot satisfy that read: the cache answers only for
-// a range it holds in full, so the entry is walked straight past and the bytes are paid for twice, in
-// egress and in cache capacity. The shipped default was a 64 KiB window against the kernel's 128 KiB
-// MaxRead, so every prefetch on every sequential read of every file was waste.
+// Two separate defects made this number wrong, and both had to be fixed for it to hold:
 //
-// The assertion is bytes transferred, because that is what the defect was: latency barely moved, and a
-// hit-rate assertion would have passed — the prefetched entries were never hit, so they never counted
-// as misses either.
+// The prefetch window was shorter than the read it anticipated. A prefetch that fetches less than the
+// reader asks for cannot satisfy that read at all — the cache answers only for a range it holds in
+// full — so the entry was walked straight past and its bytes paid for twice, in egress and in cache
+// capacity. The shipped default was a 64 KiB window against the kernel's 128 KiB MaxRead, so every
+// prefetch of every sequential read of every file was waste: 4,325,644 bytes across 43 GETs for a
+// 3,145,728-byte file.
+//
+// Matching the window to the read size then made prefetch and read issue byte-identical requests, and
+// nothing deduplicated them. Which one reached S3 first was a race between a network round trip and
+// the next read(2), so on an idle machine the prefetch won and the traversal transferred exactly the
+// file, while on a loaded one the reader won and both fetched the same range: 5,373,952 bytes across
+// 41 GETs — precisely 24 reads plus 17 prefetches, every prefetch duplicated. This test passed
+// locally and failed in CI for that reason, which is the correct outcome for a defect that only
+// appears when the machine is busy. FileSystem.fetch now shares one flight between the two.
+//
+// The assertion is bytes transferred, because that is what both defects cost. Latency barely moved,
+// and a hit-rate assertion would have passed the first one — the prefetched entries were never hit,
+// so they never counted as misses either.
 func TestPrefetchDoesNotAmplifyReads(t *testing.T) {
 	t.Parallel()
 
@@ -288,11 +301,101 @@ func TestPrefetchDoesNotAmplifyReads(t *testing.T) {
 	// A full sequential traversal reads each byte once. Prefetch may reorder that work but must not add
 	// to it: every prefetched byte is one the reader was going to ask for anyway.
 	if got := f.srv.BytesRead("seq.dat"); got != size {
-		t.Errorf("a sequential traversal of a %d-byte file transferred %d bytes (%.2fx) in %d GETs. "+
-			"Prefetching a shorter range than the reader asks for cannot satisfy any read, so the "+
-			"prefetched bytes are fetched again by the read itself: at a 64 KiB window against these "+
-			"%d-byte reads this measured 4325644 bytes across 43 GETs.",
-			size, got, float64(got)/float64(size), len(f.srv.GETs("seq.dat")), kernelBuffer)
+		t.Errorf("a sequential traversal of a %d-byte file transferred %d bytes (%.2fx) in %d GETs, "+
+			"want exactly the file in %d GETs. Prefetch must not add work: it fetches the range the "+
+			"reader is about to ask for, so an un-deduplicated prefetch is that read issued twice. "+
+			"A count near %d means every prefetch lost its race with the read it was anticipating.",
+			size, got, float64(got)/float64(size), len(f.srv.GETs("seq.dat")),
+			size/kernelBuffer, size/kernelBuffer+17)
+	}
+}
+
+// TestConcurrentIdenticalReadsShareOneGET is the deduplication on its own, without the prefetcher.
+//
+// The property the test above depends on is that two callers wanting the same bytes at the same time
+// cost one request. Asserting it there means racing a prefetch worker, so the byte count moves with
+// machine load — which is exactly how the defect came to pass locally and fail in CI. Here the race
+// is arranged deliberately and the answer is not timing-dependent: N readers, one range, one GET.
+//
+// Reads are issued through separate handles, because that is the shape that occurs — a prefetch worker
+// and a reader are different callers on the same object, as are two processes reading one file.
+func TestConcurrentIdenticalReadsShareOneGET(t *testing.T) {
+	t.Parallel()
+
+	f := newReadPathFixture(t)
+
+	// Read-ahead off: the point is what concurrent *readers* cost, and a prefetch worker issuing its
+	// own GETs is the variable this test exists to remove.
+	f.fs.readAhead.Stop()
+	f.fs.readAhead = nil
+
+	const (
+		size    = 1024 * 1024
+		want    = 131072
+		readers = 8
+	)
+
+	content := f.srv.SeedRandom("shared.dat", size)
+
+	var (
+		wg      sync.WaitGroup
+		start   = make(chan struct{})
+		results = make([][]byte, readers)
+	)
+
+	for i := range readers {
+		wg.Go(func() {
+			fh := &FileHandle{
+				fs:     f.fs,
+				handle: uint64(i + 1), //nolint:gosec // a loop index cannot be negative
+				file: &OpenFile{
+					path:        "shared.dat",
+					lastAccess:  time.Now(),
+					accessCount: 1,
+				},
+			}
+
+			// Release all readers at once, so they are genuinely in flight together rather than
+			// serialized by goroutine startup.
+			<-start
+
+			dest := make([]byte, want)
+
+			result, errno := fh.Read(context.Background(), dest, 0)
+			if errno != 0 {
+				t.Errorf("reader %d: errno %v", i, errno)
+
+				return
+			}
+
+			got, status := result.Bytes(dest)
+			if !status.Ok() {
+				t.Errorf("reader %d: status %v", i, status)
+
+				return
+			}
+
+			// Copy: the readers share one slice by design, and holding it past the read would let a
+			// later assertion observe whatever the last writer left.
+			results[i] = bytes.Clone(got)
+		})
+	}
+
+	close(start)
+	wg.Wait()
+
+	for i, got := range results {
+		if !bytes.Equal(got, content[:want]) {
+			t.Errorf("reader %d got the wrong bytes. A shared flight must hand every waiter the same "+
+				"complete result, not a partially-filled buffer", i)
+		}
+	}
+
+	if gets := len(f.srv.GETs("shared.dat")); gets != 1 {
+		t.Errorf("%d readers of the same range issued %d GETs, want 1. Every byte past the first "+
+			"request is paid for twice and cached twice; this is the same range by construction, so "+
+			"there is nothing to distinguish the requests and nothing to gain by sending them",
+			readers, gets)
 	}
 }
 

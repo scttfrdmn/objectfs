@@ -61,7 +61,20 @@ internal/health          45
 # callable from a test that only constructed a collector — and a collector with no listener gathers
 # identically to one with a listener, so the six points were exactly where the defects were.
 internal/metrics         85
-internal/network         100
+
+# 100 → 98, and the drop is the file set changing rather than coverage falling. This floor was
+# measured on macOS, where congestion_stub.go supplies 24 lines; on Linux congestion_linux.go
+# supplies 66 in their place, and three of its functions had no test at all — setTCPCongestion at 0%,
+# newPlatformDialer at 20% with its Control closure never invoked, and both procfs readers missing
+# their absent-file arms. The package measured a clean 100% locally and 86.9% in CI, below a floor
+# nobody could see was wrong from the machine it was set on.
+#
+# congestion_linux_test.go covers those, taking Linux to 98.8%. The floor sits at 98 rather than 100
+# because one arm genuinely resists: rawConn.Control's own error, which needs a socket whose fd is
+# already invalid. The lesson worth keeping is the first one — a per-package floor set on one
+# platform is a claim about a file set that platform does not compile, so CI is the authority for
+# any package with a //go:build split. internal/fuse is the other one.
+internal/network         98
 internal/testaws         61
 internal/vfs             98
 
