@@ -46,7 +46,7 @@ ObjectFS should be **invisible** to applications. If it requires code changes, w
 Research computing demands **near-native performance**:
 
 - Multi-tier caching (LRU, persistent, predictive)
-- BBR network optimization (4.6x throughput improvement)
+- TCP congestion control selection (BBR on Linux ≥ 4.9, per socket)
 - Parallel I/O and intelligent prefetching
 - Write buffering with atomic uploads
 

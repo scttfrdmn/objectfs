@@ -35,7 +35,7 @@ This project uses **[Keep a Changelog](https://keepachangelog.com/en/1.0.0/)** f
 ## Architecture
 
 ```
-User apps → Kernel VFS → FUSE (go-fuse/cgofuse) → Adapter → S3 Backend → AWS S3
+User apps → Kernel VFS → FUSE (go-fuse) → internal/fuse → internal/vfs → Adapter → S3 Backend → AWS S3
 ```
 
 Key internal packages:

@@ -139,7 +139,8 @@ feature integrates seamlessly:
 
 **Upload Priority:**
 
-1. CargoShip optimization (primary) - 4.6x performance improvement
+1. CargoShip optimization (primary) — used for uploads when enabled and the encryption mode
+   is one CargoShip can express
 2. S3 Transfer Acceleration (fallback) - Uses acceleration if CargoShip fails
 3. Standard S3 endpoint (final fallback)
 

@@ -252,7 +252,9 @@ ObjectFS automatically respects these limits with intelligent chunking.
    - 1 Gbps: 8-16 concurrent uploads
    - 10 Gbps: 16-32 concurrent uploads
 
-2. **Enable CargoShip optimization**: Provides 4.6x average performance improvement
+2. **Consider CargoShip optimization**: routes uploads through CargoShip's chunking and part
+   scheduling instead of this package's. Whether it is faster for your object sizes and network is a
+   question for `benchmarks/`, not a figure this document can supply
 
 3. **Monitor metrics**: Use the metrics API to identify bottlenecks
 

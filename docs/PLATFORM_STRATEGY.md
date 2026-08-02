@@ -1,5 +1,20 @@
 # Unified Data Platform Strategy
 
+> **Strategy document from 2025, not a description of the code.** The shared-module plan below
+> (`shared/aws-optimization`, `shared/network-algorithms`, `shared/compression`, `shared/metrics`) was
+> not built: no such module exists in either repository. What ObjectFS actually consumes from CargoShip
+> is `pkg/aws/s3` (the upload transporter) and `pkg/aws/config`, imported directly — see
+> `internal/storage/s3/client.go`.
+>
+> One item did land on CargoShip's side and is not yet used here: CargoShip now exports
+> `pkg/s3optimization` (access-pattern analysis, predictive prefetch, adaptive scheduling). ObjectFS
+> imports none of it, and has its own prefetcher in `internal/cache/predictive.go`. That overlap is
+> tracked as an issue rather than described here as done.
+>
+> The "Success Metrics" section carried a 4.6x throughput figure ObjectFS never measured; it is
+> removed below for the reason given in `docs/index.md` — a number nothing produced is worse than no
+> number.
+
 ## Overview
 
 ObjectFS and CargoShip form a comprehensive data lifecycle management platform under unified development and control. This document outlines the strategic approach for coordinated development, shared technology stacks, and integrated product roadmaps.
@@ -42,6 +57,7 @@ ObjectFS and CargoShip form a comprehensive data lifecycle management platform u
 ### 1. Shared Technology Stack
 
 #### Common Libraries (Target: v0.2.0)
+
 - **S3 Optimization**: Connection pooling, health monitoring, retry logic
 - **Network Algorithms**: BBR/CUBIC congestion control from CargoShip
 - **Compression**: ZSTD, LZ4, GZIP implementations
@@ -49,6 +65,7 @@ ObjectFS and CargoShip form a comprehensive data lifecycle management platform u
 - **Configuration**: Shared YAML configuration patterns
 
 #### Implementation Approach
+
 ```bash
 # Create shared Go module
 mkdir -p shared/aws-optimization
@@ -64,11 +81,13 @@ mkdir -p shared/metrics
 ### 2. Coordinated Release Strategy
 
 #### Synchronized Releases
+
 - **Major versions**: Coordinated across both projects
 - **Shared dependencies**: Common versioning for shared libraries
 - **Feature compatibility**: Ensure cross-platform functionality
 
 #### Release Timeline Alignment
+
 ```
 Q4 2025: ObjectFS v0.2.0 + CargoShip v0.5.0
 ├── Shared S3 optimization stack
@@ -89,6 +108,7 @@ Q3 2026: ObjectFS v0.4.0 + CargoShip v0.6.0
 ### 3. Cross-Platform Data Flow
 
 #### Data Lifecycle Integration
+
 ```bash
 # Phase 1: Active Data (ObjectFS)
 objectfs s3://enterprise-bucket/workspace /mnt/active
@@ -113,6 +133,7 @@ objectfs s3://enterprise-bucket/restored /mnt/active
 ### 1. Metadata Compatibility
 
 #### ObjectFS Metadata Format
+
 ```yaml
 # .objectfs/metadata/file.yaml
 key: "data/project/file.dat"
@@ -123,6 +144,7 @@ access_pattern: "sequential"
 ```
 
 #### CargoShip Inventory Format
+
 ```yaml
 # inventory.yaml (compatible subset)
 files:
@@ -136,11 +158,14 @@ files:
 ### 2. Performance Optimization Sharing
 
 #### From CargoShip to ObjectFS
-- **BBR Congestion Control**: Proven 4.6x performance improvements
+
+- **Congestion control**: BBR/CUBIC selection, which ObjectFS implements itself in
+  `internal/network` as a per-socket `TCP_CONGESTION` option on Linux
 - **Network Adaptation**: Real-time parameter optimization
 - **Connection Management**: Advanced pooling strategies
 
 #### From ObjectFS to CargoShip
+
 - **Cache Intelligence**: Multi-level caching strategies
 - **POSIX Optimization**: Filesystem-aware performance tuning
 - **Real-time Monitoring**: Sub-second performance metrics
@@ -148,6 +173,7 @@ files:
 ### 3. Compression Algorithm Unification
 
 #### Shared Implementation
+
 ```go
 // shared/compression/algorithms.go
 type CompressionAlgorithm interface {
@@ -162,6 +188,7 @@ type CompressionAlgorithm interface {
 ## Development Workflow
 
 ### 1. Repository Structure
+
 ```
 scttfrdmn/
 ├── objectfs/           # ObjectFS repository
@@ -177,12 +204,14 @@ scttfrdmn/
 ### 2. Coordination Mechanisms
 
 #### Development Synchronization
+
 - **Weekly sync meetings**: Coordinate feature development
 - **Shared issue tracking**: Cross-project feature requests
 - **Unified testing**: Integration test suites across both projects
 - **Common CI/CD**: Shared build and deployment pipelines
 
 #### Documentation Strategy
+
 - **Unified user documentation**: Single source of truth for platform capabilities
 - **Cross-referenced APIs**: Clear integration points and examples
 - **Shared architectural decisions**: Common design patterns and principles
@@ -190,6 +219,7 @@ scttfrdmn/
 ### 3. Quality Assurance
 
 #### Cross-Platform Testing
+
 ```bash
 # Integration test suite
 tests/
@@ -202,18 +232,21 @@ tests/
 ## Strategic Benefits
 
 ### 1. Technical Advantages
+
 - **Reduced Duplication**: Shared optimization libraries
 - **Faster Innovation**: Cross-project knowledge transfer
 - **Higher Quality**: Unified testing and validation
 - **Better Performance**: Combined optimization strategies
 
 ### 2. Market Positioning
+
 - **Complete Solution**: End-to-end data lifecycle management
 - **Competitive Differentiation**: Integrated platform vs point solutions
 - **Customer Value**: Single vendor, unified support, seamless workflows
 - **Cost Efficiency**: Shared development and maintenance costs
 
 ### 3. Development Efficiency
+
 - **Resource Optimization**: Shared development efforts
 - **Faster Time-to-Market**: Coordinated release cycles
 - **Consistent User Experience**: Unified design patterns
@@ -222,12 +255,14 @@ tests/
 ## Risk Mitigation
 
 ### 1. Technical Risks
+
 - **Over-coupling**: Maintain clear separation of concerns
 - **Complexity Management**: Careful abstraction layer design
 - **Performance Regression**: Comprehensive benchmarking
 - **Compatibility Issues**: Extensive integration testing
 
 ### 2. Project Management Risks
+
 - **Release Coordination**: Clear dependency management
 - **Resource Allocation**: Balanced development priorities
 - **Quality Control**: Unified quality gates and standards
@@ -236,12 +271,16 @@ tests/
 ## Success Metrics
 
 ### 1. Technical Metrics
-- **Performance**: Maintain 4.6x improvement across platform
+
+- **Performance**: no regression against a benchmark in `benchmarks/`, run against a named bucket,
+  region, and object size. A throughput target stated as a multiplier with no baseline — which is what
+  this line was — cannot be met or missed
 - **Reliability**: 99.9% uptime for integrated workflows
 - **Efficiency**: 50% reduction in duplicated code
-- **Quality**: 95%+ test coverage across all components
+- **Quality**: 80%+ test coverage per package (the gate in `ci.yml`)
 
 ### 2. Business Metrics
+
 - **Time-to-Market**: 30% faster feature delivery
 - **Customer Satisfaction**: Unified platform experience
 - **Cost Efficiency**: Reduced development and maintenance costs
@@ -249,4 +288,8 @@ tests/
 
 ## Conclusion
 
-The unified ObjectFS + CargoShip platform strategy leverages controlled development of both projects to create a comprehensive, differentiated data lifecycle management solution. Through shared technology stacks, coordinated development, and integrated workflows, the platform delivers superior value compared to competing point solutions while optimizing development efficiency and market positioning.
+The unified ObjectFS + CargoShip platform strategy leverages controlled development of both projects
+to create a comprehensive, differentiated data lifecycle management solution. Through shared
+technology stacks, coordinated development, and integrated workflows, the platform delivers superior
+value compared to competing point solutions while optimizing development efficiency and market
+positioning.

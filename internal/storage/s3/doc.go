@@ -1,9 +1,15 @@
 /*
-Package s3 provides a high-performance AWS S3 backend with CargoShip optimization and advanced storage tier management.
+Package s3 provides an AWS S3 backend with CargoShip upload optimization and storage tier management.
 
-This package implements the core object storage functionality for ObjectFS, featuring comprehensive S3 integration
-with multi-tier storage support, cost optimization, and performance enhancements through CargoShip integration
-that delivers up to 4.6x performance improvements over standard S3 operations.
+This package implements the core object storage functionality for ObjectFS: S3 integration with
+multi-tier storage support, cost accounting, and an optional CargoShip transporter on the upload path.
+
+Throughput figures are deliberately absent, here and everywhere else in this repository. This doc
+comment used to open by claiming "up to 4.6x performance improvements over standard S3 operations",
+repeated twice more below. Nothing in this repository measured that number, and no benchmark here can
+produce it — it came from CargoShip's own reporting on CargoShip's own workload, and was restated as a
+property of ObjectFS. A reader had no way to tell it apart from something this project had measured.
+See benchmarks/ for what can actually be run against a named bucket and object size.
 
 # Architecture Overview
 
@@ -23,7 +29,7 @@ The S3 backend provides multiple layers of functionality:
 	                          │
 	┌─────────────────────────────────────────────────────────────┐
 	│              CargoShip Transporter                          │
-	│         (4.6x Performance Optimization)                    │
+	│           (upload path only, when enabled)                 │
 	└─────────────────────────────────────────────────────────────┘
 	                          │
 	┌─────────────────────────────────────────────────────────────┐
@@ -33,14 +39,17 @@ The S3 backend provides multiple layers of functionality:
 
 # CargoShip Integration
 
-The backend leverages CargoShip optimization for significant performance improvements:
+When EnableCargoShipOptimization is set, PutObject routes through CargoShip's transporter instead of
+the direct SDK call. What that changes, as a list of mechanisms rather than a speedup figure:
 
-Performance Benefits:
-- 4.6x faster upload speeds through intelligent chunking
-- Optimized connection pooling and reuse
-- Advanced retry logic with exponential backoff
-- Intelligent multipart upload optimization
-- Reduced API call overhead through batching
+- Chunking is sized by CargoShip rather than by MultipartChunkSize alone
+- Connections are pooled and reused across uploads
+- Retries and multipart part scheduling are CargoShip's, not this package's retryer
+- Batching reduces the number of API calls for many small objects
+
+Note the diversions: PutObject bypasses the transporter for any encryption mode CargoShip cannot
+express (see cargoShipCanEncrypt), and GetObject never uses it — the read path is this package's own.
+So "CargoShip is enabled" describes some writes, not all traffic.
 
 CargoShip Features:
 - Automatic optimal chunk size calculation
