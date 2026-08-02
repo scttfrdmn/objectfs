@@ -1,15 +1,28 @@
 # ObjectFS
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/scttfrdmn/objectfs.svg)](https://pkg.go.dev/github.com/scttfrdmn/objectfs)
-[![Go Report Card](https://goreportcard.com/badge/github.com/scttfrdmn/objectfs)](https://goreportcard.com/report/github.com/scttfrdmn/objectfs)
-[![codecov](https://codecov.io/gh/scttfrdmn/objectfs/graph/badge.svg)](https://codecov.io/gh/scttfrdmn/objectfs)
-[![CI Status](https://github.com/scttfrdmn/objectfs/workflows/CI/badge.svg)](https://github.com/scttfrdmn/objectfs/actions)
+<!-- Badges: each one must report something real. Three were removed rather than fixed, because a
+     badge that renders "unknown" or "retired" is worse than no badge — it reads as a broken project
+     to anyone who looks, and as a passing check to anyone who does not.
+
+       - codecov rendered "unknown": nothing has ever uploaded to it, and no workflow references
+         codecov at all. Coverage is gated per-package by scripts/coverage-gate.sh against
+         .coverage-floors, which is a job in ci.yml, so the CI badge already covers it. There is no
+         separate percentage to display and no service to display it.
+       - Go Report Card rendered "retired": the service no longer reports for this module.
+       - Go Reference (pkg.go.dev) rendered empty: there is no pkg.go.dev entry for either
+         github.com/objectfs/objectfs or github.com/scttfrdmn/objectfs, because go.mod declares a
+         module path that is not where the code lives. That makes the module un-importable; see #213.
+         The badge comes back when the path does.
+
+     The GitHub stars badge is also gone: a star count is not a property of the software. -->
+
+[![CI](https://github.com/scttfrdmn/objectfs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/scttfrdmn/objectfs/actions/workflows/ci.yml)
+[![Security](https://github.com/scttfrdmn/objectfs/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/scttfrdmn/objectfs/actions/workflows/security.yml)
 
 [![Release](https://img.shields.io/github/v/release/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/scttfrdmn/objectfs)](go.mod)
 [![GitHub issues](https://img.shields.io/github/issues/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/issues)
-[![GitHub stars](https://img.shields.io/github/stars/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/stargazers)
 
 > ## ⚠️ v0.10.0 is withdrawn — upgrade if you are on it
 >
@@ -377,3 +390,7 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 - **Issues**: [GitHub Issues](https://github.com/scttfrdmn/objectfs/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/scttfrdmn/objectfs/discussions)
+- **Security**: [SECURITY.md](SECURITY.md) — report privately through a
+  [security advisory](https://github.com/scttfrdmn/objectfs/security/advisories/new), not a public
+  issue. The policy also documents what the default configuration exposes, which is worth reading
+  before mounting on a shared host

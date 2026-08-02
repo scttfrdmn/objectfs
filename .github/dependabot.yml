@@ -1,3 +1,15 @@
+# Dependabot configuration.
+#
+# Two things to know before editing, both learned the hard way:
+#
+#  1. `labels:` must name labels that EXIST. Dependabot silently drops unknown ones, so
+#     `automerge` — which .github/workflows/dependabot-automerge.yml gates every approve and merge
+#     step on — was never applied to a single PR. 46 PRs were opened and 0 were ever merged. Adding
+#     a label here without adding it to .github/labels.yml re-breaks auto-merge silently.
+#  2. Every manifest that generates a Dependabot ALERT should have an ecosystem entry here, or the
+#     alert has nothing to act on it. sdks/java/pom.xml (5 alerts) and docs-platform/package.json
+#     (3 alerts) sat unmonitored; GitHub opened one-off security-update jobs against them anyway,
+#     which is how the missing coverage surfaced.
 version: 2
 updates:
   # Enable version updates for Go modules
@@ -80,4 +92,66 @@ updates:
   labels:
   - dependencies
   - docker
+  - automerge
+
+  # Java SDK. Five open alerts against jackson-databind (two high) were generated here with no
+  # ecosystem entry to act on them.
+- package-ecosystem: maven
+  directory: /sdks/java
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 3
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: deps
+    include: scope
+  labels:
+  - dependencies
+  - java
+  - automerge
+
+  # Documentation platform. Three open alerts against vite (one high).
+  #
+  # Note the ceiling on what this can do: no package-lock.json is committed, and for a *security*
+  # update Dependabot needs one — "can't update vulnerable dependencies for projects without a
+  # lockfile or pinned version requirement as the currently installed version of vite isn't known"
+  # is the verbatim reason the 2026-08-02 run failed. Version updates to the `^x.y.z` ranges in
+  # package.json do work. Committing a lockfile is what would close the alerts; that is #214.
+- package-ecosystem: npm
+  directory: /docs-platform
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 3
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: deps
+    include: scope
+  labels:
+  - dependencies
+  - javascript
+  - automerge
+
+  # JavaScript SDK. No alerts today, but ci.yml runs `npm install && npm test` in this directory
+  # (ci.yml:289), so its dependencies are executed on every PR and belong under the same watch.
+- package-ecosystem: npm
+  directory: /sdks/javascript
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 3
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: deps
+    include: scope
+  labels:
+  - dependencies
+  - javascript
   - automerge

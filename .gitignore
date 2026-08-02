@@ -65,6 +65,10 @@ bin/
 coverage.txt
 coverage.html
 coverage.out
+# The directory the Makefile's `coverage` target writes into (COVERAGE_DIR := coverage). The three
+# bare filenames above only match a profile written to the repo root, which `make coverage` does not
+# do — it writes coverage/coverage.out and coverage/coverage.html.
+coverage/
 
 # Temporary files
 tmp/

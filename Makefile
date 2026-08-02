@@ -91,9 +91,28 @@ version:
 	@echo "Build Time: $(BUILD_TIME)"
 	@echo "Go Version: $(GO_VERSION)"
 
-# Create necessary directories
-$(BIN_DIR) $(BUILD_DIR) $(DIST_DIR) $(COVERAGE_DIR):
-	@mkdir -p $@
+# Create necessary directories.
+#
+# `%/.mkdir` rather than the directory names themselves. `BUILD_DIR := build` and
+# `COVERAGE_DIR := coverage` made the old rule read `bin build dist coverage:`, which collides with
+# the real `build` and `coverage` targets below — so make printed four warnings on *every*
+# invocation, including `make build` and `make help`:
+#
+#   Makefile:129: warning: overriding commands for target `build'
+#   Makefile:96: warning: ignoring old commands for target `build'
+#
+# The build still worked, because the later recipe wins and both targets are .PHONY, so the
+# directory recipe was discarded and `mkdir -p` happened to be unnecessary for `build` (go build
+# creates the parent of -o). But a build system that opens with four warnings reads as unmaintained,
+# and the two names would have genuinely collided the moment one stopped being .PHONY.
+#
+# A sentinel file per directory keeps the rule pattern-based and out of the target namespace
+# entirely. Order-only (`| $(BIN_DIR)/.mkdir`) is what callers want: the directory's mtime changes
+# whenever anything is written into it, and a normal prerequisite would rebuild every binary each
+# time a sibling was built.
+%/.mkdir:
+	@mkdir -p $(@D)
+	@touch $@
 
 # Download and tidy dependencies
 deps:
@@ -125,19 +144,19 @@ lint:
 check: fmt vet lint test
 
 # Build the binary
-build: $(BIN_DIR)
+build: | $(BIN_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Building $(BINARY_NAME) $(VERSION) for $(GOOS)/$(GOARCH)...$(COLOR_RESET)"
 	@CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BINARY_PATH) ./cmd/objectfs
 	@echo "$(COLOR_GREEN)Binary built: $(BINARY_PATH)$(COLOR_RESET)"
 
 # Build debug binary
-build-debug: $(BIN_DIR)
+build-debug: | $(BIN_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Building debug binary...$(COLOR_RESET)"
 	@go build -tags $(DEBUG_TAGS) -o $(BIN_DIR)/$(BINARY_NAME)-debug ./cmd/objectfs
 
 # Build binary with race detection
-build-race: $(BIN_DIR)
+build-race: | $(BIN_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Building race detection binary...$(COLOR_RESET)"
 	@go build $(RACE_FLAGS) -o $(BIN_DIR)/$(BINARY_NAME)-race ./cmd/objectfs
 
@@ -148,7 +167,7 @@ build-race: $(BIN_DIR)
 build-all: build-linux build-darwin
 
 # Build for Linux
-build-linux: $(BUILD_DIR)
+build-linux: | $(BUILD_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Building for Linux...$(COLOR_RESET)"
 	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/objectfs
@@ -156,7 +175,7 @@ build-linux: $(BUILD_DIR)
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/objectfs
 
 # Build for macOS
-build-darwin: $(BUILD_DIR)
+build-darwin: | $(BUILD_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Building for macOS...$(COLOR_RESET)"
 	@CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/objectfs
@@ -179,7 +198,7 @@ bench:
 	@go test -bench=. -benchmem ./...
 
 # Generate test coverage
-coverage: $(COVERAGE_DIR)
+coverage: | $(COVERAGE_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Generating test coverage...$(COLOR_RESET)"
 	@go test -coverprofile=$(COVERAGE_DIR)/coverage.out ./...
 	@go tool cover -func=$(COVERAGE_DIR)/coverage.out
@@ -220,7 +239,7 @@ docker-push:
 	@docker push objectfs:latest
 
 # Create distribution packages
-package: build-all $(DIST_DIR)
+package: build-all | $(DIST_DIR)/.mkdir
 	@echo "$(COLOR_BLUE)Creating distribution packages...$(COLOR_RESET)"
 	@for binary in $(BUILD_DIR)/$(BINARY_NAME)-*; do \
 		if [ -f "$$binary" ]; then \

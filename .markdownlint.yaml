@@ -24,3 +24,15 @@ MD046: false
 
 # Allow emphasis (bold/italic) used as descriptive text, not headings
 MD036: false
+
+# MD010 (no-hard-tabs) must not touch code blocks.
+#
+# The hook runs `markdownlint --fix`, and with code_blocks left at its default of true, MD010 silently
+# rewrites the tabs inside every fenced block to spaces. Go is indented with tabs — that is not a
+# style preference, it is what gofmt emits — so the fixer turns every Go sample in this repo into code
+# that would not survive a round-trip through gofmt. It did exactly that to the s3.NewBackend example
+# in README.md, converting one tab to one space, on a commit that only touched the badges.
+#
+# Tabs in prose are still flagged, which is the part of the rule worth having.
+MD010:
+  code_blocks: false
