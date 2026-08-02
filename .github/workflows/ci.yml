@@ -152,9 +152,32 @@ jobs:
   # Each target is named explicitly rather than discovered, because `-run Fuzz -fuzz .` cannot
   # fuzz more than one target per invocation, and a loop that silently fuzzes only the first
   # match would look like coverage.
+  #
+  # GOMEMLIMIT is the reason this job stopped dying, and the value is not arbitrary. `go test
+  # -fuzz` runs one worker *process* per CPU — four on ubuntu-latest — and each is an independent
+  # Go runtime that sizes its heap against the whole machine's memory, because none of them knows
+  # the other three exist. FuzzOperationSequence allocates hard (every iteration is a real
+  # read-modify-write over a real HTTP endpoint), so four workers reached 6 GB of mostly-garbage
+  # RSS within four seconds and the cgroup OOM-killed one: `oom_kill 1`, and `go test` reported it
+  # as "fuzzing process hung or terminated unexpectedly while minimizing: EOF" against whichever
+  # input that worker happened to be holding. That message names an input and writes it to
+  # testdata, which is what makes this failure mode so misleading — every input so written
+  # replayed green, because none of them was the problem.
+  #
+  # 768 MiB per worker measured at 2.9 GB peak against the runner's 16 GB, and *raised* throughput
+  # from 1443 execs (the run that died) to ~21,000 in 45 s: the memory was garbage the collector
+  # had no pressure signal to reclaim, not live data, so capping it costs nothing and buys back
+  # the time that was going into page thrash. Measured alternatives, same 45 s budget: 384 MiB →
+  # 1.4 GB peak, 13.5k execs; 1536 MiB → 5.7 GB peak, 26.1k execs. The knee is here.
+  #
+  # It is set for every target rather than just the one that died, because the cause is the
+  # per-worker runtime's view of memory, which every target shares. A target that allocates less
+  # simply never reaches the limit.
   # ---------------------------------------------------------------------------------------------
   fuzz-smoke:
     runs-on: ubuntu-latest
+    env:
+      GOMEMLIMIT: 768MiB
     strategy:
       fail-fast: false
       matrix:
