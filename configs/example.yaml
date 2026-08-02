@@ -66,6 +66,9 @@ cache:
     directory: /var/cache/objectfs
     max_size: 10GB
 
+# Durations take a unit suffix (ns, us, ms, s, m, h). A bare number is nanoseconds, so `read: 30`
+# means thirty nanoseconds; that is refused at startup with the key named rather than left to fail
+# later as a network timeout.
 network:
   timeouts:
     connect: 10s                      # TCP dial timeout

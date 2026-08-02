@@ -150,6 +150,10 @@ write_buffer:
     level: 3                          # zstd 0-22, gzip 0-9; 0 = codec default
 
 # Network behavior.
+#
+# Every duration in this file takes a unit suffix — ns, us, ms, s, m, h. A bare number is read as
+# nanoseconds, so `read: 30` is thirty nanoseconds and not thirty seconds. That is refused at startup
+# with the key named, rather than accepted and left to fail later as a network timeout.
 network:
   timeouts:
     connect: 10s                      # TCP dial timeout

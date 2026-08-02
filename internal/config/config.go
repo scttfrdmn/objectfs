@@ -906,6 +906,10 @@ func (c *Configuration) Validate() error {
 		return err
 	}
 
+	if err := c.validateDurations(); err != nil {
+		return err
+	}
+
 	if err := c.validateS3Config(); err != nil {
 		return err
 	}
@@ -1127,6 +1131,100 @@ func (c *Configuration) validateSizes() error {
 
 	// write_buffer.compression.min_size is validated by validateCompressionConfig, which builds the
 	// codec — and only when compression is enabled, since a disabled block is not consulted.
+
+	return nil
+}
+
+// minSaneDuration is the floor below which a non-zero duration is taken to be a unit mistake rather
+// than a deliberate setting.
+//
+// One millisecond, because nothing in this schema is a setting anyone would want below it — the
+// smallest deliberate value in any shipped config is a 1-second retry delay, and the fastest of these
+// is a health-check interval — while every value produced by the unit trap below is far under it. A
+// millisecond timeout on an S3 request over the internet cannot succeed, so nothing is being refused
+// that would have worked.
+const minSaneDuration = time.Millisecond
+
+// validateDurations rejects a duration that yaml.v2 read as nanoseconds because it carried no unit.
+//
+// This is the whole defect, and it is not about any one setting. gopkg.in/yaml.v2 decodes a bare
+// integer into a time.Duration by taking it as a raw nanosecond count, with no error — so
+// `read: 30`, which is what someone writing a 30-second timeout tries first, configures **30
+// nanoseconds**, and `-5` is accepted as a negative duration. Nothing downstream catches it: every
+// consumer defends against zero (internal/circuit.NewBreaker, Checker.checkLoop and
+// Monitor.monitorLoop all substitute a default at <= 0) and a small positive passes every one of
+// those guards.
+//
+// What that produced, found by FuzzConfigConstructsBackend from the three-line document
+// `network:\n  timeouts:\n    read: 2`: the value becomes the transport's ResponseHeaderTimeout, so
+// every request fails before S3 can answer, and the mount dies inside NewBackend's health check with
+// "exceeded maximum number of attempts ... timeout awaiting response headers". That message names a
+// network problem. The operator has a config file with a plausible-looking number in it and an error
+// pointing at their network, which is audit finding C1's exact shape: accepted by every layer that
+// reads configuration, fatal at the layer that acts on it, attributed to neither.
+//
+// It is checked here, at load, rather than each consumer clamping, because a clamp would silently
+// substitute a duration the operator did not ask for — and the value they wrote is not a value they
+// meant, so honoring any interpretation of it is worse than refusing.
+//
+// Zero remains valid throughout and means "use the built-in default", which is how a partial config
+// file works. The message states the unit rule, since the fix is to add a suffix, not to pick a
+// different number.
+func (c *Configuration) validateDurations() error {
+	durations := []struct {
+		path  string
+		value time.Duration
+	}{
+		{"network.timeouts.connect", c.Network.Timeouts.Connect},
+		{"network.timeouts.read", c.Network.Timeouts.Read},
+		{"network.timeouts.write", c.Network.Timeouts.Write},
+		{"network.retry.base_delay", c.Network.Retry.BaseDelay},
+		{"network.retry.max_delay", c.Network.Retry.MaxDelay},
+		{"network.circuit_breaker.timeout", c.Network.CircuitBreaker.Timeout},
+		{"monitoring.health_checks.interval", c.Monitoring.HealthChecks.Interval},
+		{"monitoring.health_checks.timeout", c.Monitoring.HealthChecks.Timeout},
+		{"cache.ttl", c.Cache.TTL},
+		{"cluster.redis.ttl", c.Cluster.Redis.TTL},
+
+		// Not wired — vfs.NewWriter takes no configuration and nothing drives a periodic flush — and
+		// checked anyway. A value that is wrong now stays wrong when it is wired, and it would then be
+		// wrong in a release that changed nothing about it. This entry was added because the
+		// reflection walk in validate_durations_test.go found it and the hand-written list did not:
+		// the field is declared with different alignment from the others, so the grep that produced
+		// that list missed it. Which is the walk's whole point.
+		{"write_buffer.flush_interval", c.WriteBuffer.FlushInterval},
+	}
+
+	for _, d := range durations {
+		if d.value == 0 {
+			continue
+		}
+
+		if d.value < 0 {
+			return fmt.Errorf("%s must not be negative, got %s. Durations take a unit suffix "+
+				"(\"30s\", \"5m\", \"1h\"); a bare number is read as nanoseconds", d.path, d.value)
+		}
+
+		if d.value < minSaneDuration {
+			return fmt.Errorf("%s is %s, which is almost certainly a missing unit: a duration "+
+				"written without a suffix is read as nanoseconds, so \"%d\" means %s and not %ds. "+
+				"Write it as \"%ds\" (or \"%dms\", \"%dm\") — the accepted suffixes are ns, us, ms, "+
+				"s, m, h", d.path, d.value, int64(d.value), d.value, int64(d.value), int64(d.value),
+				int64(d.value), int64(d.value))
+		}
+	}
+
+	// max_attempts is not a duration, but it is in the same block and has the same shape of failure:
+	// negative is meaningless and pkg/retry would treat it as no attempts at all.
+	if c.Network.Retry.MaxAttempts < 0 {
+		return fmt.Errorf("network.retry.max_attempts must not be negative, got %d",
+			c.Network.Retry.MaxAttempts)
+	}
+
+	if c.Network.CircuitBreaker.FailureThreshold < 0 {
+		return fmt.Errorf("network.circuit_breaker.failure_threshold must not be negative, got %d",
+			c.Network.CircuitBreaker.FailureThreshold)
+	}
 
 	return nil
 }
