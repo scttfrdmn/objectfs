@@ -3,7 +3,11 @@ package testaws_test
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -167,6 +171,90 @@ func TestRecorderCountsRequestBodies(t *testing.T) {
 	}
 	if put.RequestBytes != int64(len(body)) {
 		t.Errorf("RequestBytes = %d, want %d", put.RequestBytes, len(body))
+	}
+}
+
+// TestRecorderLogsARequestBeforeItsCallerCanObserveTheResponse is the harness auditing itself.
+//
+// Everything in this package that asserts on transfer behavior — GETs, BytesRead, the read-amplification
+// suite — reads the request log immediately after the operation it is measuring returns. That is only
+// sound if a completed response implies a recorded request. It did not: the handler appended to the log
+// after the proxy had already written the body to the socket, so a client could hold every byte of a
+// response whose request was not yet in the log.
+//
+// The consequence was not a failure in this package. It was internal/fuse TestShortFileIsServedFromCache
+// failing on its precondition — "the first read issued no GET" — which reads as the read path serving
+// from a cache it had no way to populate, in a test whose whole subject is cache correctness. One CI run
+// in seven. A harness that lags the behavior it observes makes every assertion built on it a coin flip
+// weighted by machine load, and it blames the code under test.
+//
+// Concurrency is required to see it: the window is between two statements on the server goroutine, so a
+// single caller alternating request and assertion never lands in it. At 16 workers the old recorder
+// missed roughly 4 reads in 960.
+func TestRecorderLogsARequestBeforeItsCallerCanObserveTheResponse(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const (
+		workers = 16
+		reads   = 40
+		size    = 10240
+	)
+
+	var missing atomic.Int64
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := range reads {
+				key := fmt.Sprintf("logged-%d-%d", w, i)
+
+				want := testaws.DeterministicBytes(key, size)
+				ts.PutObject(key, want)
+
+				// Ranged, because that is the shape the read-path assertions use.
+				out, err := ts.Client().GetObject(context.Background(), &awss3.GetObjectInput{
+					Bucket: aws.String(ts.Bucket),
+					Key:    aws.String(key),
+					Range:  aws.String(fmt.Sprintf("bytes=0-%d", size-1)),
+				})
+				if err != nil {
+					t.Errorf("%s: ranged GetObject: %v", key, err)
+
+					return
+				}
+
+				got, err := io.ReadAll(out.Body)
+				_ = out.Body.Close()
+
+				if err != nil {
+					t.Errorf("%s: reading the body: %v", key, err)
+
+					return
+				}
+
+				if !bytes.Equal(got, want) {
+					t.Errorf("%s: read %d bytes, want %d", key, len(got), size)
+
+					return
+				}
+
+				// The bytes are in hand, so the GET that carried them happened. It must be visible.
+				if len(ts.GETs(key)) == 0 {
+					missing.Add(1)
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+
+	if n := missing.Load(); n != 0 {
+		t.Errorf("%d of %d completed reads observed an empty GET log; a caller holding a whole "+
+			"response body must be able to see the request that delivered it, or every assertion "+
+			"built on the log is load-dependent",
+			n, workers*reads)
 	}
 }
 

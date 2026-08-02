@@ -72,9 +72,20 @@ func (r Request) IsRanged() bool { return r.Range != "" }
 // measured a 4 KiB read of a 256 MiB object taking 49 seconds, but the defect is that it transferred
 // 256 MiB, and that is what a regression test has to pin.
 type recorder struct {
-	mu       sync.Mutex
-	requests []Request
-	faults   []*fault
+	mu sync.Mutex
+
+	// requests holds a pointer per observed request, not a value, because an entry is published when
+	// the request arrives and its response fields are filled in once it has been served. See the
+	// handler in startRecorder for why the publish cannot wait for the response.
+	requests []*Request
+
+	faults []*fault
+
+	// inFlight counts requests that have been published but not yet served, and served is broadcast
+	// as each one completes. snapshot waits on this: a request whose bytes the client already holds
+	// must be visible to the assertion that reads the log next.
+	inFlight int
+	served   *sync.Cond
 }
 
 // Fault makes matching requests fail before they reach the emulator, a bounded number of times.
@@ -144,6 +155,12 @@ type Fault struct {
 	// sees the effect on every subsequent request. It must not itself make a request that the same
 	// fault would match — the fault's budget is already claimed by then, so it will not recurse,
 	// but a fault armed for more fires would.
+	//
+	// It must also not read the request log ([TestServer.Requests] and everything built on it). The
+	// triggering request is published and counted in flight for the duration of the hook, and those
+	// accessors wait for in-flight requests to be served, so a hook that called one would wait on
+	// itself. Issuing a request is fine — that is the hook's usual purpose, and it completes on its
+	// own goroutine; only observing is not.
 	OnFire func()
 }
 
@@ -279,6 +296,7 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 	}
 
 	rec := &recorder{}
+	rec.served = sync.NewCond(&rec.mu)
 
 	// Rewrite/SetURL rather than NewSingleHostReverseProxy: the AWS SDK signs the request including
 	// the Host header, and NewSingleHostReverseProxy rewrites only the URL host, leaving Host as the
@@ -356,6 +374,23 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 			r.Body = &countingBody{ReadCloser: r.Body, n: &observed.RequestBytes}
 		}
 
+		// Published before the response is served, and marked served after.
+		//
+		// It used to be appended after proxy.ServeHTTP returned, which loses a race the assertions in
+		// this package are built on. The proxy writes the body to the socket inside ServeHTTP, so a
+		// client can have every byte of a fully-Content-Length'd response — and a test can return from
+		// the read, check the log, and find nothing — while this goroutine has not yet reached the
+		// append. Measured at 4 in 960 concurrent ranged reads: the bytes compared equal and the GET
+		// that delivered them was absent from the log.
+		//
+		// That surfaced as internal/fuse TestShortFileIsServedFromCache failing on its *precondition*
+		// ("the first read issued no GET"), which reads as the read path having served from a cache it
+		// could not have populated. A harness whose observations lag the behavior it observes turns
+		// every assertion built on it into a coin flip weighted by machine load, and the failure blames
+		// the code under test.
+		rec.publish(&observed)
+		defer rec.serve()
+
 		capture := &capturingWriter{ResponseWriter: w}
 
 		// A fault is claimed before proxying, so the request never reaches the emulator and its
@@ -372,11 +407,10 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 			proxy.ServeHTTP(capture, r)
 		}
 
+		// Under the lock, because a concurrent snapshot copies these fields.
+		rec.mu.Lock()
 		observed.Status = capture.status
 		observed.ResponseBytes = capture.written
-
-		rec.mu.Lock()
-		rec.requests = append(rec.requests, observed)
 		rec.mu.Unlock()
 	}))
 	t.Cleanup(srv.Close)
@@ -408,20 +442,63 @@ func (c *capturingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// snapshot returns a copy of the requests observed so far.
+// publish records a request that has arrived but not yet been served.
+func (r *recorder) publish(req *Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.requests = append(r.requests, req)
+	r.inFlight++
+}
+
+// serve marks one published request as fully served and wakes anyone waiting in snapshot.
+func (r *recorder) serve() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.inFlight--
+	r.served.Broadcast()
+}
+
+// snapshot returns a copy of the requests observed so far, once none are still being served.
+//
+// The wait is the point. Without it a caller can observe a log that is missing the very request whose
+// response it has already consumed — see the handler in startRecorder. Waiting here rather than in each
+// accessor means every assertion in this package inherits the guarantee.
+//
+// It cannot deadlock on the caller's own request: a test calls this after its operation returned, so
+// the request it cares about is served. A genuinely concurrent request from another goroutine is
+// briefly waited on, which is the conservative answer — counting it is right if it completes, and it
+// would have been counted a moment later anyway.
 func (r *recorder) snapshot() []Request {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	for r.inFlight > 0 {
+		r.served.Wait()
+	}
+
 	out := make([]Request, len(r.requests))
-	copy(out, r.requests)
+	for i, req := range r.requests {
+		out[i] = *req
+	}
 
 	return out
 }
 
+// reset drops the log, once nothing is still being served.
+//
+// The same wait as snapshot, for the mirrored reason: clearing while a request is in flight leaves that
+// request in the log *after* the reset meant to precede it, so the next assertion counts traffic from
+// the phase the test just declared finished. Dropping the pointer is safe — serve only touches the
+// counter, never the slice.
 func (r *recorder) reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	for r.inFlight > 0 {
+		r.served.Wait()
+	}
 
 	r.requests = nil
 }
