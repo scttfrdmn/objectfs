@@ -73,7 +73,14 @@ internal/vfs             98
 # they drive the cost optimizer's access-pattern map through GetObject rather than calling it, because
 # the map was written from the read path and a test that called the optimizer directly would prove
 # the lock works without proving the path that needs it has it.
-internal/storage/s3      79
+#
+# 79 to 81 with the multipart-abort and batch-partial-failure work. Both raises are error paths, which
+# is where this package's coverage was thinnest and where its defects were: the paths that run when
+# something has already gone wrong are the ones a test has to arrange a failure to reach, so they were
+# reachable only by whichever error a happy-path test happened to provoke. Both are now driven by
+# faults injected at the endpoint — a 403 on the Complete of a multipart upload, a 503 that outlasts
+# the retry budget on one key of a batch — which is the only way to reach them at all.
+internal/storage/s3      81
 
 # internal/adapter is the one package whose floor is set below the current measurement on purpose.
 # Its coverage moves with which S3-backed tests the harness can run, and the write-path rebuild

@@ -40,8 +40,26 @@ type Backend interface {
 	DeleteObject(ctx context.Context, key string) error
 	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
 
-	// Batch operations
+	// GetObjects fetches several objects, returning the ones that were fetched and an error naming
+	// every one that was not.
+	//
+	// A non-nil error with a non-empty map is normal and is how a partial batch is reported: a caller
+	// that can use partial results reads the map, and a caller that needs all of them checks the
+	// error. What implementations must not do is what the S3 backend did before this contract was
+	// written — return a nil error unless *every* key failed (audit finding H11). The map is the only
+	// other channel, and a missing entry is a nil slice, so a caller could not distinguish an object
+	// that is absent from one whose GET was throttled. One key failing out of a thousand is both the
+	// likely case and the one that was silent.
+	//
+	// Wrap the per-key failures (errors.Join is enough) rather than formatting them into a message, so
+	// a caller can still ask with errors.Is whether the batch failed only on absent objects.
 	GetObjects(ctx context.Context, keys []string) (map[string][]byte, error)
+
+	// PutObjects stores several objects, returning an error naming every one that failed.
+	//
+	// It has no partial-success channel, so unlike GetObjects a non-nil error says only that at least
+	// one object is not durable. Implementations must attempt every object rather than stopping at the
+	// first failure: the caller cannot retry what was never tried, and cannot tell which those were.
 	PutObjects(ctx context.Context, objects map[string][]byte) error
 
 	// ListObjects returns the objects under prefix, at most limit of them. A limit of zero or less

@@ -1134,7 +1134,11 @@ func (b *Backend) batchConcurrency() int {
 	return 1
 }
 
-// GetObjects retrieves multiple objects in batch with CargoShip optimization
+// GetObjects fetches the named objects concurrently, up to batchConcurrency at a time.
+//
+// It returns every object it fetched together with an error naming every one it did not, so a
+// non-nil error alongside a non-empty map is the normal way a partial batch is reported. See the
+// contract on [types.Backend] for what a caller may assume.
 func (b *Backend) GetObjects(ctx context.Context, keys []string) (map[string][]byte, error) {
 	if len(keys) == 0 {
 		return make(map[string][]byte), nil
@@ -1162,23 +1166,32 @@ func (b *Backend) GetObjects(ctx context.Context, keys []string) (map[string][]b
 		}(key)
 	}
 
-	var firstError error
+	var failures []error
+
 	for range keys {
 		res := <-resultCh
 		if res.err != nil {
-			if firstError == nil {
-				firstError = res.err
-			}
+			failures = append(failures, fmt.Errorf("%s: %w", res.key, res.err))
+
 			continue
 		}
+
 		results[res.key] = res.data
 	}
 
-	if firstError != nil && len(results) == 0 {
-		return nil, firstError
-	}
-
-	return results, nil
+	// Every failure is reported, and the successes are returned alongside it. The old code returned a
+	// nil error unless *every* key failed, which made a failed fetch indistinguishable from an object
+	// that is not there — and since the map is the only other channel, a caller reading `results[k]`
+	// got a nil slice either way and no way to tell "absent" from "the GET was throttled" (audit
+	// finding H11). One key failing out of a thousand is the case that matters and the case that was
+	// silent.
+	//
+	// A non-nil error with a non-empty map is deliberate, and it is the same shape io.Reader has: a
+	// caller that wants partial results reads the map, and a caller that wants all-or-nothing checks
+	// the error. errors.Join keeps every failure inspectable with errors.Is and errors.As rather than
+	// flattening them into a string, so a caller can still ask whether the failures were all
+	// ObjectNotFound.
+	return results, stderr.Join(failures...)
 }
 
 // PutObjects stores multiple objects in batch with CargoShip optimization
@@ -1206,16 +1219,22 @@ func (b *Backend) PutObjects(ctx context.Context, objects map[string][]byte) err
 		}(key, data)
 	}
 
-	var errors []string
-	for i := 0; i < len(objects); i++ {
+	var failures []error
+
+	for range objects {
 		res := <-resultCh
 		if res.err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", res.key, res.err))
+			failures = append(failures, fmt.Errorf("%s: %w", res.key, res.err))
 		}
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("batch put failed for %d objects: %s", len(errors), strings.Join(errors, "; "))
+	// Joined rather than formatted into one string, so a caller can still ask what kind of failure it
+	// was — errors.Is against an AccessDenied is actionable, "batch put failed for 3 objects: ..." is
+	// not. The count is worth keeping in the message, since the join alone does not say how many of
+	// the batch survived.
+	if len(failures) > 0 {
+		return fmt.Errorf("batch put failed for %d of %d objects: %w", len(failures), len(objects),
+			stderr.Join(failures...))
 	}
 
 	return nil
