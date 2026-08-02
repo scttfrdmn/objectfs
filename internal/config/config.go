@@ -923,6 +923,18 @@ func (c *Configuration) Validate() error {
 		return fmt.Errorf("storage.s3 configuration invalid: %w", err)
 	}
 
+	// An empty region is only valid if something will resolve it, and here is where that can still be
+	// said usefully. FuzzConfigConstructsBackend found the gap from the input `storage:` alone — and
+	// found it on CI and not locally, because a developer's shell has AWS_REGION or AWS_PROFILE
+	// exported and so resolves a region that a container or a systemd unit will not. See
+	// [awsname.RegionIsResolvable] for what is and is not checked.
+	if !awsname.RegionIsResolvable(c.Storage.S3.Region) {
+		return fmt.Errorf("storage.s3 configuration invalid: no region: storage.s3.region is unset " +
+			"and none can be resolved from AWS_REGION, AWS_DEFAULT_REGION, or a shared config file. " +
+			"Set storage.s3.region (for example \"us-west-2\"), or export AWS_REGION. On EC2 a region " +
+			"from instance metadata alone is not detected here, so set it explicitly")
+	}
+
 	if err := validateEncryptionConfig(c.Security.Encryption); err != nil {
 		return err
 	}

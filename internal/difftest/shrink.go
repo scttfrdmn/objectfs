@@ -117,8 +117,11 @@ func smallerOps(p Program, i int) []Program {
 		for _, off := range smallerInts(op.Offset) {
 			variants = append(variants, Op{Kind: OpTruncate, Offset: off})
 		}
-	case OpFlush, OpReopen:
-		// No magnitude to shrink; deletion is the only reduction, and pass 1 tries it.
+	case OpFlush, OpReopen, OpStat:
+		// No magnitude to shrink; deletion is the only reduction, and pass 1 tries it. OpStat is
+		// listed rather than left to fall through: the fall-through produced the same answer, but a
+		// kind added later would then also shrink to nothing in silence, and a shrinker that quietly
+		// declines to reduce an operation makes counterexamples larger for no visible reason.
 		return nil
 	}
 

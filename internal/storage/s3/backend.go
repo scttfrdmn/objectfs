@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -1421,8 +1422,10 @@ func (b *Backend) Close() error {
 // reads of objects that are perfectly readable.
 //
 // What keeps that from happening is that an abandoned chunk reports only its own truth — that it was
-// canceled — rather than inheriting the failure that abandoned it. [errReadAbandoned] is the whole
-// mechanism, and it is less obvious than it looks; the reasoning is there.
+// canceled — rather than inheriting the failure that abandoned it. [errReadAbandoned] is half the
+// mechanism, and it is less obvious than it looks; the reasoning is there. The other half is that the
+// first real finding is recorded explicitly and preferred over errgroup's return value, because
+// otherwise the diagnosis races the cancellation it triggers and can lose.
 func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, totalSize int64) ([]byte, error) {
 	chunkSize := b.config.ReadChunkSize
 	if chunkSize <= 0 {
@@ -1458,6 +1461,35 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 	groupCtx, abandonSiblings := context.WithCancelCause(ctx)
 	defer abandonSiblings(errReadAbandoned)
 
+	// errgroup keeps the error that arrives first, and an abandoned sibling can arrive before the
+	// chunk whose failure abandoned it: the detecting chunk has to cancel before it can return, so the
+	// two race, and a cancellation is quicker to produce than a diagnosis. Whichever wins is the error
+	// the caller sees — so the *finding* loses to the *consequence* on a machine where the scheduler
+	// happens to run the sibling first.
+	//
+	// That is not a cosmetic difference in the message. A cancellation is
+	// ErrCodeOperationCanceled, which the health tracker heals on; the finding is
+	// ErrCodeDataCorruption, which is the evidence that an object shrank mid-read. Losing the race
+	// discards the only report that the assembled buffer would have been short.
+	//
+	// TestParallelReadRefusesAShortChunk caught this on CI and passed 160 consecutive local runs,
+	// including under -cpu=1 and -race: it needs a slower, more contended machine to lose the race
+	// with any regularity. So the first real finding is recorded here, under its own mutex, and
+	// preferred over whatever errgroup returns. A test whose result depends on scheduling is a test
+	// that passes for the wrong reason somewhere.
+	var (
+		findingMu sync.Mutex
+		finding   error
+	)
+	recordFinding := func(err error) {
+		findingMu.Lock()
+		defer findingMu.Unlock()
+
+		if finding == nil {
+			finding = err
+		}
+	}
+
 	chunks := make([][]byte, numChunks)
 	etags := make([]string, numChunks)
 
@@ -1483,13 +1515,17 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 			// translateError has to leave a refused range as a mere validation failure, because for
 			// the serial path it usually is one, and only here is it known to mean the object shrank.
 			if err != nil {
+				if isInvalidRange(err) {
+					err = shrunkMidRead(key, b.bucket, start, want, err)
+				}
+
+				// Recorded before the cancellation, so this chunk's own error cannot lose the race to a
+				// sibling that the cancellation is about to abandon.
+				recordFinding(err)
+
 				// abandonSiblings, not errgroup's own cancellation: this is a plain Group, so nothing
 				// else stops the remaining chunks. See the sentinel's rationale above.
 				abandonSiblings(errReadAbandoned)
-
-				if isInvalidRange(err) {
-					return shrunkMidRead(key, b.bucket, start, want, err)
-				}
 
 				return err
 			}
@@ -1500,10 +1536,13 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 			// matched. Either way the assembled buffer would be short, and a short buffer is
 			// indistinguishable from a file that ends there.
 			if int64(len(read.data)) != want {
+				short := shrunkMidRead(key, b.bucket, start, want, nil).
+					WithDetail("returned_bytes", len(read.data))
+
+				recordFinding(short)
 				abandonSiblings(errReadAbandoned)
 
-				return shrunkMidRead(key, b.bucket, start, want, nil).
-					WithDetail("returned_bytes", len(read.data))
+				return short
 			}
 
 			chunks[i] = read.data
@@ -1514,6 +1553,17 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 	}
 
 	if err := group.Wait(); err != nil {
+		// The recorded finding wins when there is one. It is the diagnosis; errgroup's value may be a
+		// sibling's abandonment, which is only the consequence of that diagnosis. When no chunk
+		// recorded anything, the failure came from the caller's own context and errgroup's value is
+		// exactly right.
+		findingMu.Lock()
+		defer findingMu.Unlock()
+
+		if finding != nil {
+			return nil, finding
+		}
+
 		return nil, err
 	}
 
@@ -1813,6 +1863,11 @@ func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int
 	if parseErr != nil || want < 0 {
 		// HeadObject warns and falls back to ContentLength for a malformed value; matching that
 		// here keeps the two from disagreeing about the same object.
+		//
+		// nolint:nilerr // parseErr is not this function's error to report. An unparseable
+		// objectfs-original-size means the integrity check has no expected length to compare
+		// against, not that the object failed the check — returning parseErr would refuse to read
+		// an object over a malformed metadata value that HeadObject tolerates.
 		return nil
 	}
 

@@ -212,6 +212,8 @@ func (b *brokenFS) Durable(ctx context.Context) ([]byte, error) {
 // and this test are deleted together — but until then, a change that stops the oracle from catching
 // these fails here rather than quietly passing everything forever.
 func TestOracleCatchesLegacyDefects(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		prog difftest.Program
@@ -305,6 +307,10 @@ func TestOracleCatchesLegacyDefects(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Each case gets its own temp directory and its own endpoint from legacyPair, so there is
+			// nothing shared to serialize on.
+			t.Parallel()
+
 			factory := legacyPair(t)
 
 			ref, sub, cleanup, err := factory()

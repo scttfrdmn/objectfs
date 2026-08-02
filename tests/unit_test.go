@@ -254,12 +254,20 @@ func TestConfigUnit(t *testing.T) {
 	err := defaultConfig.Validate()
 	assert.NoError(t, err) // Default config should be valid
 
-	// Test valid configuration
+	// Test valid configuration.
+	//
+	// The region is set explicitly, and it is the whole reason this literal is not just the fields
+	// under test: Validate refuses an empty region unless the environment supplies one, so leaving it
+	// out made this config valid on a developer's machine and invalid in a container — the same
+	// environment-dependence FuzzConfigConstructsBackend found in the loader.
 	validConfig := &config.Configuration{
 		Global: config.GlobalConfig{
 			LogLevel:    "DEBUG",
 			MetricsPort: 9090,
 			HealthPort:  9091,
+		},
+		Storage: config.StorageConfig{
+			S3: config.S3Config{Region: "us-west-2"},
 		},
 		Performance: config.PerformanceConfig{
 			CacheSize:          "100MB",
@@ -359,10 +367,10 @@ func TestErrorConditions(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
-	assert.Error(t, writeBuffer.Write("", 0, []byte("data")), "an empty key is a caller bug")
-	assert.Error(t, writeBuffer.Write("test", -1, []byte("data")),
+	require.Error(t, writeBuffer.Write("", 0, []byte("data")), "an empty key is a caller bug")
+	require.Error(t, writeBuffer.Write("test", -1, []byte("data")),
 		"a negative offset must not be clamped to zero, where corruption is maximally destructive")
-	assert.NoError(t, writeBuffer.Write("test", 0, []byte("data longer than any buffer v0.10.0 would accept")))
+	require.NoError(t, writeBuffer.Write("test", 0, []byte("data longer than any buffer v0.10.0 would accept")))
 
 	// Test metrics with disabled configuration
 	disabledConfig := &metrics.Config{

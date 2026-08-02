@@ -371,6 +371,8 @@ func vfsPair(t *testing.T) difftest.Factory {
 // literals. Restating them would let the corpus and the suite drift apart, and the corpus is the half
 // nobody reads.
 func TestVFSPassesTheLegacyDefectSuite(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range seedCorpus {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -513,6 +515,8 @@ func TestDecodeProgramIsTotal(t *testing.T) {
 					t.Errorf("decode(%d bytes) op %d is an empty write, a no-op that wastes an operation",
 						len(in), i)
 				}
+			case difftest.OpTruncate, difftest.OpFlush, difftest.OpReopen, difftest.OpStat:
+				// Carry no length or data, so the offset bound checked above is the whole contract.
 			}
 		}
 	}

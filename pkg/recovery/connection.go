@@ -319,7 +319,6 @@ func (cm *ConnectionManager) scheduleReconnect() {
 	})
 
 	cm.shutdownWg.Go(func() {
-
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 

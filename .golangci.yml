@@ -78,6 +78,16 @@ linters:
         # that exist.
         - fieldalignment
 
+        # shadow, on the evidence of running it. It produced 23 findings in this repo and every
+        # single one was `if err := f(); err != nil` — the scoped-error form the Go standard library
+        # uses throughout, and the form that *prevents* the bug shadow exists to find, since an err
+        # confined to the if cannot be mistaken for the outer one further down. Nothing was reported
+        # at the shape that is genuinely dangerous: an inner `err :=` in a block whose outer err is
+        # then returned unchecked. A check whose every finding is a false positive does not get read,
+        # and once it is not read it costs more than it detects. Enable it again if it learns to tell
+        # the two apart.
+        - shadow
+
     exhaustive:
       # A default arm is a deliberate statement that the remaining cases are handled together.
       default-signifies-exhaustive: true
@@ -139,6 +149,17 @@ linters:
         text: 'should pass the context parameter'
         linters:
           - contextcheck
+
+      # A property test's randomness must be weak, in the specific sense G404 means by it. The
+      # generators here are seeded with fixed PCG constants precisely so a failure reproduces: a
+      # counterexample found on CI has to be reachable on a developer's machine from the same seed,
+      # and crypto/rand cannot be seeded at all. Excluded by path rather than per-line because the
+      # rationale is identical at every site, and three copies of the same paragraph is how a
+      # suppression stops being read.
+      - path: '_test\.go'
+        text: 'G404'
+        linters:
+          - gosec
 
       # The SDKs are a published surface: an exported symbol with no caller inside this repo is
       # the normal case there, not dead code.

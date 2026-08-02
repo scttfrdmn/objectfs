@@ -14,6 +14,8 @@ package awsname
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 )
 
@@ -72,4 +74,60 @@ func ValidateRegion(region string) error {
 	}
 
 	return nil
+}
+
+// RegionIsResolvable reports whether an empty configured region will resolve to one at mount time.
+//
+// [ValidateRegion] deliberately accepts "" as "resolve it from the environment", which is correct on
+// EC2 and for anyone using AWS_PROFILE. But it is only correct where something is actually there to
+// resolve, and where nothing is, the mount fails several layers down inside a HeadBucket health check
+// with "failed to resolve service endpoint, endpoint rule error, A region must be set when sending
+// requests to S3" — a message that names no key the operator could edit.
+//
+// FuzzConfigConstructsBackend found this from the input `storage:` alone, and found it on CI rather
+// than on a developer's machine. That difference is the finding: a shell with AWS_REGION or
+// AWS_PROFILE exported, or a populated ~/.aws/config, resolves the region and hides the defect
+// entirely — so it reproduces in a container, a CI runner, and a systemd unit with a clean
+// environment, which is to say in production and not in development.
+//
+// This is separate from ValidateRegion because the two ask different questions. ValidateRegion is
+// syntax and is a pure function of its argument. This one asks what the environment will supply, so
+// its answer depends on where it runs and it cannot be a table test. Only the *sources* are checked
+// here — the two environment variables and AWS_CONFIG_FILE's region key. IMDS is deliberately not
+// probed: it would mean a network round trip with a timeout on the config-load path, and on a machine
+// that is not EC2 the probe is pure latency before an error message. An EC2 instance whose region
+// comes only from metadata therefore still gets the deep failure, which is the one case this does not
+// improve; setting storage.s3.region explicitly is the answer, and the error says so.
+func RegionIsResolvable(region string) bool {
+	if region != "" {
+		return true
+	}
+
+	for _, env := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
+		if os.Getenv(env) != "" {
+			return true
+		}
+	}
+
+	// A shared config file that exists is taken at its word rather than parsed. Deciding which profile
+	// applies means reproducing the SDK's precedence between AWS_PROFILE, [default], and a
+	// credential_source chain — and getting that subtly wrong would refuse a configuration that would
+	// have worked, which is worse than the deep error this exists to replace. The SDK remains the
+	// authority; this only declines to guess on its behalf.
+	path := os.Getenv("AWS_CONFIG_FILE")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+
+		path = filepath.Join(home, ".aws", "config")
+	}
+
+	// nolint:gosec // G703 reads AWS_CONFIG_FILE as a tainted path. It is tainted by the operator of
+	// this process, which is the AWS SDK's own contract for that variable — and this only stats it.
+	// Nothing here opens, reads, or writes the path, so there is no traversal to perform.
+	info, err := os.Stat(path)
+
+	return err == nil && !info.IsDir() && info.Size() > 0
 }

@@ -809,7 +809,12 @@ func TestExtentListPlanIsSelfConsistent(t *testing.T) {
 	for range 3000 {
 		var l ExtentList
 		truncated := false
-		for i := 0; i < rng.IntN(7); i++ {
+		// The operation count is drawn once, not re-drawn each iteration. `i < rng.IntN(7)` re-rolls
+		// the bound on every pass, so the loop ends as soon as one roll lands at or below i — which
+		// turns the intended uniform 0-6 into a peak at 1-2 and drops 6-operation programs from 14.3%
+		// of runs to 0.62%, a 23x under-sampling of exactly the longest sequences this test exists to
+		// explore. Measured over a million iterations, not reasoned about.
+		for i := range rng.IntN(7) {
 			if rng.IntN(6) == 0 {
 				if err := l.Truncate(int64(rng.IntN(250))); err != nil {
 					t.Fatalf("Truncate: %v", err)
@@ -1230,7 +1235,9 @@ func TestWriteFlushRoundTripMatchesModel(t *testing.T) {
 		var l ExtentList
 		m := newModel()
 
-		for op := 0; op < 1+rng.IntN(8); op++ {
+		// Drawn once. See TestExtentListPlanIsSelfConsistent for what re-rolling the bound each pass
+		// costs: the program-length distribution collapses toward its short end.
+		for range 1 + rng.IntN(8) {
 			switch {
 			case rng.IntN(8) == 0:
 				size := int64(rng.IntN(150))
@@ -1326,7 +1333,8 @@ func TestReadAtMatchesModel(t *testing.T) {
 		want := append([]byte(nil), stored...)
 
 		var l ExtentList
-		for op := 0; op < 1+rng.IntN(6); op++ {
+		// Drawn once; see TestExtentListPlanIsSelfConsistent.
+		for range 1 + rng.IntN(6) {
 			if rng.IntN(6) == 0 {
 				size := int64(rng.IntN(110))
 				if err := l.Truncate(size); err != nil {

@@ -216,6 +216,8 @@ func incompressible(n int) []byte {
 // It is a table test rather than a fuzz seed because a corpus can be emptied, a fuzztime can be set to
 // zero, and neither failure is visible. A named test that fails is.
 func TestRoundTripAcrossACodecChange(t *testing.T) {
+	t.Parallel()
+
 	sh := testaws.Shared(t)
 
 	// Compressible, so the write path definitely stores an encoded body — the case the reader has to

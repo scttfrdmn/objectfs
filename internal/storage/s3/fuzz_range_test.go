@@ -57,10 +57,7 @@ func FuzzSliceRange(f *testing.F) {
 		// The expectation, computed independently of the implementation: clamp the offset into
 		// [0, length], read "to the end" for a non-positive size, and clamp the end into [offset, length]
 		// without ever letting offset+size overflow.
-		wantStart := max(offset, 0)
-		if wantStart > int64(length) {
-			wantStart = int64(length)
-		}
+		wantStart := min(max(offset, 0), int64(length))
 
 		wantEnd := int64(length)
 		if size > 0 {

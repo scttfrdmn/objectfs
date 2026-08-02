@@ -220,7 +220,9 @@ func TestUndecodableObjectFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build zstd encoder: %v", err)
 	}
-	defer func() { _ = encoder.Close() }()
+	// t.Cleanup rather than defer: the subtests below run in parallel, so this function returns
+	// while they are still using the encoder. A defer would close it out from under them.
+	t.Cleanup(func() { _ = encoder.Close() })
 
 	original := compressible(8192)
 	body := encoder.EncodeAll(original, nil)
@@ -356,6 +358,9 @@ func TestCompressionRoundTripAcrossSizes(t *testing.T) {
 	// MinSize defaults to 4KB, so 4095/4096/4097 straddle the decision.
 	for _, size := range []int{0, 1, 4095, 4096, 4097, 65536} {
 		t.Run(sizeName(size), func(t *testing.T) {
+			// Each case owns a key derived from its own size, so these do not interact.
+			t.Parallel()
+
 			key := "roundtrip/compressed/" + sizeName(size)
 			want := compressible(size)
 

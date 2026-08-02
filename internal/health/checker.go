@@ -270,7 +270,7 @@ func (c *Checker) RunAllChecks(ctx context.Context) (map[string]*Result, error) 
 	}
 
 	// Collect results
-	for range len(checks) {
+	for range checks {
 		result := <-resultsChan
 		results[result.Check] = result
 	}

@@ -144,6 +144,26 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
+	// An unset region is legitimate, but only if something resolves it. Check that it did.
+	//
+	// awsname.ValidateRegion accepts "" on the grounds that the SDK resolves it from AWS_REGION, the
+	// shared config file, or instance metadata — which is true wherever one of those is present, and
+	// is why this went unnoticed: it is present on a developer's machine and in any shell with
+	// AWS_PROFILE exported. In a container, a CI runner, or a systemd unit with a clean environment,
+	// nothing resolves it, and the mount failed inside the health check with "failed to resolve
+	// service endpoint, endpoint rule error, A region must be set when sending requests to S3" —
+	// several layers below the configuration, naming no key the operator could edit.
+	//
+	// FuzzConfigConstructsBackend found it from the input `storage:` alone, on CI and not locally,
+	// which is the finding within the finding: a test that consults ambient AWS configuration proves
+	// something different on every machine that runs it. This is audit finding C1's shape a third
+	// time — accepted by every layer that reads configuration, refused by the layer that acts on it.
+	if awsCfg.Region == "" {
+		return nil, fmt.Errorf("no AWS region: storage.s3.region is unset and none could be " +
+			"resolved from AWS_REGION, AWS_DEFAULT_REGION, the shared config file, or instance " +
+			"metadata. Set storage.s3.region (for example \"us-west-2\"), or export AWS_REGION")
+	}
+
 	// Create standard S3 client without acceleration
 	standardClient := s3.NewFromConfig(awsCfg, clientOptions(cfg))
 

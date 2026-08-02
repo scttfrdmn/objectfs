@@ -472,6 +472,13 @@ func (t *Tracker) transitionState(health *ComponentHealth, newState HealthState,
 		// retries on every call.
 		health.probing = false
 		health.nextProbe = now.Add(t.config.ProbeAfter)
+
+	case StateDegraded:
+		// Nothing to do, and the emptiness is the point rather than an omission. Degraded admits
+		// operations, so there is no probe clock to arm — GetState returns it without consulting
+		// nextProbe — and ConsecutiveErrors must keep accumulating, because that count is what
+		// escalates degraded to unavailable. Resetting it here would make a component that fails
+		// steadily below the unavailable threshold never reach it.
 	}
 }
 

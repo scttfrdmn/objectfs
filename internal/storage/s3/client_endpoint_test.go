@@ -55,7 +55,10 @@ func TestAllClientsHonourEndpointConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPooledClient: %v", err)
 	}
-	defer cm.ReturnPooledClient(pooled)
+	// t.Cleanup, not defer: the subtests below are parallel, so this function returns while they are
+	// still inspecting the client. Returning it to the pool at that point hands a client another
+	// caller may draw to a test that is still asserting on it.
+	t.Cleanup(func() { cm.ReturnPooledClient(pooled) })
 
 	clients := []struct {
 		name   string
@@ -68,6 +71,8 @@ func TestAllClientsHonourEndpointConfig(t *testing.T) {
 
 	for _, tc := range clients {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			if tc.client == nil {
 				t.Fatalf("%s client is nil", tc.name)
 			}

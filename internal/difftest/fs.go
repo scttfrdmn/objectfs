@@ -67,6 +67,8 @@ type Local struct {
 func NewLocal(dir string) (*Local, error) {
 	path := filepath.Join(dir, "reference.bin")
 
+	// nolint:gosec // G304 reads dir as tainted. Every caller passes t.TempDir(), and the filename is
+	// a constant this function chooses; there is no caller-controlled component in the path.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("difftest: create reference file: %w", err)

@@ -28,7 +28,11 @@ import (
 // t.Parallel: t.Setenv and t.Parallel are mutually exclusive, and an ambient AWS_PROFILE would
 // otherwise leak a real account into what is supposed to be a hermetic test.
 const (
-	AccessKeyID     = "AKIATEST12345678901"
+	AccessKeyID = "AKIATEST12345678901"
+
+	// nolint:gosec // G101 is right that this is a hardcoded credential and wrong that it matters:
+	// it is the example key from AWS's own documentation, which every substrate emulator accepts and
+	// no AWS account has ever used. Hardcoding it is what makes these tests hermetic — see above.
 	SecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 	// DefaultRegion is the emulator's region. It is not us-west-2: nothing here talks to AWS,

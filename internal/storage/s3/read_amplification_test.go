@@ -115,6 +115,8 @@ func TestSmallReadOfLargeObjectDoesNotFetchTheWholeThing(t *testing.T) {
 // the stored bytes — the whole object must be fetched and decoded. Amplification is the price of
 // compression here, and it is a documented tradeoff rather than a defect. What would be a defect is
 // returning the wrong bytes, which is what a naive "always range" fix would do.
+//
+//nolint:tparallel // the subtests share a request recorder and must run in order; see below
 func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
 	t.Parallel()
 
@@ -168,6 +170,11 @@ func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
 		{"range past the end of the compressed body", objectSize - readSize, false},
 	}
 
+	// Not parallel: each case calls ResetRequests and then asserts on what the endpoint saw, so a
+	// concurrent sibling's traffic would land inside the window under assertion. Counting requests is
+	// the entire point of this test — it is what distinguishes a correct read from a correct read that
+	// transferred the whole object — so serial is the requirement, not a limitation.
+	//nolint:paralleltest // shared request recorder; the cases must run in order, see above
 	for _, r := range reads {
 		t.Run(r.name, func(t *testing.T) {
 			if inside := r.offset < stored; inside != r.wantInsideStored {

@@ -169,6 +169,10 @@ func (a *Adapter) Start(ctx context.Context) error {
 	// The context is the mount's, not Start's: see the mountCtx field.
 	a.mountCtx, a.cancelMount = context.WithCancel(context.WithoutCancel(ctx))
 
+	// nolint:contextcheck // Deliberately not Start's context. The write path outlives Start by
+	// design — it holds dirty ranges for as long as the mount does — so inheriting a context that
+	// is canceled when Start returns would cancel every flush the moment the mount came up. The
+	// WithoutCancel above is the whole point, and mountCtx is what Stop cancels instead.
 	a.writeBuffer, err = vfs.NewWriter(a.mountCtx, a.backend)
 	if err != nil {
 		return fmt.Errorf("failed to initialize write path: %w", err)

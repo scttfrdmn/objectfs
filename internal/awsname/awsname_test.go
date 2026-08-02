@@ -2,6 +2,8 @@ package awsname
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -156,6 +158,24 @@ func FuzzValidateRegion(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, region string) {
+		// Long inputs are discarded rather than validated, and that is about the fuzzer rather than
+		// about ValidateRegion.
+		//
+		// This target runs at roughly 700,000 executions per second, because the function under test is
+		// a length check and one RE2 match. At that rate a 60-second run in CI mutates its way to a
+		// corpus of a couple of hundred entries, almost all of them long strings that differ only past
+		// the length limit and so tell the validator nothing it did not already know at byte 64 — and
+		// every one has to be minimized and written out when -fuzztime expires. On a shared runner that
+		// shutdown overran its grace period and the job failed with "context deadline exceeded" and no
+		// counterexample, which reads exactly like a hang in the code and is not one.
+		//
+		// t.Skip keeps the input out of the corpus instead of counting it as interesting. The length
+		// path stays covered by the seed corpus, which carries a 64-character region and is replayed by
+		// every ordinary `go test` run — a bound the fuzzer cannot erode.
+		if len(region) > maxRegionLength*2 {
+			t.Skip("beyond the length limit by a margin; see the comment above")
+		}
+
 		if err := ValidateRegion(region); err != nil {
 			return
 		}
@@ -173,6 +193,86 @@ func FuzzValidateRegion(f *testing.F) {
 				t.Fatalf("accepted region %q, whose byte %d (%q) cannot appear in a DNS label — "+
 					"it would be templated into an S3 endpoint host", region, i, r)
 			}
+		}
+	})
+}
+
+// TestRegionIsResolvable pins the check that closed the seam FuzzConfigConstructsBackend found.
+//
+// It uses t.Setenv rather than a table of pure inputs because the function's answer depends on the
+// environment by design — that is what it is for. t.Setenv also makes these cases un-parallelizable,
+// which is why this test does not call t.Parallel: the environment is process-global, so two of these
+// running concurrently would read each other's variables.
+//
+// AWS_CONFIG_FILE is pointed at a real file for the shared-config case and at a path that does not
+// exist for the negative cases. Without that, the result would depend on whether the machine running
+// the test happens to have ~/.aws/config — which is exactly the environment-dependence being fixed,
+// reintroduced in the test for it.
+func TestRegionIsResolvable(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-config")
+
+	t.Run("an explicit region needs nothing from the environment", func(t *testing.T) {
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", missing)
+
+		if !RegionIsResolvable("us-west-2") {
+			t.Error("an explicitly configured region must be resolvable regardless of environment")
+		}
+	})
+
+	t.Run("no region and nothing to resolve it from", func(t *testing.T) {
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", missing)
+
+		if RegionIsResolvable("") {
+			t.Error("an empty region with no environment source must not be reported resolvable: " +
+				"this is the case that reached a HeadBucket health check and failed there")
+		}
+	})
+
+	for _, env := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
+		t.Run("resolved from "+env, func(t *testing.T) {
+			t.Setenv("AWS_REGION", "")
+			t.Setenv("AWS_DEFAULT_REGION", "")
+			t.Setenv("AWS_CONFIG_FILE", missing)
+			t.Setenv(env, "eu-central-1")
+
+			if !RegionIsResolvable("") {
+				t.Errorf("an empty region must be resolvable when %s is set", env)
+			}
+		})
+	}
+
+	t.Run("a non-empty shared config file is taken at its word", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte("[default]\nregion = us-west-2\n"), 0o600); err != nil {
+			t.Fatalf("writing the config fixture: %v", err)
+		}
+
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", path)
+
+		if !RegionIsResolvable("") {
+			t.Error("a shared config file that exists must be treated as a source, since the SDK " +
+				"reads it and this package deliberately does not parse it")
+		}
+	})
+
+	t.Run("an empty shared config file is not a source", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatalf("writing the empty config fixture: %v", err)
+		}
+
+		t.Setenv("AWS_REGION", "")
+		t.Setenv("AWS_DEFAULT_REGION", "")
+		t.Setenv("AWS_CONFIG_FILE", path)
+
+		if RegionIsResolvable("") {
+			t.Error("a zero-length config file supplies no region, so it must not count as a source")
 		}
 	})
 }

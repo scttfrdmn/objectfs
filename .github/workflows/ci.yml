@@ -105,17 +105,34 @@ jobs:
           go-version-file: ${{ env.GO_VERSION_FILE }}
           cache: true
 
-      - name: Verify the lint configuration parses
-        uses: golangci/golangci-lint-action@v6
+      # --new-from-merge-base resolves origin/<base> with git, so the ref has to exist locally.
+      # fetch-depth: 0 above fetches all branches for a push, but a pull_request checkout fetches
+      # the merge ref, and the base branch is not guaranteed among them. Fetching it explicitly
+      # costs seconds and removes the case where the gate silently degrades to linting everything.
+      - name: Fetch the base branch for the diff
+        run: git fetch --no-tags origin ${{ github.base_ref || 'main' }}
+
+      # install-only, then invoke the binary directly in the steps below.
+      #
+      # Three steps here need golangci-lint and the action runs it at most once, so the version
+      # is installed once and the runs are ordinary shell. The previous form had each step re-enter
+      # the action and passed the whole-repo count as a bare `golangci-lint run` — which was
+      # `command not found`, because nothing but the action puts it on PATH. The `|| true` on that
+      # step meant a missing binary and a clean repo were the same observation.
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          args: config verify
+          install-only: true
+
+      - name: Verify the lint configuration parses
+        run: golangci-lint config verify
 
       - name: Lint changed code (blocking)
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v2.12.2
-          args: --new-from-merge-base=origin/${{ github.base_ref || 'main' }} --timeout=10m
+        run: |
+          golangci-lint run \
+            --new-from-merge-base=origin/${{ github.base_ref || 'main' }} \
+            --timeout=10m
 
       - name: Whole-repo finding count (informational)
         if: always()

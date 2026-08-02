@@ -21,6 +21,8 @@ import (
 // It counts file descriptors rather than parsing netstat, because the descriptor is what actually
 // runs out. A leak that shows up as "too many open files" in a long-lived mount is the same defect as
 // the one that shows up as port exhaustion in a fuzz run, and the FD count catches both.
+//
+//nolint:paralleltest // counts a process-wide FD total, so a parallel sibling reads as the leak
 func TestBackendCloseReleasesSockets(t *testing.T) {
 	// Not parallel: it counts a process-wide resource, and a concurrent test opening files would be
 	// indistinguishable from the leak.

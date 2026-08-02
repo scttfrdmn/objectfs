@@ -35,6 +35,8 @@ import (
 // Asserting on the recorded requests rather than on the returned values is what makes this a real
 // test: before the fix, these operations did not merely return wrong answers, they left no trace on
 // the endpoint at all.
+//
+//nolint:paralleltest,tparallel // ordered subtests over a shared request recorder; see below
 func TestPooledOperationsReachTheConfiguredEndpoint(t *testing.T) {
 	t.Parallel()
 
@@ -47,6 +49,10 @@ func TestPooledOperationsReachTheConfiguredEndpoint(t *testing.T) {
 	ts.PutObject(key, []byte("payload"))
 	ts.ResetRequests()
 
+	// The subtests deliberately do not call t.Parallel, and the sequence is load-bearing twice over:
+	// each one calls ResetRequests on a recorder they all share, so a concurrent sibling's traffic
+	// would land in the window being asserted; and DeleteObject removes the key the earlier three
+	// need. Parallelizing these would not be a speedup, it would be a different test.
 	t.Run("HeadObject", func(t *testing.T) {
 		if _, err := backend.HeadObject(ctx, key); err != nil {
 			t.Fatalf("HeadObject: %v", err)
@@ -156,6 +162,9 @@ func TestBackendRoundTripsBytesUnchanged(t *testing.T) {
 	sizes := []int{0, 1, 4095, 4096, 4097, 1 << 20}
 	for _, size := range sizes {
 		t.Run(sizeName(size), func(t *testing.T) {
+			// Safe to parallelize: each case owns its keys, derived from its own size.
+			t.Parallel()
+
 			key := "roundtrip/" + sizeName(size)
 			want := testaws.DeterministicBytes(key, size)
 
@@ -334,6 +343,8 @@ func TestGetObjectNegativeSizeDoesNotPanic(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			// A panic here fails the test rather than the process, which is the only reason this
 			// is observable at all.
 			got, err := backend.GetObject(ctx, key, tc.offset, tc.size)
