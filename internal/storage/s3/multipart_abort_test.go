@@ -18,8 +18,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // Multipart fixture sizes. S3 requires every non-final part to be at least 5 MB, so a genuine

@@ -68,7 +68,7 @@ RUN if [ "$VERSION" != "dev" ]; then \
     fi
 
 # Runtime stage
-FROM alpine:3.21
+FROM alpine:3.24
 
 # Install runtime dependencies
 RUN apk add --no-cache \
@@ -122,5 +122,5 @@ LABEL org.opencontainers.image.title="ObjectFS"
 LABEL org.opencontainers.image.description="Enterprise-Grade High-Performance POSIX Filesystem for Object Storage"
 LABEL org.opencontainers.image.vendor="ObjectFS"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL org.opencontainers.image.source="https://github.com/objectfs/objectfs"
+LABEL org.opencontainers.image.source="https://github.com/scttfrdmn/objectfs"
 LABEL org.opencontainers.image.documentation="https://objectfs.io/docs"

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/pkg/retry"
 )
 
 // A syntactically valid KMS key ARN, in the documentation-reserved account 111122223333. Only its

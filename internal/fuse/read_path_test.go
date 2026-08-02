@@ -23,10 +23,10 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/objectfs/objectfs/internal/cache"
-	"github.com/objectfs/objectfs/internal/testaws"
-	"github.com/objectfs/objectfs/internal/vfs"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // readPathFixture is a FileSystem wired to a real cache, a real write path, and a real S3 endpoint.

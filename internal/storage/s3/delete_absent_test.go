@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestDeleteObjectOnAnAbsentKeyIsANoOp pins the documented contract.

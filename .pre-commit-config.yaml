@@ -71,10 +71,24 @@ repos:
       #   files: \.go$
       #   pass_filenames: false
 
-      # Quality checks with golangci-lint
+      # Quality checks with golangci-lint, scoped to what this commit changes.
+      #
+      # `--new-from-merge-base` is the same gate ci.yml applies (the "Lint changed code (blocking)"
+      # step), and matching it is the point. Without it this hook ran the whole repository and
+      # blocked, so it failed on findings the committer did not introduce — 64 of them today, in
+      # packages a one-line change need not have touched. A hook that cannot pass on a clean
+      # checkout gets bypassed with `--no-verify`, and once that is habit it stops catching the
+      # findings it was added for. CI reports the whole-repo count too, deliberately as
+      # informational rather than as a gate; the backlog is tracked, not used to block unrelated work.
+      #
+      # The `--enable` list is also gone. It predates `.golangci.yml` — there was no configuration
+      # file in this repository until v0.10.1, so the flags were the whole policy. Now they are a
+      # second policy layered on the first: the flags add checks to those the config enables and
+      # cannot remove any, so `contextcheck` findings appeared from the config while the flag list
+      # implied a narrower run. One authority, and it is `.golangci.yml`.
   - id: golangci-lint-check
     name: Go Quality Checks
-    entry: sh -c 'golangci-lint run --enable=errcheck,staticcheck,govet,ineffassign,unused,bodyclose,unconvert,whitespace --timeout=5m'
+    entry: sh -c 'golangci-lint run --new-from-merge-base=origin/main --timeout=5m'
     language: system
     files: \.go$
     pass_filenames: false
@@ -112,11 +126,21 @@ repos:
 
   # YAML formatting
 - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
-  rev: v2.11.0
+  rev: v2.16.0
   hooks:
   - id: pretty-format-yaml
     args: [--autofix, --indent, '2']
-    exclude: ^mkdocs\.yml$
+    # .golangci.yml is excluded because this formatter actively damages it. It dedents every block
+    # sequence to its parent's column, which destroys the nesting that makes `linters.settings.<name>`
+    # readable and pushes the trailing comments out of alignment with the entries they annotate — and
+    # each of those comments is the recorded reason a linter is on or off. It also unquotes the
+    # `path:`/`text:` regexes in the exclusion rules, leaving patterns like `fuzz_.*_test\.go` bare
+    # where the escape sequences are no longer visibly protected.
+    #
+    # None of that is invalid YAML, and golangci-lint parses either form; the file is configuration a
+    # human has to read and argue with, and the formatter optimises for neither. It never ran against
+    # this file until a module-path rename touched one line of it.
+    exclude: ^(mkdocs\.yml|\.golangci\.yml)$
 
   # License and copyright checks
 - repo: local

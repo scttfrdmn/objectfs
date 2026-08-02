@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/difftest"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/difftest"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // localPair returns two independent local files. Comparing the reference against itself must never

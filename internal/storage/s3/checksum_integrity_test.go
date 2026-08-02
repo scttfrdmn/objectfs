@@ -20,8 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/objectfs/objectfs/internal/testaws"
-	objectfserrors "github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
+	objectfserrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // seedWithChecksum writes body directly to storage with the given objectfs-sha256 value, bypassing

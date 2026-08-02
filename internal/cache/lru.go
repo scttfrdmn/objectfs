@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // LRUCache implements a thread-safe LRU cache with weighted eviction

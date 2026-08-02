@@ -5,8 +5,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestBackendCloseReleasesSockets pins the socket leak that FuzzConfigConstructsBackend found.

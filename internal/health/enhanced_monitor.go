@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	pkghealth "github.com/objectfs/objectfs/pkg/health"
+	pkghealth "github.com/scttfrdmn/objectfs/pkg/health"
 )
 
 // EnhancedMonitor extends Monitor with improved problem detection and remediation

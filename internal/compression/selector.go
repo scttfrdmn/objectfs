@@ -1,6 +1,6 @@
 package compression
 
-import comprpkg "github.com/objectfs/objectfs/pkg/compression"
+import comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 
 // AccessHint provides context about the expected read pattern for an object.
 // Hot objects should favor fast decompression (LZ4); cold objects can afford

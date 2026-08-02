@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 func TestLZ4Codec_RoundTrip(t *testing.T) {

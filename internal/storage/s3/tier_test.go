@@ -11,7 +11,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 
-	"github.com/objectfs/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsname"
 )
 
 func TestStorageTiers(t *testing.T) {

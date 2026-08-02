@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // prefetchingConfig is predictiveCacheConfig with the prefetcher actually running.

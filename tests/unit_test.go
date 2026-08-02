@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/objectfs/objectfs/internal/cache"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/metrics"
-	"github.com/objectfs/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/metrics"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
 )
 
 // Unit tests for cache system

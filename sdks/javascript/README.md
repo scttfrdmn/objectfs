@@ -450,7 +450,7 @@ See the [examples](examples/) directory for complete examples:
 ### Setup
 
 ```bash
-git clone https://github.com/objectfs/objectfs.git
+git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs/sdks/javascript
 
 # Install dependencies
@@ -511,6 +511,6 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution guidelines.
 
 ## Support
 
-- GitHub Issues: <https://github.com/objectfs/objectfs/issues>
+- GitHub Issues: <https://github.com/scttfrdmn/objectfs/issues>
 - Documentation: <https://docs.objectfs.io/javascript>
 - NPM Package: <https://www.npmjs.com/package/@objectfs/sdk>

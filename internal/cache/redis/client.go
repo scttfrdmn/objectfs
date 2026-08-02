@@ -10,8 +10,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // Cache implements types.Cache backed by a Redis server.

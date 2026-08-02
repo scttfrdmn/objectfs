@@ -52,7 +52,7 @@ ObjectFS automatically adjusts chunk sizes based on file size for optimal perfor
 #### Example Usage
 
 ```go
-import "github.com/objectfs/objectfs/internal/storage/s3"
+import "github.com/scttfrdmn/objectfs/internal/storage/s3"
 
 cfg := s3.NewDefaultConfig()
 

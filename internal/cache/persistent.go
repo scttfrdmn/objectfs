@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // PersistentCache implements a disk-based cache with optional compression.

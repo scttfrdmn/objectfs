@@ -11,6 +11,7 @@ locations to accelerate uploads and downloads. Data arrives at an edge location
 and is routed to Amazon S3 over an optimized network path.
 
 **Key Benefits:**
+
 - Up to 50-500% faster transfers for long-distance operations
 - Automatic fallback on acceleration errors
 - Transparent integration - no code changes required
@@ -21,6 +22,7 @@ and is routed to Amazon S3 over an optimized network path.
 Before enabling S3 Transfer Acceleration in ObjectFS:
 
 1. **Enable Transfer Acceleration on your S3 bucket:**
+
    ```bash
    aws s3api put-bucket-accelerate-configuration \
        --bucket your-bucket-name \
@@ -28,6 +30,7 @@ Before enabling S3 Transfer Acceleration in ObjectFS:
    ```
 
 2. **Verify acceleration is enabled:**
+
    ```bash
    aws s3api get-bucket-accelerate-configuration \
        --bucket your-bucket-name
@@ -57,7 +60,7 @@ struct directly and is correct as written for that use.
 ### Go API Configuration
 
 ```go
-import "github.com/objectfs/objectfs/internal/storage/s3"
+import "github.com/scttfrdmn/objectfs/internal/storage/s3"
 
 // Create S3 config with acceleration enabled
 cfg := s3.NewDefaultConfig()
@@ -81,12 +84,14 @@ ObjectFS automatically detects acceleration-specific errors and falls back to
 standard S3 endpoints:
 
 **Detected Errors:**
+
 - `InvalidRequest` - Acceleration not enabled on bucket
 - `AccelerateNotSupported` - Bucket doesn't support acceleration
 - Acceleration endpoint connection failures
 - S3-accelerate endpoint errors
 
 **Fallback Behavior:**
+
 1. Attempt operation with accelerated endpoint
 2. Detect acceleration error
 3. Log fallback event
@@ -133,11 +138,13 @@ ObjectFS uses CargoShip for optimized uploads when available. The acceleration
 feature integrates seamlessly:
 
 **Upload Priority:**
+
 1. CargoShip optimization (primary) - 4.6x performance improvement
 2. S3 Transfer Acceleration (fallback) - Uses acceleration if CargoShip fails
 3. Standard S3 endpoint (final fallback)
 
 **Example Flow:**
+
 ```
 PutObject Request
     ↓
@@ -155,6 +162,7 @@ Standard S3 Endpoint
 S3 Transfer Acceleration works best for:
 
 **✅ Recommended:**
+
 - Long-distance transfers (cross-continent, cross-region)
 - Large files (>10MB)
 - Remote clients connecting to distant S3 regions
@@ -162,6 +170,7 @@ S3 Transfer Acceleration works best for:
 - Geographic distribution of clients
 
 **❌ Not Recommended:**
+
 - Same-region transfers (minimal benefit)
 - Very small files (<1KB) - overhead exceeds benefit
 - Applications already close to S3 region
@@ -260,6 +269,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
 ### Issue: Acceleration Not Working
 
 **Symptoms:**
+
 - No accelerated requests in metrics
 - FallbackEvents increasing
 - Performance not improving
@@ -267,6 +277,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
 **Solutions:**
 
 1. **Verify bucket acceleration is enabled:**
+
    ```bash
    aws s3api get-bucket-accelerate-configuration --bucket your-bucket
    ```
@@ -280,6 +291,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
    - Check firewall rules allow acceleration endpoints
 
 4. **Review logs for specific errors:**
+
    ```go
    metrics := backend.GetMetrics()
    if metrics.FallbackEvents > 0 {
@@ -291,6 +303,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
 ### Issue: High Fallback Rate
 
 **Symptoms:**
+
 - FallbackRate > 50%
 - Frequent acceleration disablement
 
@@ -305,6 +318,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
    - Check if errors are intermittent or persistent
 
 3. **Consider disabling if not beneficial:**
+
    ```go
    cfg.UseAccelerate = false  // Disable if causing issues
    ```
@@ -312,6 +326,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
 ### Issue: No Performance Improvement
 
 **Symptoms:**
+
 - Acceleration active but speed unchanged
 - High acceleration rate but same throughput
 
@@ -323,6 +338,7 @@ fallbackCounter.Add(float64(metrics.FallbackEvents))
 4. **CPU bound** - Processing is the bottleneck, not transfer
 
 **Verification:**
+
 ```bash
 # Run benchmarks to compare
 go test -bench='BenchmarkGetObject' ./internal/storage/s3/
@@ -339,6 +355,7 @@ go test -bench='BenchmarkGetObject' ./internal/storage/s3/
    - Verify cost-benefit ratio
 
 2. **Use appropriate pool sizes:**
+
    ```go
    cfg.PoolSize = 20  // Higher for better acceleration utilization
    ```

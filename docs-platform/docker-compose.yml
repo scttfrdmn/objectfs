@@ -27,7 +27,22 @@ services:
     - docs-logs:/app/logs
     restart: unless-stopped
     healthcheck:
-      test: [CMD, curl, -f, http://localhost:3001/api/health]
+      # A block sequence, not the flow form `[CMD, curl, -f, http://...]` this used to be.
+      #
+      # A bare URL inside a *flow* sequence is not valid YAML 1.1: the scanner reads `http` as a
+      # plain scalar and then meets `:` where it expects `,` or `]`. Docker's own parser is lenient
+      # enough to accept it, which is why it went unnoticed for so long — but `check-yaml` is PyYAML
+      # and fails on it, so `pre-commit run --all-files` could not come back clean.
+      #
+      # Quoting the URL fixes check-yaml but not the repository: `pretty-format-yaml` is ruamel,
+      # which follows YAML 1.2, permits the bare `:`, and strips the quotes right back off. The two
+      # hooks then disagree forever. In block form there is no `]` to terminate, both parsers accept
+      # the URL unquoted, and there are no quotes left for the formatter to remove.
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:3001/api/health
       interval: 30s
       timeout: 10s
       retries: 3
@@ -65,7 +80,12 @@ services:
     devices:
     - /dev/fuse:/dev/fuse
     healthcheck:
-      test: [CMD, curl, -f, http://localhost:8081/health]
+      # Block form, for the reason given on the docs service above.
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:8081/health
       interval: 30s
       timeout: 10s
       retries: 3

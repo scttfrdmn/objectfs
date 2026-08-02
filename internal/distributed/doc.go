@@ -308,7 +308,7 @@ Example: Complete Cluster Setup
 		"log"
 		"time"
 
-		"github.com/objectfs/objectfs/internal/distributed"
+		"github.com/scttfrdmn/objectfs/internal/distributed"
 	)
 
 	func main() {

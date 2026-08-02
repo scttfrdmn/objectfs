@@ -20,9 +20,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
-	objectfserrors "github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
+	objectfserrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // TestSetObjectMetadataReplacesWithoutRewritingBytes is the property the whole attribute path rests

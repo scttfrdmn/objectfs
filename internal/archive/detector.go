@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	archivepkg "github.com/objectfs/objectfs/pkg/archive"
-	"github.com/objectfs/objectfs/pkg/types"
+	archivepkg "github.com/scttfrdmn/objectfs/pkg/archive"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // Detect scans a slice of S3 object metadata and returns lightweight

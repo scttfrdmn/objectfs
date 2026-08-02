@@ -102,7 +102,7 @@ ObjectFS, or try our [Quick Start](/guide/getting-started) tutorial.
 
 ## Community & Support
 
-- **GitHub**: [Source code and issues](https://github.com/objectfs/objectfs)
+- **GitHub**: [Source code and issues](https://github.com/scttfrdmn/objectfs)
 - **Community Forum**: [Ask questions and share experiences](https://community.objectfs.io)
 - **Documentation**: [Complete guides and API reference](https://docs.objectfs.io)
 - **Commercial Support**: [Enterprise support](mailto:support@objectfs.io)

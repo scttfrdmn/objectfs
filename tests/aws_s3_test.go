@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	s3backend "github.com/objectfs/objectfs/internal/storage/s3"
+	s3backend "github.com/scttfrdmn/objectfs/internal/storage/s3"
 )
 
 // AWSS3TestSuite tests ObjectFS against real AWS S3

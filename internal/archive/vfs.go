@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	archivepkg "github.com/objectfs/objectfs/pkg/archive"
-	"github.com/objectfs/objectfs/pkg/types"
+	archivepkg "github.com/scttfrdmn/objectfs/pkg/archive"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // VFS provides a virtual filesystem view into archive contents stored as S3

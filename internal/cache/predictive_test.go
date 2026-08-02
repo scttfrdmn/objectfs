@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // lruMinimalCache wraps NewLRUCache to provide a concrete types.Cache for tests.

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	objerrors "github.com/objectfs/objectfs/pkg/errors"
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // State represents the circuit breaker state

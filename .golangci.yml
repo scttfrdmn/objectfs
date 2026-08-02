@@ -180,4 +180,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/objectfs/objectfs
+        - github.com/scttfrdmn/objectfs

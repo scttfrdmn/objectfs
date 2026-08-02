@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // makeClusterWithNode returns a ClusterManager that has one alive node

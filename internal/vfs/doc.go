@@ -3,7 +3,7 @@ Package vfs holds ObjectFS's POSIX-semantics core, independent of any kernel bin
 
 It owns the file model — attributes, open handles, and dirty byte ranges — and the policy for
 turning a sequence of POSIX operations into object-storage operations. It depends on
-[github.com/objectfs/objectfs/pkg/types].Backend and on nothing FUSE, so it builds and tests on
+[github.com/scttfrdmn/objectfs/pkg/types].Backend and on nothing FUSE, so it builds and tests on
 every platform and needs no mount.
 
 # Why this package exists

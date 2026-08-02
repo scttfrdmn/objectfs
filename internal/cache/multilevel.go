@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/analytics"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/analytics"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // MultiLevelCache implements a multi-level cache hierarchy

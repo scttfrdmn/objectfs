@@ -361,7 +361,7 @@ For ML strategy effectiveness:
 ### Accessing Predictive Stats
 
 ```go
-import "github.com/objectfs/objectfs/internal/cache"
+import "github.com/scttfrdmn/objectfs/internal/cache"
 
 // Get predictive cache stats
 predictiveCache := cache.GetPredictiveCache()

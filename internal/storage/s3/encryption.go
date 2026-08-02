@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
-	"github.com/objectfs/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsname"
 )
 
 // This file is audit finding P-7.
