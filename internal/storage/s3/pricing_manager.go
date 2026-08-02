@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v2"
 
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
 	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
@@ -22,9 +23,11 @@ const (
 // PricingManager resolves S3 tier pricing from a built-in static rate table,
 // applying operator-supplied overrides and discounts.
 //
-// Rates are approximate us-east-1 list prices sourced from StorageTiers and are
-// suitable for comparing tiers, not for billing reconciliation. Set
-// PricingConfig.CustomPricing for exact, negotiated, or non-us-east-1 rates.
+// Rates are us-east-1 list prices read from [awsrates], the one table in this repo checked against
+// the live AWS Pricing API. They suit comparing tiers, not billing reconciliation: they are first
+// volume band, they assume Standard retrieval speed on the Glacier classes, and PricingConfig.Region
+// does not select them. Set PricingConfig.CustomPricing for exact, negotiated, or non-us-east-1
+// rates.
 type PricingManager struct {
 	config      PricingConfig
 	logger      *slog.Logger
@@ -79,93 +82,48 @@ func (pm *PricingManager) GetTierPricing(tier string) (TierPricing, error) {
 
 // getDefaultPricing returns the built-in rate table for a tier.
 //
-// Rates come from StorageTiers and are approximate us-east-1 list prices. They
-// are intended for relative cost comparison between tiers, not for billing
-// reconciliation. Operators needing exact figures should set CustomPricing.
+// Every rate comes from [awsrates], which is verified against the live AWS Pricing API. They are
+// us-east-1 list prices for the first volume band, intended for relative cost comparison between
+// tiers rather than for billing reconciliation — an operator with negotiated rates, or outside
+// us-east-1, should set CustomPricing.
+//
+// This function used to hold its own copies of the request and retrieval rates, in per-1,000 units
+// that it divided down at return. That is where #209's defect lived: Standard PUT was written as
+// 0.0005, which is a tenth of the $0.005-per-1,000 AWS charges, so every write on the default
+// configuration was costed at 10% of its price. internal/cost/pricing.go had the same rate right,
+// which meant the answer depended on which package the caller asked. Reading from one table in
+// per-request units removes both the duplicate and the conversion that went wrong.
 func (pm *PricingManager) getDefaultPricing(tier string) TierPricing {
-	// Use the existing StorageTiers data as defaults
+	// StorageTiers supplies the tier *constraints*; awsrates supplies the money. Both fall back to
+	// Standard for an unknown tier, and awsrates.For reports that it did.
 	tierInfo, exists := StorageTiers[tier]
 	if !exists {
 		tierInfo = StorageTiers[TierStandard]
 	}
 
+	rate, known := awsrates.For(tier)
+	if !known {
+		pm.logger.Warn("no rate for storage tier; reporting Standard's prices for it",
+			"tier", tier,
+			"fallback", TierStandard)
+	}
+
 	return TierPricing{
-		StorageCostPerGBMonth: tierInfo.CostPerGBMonth,
-		RetrievalCostPerGB:    pm.getDefaultRetrievalCost(tier),
+		StorageCostPerGBMonth: rate.StoragePerGBMonth,
+		RetrievalCostPerGB:    rate.RetrievalPerGB,
 		RequestCosts: RequestCosts{
-			PutRequestCost:    pm.getDefaultRequestCost("PUT", tier),
-			GetRequestCost:    pm.getDefaultRequestCost("GET", tier),
+			PutRequestCost: rate.PutRequest,
+			GetRequestCost: rate.GetRequest,
+			// DELETE is free on S3, on every storage class.
 			DeleteRequestCost: 0.0,
-			ListRequestCost:   pm.getDefaultRequestCost("LIST", tier),
-			HeadRequestCost:   pm.getDefaultRequestCost("HEAD", tier),
+			ListRequestCost:   rate.ListRequest,
+			// HEAD bills in the same Tier2 request group as GET.
+			HeadRequestCost: rate.GetRequest,
 		},
 		MinimumBillableSize: tierInfo.MinObjectSize,
 		MinimumBillableDays: tierInfo.MinimumStorageDays,
 		TransitionCosts:     make(map[string]float64),
 	}
-}
-
-// Helper methods for default pricing
-func (pm *PricingManager) getDefaultRetrievalCost(tier string) float64 {
-	costs := map[string]float64{
-		TierStandard:    0.0,
-		TierStandardIA:  0.01,
-		TierOneZoneIA:   0.01,
-		TierGlacierIR:   0.03,
-		TierGlacier:     0.02, // Variable based on retrieval speed
-		TierDeepArchive: 0.05, // Variable based on retrieval speed
-		TierIntelligent: 0.0,  // No retrieval charges
-	}
-	return costs[tier]
-}
-
-func (pm *PricingManager) getDefaultRequestCost(requestType, tier string) float64 {
-	// Default request costs per 1000 requests
-	costs := map[string]map[string]float64{
-		"PUT": {
-			TierStandard:    0.0005,
-			TierStandardIA:  0.001,
-			TierOneZoneIA:   0.001,
-			TierGlacierIR:   0.002,
-			TierGlacier:     0.0025,
-			TierDeepArchive: 0.005,
-			TierIntelligent: 0.0005,
-		},
-		"GET": {
-			TierStandard:    0.0004,
-			TierStandardIA:  0.0004,
-			TierOneZoneIA:   0.0004,
-			TierGlacierIR:   0.0004,
-			TierGlacier:     0.0004,
-			TierDeepArchive: 0.0004,
-			TierIntelligent: 0.0004,
-		},
-		"LIST": {
-			TierStandard:    0.005,
-			TierStandardIA:  0.005,
-			TierOneZoneIA:   0.005,
-			TierGlacierIR:   0.005,
-			TierGlacier:     0.005,
-			TierDeepArchive: 0.005,
-			TierIntelligent: 0.005,
-		},
-		"HEAD": {
-			TierStandard:    0.0004,
-			TierStandardIA:  0.0004,
-			TierOneZoneIA:   0.0004,
-			TierGlacierIR:   0.0004,
-			TierGlacier:     0.0004,
-			TierDeepArchive: 0.0004,
-			TierIntelligent: 0.0004,
-		},
-	}
-
-	if tierCosts, exists := costs[requestType]; exists {
-		if cost, exists := tierCosts[tier]; exists {
-			return cost / 1000.0 // Convert to cost per request
-		}
-	}
-	return 0.0005 / 1000.0 // Default fallback
 }
 
 // applyDiscounts applies configured discounts to base pricing

@@ -51,49 +51,57 @@ CargoShip Features:
 
 # Storage Tier Management
 
-Comprehensive support for all AWS S3 storage classes:
+Comprehensive support for all AWS S3 storage classes.
+
+Rates are deliberately not restated here. This section used to carry a per-GB figure for each tier
+and a Cost/GB column in the summary table below, which made it two more copies of the S3 rate card —
+and a rate in a doc comment has no way to be told it is stale, so the only question is when it starts
+lying rather than whether. internal/awsrates holds every rate, in one place, checked against the live
+AWS Pricing API by a test. Read it there, or call PricingManager.GetTierPricing, which serves from it.
+
+What stays here is the part that is S3 *behavior* rather than S3 *price*: minimum billable size,
+minimum storage duration, and retrieval latency. Those change when AWS changes the product, not when
+AWS changes a number.
 
 Standard Tier (STANDARD):
 - Instant access, no retrieval costs
 - Recommended for frequently accessed data
 - No minimum object size or storage duration
-- Cost: ~$0.023/GB/month
 
 Standard-IA (STANDARD_IA):
 - Instant access with retrieval costs
 - 128KB minimum object size
 - 30-day minimum storage duration
-- Cost: ~$0.0125/GB/month + $0.01/GB retrieval
+- Retrieval is charged per GB
 
 One Zone-IA (ONEZONE_IA):
 - Single availability zone storage
 - Lower cost than Standard-IA
 - Same constraints as Standard-IA
-- Cost: ~$0.01/GB/month + $0.01/GB retrieval
+- Retrieval is charged per GB
 
 Glacier Instant Retrieval (GLACIER_IR):
 - Instant access for archive data
 - 128KB minimum object size
 - 90-day minimum storage duration
-- Cost: ~$0.004/GB/month + $0.03/GB retrieval
+- Retrieval is charged per GB, at the highest rate of the instant-access tiers
 
 Glacier Flexible Retrieval (GLACIER):
 - Minutes to hours retrieval time
 - 40KB minimum object size
 - 90-day minimum storage duration
-- Cost: ~$0.0036/GB/month + variable retrieval
+- Retrieval is charged per GB and varies by requested speed
 
 Deep Archive (DEEP_ARCHIVE):
 - Lowest cost, hours for retrieval
 - 40KB minimum object size
 - 180-day minimum storage duration
-- Cost: ~$0.00099/GB/month + variable retrieval
+- Retrieval is charged per GB and varies by requested speed
 
 Intelligent Tiering (INTELLIGENT_TIERING):
 - Automatic tier optimization
 - No retrieval charges
-- Monitoring charges apply
-- Cost: ~$0.023/GB/month + $0.0025/1000 objects
+- Priced as Standard for the frequent-access tier, plus per-object monitoring charges
 
 # Cost Optimization
 
@@ -282,15 +290,15 @@ The backend is designed for concurrent access:
 
 Quick reference for S3 storage classes:
 
-| Tier | Access | Min Size | Min Duration | Use Case | Cost/GB |
-|------|--------|----------|--------------|----------|---------|
-| Standard | Instant | None | None | Frequent | $0.023 |
-| Standard-IA | Instant | 128KB | 30 days | Infrequent | $0.0125 |
-| One Zone-IA | Instant | 128KB | 30 days | Non-critical | $0.01 |
-| Glacier IR | Instant | 128KB | 90 days | Archive + instant | $0.004 |
-| Glacier | Minutes-Hours | 40KB | 90 days | Long-term archive | $0.0036 |
-| Deep Archive | Hours | 40KB | 180 days | Very long-term | $0.00099 |
-| Intelligent | Variable | 128KB | None | Auto-optimize | Variable |
+| Tier | Access | Min Size | Min Duration | Use Case |
+|------|--------|----------|--------------|----------|
+| Standard | Instant | None | None | Frequent |
+| Standard-IA | Instant | 128KB | 30 days | Infrequent |
+| One Zone-IA | Instant | 128KB | 30 days | Non-critical |
+| Glacier IR | Instant | 128KB | 90 days | Archive + instant |
+| Glacier | Minutes-Hours | 40KB | 90 days | Long-term archive |
+| Deep Archive | Hours | 40KB | 180 days | Very long-term |
+| Intelligent | Variable | 128KB | None | Auto-optimize |
 
 This package provides enterprise-grade S3 integration with advanced optimization,
 comprehensive cost management, and high-performance operation capabilities.

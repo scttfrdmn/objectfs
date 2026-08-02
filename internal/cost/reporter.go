@@ -123,8 +123,11 @@ func (r *Reporter) RecordStorage(tenantID, tier string, sizeBytes int64, duratio
 
 // Report returns a CostReport snapshot for tenantID.
 // If the tenant has never been seen, an empty report is returned.
-// baselineStoragePerGB is used to compute the ROI Savings field; pass 0.023
-// (Standard tier) for the default ROI calculation.
+//
+// baselineStoragePerGB is the rate the ROI Savings field is measured against — what the same bytes
+// would have cost on the tier the caller is comparing to. Pass [StandardBaselinePerGB] for the usual
+// "versus Standard" comparison; the doc here used to say "pass 0.023", which was a sixth place in this
+// repo where the Standard rate was written down and one more thing to update when AWS moves it.
 func (r *Reporter) Report(tenantID string, baselineStoragePerGB float64) CostReport {
 	r.mu.RLock()
 	rec, ok := r.tenants[tenantID]
@@ -140,7 +143,18 @@ func (r *Reporter) Report(tenantID string, baselineStoragePerGB float64) CostRep
 	return buildReport(tenantID, snap, start, time.Now(), baselineStoragePerGB)
 }
 
+// StandardBaselinePerGB is the STANDARD storage rate, for callers computing ROI against it.
+//
+// It is a function of [DefaultPrices] rather than a literal so that "savings versus Standard" is
+// measured against the same rate everything else charges at. A hardcoded baseline drifting from the
+// live rate would misstate every savings figure while every cost figure stayed right, which is the
+// hardest kind of discrepancy to notice: both numbers look plausible and only their difference is
+// wrong.
+var StandardBaselinePerGB = DefaultPrices[TierStandard].StoragePerGBMonth
+
 // ReportAll returns CostReports for every tracked tenant.
+//
+// baselineStoragePerGB has the same meaning as in [Reporter.Report].
 func (r *Reporter) ReportAll(baselineStoragePerGB float64) []CostReport {
 	r.mu.RLock()
 	ids := make([]string, 0, len(r.tenants))

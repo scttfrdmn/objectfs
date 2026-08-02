@@ -9,6 +9,7 @@ import (
 	"github.com/scttfrdmn/cargoship/pkg/aws/config"
 
 	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
 )
 
 // S3 Storage Tier Constants.
@@ -47,11 +48,21 @@ type StorageTierInfo struct {
 	RetrievalCost      bool          `json:"retrieval_cost"`
 	MinimumStorageDays int           `json:"minimum_storage_days"`
 	RecommendedUseCase string        `json:"recommended_use_case"`
-	CostPerGBMonth     float64       `json:"cost_per_gb_month"` // Approximate cost in USD
+
+	// CostPerGBMonth is the us-east-1 list price in USD, filled in from [awsrates] rather than
+	// written in the literal below. See withRates.
+	CostPerGBMonth float64 `json:"cost_per_gb_month"`
 }
 
-// Predefined storage tier information with AWS constraints
-var StorageTiers = map[string]StorageTierInfo{
+// StorageTiers holds the per-tier constraints and list price for every S3 storage class.
+//
+// The literal carries the tier *constraints* — minimum size, embargo, retrieval latency — which are
+// S3 behavior and belong here. It deliberately does not carry CostPerGBMonth: rates are the one
+// thing this table used to state for itself, and stating them here made it the third of five copies
+// of the S3 rate card in this repo. Two of the five disagreed by a factor of ten, so what a write
+// cost depended on which package the caller reached for. withRates reads each rate from
+// [awsrates] instead, which is the only table checked against the live AWS Pricing API.
+var StorageTiers = withRates(map[string]StorageTierInfo{
 	TierStandard: {
 		Name:               "Standard",
 		MinObjectSize:      0,
@@ -60,7 +71,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      false,
 		MinimumStorageDays: 0,
 		RecommendedUseCase: "Frequently accessed data",
-		CostPerGBMonth:     0.023, // Approximate USD
 	},
 	TierStandardIA: {
 		Name:               "Standard-Infrequent Access",
@@ -70,7 +80,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      true, // $0.01 per GB retrieval cost
 		MinimumStorageDays: 30,
 		RecommendedUseCase: "Infrequently accessed data that needs instant access",
-		CostPerGBMonth:     0.0125,
 	},
 	TierOneZoneIA: {
 		Name:               "One Zone-Infrequent Access",
@@ -80,7 +89,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      true, // $0.01 per GB retrieval cost
 		MinimumStorageDays: 30,
 		RecommendedUseCase: "Infrequently accessed data in single AZ",
-		CostPerGBMonth:     0.01,
 	},
 	TierReducedRedundancy: {
 		Name:               "Reduced Redundancy",
@@ -90,7 +98,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      false,
 		MinimumStorageDays: 0,
 		RecommendedUseCase: "Non-critical, reproducible data (deprecated)",
-		CostPerGBMonth:     0.024,
 	},
 	TierGlacierIR: {
 		Name:               "Glacier Instant Retrieval",
@@ -100,7 +107,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      true, // $0.03 per GB retrieval cost
 		MinimumStorageDays: 90,
 		RecommendedUseCase: "Archive data needing instant access",
-		CostPerGBMonth:     0.004,
 	},
 	TierGlacier: {
 		Name:               "Glacier Flexible Retrieval",
@@ -110,7 +116,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      true, // Variable retrieval costs
 		MinimumStorageDays: 90,
 		RecommendedUseCase: "Long-term archive with flexible retrieval",
-		CostPerGBMonth:     0.0036,
 	},
 	TierDeepArchive: {
 		Name:               "Glacier Deep Archive",
@@ -120,7 +125,6 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      true, // Variable retrieval costs
 		MinimumStorageDays: 180,
 		RecommendedUseCase: "Long-term archive rarely accessed",
-		CostPerGBMonth:     0.00099,
 	},
 	TierIntelligent: {
 		Name:               "Intelligent Tiering",
@@ -130,8 +134,33 @@ var StorageTiers = map[string]StorageTierInfo{
 		RetrievalCost:      false, // No retrieval charges
 		MinimumStorageDays: 0,
 		RecommendedUseCase: "Automatic cost optimization for changing access patterns",
-		CostPerGBMonth:     0.023, // Plus monitoring charges
 	},
+})
+
+// withRates fills in CostPerGBMonth for every tier from [awsrates], and panics if any tier has no
+// rate there.
+//
+// The panic is deliberate and it is at init time, which is the only point where this can be a build
+// failure rather than a wrong number in a cost report. The alternative — leaving the field zero —
+// prices that tier at $0/GB-month, and a cost estimate of zero does not look like a missing entry.
+// It looks like free storage, which is a plausible-enough answer to survive review. awsrates covers
+// every class in awsname.StorageClasses and TestStorageTiersCoversEveryStorageClass pins this map to
+// the same set, so reaching the panic means one of those two invariants has just been broken by the
+// change being compiled.
+func withRates(tiers map[string]StorageTierInfo) map[string]StorageTierInfo {
+	for class, info := range tiers {
+		rate, ok := awsrates.For(class)
+		if !ok {
+			panic(fmt.Sprintf("s3: StorageTiers has an entry for %q but internal/awsrates has no rate "+
+				"for it; add one there rather than writing a literal here, or every cost reported for "+
+				"this tier is $0", class))
+		}
+
+		info.CostPerGBMonth = rate.StoragePerGBMonth
+		tiers[class] = info
+	}
+
+	return tiers
 }
 
 // TierValidator validates operations against storage tier constraints

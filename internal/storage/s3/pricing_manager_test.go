@@ -5,6 +5,8 @@ import (
 	"math"
 	"os"
 	"testing"
+
+	"github.com/scttfrdmn/objectfs/internal/awsname"
 )
 
 func abs(x float64) float64 {
@@ -429,4 +431,176 @@ custom_discounts:
 				manager.config.DiscountConfig.EnterpriseDiscount)
 		}
 	})
+}
+
+// TestDefaultPricingHoldsThePublishedRequestPrices is the test whose absence let #209 happen.
+//
+// getDefaultPricing carried its own request-rate table in per-1,000 units and divided by 1,000 on the
+// way out. Standard PUT was written 0.0005 where AWS charges $0.005 per 1,000, so the default
+// configuration costed every write at a tenth of its price. Nothing here caught it: the existing
+// tests assert PutRequestCost > 0, or compare it to StorageTiers, or recompute the discount formula —
+// all of which agree with a rate that is uniformly wrong.
+//
+// So the expectations are the published price and the published divisor, stated separately as
+// literals, and the product is compared to what the manager returns. Dividing the published figure by
+// hand here would just repeat whatever mistake the code made.
+//
+// This overlaps internal/awsrates' own test deliberately. That one checks the table; this one checks
+// that the path a caller actually takes — GetTierPricing, with no custom pricing and no discounts —
+// reaches it. The defect was not in a table, it was in a second table that a caller reached instead.
+func TestDefaultPricingHoldsThePublishedRequestPrices(t *testing.T) {
+	t.Parallel()
+
+	manager := NewPricingManager(PricingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	cases := []struct {
+		tier        string
+		op          string
+		published   float64 // dollars, as AWS prints them
+		per         float64 // per how many requests
+		description string
+	}{
+		{TierStandard, "PUT", 0.005, 1_000, "$0.005 per 1,000 PUT, COPY, POST, or LIST requests"},
+		{TierStandard, "GET", 0.004, 10_000, "$0.004 per 10,000 GET and all other requests"},
+		{TierStandardIA, "PUT", 0.01, 1_000, "$0.01 per 1,000 PUT to Standard-Infrequent Access"},
+		{TierStandardIA, "GET", 0.01, 10_000, "$0.01 per 10,000 GET from Standard-Infrequent Access"},
+		{TierOneZoneIA, "PUT", 0.01, 1_000, "$0.01 per 1,000 PUT to One Zone-Infrequent Access"},
+		{TierGlacierIR, "PUT", 0.02, 1_000, "$0.02 per 1,000 PUT to Glacier Instant Retrieval"},
+		{TierGlacierIR, "GET", 0.1, 10_000, "$0.1 per 10,000 GET from Glacier Instant Retrieval"},
+		{TierGlacier, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle requests to Glacier"},
+		{TierDeepArchive, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle requests to Deep Archive"},
+		{TierIntelligent, "PUT", 0.005, 1_000, "$0.005 per 1,000 PUT to Intelligent-Tiering"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tier+"/"+tc.op, func(t *testing.T) {
+			t.Parallel()
+
+			pricing, err := manager.GetTierPricing(tc.tier)
+			if err != nil {
+				t.Fatalf("GetTierPricing(%s): %v", tc.tier, err)
+			}
+
+			got := pricing.RequestCosts.PutRequestCost
+			if tc.op == "GET" {
+				got = pricing.RequestCosts.GetRequestCost
+			}
+
+			want := tc.published / tc.per
+			if abs(got-want) > 1e-12 {
+				t.Errorf("%s %s costs %v per request, want %v (%s)\n"+
+					"  ratio to expected: %.4gx — a round factor of ten here is the per-1,000 price "+
+					"stored as if it were per-request, which is exactly the #209 defect",
+					tc.tier, tc.op, got, want, tc.description, got/want)
+			}
+		})
+	}
+}
+
+// TestDefaultPricingHoldsThePublishedStorageAndRetrievalRates covers the other two money fields.
+//
+// Same reasoning: literal published figures, not a formula. The retrieval rates are the ones most
+// likely to be quietly wrong, because Glacier and Deep Archive charge per retrieval *speed* and a
+// single number has to name which one it is — the table this replaced said 0.02 for Glacier with the
+// comment "Variable based on retrieval speed", which is not a rate, it is an admission that nobody
+// knew which rate it was. AWS charges $0.01/GB for Glacier Standard retrieval.
+func TestDefaultPricingHoldsThePublishedStorageAndRetrievalRates(t *testing.T) {
+	t.Parallel()
+
+	manager := NewPricingManager(PricingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	cases := []struct {
+		tier      string
+		storage   float64
+		retrieval float64
+		note      string
+	}{
+		{TierStandard, 0.023, 0.0, "no retrieval fee"},
+		{TierStandardIA, 0.0125, 0.01, ""},
+		{TierOneZoneIA, 0.01, 0.01, ""},
+		{TierGlacierIR, 0.004, 0.03, ""},
+		{TierGlacier, 0.0036, 0.01, "Standard retrieval speed"},
+		{TierDeepArchive, 0.00099, 0.02, "Standard retrieval speed"},
+		{TierIntelligent, 0.023, 0.0, "frequent-access tier; monitoring charges are separate"},
+		{TierReducedRedundancy, 0.024, 0.0, "deprecated, and dearer than Standard — that is not a typo"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tier, func(t *testing.T) {
+			t.Parallel()
+
+			pricing, err := manager.GetTierPricing(tc.tier)
+			if err != nil {
+				t.Fatalf("GetTierPricing(%s): %v", tc.tier, err)
+			}
+
+			if abs(pricing.StorageCostPerGBMonth-tc.storage) > 1e-12 {
+				t.Errorf("%s stores at %v/GB-month, want %v %s", tc.tier,
+					pricing.StorageCostPerGBMonth, tc.storage, tc.note)
+			}
+
+			if abs(pricing.RetrievalCostPerGB-tc.retrieval) > 1e-12 {
+				t.Errorf("%s retrieves at %v/GB, want %v %s", tc.tier,
+					pricing.RetrievalCostPerGB, tc.retrieval, tc.note)
+			}
+		})
+	}
+}
+
+// TestEveryTierPricesEveryMoneyField fails when a tier reports $0 for something S3 charges for.
+//
+// A zero rate is the worst kind of wrong answer here, because it does not look like a missing entry —
+// it looks like free, which is plausible enough to survive a glance at a cost report. This walks
+// every class the config loader accepts, not a hand-written list, so a class added to awsname without
+// a rate fails here rather than reporting zero.
+func TestEveryTierPricesEveryMoneyField(t *testing.T) {
+	t.Parallel()
+
+	manager := NewPricingManager(PricingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	for _, tier := range awsname.StorageClasses() {
+		t.Run(tier, func(t *testing.T) {
+			t.Parallel()
+
+			pricing, err := manager.GetTierPricing(tier)
+			if err != nil {
+				t.Fatalf("GetTierPricing(%s): %v", tier, err)
+			}
+
+			if pricing.StorageCostPerGBMonth <= 0 {
+				t.Errorf("%s stores at %v/GB-month; no S3 class is free to store",
+					tier, pricing.StorageCostPerGBMonth)
+			}
+
+			if pricing.RequestCosts.PutRequestCost <= 0 {
+				t.Errorf("%s writes at %v per request; every class charges for PUT",
+					tier, pricing.RequestCosts.PutRequestCost)
+			}
+
+			if pricing.RequestCosts.GetRequestCost <= 0 {
+				t.Errorf("%s reads at %v per request; every class charges for GET",
+					tier, pricing.RequestCosts.GetRequestCost)
+			}
+
+			if pricing.RequestCosts.ListRequestCost <= 0 {
+				t.Errorf("%s lists at %v per request; LIST bills in the Tier1 group",
+					tier, pricing.RequestCosts.ListRequestCost)
+			}
+
+			// HEAD and GET bill in the same request group, so they must agree. If they diverge, one of
+			// the two is reading a rate that does not exist.
+			if pricing.RequestCosts.HeadRequestCost != pricing.RequestCosts.GetRequestCost {
+				t.Errorf("%s bills HEAD at %v and GET at %v; both are Tier2 requests and AWS charges "+
+					"one price for the group", tier, pricing.RequestCosts.HeadRequestCost,
+					pricing.RequestCosts.GetRequestCost)
+			}
+
+			// DELETE is free on every class, and reporting a cost for it would overstate every
+			// cleanup operation.
+			if pricing.RequestCosts.DeleteRequestCost != 0 {
+				t.Errorf("%s bills DELETE at %v; DELETE is free on S3",
+					tier, pricing.RequestCosts.DeleteRequestCost)
+			}
+		})
+	}
 }

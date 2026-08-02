@@ -1,6 +1,10 @@
 package cost
 
-import "math"
+import (
+	"math"
+
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
+)
 
 // OpType classifies an S3 API operation for billing purposes.
 type OpType int
@@ -115,10 +119,16 @@ func (c *Calculator) CalculateStorageCost(tier string, sizeBytes int64, duration
 	return price.StoragePerGBMonth * gb * math.Max(0, durationMonths)
 }
 
-// byteToGB converts bytes to gigabytes (binary: 1 GB = 1 073 741 824 bytes).
+// byteToGB converts bytes to the GB unit AWS bills in, which is decimal: 1 GB = 10^9 bytes.
+//
+// It used to divide by 2^30, with a comment stating the binary reading was correct. It is not — S3
+// quotes GB-months in decimal GB — and every storage cost this package produced was 7.4% low as a
+// result. The comment is why it survived: it made the wrong unit look considered rather than
+// mistaken, so a reader checking the code found a deliberate-looking choice and moved on.
+//
+// The conversion now lives in [awsrates.GBFromBytes], next to the rates it has to agree with, so
+// there is one place where the unit is decided. This wrapper stays because three call sites read
+// better with the short name.
 func byteToGB(bytes int64) float64 {
-	if bytes <= 0 {
-		return 0
-	}
-	return float64(bytes) / (1024 * 1024 * 1024)
+	return awsrates.GBFromBytes(bytes)
 }
