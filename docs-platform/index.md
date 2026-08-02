@@ -53,13 +53,17 @@ Get ObjectFS running in minutes:
 <CodeRunner language="bash">
 
 ```bash
-# Install ObjectFS
-curl -sSL https://get.objectfs.io | sh
+# Build from source. There is no install script: get.objectfs.io is not a domain
+# this project serves, and no release workflow publishes a binary yet.
+git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs && make build
 
-# Mount your first filesystem
-objectfs mount s3://my-bucket /mnt/data
+# Mount your first filesystem: two positional arguments, no subcommand.
+# It runs in the foreground, so background it or use a second shell.
+./objectfs s3://my-bucket /mnt/data &
 
-# Use it like any local directory
+# Use it like any local directory — within the limits of the
+# supported-operations table in the README
 ls /mnt/data
 echo "Hello ObjectFS!" > /mnt/data/test.txt
 cat /mnt/data/test.txt

@@ -140,76 +140,65 @@ demo().catch(console.error);
 
 ### Go API Example
 
+> **This example previously imported `github.com/scttfrdmn/objectfs/pkg/client`, which does not
+> exist**, and called a `client.Mount`/`GetHealth`/`ListObjects`/`Unmount` API that has never been
+> written. It also used `config.Config`, which is `config.Configuration`. None of it compiled.
+>
+> What ObjectFS actually offers a Go caller is `internal/adapter`: construct, `Start`, `Stop`. There
+> is no client library, no mount handle, and no object-listing call — a program that wants to list
+> objects uses the AWS SDK directly. The example below is that API, and it is what the corresponding
+> Python and JavaScript blocks on this page describe a *proposed* SDK for.
+>
+> Note what `internal/` means: this compiles **inside** this module and nowhere else. Go's import
+> rule makes it unimportable from another program, so today the only supported way to use ObjectFS
+> from outside is to run the binary. A stable embedding API would need these types moved under
+> `pkg/`, which is a decision and not an oversight.
+
 <CodeRunner language="go" :executable="true">
 
 ```go
 package main
 
 import (
-    "fmt"
     "context"
-    "time"
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
 
-    "github.com/scttfrdmn/objectfs/pkg/client"
+    "github.com/scttfrdmn/objectfs/internal/adapter"
     "github.com/scttfrdmn/objectfs/internal/config"
 )
 
 func main() {
-    // Create configuration
-    cfg := &config.Config{
-        Performance: config.PerformanceConfig{
-            CacheSize:      "4GB",
-            MaxConcurrency: 200,
-        },
-        Storage: config.StorageConfig{
-            S3: config.S3Config{
-                Region: "us-east-1",
-            },
-        },
-    }
-
-    // Create client
-    client, err := client.New(cfg)
-    if err != nil {
-        panic(err)
-    }
-    defer client.Close()
+    // Start from the defaults and override, rather than building a Configuration literal:
+    // the loader validates roughly thirty fields, and a zero value for any of them is a
+    // startup error rather than a default.
+    cfg := config.NewDefault()
+    cfg.Performance.CacheSize = "4GB"
+    cfg.Performance.MaxConcurrency = 200
+    cfg.Storage.S3.Region = "us-east-1"
 
     ctx := context.Background()
 
-    // Mount filesystem
-    mountID, err := client.Mount(ctx, "s3://demo-bucket", "/mnt/demo", nil)
+    fs, err := adapter.New(ctx, "s3://demo-bucket", "/mnt/demo", cfg)
     if err != nil {
-        panic(err)
+        log.Fatal(err)
     }
-    fmt.Printf("Mounted: %s\n", mountID)
 
-    // Get health
-    health, err := client.GetHealth(ctx)
-    if err != nil {
-        panic(err)
+    // Start mounts the filesystem and returns; it does not block.
+    if err := fs.Start(ctx); err != nil {
+        log.Fatal(err)
     }
-    fmt.Printf("Health: %s\n", health.Status)
 
-    // List objects
-    objects, err := client.ListObjects(ctx, "s3://demo-bucket", &client.ListObjectsOptions{
-        Prefix:  "data/",
-        MaxKeys: 10,
-    })
-    if err != nil {
-        panic(err)
+    // The mount lives until the process is signalled. Stop unmounts and flushes.
+    signals := make(chan os.Signal, 1)
+    signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+    <-signals
+
+    if err := fs.Stop(ctx); err != nil {
+        log.Fatal(err)
     }
-    fmt.Printf("Objects: %d\n", len(objects.Objects))
-
-    // Wait a bit
-    time.Sleep(2 * time.Second)
-
-    // Unmount
-    err = client.Unmount(ctx, "/mnt/demo", nil)
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println("Unmounted successfully")
 }
 ```
 
