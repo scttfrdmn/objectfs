@@ -8,6 +8,47 @@ import (
 	"time"
 )
 
+// newStartedMonitor returns a started Monitor that binds no port, and stops it on cleanup.
+//
+// The HTTP endpoint is disabled explicitly, and that is the point of this helper. Six tests in this
+// file used to build an identical MonitorConfig with HealthCheckConfig left nil, which NewChecker
+// fills in from its defaults — including HTTPEnabled: true on the fixed port 8081. Every Start
+// therefore raced five siblings for one port: the first won, the rest logged "failed to bind" and
+// took an error arm they were not written to test. Whether that arm ran at all depended on goroutine
+// scheduling, so this package reported 45.0% coverage on an idle machine and 44.7% under CI's load,
+// and its floor had been pinned to the luckier number. Tests that are not about the endpoint should
+// not open one.
+//
+// A long MonitorInterval keeps monitorLoop from firing a cycle mid-test; these tests drive checks
+// through TriggerCheck instead.
+func newStartedMonitor(t *testing.T) *Monitor {
+	t.Helper()
+
+	monitor, err := NewMonitor(&MonitorConfig{
+		Enabled:          true,
+		MonitorInterval:  time.Hour,
+		ReportingEnabled: false,
+		HealthCheckConfig: &Config{
+			Enabled:       true,
+			CheckInterval: time.Hour,
+			Timeout:       10 * time.Second,
+			MaxFailures:   3,
+			HTTPEnabled:   false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMonitor() error = %v", err)
+	}
+
+	if err := monitor.Start(t.Context()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	t.Cleanup(func() { _ = monitor.Stop() })
+
+	return monitor
+}
+
 // MockComponent implements HealthyComponent for testing
 type MockComponent struct {
 	name       string
@@ -95,6 +136,8 @@ func TestMonitor_StartStop(t *testing.T) {
 		Enabled:          true,
 		MonitorInterval:  time.Hour, // Long interval to avoid background execution
 		ReportingEnabled: false,
+		// No HTTP endpoint: this test is about the lifecycle, not the port. See newStartedMonitor.
+		HealthCheckConfig: &Config{Enabled: true, CheckInterval: time.Hour, HTTPEnabled: false},
 	})
 	if err != nil {
 		t.Fatalf("NewMonitor() error = %v", err)
@@ -106,7 +149,7 @@ func TestMonitor_StartStop(t *testing.T) {
 	}
 
 	// Start the monitor
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := monitor.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
@@ -159,20 +202,7 @@ func TestMonitor_StartDisabled(t *testing.T) {
 func TestMonitor_RegisterComponent(t *testing.T) {
 	t.Parallel()
 
-	monitor, err := NewMonitor(&MonitorConfig{
-		Enabled:          true,
-		MonitorInterval:  time.Hour,
-		ReportingEnabled: false,
-	})
-	if err != nil {
-		t.Fatalf("NewMonitor() error = %v", err)
-	}
-
-	ctx := context.Background()
-	if err := monitor.Start(ctx); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() { _ = monitor.Stop() }()
+	monitor := newStartedMonitor(t)
 
 	// Register a healthy component
 	comp := &MockComponent{
@@ -281,20 +311,7 @@ func TestMonitor_GetStatus(t *testing.T) {
 func TestMonitor_GetDetailedStatus(t *testing.T) {
 	t.Parallel()
 
-	monitor, err := NewMonitor(&MonitorConfig{
-		Enabled:          true,
-		MonitorInterval:  time.Hour,
-		ReportingEnabled: false,
-	})
-	if err != nil {
-		t.Fatalf("NewMonitor() error = %v", err)
-	}
-
-	ctx := context.Background()
-	if err := monitor.Start(ctx); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() { _ = monitor.Stop() }()
+	monitor := newStartedMonitor(t)
 
 	// Register a component
 	comp := &MockComponent{
@@ -338,20 +355,7 @@ func TestMonitor_IsHealthy(t *testing.T) {
 func TestMonitor_TriggerCheck(t *testing.T) {
 	t.Parallel()
 
-	monitor, err := NewMonitor(&MonitorConfig{
-		Enabled:          true,
-		MonitorInterval:  time.Hour,
-		ReportingEnabled: false,
-	})
-	if err != nil {
-		t.Fatalf("NewMonitor() error = %v", err)
-	}
-
-	ctx := context.Background()
-	if err := monitor.Start(ctx); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() { _ = monitor.Stop() }()
+	monitor := newStartedMonitor(t)
 
 	// Register a component
 	comp := &MockComponent{
@@ -362,7 +366,7 @@ func TestMonitor_TriggerCheck(t *testing.T) {
 	_ = monitor.RegisterComponent(comp)
 
 	// Trigger the check
-	result, err := monitor.TriggerCheck(ctx, "trigger-test")
+	result, err := monitor.TriggerCheck(t.Context(), "trigger-test")
 	if err != nil {
 		t.Errorf("TriggerCheck() error = %v", err)
 	}
@@ -374,20 +378,7 @@ func TestMonitor_TriggerCheck(t *testing.T) {
 func TestMonitor_TriggerAllChecks(t *testing.T) {
 	t.Parallel()
 
-	monitor, err := NewMonitor(&MonitorConfig{
-		Enabled:          true,
-		MonitorInterval:  time.Hour,
-		ReportingEnabled: false,
-	})
-	if err != nil {
-		t.Fatalf("NewMonitor() error = %v", err)
-	}
-
-	ctx := context.Background()
-	if err := monitor.Start(ctx); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() { _ = monitor.Stop() }()
+	monitor := newStartedMonitor(t)
 
 	// Register multiple components
 	comp1 := &MockComponent{name: "comp1", compType: "storage"}
@@ -396,7 +387,7 @@ func TestMonitor_TriggerAllChecks(t *testing.T) {
 	_ = monitor.RegisterComponent(comp2)
 
 	// Trigger all checks
-	results, err := monitor.TriggerAllChecks(ctx)
+	results, err := monitor.TriggerAllChecks(t.Context())
 	if err != nil {
 		t.Errorf("TriggerAllChecks() error = %v", err)
 	}
@@ -676,20 +667,7 @@ func TestHealthEndpoints_GetDetailedHealth(t *testing.T) {
 func TestMonitor_ComponentHealthFailure(t *testing.T) {
 	t.Parallel()
 
-	monitor, err := NewMonitor(&MonitorConfig{
-		Enabled:          true,
-		MonitorInterval:  time.Hour,
-		ReportingEnabled: false,
-	})
-	if err != nil {
-		t.Fatalf("NewMonitor() error = %v", err)
-	}
-
-	ctx := context.Background()
-	if err := monitor.Start(ctx); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() { _ = monitor.Stop() }()
+	monitor := newStartedMonitor(t)
 
 	// Register a failing component
 	comp := &MockComponent{
@@ -699,10 +677,25 @@ func TestMonitor_ComponentHealthFailure(t *testing.T) {
 	}
 	_ = monitor.RegisterComponent(comp)
 
-	// Trigger check
-	result, err := monitor.TriggerCheck(ctx, "failing-comp")
+	// Trigger check. The check must run and must report the component's own failure — an error from
+	// TriggerCheck itself would mean the check never executed, which is a different outcome and not
+	// the one this test is about.
+	result, err := monitor.TriggerCheck(t.Context(), "failing-comp")
 	if err != nil {
-		// Error is acceptable if check failed
-		_ = result
+		t.Fatalf("TriggerCheck() error = %v: the check is registered, so it must run", err)
+	}
+
+	if result.Status != StatusUnhealthy {
+		t.Errorf("Status = %q, want %q for a component whose HealthCheck returned an error",
+			result.Status, StatusUnhealthy)
+	}
+
+	if result.Error == "" {
+		t.Error("Result.Error is empty for a failed check, so nothing carries the reason the " +
+			"component is unhealthy to whoever reads the endpoint")
+	}
+
+	if comp.checkCount == 0 {
+		t.Error("the component's HealthCheck was never called")
 	}
 }

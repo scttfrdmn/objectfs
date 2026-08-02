@@ -24,10 +24,18 @@ import (
 // The three functions below were the uncovered ones: setTCPCongestion at 0%, newPlatformDialer at
 // 20% (its Control closure never invoked, because nothing dialed), and the procfs readers at 87.5%
 // and 75% — the absent-file arms, which is the case that actually varies between hosts.
+//
+// The readers take their path as a parameter, so every case here is parallel. An earlier version
+// redirected package-level variables instead and could not be: each subtest would have raced the
+// variable its sibling had just assigned. That is worth stating because the sequential version
+// passed on macOS — where this file is not compiled at all — and only CI, which does compile it,
+// reported the nine paralleltest findings.
 
 // TestReadAvailableAlgorithmsParsesProcfs pins the parse against the shape a kernel writes: names
 // separated by spaces on a single line with a trailing newline.
 func TestReadAvailableAlgorithmsParsesProcfs(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name    string
 		content string
@@ -69,12 +77,9 @@ func TestReadAvailableAlgorithmsParsesProcfs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Not parallel: these subtests rewrite the package-level path variables. t.Setenv-style
-			// serialization by omission is deliberate — a parallel subtest here would race the
-			// variable it just set against a sibling's.
-			withAvailablePath(t, tc.content)
+			t.Parallel()
 
-			got, err := readAvailableAlgorithms()
+			got, err := readAvailableAlgorithms(writeFile(t, t.TempDir(), "available", tc.content))
 			if err != nil {
 				t.Fatalf("readAvailableAlgorithms: %v", err)
 			}
@@ -88,9 +93,9 @@ func TestReadAvailableAlgorithmsParsesProcfs(t *testing.T) {
 
 // TestReadSystemDefaultParsesProcfs is the same for the one-value file.
 func TestReadSystemDefaultParsesProcfs(t *testing.T) {
-	withSystemDefaultPath(t, "bbr\n")
+	t.Parallel()
 
-	got, err := readSystemDefault()
+	got, err := readSystemDefault(writeFile(t, t.TempDir(), "default", "bbr\n"))
 	if err != nil {
 		t.Fatalf("readSystemDefault: %v", err)
 	}
@@ -107,18 +112,20 @@ func TestReadSystemDefaultParsesProcfs(t *testing.T) {
 // kernel built without CONFIG_TCP_CONG_ADVANCED, or a sandbox that denies the read. Detect must
 // still return a usable result, because the alternative is that a mount fails over a tuning hint.
 func TestProcfsReadsFailSoftly(t *testing.T) {
+	t.Parallel()
+
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 
 	t.Run("readers report the error", func(t *testing.T) {
-		setPaths(t, missing, missing)
+		t.Parallel()
 
-		if _, err := readAvailableAlgorithms(); err == nil {
+		if _, err := readAvailableAlgorithms(missing); err == nil {
 			t.Error("readAvailableAlgorithms returned nil error for a path that does not exist")
 		} else if !strings.Contains(err.Error(), "available congestion algorithms") {
 			t.Errorf("the error does not say which read failed: %v", err)
 		}
 
-		if _, err := readSystemDefault(); err == nil {
+		if _, err := readSystemDefault(missing); err == nil {
 			t.Error("readSystemDefault returned nil error for a path that does not exist")
 		} else if !strings.Contains(err.Error(), "system congestion default") {
 			t.Errorf("the error does not say which read failed: %v", err)
@@ -126,9 +133,9 @@ func TestProcfsReadsFailSoftly(t *testing.T) {
 	})
 
 	t.Run("detect still returns a usable result", func(t *testing.T) {
-		setPaths(t, missing, missing)
+		t.Parallel()
 
-		result := detect()
+		result := detectFrom(missing, missing)
 
 		if !result.Supported {
 			t.Error("Supported is false on Linux. It reports whether the platform has per-socket " +
@@ -145,13 +152,13 @@ func TestProcfsReadsFailSoftly(t *testing.T) {
 
 // TestDetectPrefersBBRFromProcfs is the whole path end to end: parse, select, report.
 func TestDetectPrefersBBRFromProcfs(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
-	setPaths(t,
+	result := detectFrom(
 		writeFile(t, dir, "available", "reno cubic bbr\n"),
 		writeFile(t, dir, "default", "cubic\n"),
 	)
-
-	result := detect()
 
 	if result.Recommended != AlgorithmBBR {
 		t.Errorf("Recommended is %q, want %q: bbr is available, and it is preferred over both cubic "+
@@ -160,6 +167,30 @@ func TestDetectPrefersBBRFromProcfs(t *testing.T) {
 
 	if result.SystemDefault != AlgorithmCUBIC {
 		t.Errorf("SystemDefault is %q, want %q", result.SystemDefault, AlgorithmCUBIC)
+	}
+}
+
+// TestDetectReadsTheRealProcfs covers detect itself, which is the arm production calls.
+//
+// detectFrom above is where the assertions can be specific, because it is handed known content. This
+// one asserts only what is true of any Linux kernel, which is the most that can be said about a file
+// whose content is the host's business: the call returns, reports the platform as supported, and
+// recommends something the kernel actually listed. Without it, the one-line wrapper that supplies the
+// real paths is untested, and a typo in either constant would be invisible.
+func TestDetectReadsTheRealProcfs(t *testing.T) {
+	t.Parallel()
+
+	result := detect()
+
+	if !result.Supported {
+		t.Error("Supported must be true on Linux regardless of what procfs holds")
+	}
+
+	if result.Recommended != AlgorithmAuto && !slices.Contains(result.Available, result.Recommended) {
+		t.Errorf("Recommended is %q, which is not in Available %v and is not %q. A recommendation "+
+			"the kernel cannot honor is worse than no recommendation: setsockopt fails and the "+
+			"error is discarded, so the connection silently keeps the default",
+			result.Recommended, result.Available, AlgorithmAuto)
 	}
 }
 
@@ -175,6 +206,8 @@ func TestDetectPrefersBBRFromProcfs(t *testing.T) {
 // contract — best effort, never fail the dial — so a hostile kernel is a pass here and a failed
 // dial is not.
 func TestPlatformDialerSetsCongestionOnRealConnection(t *testing.T) {
+	t.Parallel()
+
 	ln := loopbackListener(t)
 
 	for _, algo := range []Algorithm{AlgorithmAuto, "", AlgorithmCUBIC, AlgorithmReno, AlgorithmBBR,
@@ -182,7 +215,7 @@ func TestPlatformDialerSetsCongestionOnRealConnection(t *testing.T) {
 		t.Run(string(algo), func(t *testing.T) {
 			t.Parallel()
 
-			conn, err := newPlatformDialer(algo).Dial("tcp", ln.Addr().String())
+			conn, err := newPlatformDialer(algo).DialContext(t.Context(), "tcp", ln.Addr().String())
 			if err != nil {
 				t.Fatalf("dial with algo %q failed: %v. The Control hook must never fail a "+
 					"connection over congestion control — a tuning preference the kernel declines "+
@@ -220,7 +253,9 @@ func TestPlatformDialerSetsCongestionOnRealConnection(t *testing.T) {
 // test skips in those cases rather than asserting a privilege it does not have — but it does not skip
 // on the interesting outcome, so on a normal Linux host the round trip really is checked.
 func TestSetTCPCongestionAppliesAnAvailableAlgorithm(t *testing.T) {
-	available, err := readAvailableAlgorithms()
+	t.Parallel()
+
+	available, err := readAvailableAlgorithms(availableAlgorithmsPath)
 	if err != nil || len(available) == 0 {
 		t.Skipf("this kernel lists no congestion algorithms to set (err=%v)", err)
 	}
@@ -262,28 +297,6 @@ func TestSetTCPCongestionAppliesAnAvailableAlgorithm(t *testing.T) {
 
 // --- helpers ---
 
-// setPaths points the procfs readers at the given files for the duration of the test.
-func setPaths(t *testing.T, available, systemDefault string) {
-	t.Helper()
-
-	origAvailable, origDefault := availableAlgorithmsPath, systemDefaultPath
-	availableAlgorithmsPath, systemDefaultPath = available, systemDefault
-
-	t.Cleanup(func() {
-		availableAlgorithmsPath, systemDefaultPath = origAvailable, origDefault
-	})
-}
-
-func withAvailablePath(t *testing.T, content string) {
-	t.Helper()
-	setPaths(t, writeFile(t, t.TempDir(), "available", content), systemDefaultPath)
-}
-
-func withSystemDefaultPath(t *testing.T, content string) {
-	t.Helper()
-	setPaths(t, availableAlgorithmsPath, writeFile(t, t.TempDir(), "default", content))
-}
-
 func writeFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 
@@ -299,7 +312,9 @@ func writeFile(t *testing.T, dir, name, content string) string {
 func loopbackListener(t *testing.T) net.Listener {
 	t.Helper()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("cannot listen on loopback in this environment: %v", err)
 	}
@@ -323,7 +338,9 @@ func loopbackListener(t *testing.T) net.Listener {
 func loopbackConn(t *testing.T) net.Conn {
 	t.Helper()
 
-	conn, err := net.Dial("tcp", loopbackListener(t).Addr().String())
+	var d net.Dialer
+
+	conn, err := d.DialContext(t.Context(), "tcp", loopbackListener(t).Addr().String())
 	if err != nil {
 		t.Skipf("cannot dial loopback in this environment: %v", err)
 	}

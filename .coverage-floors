@@ -18,7 +18,7 @@
 #                                      its behavior is reachable by calling a node method instead of
 #                                      by mounting
 #   internal/adapter    45.7% → 46.9%  see its own note below; the floor stays at 40 on purpose
-#   internal/health     45.0%          reachable now that pkg/health's probe path exists
+#   internal/health     48.5%          reachable now that pkg/health's probe path exists
 #   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
 #                                      work
 #
@@ -55,7 +55,14 @@ internal/cost            98
 internal/difftest        75
 internal/distributed     67
 internal/filesystem      88
-internal/health          45
+# 45 → 48: the previous floor was not a stable measurement. Eight tests started a Monitor whose
+# default Config enables the health endpoint on the fixed port 8081, so each Start raced its siblings
+# for one port; the losers hit startHTTPServer's bind-error arm, and how many did was a matter of
+# goroutine scheduling. The package measured 45.0% on an idle machine and 44.7% under CI's load, and
+# the floor had been set from the luckier run — so CI failed a gate that passed locally, over two
+# statements nothing had deliberately tested. Tests that are not about the endpoint no longer open
+# one, the two that are bind port 0, and the result is 48.5% at every -cpu value from 1 to 8.
+internal/health          48
 # 79 → 85: the wiring tests scrape the endpoint over a socket rather than inspecting the collector's
 # fields, which is what reaches Start, the HTTP handlers, and the label validation. None of that was
 # callable from a test that only constructed a collector — and a collector with no listener gathers
