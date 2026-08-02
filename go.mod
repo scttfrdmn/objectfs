@@ -13,9 +13,10 @@ require (
 	github.com/klauspost/compress v1.18.0
 	github.com/pierrec/lz4/v4 v4.1.22
 	github.com/prometheus/client_golang v1.22.0
+	github.com/prometheus/client_model v0.6.2
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/scttfrdmn/cargoship v0.13.0
-	github.com/scttfrdmn/substrate v0.82.0
+	github.com/scttfrdmn/substrate v0.85.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -56,7 +57,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

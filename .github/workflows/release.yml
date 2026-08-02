@@ -6,7 +6,9 @@ on:
     - v*.*.*
 
 env:
-  GO_VERSION: '1.24'
+  # Read from go.mod so a toolchain bump cannot leave this behind. It said 1.24 while go.mod said
+  # 1.26.0, which is a release built by a compiler no CI job had ever run.
+  GO_VERSION_FILE: go.mod
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
@@ -80,6 +82,12 @@ jobs:
     needs: create-release
     permissions:
       contents: write
+    # Linux and macOS only, because that is what builds. `internal/fuse` carries
+    # `//go:build linux || darwin` and `platform_unsupported.go` fails the build on anything else by
+    # design, so windows/amd64 and freebsd/amd64 could never have produced an artifact — and
+    # linux/armv7 fails separately on a 32-bit `int` overflow in `safeIntToUint32`. Three of the
+    # previous seven matrix entries were guaranteed-red jobs. Adding a platform back means adding a
+    # FUSE binding for it first; see internal/fuse/doc.go.
     strategy:
       matrix:
         include:
@@ -89,23 +97,12 @@ jobs:
         - goos: linux
           goarch: arm64
           name: linux-arm64
-        - goos: linux
-          goarch: arm
-          goarm: 7
-          name: linux-armv7
         - goos: darwin
           goarch: amd64
           name: darwin-amd64
         - goos: darwin
           goarch: arm64
           name: darwin-arm64
-        - goos: windows
-          goarch: amd64
-          name: windows-amd64
-          ext: .exe
-        - goos: freebsd
-          goarch: amd64
-          name: freebsd-amd64
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -113,46 +110,49 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: ${{ env.GO_VERSION_FILE }}
 
     - name: Cache Go modules
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-${{ hashFiles('go.mod') }}-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-${{ env.GO_VERSION }}-
+          ${{ runner.os }}-go-${{ hashFiles('go.mod') }}-
+
+    - name: Verify the tag matches the version the binary reports
+      run: |
+        TAG=${GITHUB_REF#refs/tags/}
+        DECLARED=$(sed -n 's/^[[:space:]]*version = "\(.*\)"/\1/p' cmd/objectfs/main.go)
+        if [ "$TAG" != "v$DECLARED" ]; then
+          echo "::error::tag $TAG does not match cmd/objectfs/main.go version \"$DECLARED\""
+          echo "The binary reports its version from that constant, so a mismatch ships a release"
+          echo "whose --version output contradicts its own tag."
+          exit 1
+        fi
+        echo "tag $TAG matches the declared version"
 
     - name: Build binary
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
-        GOARM: ${{ matrix.goarm }}
         CGO_ENABLED: 0
       run: |
-        VERSION=${GITHUB_REF#refs/tags/}
-        COMMIT=$(git rev-parse --short HEAD)
-        BUILD_TIME=$(date -u '+%Y-%m-%d_%I:%M:%S%p')
-
-        LDFLAGS="-s -w -X main.Version=$VERSION -X main.Commit=$COMMIT -X main.BuildTime=$BUILD_TIME"
+        # No -X ldflags: `main.Version` does not exist. cmd/objectfs/main.go declares an untyped
+        # `version` *constant*, which the linker cannot rewrite, so every previous release silently
+        # ignored these flags and shipped a binary reporting the hardcoded value. The step above
+        # asserts the constant and the tag agree instead of pretending to inject one.
+        LDFLAGS="-s -w"
 
         mkdir -p dist
-        BINARY_NAME="objectfs-${{ matrix.name }}${{ matrix.ext }}"
+        BINARY_NAME="objectfs-${{ matrix.name }}"
         go build -ldflags "$LDFLAGS" -tags "release,netgo" -o "dist/$BINARY_NAME" ./cmd/objectfs
 
-        # Create tarball (except for Windows)
         cd dist
-        if [ "${{ matrix.goos }}" != "windows" ]; then
-          tar -czf "$BINARY_NAME.tar.gz" "$BINARY_NAME"
-          echo "ASSET_PATH=dist/$BINARY_NAME.tar.gz" >> $GITHUB_ENV
-          echo "ASSET_NAME=$BINARY_NAME.tar.gz" >> $GITHUB_ENV
-          echo "ASSET_CONTENT_TYPE=application/gzip" >> $GITHUB_ENV
-        else
-          zip "$BINARY_NAME.zip" "$BINARY_NAME"
-          echo "ASSET_PATH=dist/$BINARY_NAME.zip" >> $GITHUB_ENV
-          echo "ASSET_NAME=$BINARY_NAME.zip" >> $GITHUB_ENV
-          echo "ASSET_CONTENT_TYPE=application/zip" >> $GITHUB_ENV
-        fi
+        tar -czf "$BINARY_NAME.tar.gz" "$BINARY_NAME"
+        echo "ASSET_PATH=dist/$BINARY_NAME.tar.gz" >> $GITHUB_ENV
+        echo "ASSET_NAME=$BINARY_NAME.tar.gz" >> $GITHUB_ENV
+        echo "ASSET_CONTENT_TYPE=application/gzip" >> $GITHUB_ENV
 
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
@@ -289,7 +289,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: ${{ env.GO_VERSION_FILE }}
 
     - name: Generate documentation
       run: |

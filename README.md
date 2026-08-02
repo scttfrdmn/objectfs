@@ -11,32 +11,35 @@
 [![GitHub issues](https://img.shields.io/github/issues/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/issues)
 [![GitHub stars](https://img.shields.io/github/stars/scttfrdmn/objectfs)](https://github.com/scttfrdmn/objectfs/stargazers)
 
-> ## ⚠️ v0.10.0 is withdrawn — do not use it
+> ## ⚠️ v0.10.0 is withdrawn — upgrade if you are on it
 >
-> A deep audit of v0.10.0 found defects that lose or corrupt user data. **v0.10.1 is in progress.**
-> Until it is released, no tagged version of ObjectFS should be used for data you care about.
+> A deep audit of v0.10.0 found defects that lose or corrupt user data. All of the ones below are
+> fixed in the current release, each with a test that fails on the old code. **If you are running
+> v0.10.0, upgrade and re-verify any data written through it** — the write-path defect corrupted
+> objects silently, so a bucket can hold damage that nothing has reported yet.
 >
-> The three that matter most:
->
-> | | Defect | Effect |
+> | | Defect in v0.10.0 | Effect |
 > |---|---|---|
-> | **C1** | The shipped default configuration selects a compression algorithm the codec factory rejects | `objectfs s3://bucket /mnt` **cannot mount** — it exits with `Failed to start adapter` |
-> | **H7** | The write-buffer flush callback discards the write offset and issues a whole-object `PutObject` | **Silent data loss.** Appending one byte to a 1 MiB file leaves a 1-byte object |
-> | **C4** | Read amplification is keyed off the compression *config*, not the object, so a ranged read fetches the entire object | A 4 KiB read of a 10 GiB object transfers 10 GiB. Measured 216× penalty on a 256 MiB object |
+> | **C1** | The shipped default configuration selected a compression algorithm the codec factory rejects | `objectfs s3://bucket /mnt` **could not mount** — it exited with `Failed to start adapter` |
+> | **H7** | The write-buffer flush callback discarded the write offset and issued a whole-object `PutObject` | **Silent data loss.** Appending one byte to a 1 MiB file left a 1-byte object |
+> | **C4** | Read amplification was keyed off the compression *config*, not the object, so a ranged read fetched the whole object | A 4 KiB read of a 10 GiB object transferred 10 GiB. Measured 216× penalty on a 256 MiB object |
+> | **C2** | Reading an object whose stored `Content-Encoding` did not match the configured codec returned raw compressed bytes with exit status 0 | Corruption presented as success. The `objectfs-sha256` the write path recorded was never read |
+> | **H5/H6** | The read cache was keyed on request *length* and never invalidated on write | Structurally could not hit; read-after-write on one descriptor returned pre-write bytes |
+> | **D11** | `rm` reported success while the S3 object survived | go-fuse's default for an unimplemented `Unlink` is *success*. Deletion now fails loudly (#163) |
 >
-> Also in scope for v0.10.1: reading an object whose stored `Content-Encoding` does not match the
-> configured codec returns raw compressed bytes with exit status 0 instead of failing; the read cache
-> is keyed on request *length* so it structurally cannot hit and is never invalidated on write; and
-> `rm` reports success while the S3 object survives.
+> To check a bucket written by v0.10.0: compare each object's `objectfs-sha256` user-metadata against
+> its content, and check that `HeadObject`'s `ContentLength` matches the size your application wrote.
+> The C4 amplification cost egress but did not damage data.
 >
 > The same audit found that much of this README claimed things the code does not do. Those claims
 > have been replaced with what is actually implemented — see
 > [Supported filesystem operations](#supported-filesystem-operations) and
-> [Data integrity](#data-integrity) below, which are now the two sections to read before trusting
+> [Data integrity](#data-integrity) below, which are the two sections to read before trusting
 > ObjectFS with anything.
 >
-> Track progress: [issues](https://github.com/scttfrdmn/objectfs/issues) ·
-> [v0.10.1 milestone](https://github.com/scttfrdmn/objectfs/milestones)
+> ObjectFS is **not** a POSIX-compliant filesystem, and several defects from the same audit are still
+> open — see [issues](https://github.com/scttfrdmn/objectfs/issues) and the
+> [milestones](https://github.com/scttfrdmn/objectfs/milestones).
 
 **A FUSE filesystem that mounts an S3 bucket as a directory, built for research computing.**
 

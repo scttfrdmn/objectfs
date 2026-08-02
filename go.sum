@@ -127,8 +127,8 @@ github.com/sagikazarmark/locafero v0.11.0 h1:1iurJgmM9G3PA/I+wWYIOw/5SyBtxapeHDc
 github.com/sagikazarmark/locafero v0.11.0/go.mod h1:nVIGvgyzw595SUSUE6tvCp3YYTeHs15MvlmU87WwIik=
 github.com/scttfrdmn/cargoship v0.13.0 h1:LlkRbcpw8TiRcetRg2BFUJr0NiNGBQvThVDUUdOR1ms=
 github.com/scttfrdmn/cargoship v0.13.0/go.mod h1:Jt72iXBE5fAI0GdW0vPSfg9O0w+USqWd8FUwWb6nQ8g=
-github.com/scttfrdmn/substrate v0.82.0 h1:uOarZI06SUyI++i+SxAChuGSyyju/IZG/0+pRPrvH+8=
-github.com/scttfrdmn/substrate v0.82.0/go.mod h1:q0Q4+aLxZdA8peP/zcRLx2oiVQ/78FbO8qxv+ToABlA=
+github.com/scttfrdmn/substrate v0.85.0 h1:PLoj+u+nbQ0Kh28qs5Qw1Vt1TXaFmkyev9XsfmqwE3E=
+github.com/scttfrdmn/substrate v0.85.0/go.mod h1:q0Q4+aLxZdA8peP/zcRLx2oiVQ/78FbO8qxv+ToABlA=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 h1:+jumHNA0Wrelhe64i8F6HNlS8pkoyMv5sreGx2Ry5Rw=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8/go.mod h1:3n1Cwaq1E1/1lhQhtRK2ts/ZwZEhjcQeJQ1RuC6Q/8U=
 github.com/spf13/afero v1.15.0 h1:b/YBCLWAJdFWJTN9cLhiXXcD7mzKn9Dm86dNnfyQw1I=
