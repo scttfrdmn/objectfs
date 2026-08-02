@@ -25,8 +25,29 @@ extern const char *_GoStringPtr(_GoString_ s);
 
 
 #include "objectfs_types.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+// objectfs_client_t is an opaque token, not an address: it carries an int64 index into a Go-side
+// handle table and is never dereferenced on either side. Converting between the two is done here,
+// in C, rather than in Go with unsafe.Pointer(uintptr(id)).
+//
+// go vet reports that Go form as "possible misuse of unsafe.Pointer" and it is right to: the rule
+// it enforces is that an integer must not become a pointer, because Go's garbage collector may move
+// an object and will not update a value it cannot see is a reference. It has no way to express "this
+// pointer is a token", and it runs outside golangci-lint, so a //nolint directive does not silence
+// it — the two lines that carried one had never suppressed anything.
+//
+// Doing the arithmetic in C makes that structurally true instead of asserted. The value never exists
+// as a Go pointer, so there is nothing for the collector to misinterpret, and the intent is stated
+// by which language the cast is written in.
+//
+// They are typed objectfs_client_t rather than void *: cgo gives the typedef its own Go type, so a
+// void * helper would return unsafe.Pointer and need a conversion at every call site — which is the
+// conversion this exists to remove.
+static inline objectfs_client_t objectfs_id_to_handle(int64_t id) { return (objectfs_client_t)(intptr_t)id; }
+static inline int64_t objectfs_handle_to_id(objectfs_client_t h)  { return (int64_t)(intptr_t)h; }
 
 #line 1 "cgo-generated-wrapper"
 

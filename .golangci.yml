@@ -167,16 +167,6 @@ linters:
         linters:
           - unused
 
-      # sdks/c is cgo, and its handle table converts an int64 index to and from an opaque C
-      # pointer type. That is the documented way to hand a Go-side handle across the cgo boundary
-      # — the value is never dereferenced, which is why it is safe — and unsafeptr has no way to
-      # express "this pointer is a token." A //nolint:govet on each line does not suppress it,
-      # because `go vet` runs outside golangci-lint and reports it anyway.
-      - path: 'sdks/c/'
-        text: 'possible misuse of unsafe.Pointer'
-        linters:
-          - govet
-
 issues:
   # Report everything. A cap that hides findings is how a lint gate becomes decorative.
   max-issues-per-linter: 0
