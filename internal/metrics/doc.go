@@ -280,7 +280,7 @@ has no caller outside this package's own tests, so nothing a mount does reaches 
 here because it may be wired up, not because it runs.
 
 Two things in it do not work as their field names suggest, and are stated here rather than left for
-whoever wires it up to discover:
+whoever wires it up to discover. Both are tracked in issue 222:
 
   - DetailedOperationMetrics.P50Latency, P95Latency, and P99Latency are declared and never assigned.
     They are always zero. Anything serializing this struct — the JSON tags are p50_latency and
