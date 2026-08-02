@@ -74,7 +74,8 @@ jobs:
         sarif_file: gosec.sarif
 
     - name: Run Trivy vulnerability scanner (repo)
-      uses: aquasecurity/trivy-action@0.28.0
+      # v-prefixed: `@0.28.0` does not resolve. See the note in release.yml.
+      uses: aquasecurity/trivy-action@v0.36.0
       with:
         scan-type: fs
         scan-ref: .
