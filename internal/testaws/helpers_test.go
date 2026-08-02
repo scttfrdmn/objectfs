@@ -60,3 +60,16 @@ func startMultipart(t *testing.T, ts *testaws.TestServer, key string) string {
 
 	return uploadID
 }
+
+// noRetry disables the SDK's own retrying for one operation.
+//
+// It exists because the raw client is not the naive caller it looks like. `newClient` leaves the
+// SDK's default retryer in place — three attempts — so an injected fault armed for two fires is
+// spent by attempts one and two and the operation *succeeds* on the third, with the caller seeing no
+// error at all. That is the trap this whole mechanism exists to avoid, reappearing one layer up: a
+// test asserting "the request failed" would pass or fail depending on how the fault budget compares
+// against a retry budget nobody mentioned. Faults are counted at the proxy, so a test about the
+// proxy has to make exactly one request per call.
+func noRetry(o *awss3.Options) {
+	o.Retryer = aws.NopRetryer{}
+}

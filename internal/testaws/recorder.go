@@ -1,11 +1,14 @@
 package testaws
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +33,10 @@ type Request struct {
 	Range string
 
 	// Status is the response status. A served range answers 206.
+	//
+	// Zero means no response was sent at all, which happens when a [Fault] aborted the request.
+	// Such a request is still recorded: a test asserting that a failed request was retried has to
+	// be able to count the attempt that failed.
 	Status int
 
 	// ResponseBytes is the number of body bytes the server actually sent.
@@ -53,6 +60,168 @@ func (r Request) IsRanged() bool { return r.Range != "" }
 type recorder struct {
 	mu       sync.Mutex
 	requests []Request
+	faults   []*fault
+}
+
+// Fault makes matching requests fail before they reach the emulator, a bounded number of times.
+//
+// # Why this is here and not in substrate's fault controller
+//
+// substrate injects faults by probability (`FaultRule.Probability`), which is the right primitive
+// for soak testing and the wrong one for a regression test: "fail chunk 3 once, then let it
+// succeed" cannot be expressed as a probability, and a test that retries until a coin lands is a
+// flake. The behaviors this harness has to pin are exactly of that shape — a transient failure on
+// one chunk of a parallel read must be retried and the read must still return correct bytes — so
+// the count has to be exact. A substrate issue tracks adding a max-fires bound upstream; until
+// then, this interposes at the proxy the harness already owns.
+//
+// It sits in front of the emulator rather than inside it, which has a consequence worth knowing:
+// the failed request never reaches S3, so it appears in [TestServer.Requests] but not in the
+// emulator's event store, and [TestServer.Operations] will not count it.
+type Fault struct {
+	// Method is the HTTP method to match, e.g. "GET". Empty matches any method.
+	Method string
+
+	// KeySuffix matches against the request path, which under path-style addressing is
+	// "/bucket/key". Empty matches any path.
+	KeySuffix string
+
+	// RangePrefix matches the start of the Range header, which is how a specific chunk of a
+	// parallel read is singled out: "bytes=1048576-" picks the chunk starting at 1 MiB. Empty
+	// matches any request, ranged or not.
+	RangePrefix string
+
+	// Status is the HTTP status to answer with. Defaults to 500, which the AWS SDK treats as a
+	// retryable server error.
+	Status int
+
+	// Code is the S3 error code in the XML body, e.g. "InternalError". Defaults to
+	// "InternalError". This is what the SDK's retry classifier reads, so a code S3 does not
+	// consider retryable produces a request that fails once and stays failed.
+	Code string
+
+	// Times is how many matching requests to fail. Zero means one — a Fault that fails nothing is
+	// never what a caller meant, and reading `Times: 0` as "unlimited" would turn a typo into a
+	// test that hangs on the retry budget.
+	Times int
+
+	// OnFire is called when the fault fires, before the error response is written.
+	//
+	// It exists to make a race deterministic. Some behaviors are only reachable when something
+	// happens *between* two requests of one operation — an object replaced between the first chunk
+	// of a parallel read and its retry, say — and a test that races a goroutine against the read to
+	// arrange that is a flake. Firing a fault is a known point in the sequence, so a hook there
+	// turns the interleaving into a fixture.
+	//
+	// It runs on the proxy's goroutine while the request that triggered it is held, so the caller
+	// sees the effect on every subsequent request. It must not itself make a request that the same
+	// fault would match — the fault's budget is already claimed by then, so it will not recurse,
+	// but a fault armed for more fires would.
+	OnFire func()
+}
+
+// fault is a Fault plus its remaining budget.
+type fault struct {
+	spec      Fault
+	remaining int
+	fired     int
+}
+
+func (f *fault) matches(r *http.Request) bool {
+	if f.spec.Method != "" && r.Method != f.spec.Method {
+		return false
+	}
+
+	if f.spec.KeySuffix != "" && !strings.HasSuffix(r.URL.Path, "/"+strings.TrimPrefix(f.spec.KeySuffix, "/")) {
+		return false
+	}
+
+	if f.spec.RangePrefix != "" && !strings.HasPrefix(r.Header.Get("Range"), f.spec.RangePrefix) {
+		return false
+	}
+
+	return true
+}
+
+// take claims one fire from a matching fault, returning the spec to serve and whether one was
+// claimed. Matching and decrementing happen under the same lock, so N concurrent chunk requests
+// against a fault with Times 1 produce exactly one failure — the property the whole mechanism
+// exists for.
+func (r *recorder) take(req *http.Request) (Fault, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, f := range r.faults {
+		if f.remaining <= 0 || !f.matches(req) {
+			continue
+		}
+
+		f.remaining--
+		f.fired++
+
+		return f.spec, true
+	}
+
+	return Fault{}, false
+}
+
+// InjectFault arms a fault. Faults are matched in the order they were added, and the first match
+// with budget remaining fires.
+func (ts *TestServer) InjectFault(f Fault) {
+	if f.Times <= 0 {
+		f.Times = 1
+	}
+	if f.Status == 0 {
+		f.Status = http.StatusInternalServerError
+	}
+	if f.Code == "" {
+		f.Code = "InternalError"
+	}
+
+	ts.rec.mu.Lock()
+	defer ts.rec.mu.Unlock()
+
+	ts.rec.faults = append(ts.rec.faults, &fault{spec: f, remaining: f.Times})
+}
+
+// FaultsFired returns how many injected faults have actually fired.
+//
+// A test that arms a fault and then asserts the operation succeeded has proven nothing unless the
+// fault fired: a matcher that matches nothing produces exactly the same passing test as a working
+// retry. This is what makes that difference visible.
+func (ts *TestServer) FaultsFired() int {
+	ts.rec.mu.Lock()
+	defer ts.rec.mu.Unlock()
+
+	var total int
+	for _, f := range ts.rec.faults {
+		total += f.fired
+	}
+
+	return total
+}
+
+// ClearFaults disarms every fault, including budget not yet spent.
+func (ts *TestServer) ClearFaults() {
+	ts.rec.mu.Lock()
+	defer ts.rec.mu.Unlock()
+
+	ts.rec.faults = nil
+}
+
+// serveFault writes an S3-shaped error response. The body matters: the AWS SDK parses the Code out
+// of it to decide whether the error is retryable, and a bare status with an empty body classifies
+// differently from the same status with an InternalError body.
+func serveFault(w http.ResponseWriter, spec Fault) {
+	body := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Error><Code>` + spec.Code + `</Code>` +
+		`<Message>injected by testaws</Message>` +
+		`<RequestId>testaws-injected</RequestId></Error>`
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(spec.Status)
+	_, _ = w.Write([]byte(body))
 }
 
 // countingBody wraps a response body to count the bytes that pass through it.
@@ -106,9 +275,18 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 		},
 	}
 
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		// A proxy failure must be loud: silently returning a 502 would look to the SDK like an
-		// S3 error and send a test down the wrong path entirely.
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// A client that went away is not a proxy failure. It is the expected outcome for any test
+		// about cancellation — an abandoned parallel read, a FUSE interrupt, a context deadline —
+		// and reporting it would make the mechanism under test indistinguishable from a broken
+		// fixture. The cancellation is already visible where it matters: the request is recorded
+		// with a zero status and a short byte count.
+		if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
+			return
+		}
+
+		// Anything else must be loud: silently returning a 502 would look to the SDK like an S3
+		// error and send a test down the wrong path entirely.
 		t.Errorf("testaws: proxy to the emulator failed: %v", err)
 		w.WriteHeader(http.StatusBadGateway)
 	}
@@ -126,7 +304,20 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 		}
 
 		capture := &capturingWriter{ResponseWriter: w}
-		proxy.ServeHTTP(capture, r)
+
+		// A fault is claimed before proxying, so the request never reaches the emulator and its
+		// state is untouched — which is what lets a test arm a failure against an object and still
+		// read the object's real bytes on the retry.
+		if spec, faulted := rec.take(r); faulted {
+			if spec.OnFire != nil {
+				// Before the response, so a test that arms a side effect here can rely on it having
+				// happened by the time the client observes the failure.
+				spec.OnFire()
+			}
+			serveFault(capture, spec)
+		} else {
+			proxy.ServeHTTP(capture, r)
+		}
 
 		observed.Status = capture.status
 		observed.ResponseBytes = capture.written

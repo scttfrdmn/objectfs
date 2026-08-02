@@ -7,7 +7,9 @@ package s3
 // internal/testaws for a real S3 endpoint, and testaws imports this package, so an in-package test
 // that used the harness would be an import cycle.
 
-import "github.com/objectfs/objectfs/internal/circuit"
+import (
+	"github.com/objectfs/objectfs/internal/circuit"
+)
 
 // SetPoolSizeForTest overwrites a live backend's pool size.
 //

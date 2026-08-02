@@ -7,6 +7,26 @@ import (
 	"github.com/objectfs/objectfs/pkg/retry"
 )
 
+// Parallel-read fallbacks, applied when a Config reaches [Backend.parallelGetObject] with these
+// fields unset.
+//
+// They are named rather than inlined at the point of use because NewBackend's defaulting and the
+// read path's own floors are two places that must agree about the same number: a chunk size that
+// differs between them changes how many GETs a read issues, which is the property
+// TestParallelReadThresholdDrivesFanOut asserts. ParallelReadThreshold is deliberately not among
+// them — zero is how this package spells "parallel reads off".
+const (
+	// defaultReadChunkSize is the bytes per range GET, matching MultipartChunkSize so a read fans
+	// out along the same boundaries a multipart write used.
+	defaultReadChunkSize = 16 * 1024 * 1024
+
+	// defaultParallelReadConcurrency is the fan-out width used when neither
+	// ParallelReadConcurrency nor MultipartConcurrency is set. It matches the default PoolSize:
+	// each concurrent chunk holds a pooled client for the length of its transfer, so a wider
+	// fan-out than the pool would spend its extra width waiting on [ConnectionPool.Get].
+	defaultParallelReadConcurrency = 8
+)
+
 // Config represents S3 backend configuration
 type Config struct {
 	Region          string `yaml:"region"`
@@ -327,12 +347,12 @@ func NewDefaultConfig() *Config {
 			Timeout:          30 * time.Second,
 		},
 		EnableCargoShipOptimization: true,
-		MultipartThreshold:          32 * 1024 * 1024,  // 32MB - trigger multipart for larger files
-		MultipartChunkSize:          16 * 1024 * 1024,  // 16MB - optimal chunk size for performance
-		MultipartConcurrency:        8,                 // Match pool size for concurrent uploads
-		ParallelReadThreshold:       64 * 1024 * 1024,  // 64MB - fan out reads above this size
-		ReadChunkSize:               16 * 1024 * 1024,  // 16MB - matches MultipartChunkSize
-		ParallelReadConcurrency:     0,                 // 0 = inherit MultipartConcurrency (8)
+		MultipartThreshold:          32 * 1024 * 1024, // 32MB - trigger multipart for larger files
+		MultipartChunkSize:          16 * 1024 * 1024, // 16MB - optimal chunk size for performance
+		MultipartConcurrency:        8,                // Match pool size for concurrent uploads
+		ParallelReadThreshold:       64 * 1024 * 1024, // 64MB - fan out reads above this size
+		ReadChunkSize:               defaultReadChunkSize,
+		ParallelReadConcurrency:     0,                 // 0 = inherit MultipartConcurrency
 		StorageTier:                 TierStandard,      // Default to Standard tier
 		TierConstraints:             TierConstraints{}, // Use tier defaults
 		Compression: CompressionConfig{

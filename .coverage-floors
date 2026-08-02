@@ -53,7 +53,7 @@ internal/filesystem      88
 internal/health          45
 internal/metrics         79
 internal/network         100
-internal/testaws         57
+internal/testaws         61
 internal/vfs             98
 
 # internal/storage/s3 goes from 71 to 73 with the two operations the node contract added to the

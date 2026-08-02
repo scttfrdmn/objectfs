@@ -404,15 +404,15 @@ func TestMultipartContentEncodingProbeMatchesTheEndpoint(t *testing.T) {
 		t.Fatalf("UploadPart: %v", err)
 	}
 
-	if _, err := client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
+	if _, completeErr := client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(ts.Bucket),
 		Key:      aws.String(key),
 		UploadId: create.UploadId,
 		MultipartUpload: &s3types.CompletedMultipartUpload{
 			Parts: []s3types.CompletedPart{{PartNumber: aws.Int32(1), ETag: part.ETag}},
 		},
-	}); err != nil {
-		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}); completeErr != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", completeErr)
 	}
 
 	head, err := client.HeadObject(ctx, &awss3.HeadObjectInput{
@@ -500,5 +500,248 @@ func TestRequireRangeGETSkipsRatherThanPassing(t *testing.T) {
 	if n := ts.BytesRead(key); n != 1024 {
 		t.Errorf("BytesRead = %d for a 1 KiB range of a 64 KiB object; a whole-object transfer "+
 			"would read %d", n, len(body))
+	}
+}
+
+// TestInjectFaultFailsExactlyItsBudget is the fault injector's own regression test, and the reason
+// it needs one is the same reason FaultsFired exists: a matcher that matches nothing produces a
+// passing test indistinguishable from a working retry. The count has to be exact in both
+// directions — one fewer and the failure under test never happens, one more and a retry budget the
+// caller sized for one failure is exhausted by the harness.
+func TestInjectFaultFailsExactlyItsBudget(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const key = "faulted"
+	ts.PutObject(key, []byte("real bytes"))
+	ts.ResetRequests()
+
+	// A raw client with retrying off. Both halves matter: a Backend retries, and so does the raw
+	// SDK client — see noRetry. What is under test is the proxy, so each call has to make exactly
+	// one request.
+	client := ts.Client()
+
+	ts.InjectFault(testaws.Fault{Method: "GET", KeySuffix: key, Times: 2})
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := client.GetObject(context.Background(), &awss3.GetObjectInput{
+			Bucket: aws.String(ts.Bucket),
+			Key:    aws.String(key),
+		}, noRetry); err == nil {
+			t.Fatalf("attempt %d succeeded against an armed fault", attempt)
+		}
+	}
+
+	if fired := ts.FaultsFired(); fired != 2 {
+		t.Fatalf("FaultsFired = %d after two matching requests, want 2", fired)
+	}
+
+	// Budget spent: the third request must reach the emulator and return the object's real bytes.
+	// This is what makes "fail once, then succeed" expressible, which is the whole point of a
+	// bounded fault rather than substrate's probabilistic one.
+	if got := ts.GetObject(key); string(got) != "real bytes" {
+		t.Errorf("after the budget was spent the object read %q, want %q", got, "real bytes")
+	}
+	if fired := ts.FaultsFired(); fired != 2 {
+		t.Errorf("FaultsFired = %d after the budget was spent, want 2: the fault fired past its "+
+			"budget", fired)
+	}
+
+	// The failed requests are recorded even though no response was written, because a test asserting
+	// a retry happened has to be able to count the attempt that failed.
+	if gets := ts.GETs(key); len(gets) != 3 {
+		t.Errorf("recorded %d GETs, want 3 (two faulted, one served): %+v", len(gets), gets)
+	}
+}
+
+// TestInjectFaultMatchesOnMethodKeyAndRange pins the matcher's selectivity. Over-matching is the
+// dangerous direction and it is silent: a fault meant for one chunk of a parallel read that also
+// matches the HEAD sizing the read, or the neighboring chunk, fails the operation somewhere other
+// than where the test says it does.
+func TestInjectFaultMatchesOnMethodKeyAndRange(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireRangeGET()
+
+	const key = "selective"
+	ts.PutObject(key, testaws.DeterministicBytes(key, 4096))
+	ts.PutObject("other", []byte("untouched"))
+	ts.ResetRequests()
+
+	// Armed for one specific chunk of one specific key, which is the shape every parallel-read test
+	// uses.
+	ts.InjectFault(testaws.Fault{
+		Method:      "GET",
+		KeySuffix:   key,
+		RangePrefix: "bytes=1024-",
+		Times:       1,
+	})
+
+	client := ts.Client()
+
+	// Each of these differs from the armed fault in exactly one field, so a match by any of them
+	// names which part of the matcher is too loose.
+	nonMatching := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "a different method on the same key",
+			call: func() error {
+				_, err := client.HeadObject(context.Background(), &awss3.HeadObjectInput{
+					Bucket: aws.String(ts.Bucket), Key: aws.String(key),
+				})
+
+				return err
+			},
+		},
+		{
+			name: "the same range on a different key",
+			call: func() error {
+				out, err := client.GetObject(context.Background(),
+					rangedGet(ts.Bucket, "other", "bytes=0-8"))
+				if err == nil {
+					_ = out.Body.Close()
+				}
+
+				return err
+			},
+		},
+		{
+			name: "a different range on the same key",
+			call: func() error {
+				out, err := client.GetObject(context.Background(),
+					rangedGet(ts.Bucket, key, "bytes=2048-3071"))
+				if err == nil {
+					_ = out.Body.Close()
+				}
+
+				return err
+			},
+		},
+	}
+
+	for _, tc := range nonMatching {
+		if err := tc.call(); err != nil {
+			t.Errorf("%s was faulted: %v", tc.name, err)
+		}
+	}
+
+	if fired := ts.FaultsFired(); fired != 0 {
+		t.Fatalf("FaultsFired = %d before any matching request, want 0", fired)
+	}
+
+	out, err := client.GetObject(context.Background(),
+		rangedGet(ts.Bucket, key, "bytes=1024-2047"), noRetry)
+	if err == nil {
+		_ = out.Body.Close()
+
+		t.Fatal("the matching request succeeded against an armed fault")
+	}
+	if fired := ts.FaultsFired(); fired != 1 {
+		t.Errorf("FaultsFired = %d after the matching request, want 1", fired)
+	}
+}
+
+// TestFaultOnFireRunsBeforeTheClientSeesTheFailure pins the hook's ordering, which is the property
+// tests rely on it for: it turns an interleaving into a fixture. A read whose object is replaced
+// between its first chunk and the retry is otherwise a race against a goroutine.
+func TestFaultOnFireRunsBeforeTheClientSeesTheFailure(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const key = "hooked"
+	ts.PutObject(key, []byte("first generation"))
+	ts.ResetRequests()
+
+	ts.InjectFault(testaws.Fault{
+		Method:    "GET",
+		KeySuffix: key,
+		Times:     1,
+		OnFire: func() {
+			// A write from inside the hook, which is the hook's actual use: the object the retry
+			// reads is not the object the first attempt asked for.
+			ts.PutObject(key, []byte("second generation"))
+		},
+	})
+
+	client := ts.Client()
+
+	if _, err := client.GetObject(context.Background(), &awss3.GetObjectInput{
+		Bucket: aws.String(ts.Bucket), Key: aws.String(key),
+	}, noRetry); err == nil {
+		t.Fatal("the armed request succeeded")
+	}
+
+	// The effect must already be visible to the very next request, not eventually.
+	if got := ts.GetObject(key); string(got) != "second generation" {
+		t.Errorf("after the hook fired the object read %q, want %q — the hook's effect was not "+
+			"visible to the request that followed the failure", got, "second generation")
+	}
+}
+
+// TestClearFaultsDisarmsUnspentBudget matters for a fixture that arms a fault, asserts the failure,
+// and then goes on to assert something about the healthy path: leftover budget would fail a request
+// the test believes is unfaulted.
+func TestClearFaultsDisarmsUnspentBudget(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const key = "cleared"
+	ts.PutObject(key, []byte("payload"))
+
+	ts.InjectFault(testaws.Fault{Method: "GET", KeySuffix: key, Times: 5})
+	ts.ClearFaults()
+
+	if got := ts.GetObject(key); string(got) != "payload" {
+		t.Errorf("GetObject = %q after ClearFaults, want %q", got, "payload")
+	}
+	if fired := ts.FaultsFired(); fired != 0 {
+		t.Errorf("FaultsFired = %d after ClearFaults, want 0", fired)
+	}
+}
+
+// TestFaultDefaultsAreTheUsefulOnes pins the zero-value behavior, and Times is the one that would
+// otherwise bite: reading `Times: 0` as unlimited would turn an omitted field into a test that
+// exhausts a retry budget and hangs, so it means one.
+func TestFaultDefaultsAreTheUsefulOnes(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+
+	const key = "defaulted"
+	ts.PutObject(key, []byte("payload"))
+	ts.ResetRequests()
+
+	ts.InjectFault(testaws.Fault{Method: "GET", KeySuffix: key})
+
+	client := ts.Client()
+
+	out, err := client.GetObject(context.Background(), &awss3.GetObjectInput{
+		Bucket: aws.String(ts.Bucket), Key: aws.String(key),
+	}, noRetry)
+	if err == nil {
+		_ = out.Body.Close()
+
+		t.Fatal("a Fault with Times unset failed nothing")
+	}
+
+	// 500 by default, because that is what the AWS SDK treats as a retryable server error — a fault
+	// the SDK declines to retry makes a retry test fail for a reason unrelated to the retry.
+	gets := ts.GETs(key)
+	if len(gets) != 1 {
+		t.Fatalf("recorded %d GETs, want 1: %+v", len(gets), gets)
+	}
+	if gets[0].Status != http.StatusInternalServerError {
+		t.Errorf("faulted GET status = %d, want 500", gets[0].Status)
+	}
+
+	// Times defaulted to one, not unlimited: the next request is served.
+	if got := ts.GetObject(key); string(got) != "payload" {
+		t.Errorf("the request after a single-fire fault read %q, want %q", got, "payload")
 	}
 }

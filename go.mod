@@ -17,6 +17,7 @@ require (
 	github.com/scttfrdmn/cargoship v0.13.0
 	github.com/scttfrdmn/substrate v0.82.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 

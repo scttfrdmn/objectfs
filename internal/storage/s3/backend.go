@@ -20,6 +20,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/objectfs/objectfs/internal/awsname"
 	"github.com/objectfs/objectfs/internal/circuit"
@@ -513,6 +514,15 @@ type objectRead struct {
 	// checked against it. It is a claim about the *stored* bytes: for a compressed object it means the
 	// complete compressed body, which is what decodes to the complete content.
 	whole bool
+
+	// etag is S3's ETag for the object this response was served from.
+	//
+	// It is here for the parallel read path, which issues several GETs for one logical read and has
+	// no other way to tell that they all came from the same object. An overwrite landing between the
+	// first chunk and the last is otherwise completely silent: every range succeeds, the lengths add
+	// up, and the assembled buffer is a splice of two generations of the file that never existed on
+	// either side.
+	etag string
 }
 
 // getObjectRange fetches a byte range of an object, or the whole object when size is not positive,
@@ -530,6 +540,7 @@ func (b *Backend) getObjectRange(
 		contentEncoding string
 		metadata        map[string]string
 		whole           bool
+		etag            string
 	)
 
 	var rangeHeader *string
@@ -548,7 +559,7 @@ func (b *Backend) getObjectRange(
 			// Reset per attempt. A retry that fails after a partial read would otherwise leave the
 			// previous attempt's bytes in place, and the caller cannot tell a stale buffer from a
 			// fresh one (audit finding L24).
-			data, contentEncoding, metadata, whole = nil, "", nil, false
+			data, contentEncoding, metadata, whole, etag = nil, "", nil, false, ""
 
 			input := &s3.GetObjectInput{
 				Bucket: aws.String(b.bucket),
@@ -569,14 +580,22 @@ func (b *Backend) getObjectRange(
 
 				contentEncoding = aws.ToString(result.ContentEncoding)
 				metadata = result.Metadata
+				etag = aws.ToString(result.ETag)
 
 				body, readErr := io.ReadAll(result.Body)
 				if readErr != nil {
 					b.metricsCollector.RecordError(readErr)
-					wrapped := fmt.Errorf("failed to read object body: %w", readErr)
-					b.healthTracker.RecordError("s3-reads", wrapped)
 
-					return wrapped
+					// Through translateError rather than a bare fmt.Errorf: a body read that stops
+					// because the context was canceled has to reach the health tracker as
+					// ErrCodeOperationCanceled, and an unclassified error counts as a service
+					// failure. This is where a canceled read spends most of its time — the GET
+					// returns as soon as the headers arrive, and the body is the part that takes
+					// long enough to be interrupted — so it is the arm that matters most.
+					translatedErr := b.translateError(readErr, "GetObject", key)
+					b.healthTracker.RecordError("s3-reads", translatedErr)
+
+					return translatedErr
 				}
 
 				data = body
@@ -601,7 +620,13 @@ func (b *Backend) getObjectRange(
 		return objectRead{}, err
 	}
 
-	return objectRead{data: data, contentEncoding: contentEncoding, metadata: metadata, whole: whole}, nil
+	return objectRead{
+		data:            data,
+		contentEncoding: contentEncoding,
+		metadata:        metadata,
+		whole:           whole,
+		etag:            etag,
+	}, nil
 }
 
 // wholeObjectResponse reports whether a GET response body is the entire stored object, given the
@@ -1294,79 +1319,282 @@ func (b *Backend) Close() error {
 
 // Helper methods
 
-// parallelGetObject fans out a large read into N concurrent range GETs bounded
-// by ParallelReadConcurrency (defaults to MultipartConcurrency when 0).
-// All chunks are assembled in order before returning.
+// parallelGetObject fans out a large read into concurrent range GETs and assembles them in order.
+//
+// # Why this is not just a loop with goroutines
+//
+// It was, and that made the largest reads the least protected ones in the backend. The serial path
+// puts every GET behind the retryer, the circuit breaker, and the health tracker
+// ([Backend.getObjectRange]); this path called executeWithAccelerationFallback directly — no retry,
+// no breaker, no health signal — so a transient 500 on one chunk of a 1 GiB read failed the whole
+// read that a single retry would have completed, and a genuine S3 outage was invisible to the
+// component whose job is to notice one (audit findings D14 and M13). Every chunk now goes through
+// getObjectRange, which is the one place that stack lives.
+//
+// Three further properties this owes the caller, none of which the original had:
+//
+//   - **A short assembly is an error, not a short buffer.** The old code joined whatever came back.
+//     A chunk that answered 206 with fewer bytes than its range produced a buffer shorter than
+//     totalSize, which the kernel presents as file content — with HeadObject still reporting the
+//     full size, so the shortfall reads back as zeros. Silent truncation of user data is the worst
+//     outcome available here, so each chunk's length is checked against the range asked for and the
+//     total is checked against totalSize.
+//   - **One ETag across every chunk.** N GETs of one object are N points in time. An overwrite
+//     landing between the first and the last returns success for every range, with lengths that add
+//     up, and assembles a splice of two generations of the file that never existed in the bucket.
+//     Nothing downstream can detect that: the whole-object SHA-256 cannot be checked against an
+//     assembled read (see [verifyChecksum]), so this comparison is the only integrity evidence a
+//     large read has.
+//   - **A failure cancels its siblings.** The old code returned on the first error and left the
+//     remaining goroutines fetching chunks of an abandoned read to completion — up to
+//     ParallelReadConcurrency × ReadChunkSize of egress billed for bytes nobody receives, and on a
+//     wedged endpoint, goroutines outliving the request that spawned them.
+//
+// Routing every chunk through the reliability stack has a consequence worth naming, because getting
+// it wrong makes this function worse than what it replaced: N chunks failing from one root cause must
+// not record N health failures. s3-reads has an ErrorThreshold of 3 and a read of a large object has
+// more chunks than that, so one shrunken object could take the component degraded and start refusing
+// reads of objects that are perfectly readable.
+//
+// What keeps that from happening is that an abandoned chunk reports only its own truth — that it was
+// canceled — rather than inheriting the failure that abandoned it. [errReadAbandoned] is the whole
+// mechanism, and it is less obvious than it looks; the reasoning is there.
 func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, totalSize int64) ([]byte, error) {
 	chunkSize := b.config.ReadChunkSize
 	if chunkSize <= 0 {
-		chunkSize = 16 * 1024 * 1024
+		chunkSize = defaultReadChunkSize
 	}
+
 	concurrency := b.config.ParallelReadConcurrency
 	if concurrency <= 0 {
 		concurrency = b.config.MultipartConcurrency
 	}
 	if concurrency <= 0 {
-		concurrency = 8
+		concurrency = defaultParallelReadConcurrency
 	}
 
 	numChunks := (totalSize + chunkSize - 1) / chunkSize
 
-	type chunkResult struct {
-		index int
-		data  []byte
-		err   error
-	}
-	resultCh := make(chan chunkResult, numChunks)
-	semaphore := make(chan struct{}, concurrency)
+	// errgroup gives the error half of what this needs: the first non-nil error wins and the rest are
+	// discarded. The cancellation half is deliberately *not* errgroup.WithContext's.
+	//
+	// WithContext cancels with the failing chunk's error as the context's cause, and Go's HTTP client
+	// reports context.Cause in preference to context.Canceled. So a sibling's interrupted body read
+	// surfaces carrying the *first* chunk's error — verified: a chunk abandoned over a truncated object
+	// returned that object's ErrCodeDataCorruption as though it were its own finding, which
+	// translateError then had no arm for and classified as a service failure. One truncated object
+	// degraded s3-reads, because the read reported its single finding up to numChunks times.
+	//
+	// Canceling with an explicit sentinel keeps the abandonment while making it say only what is true
+	// of the abandoned request: it never got an answer. The first chunk's real error still reaches the
+	// caller, through errgroup's own return value rather than through its siblings.
+	group := new(errgroup.Group)
+	group.SetLimit(concurrency)
 
-	for i := range numChunks {
-		go func(idx int64) {
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			start := offset + idx*chunkSize
-			end := min(start+chunkSize, offset+totalSize)
-			rangeHdr := aws.String(fmt.Sprintf("bytes=%d-%d", start, end-1))
-
-			var chunk []byte
-			err := b.executeWithAccelerationFallback(ctx, "GetObject", func(c *s3.Client) error {
-				res, e := c.GetObject(ctx, &s3.GetObjectInput{
-					Bucket: aws.String(b.bucket),
-					Key:    aws.String(key),
-					Range:  rangeHdr,
-				})
-				if e != nil {
-					return b.translateError(e, "GetObject", key)
-				}
-				defer func() { _ = res.Body.Close() }()
-				var readErr error
-				chunk, readErr = io.ReadAll(res.Body)
-				if readErr == nil {
-					b.metricsCollector.RecordBytesDownloaded(int64(len(chunk)))
-				}
-				return readErr
-			})
-			resultCh <- chunkResult{index: int(idx), data: chunk, err: err}
-		}(i)
-	}
+	groupCtx, abandonSiblings := context.WithCancelCause(ctx)
+	defer abandonSiblings(errReadAbandoned)
 
 	chunks := make([][]byte, numChunks)
-	for range numChunks {
-		r := <-resultCh
-		if r.err != nil {
-			return nil, r.err
-		}
-		chunks[r.index] = r.data
+	etags := make([]string, numChunks)
+
+	for i := range numChunks {
+		group.Go(func() error {
+			start := offset + i*chunkSize
+			want := min(chunkSize, offset+totalSize-start)
+
+			// getObjectRange, not a bare GetObject: retry, circuit breaker, health tracking,
+			// metrics, and error translation all live in there, and duplicating any of them here is
+			// how they drifted apart in the first place.
+			read, err := b.getObjectRange(groupCtx, key, start, want)
+
+			// A refused range is the same condition as a short one, reported differently because the
+			// chunk fell entirely past the end rather than partly. S3 clamps a range that straddles
+			// the end and answers 416 for one that starts at or beyond it, so an object that shrank
+			// beneath the size this read was given produces both — short chunks at the boundary,
+			// InvalidRange for every chunk after it, decided only by where the chunk lines up.
+			//
+			// Every range here was computed from totalSize, which the caller supplied, so there is no
+			// other way to read a 416 here: unlike the serial path, this cannot be an ordinary read
+			// past EOF that should return no bytes. That is what makes the reclassification safe —
+			// translateError has to leave a refused range as a mere validation failure, because for
+			// the serial path it usually is one, and only here is it known to mean the object shrank.
+			if err != nil {
+				// abandonSiblings, not errgroup's own cancellation: this is a plain Group, so nothing
+				// else stops the remaining chunks. See the sentinel's rationale above.
+				abandonSiblings(errReadAbandoned)
+
+				if isInvalidRange(err) {
+					return shrunkMidRead(key, b.bucket, start, want, err)
+				}
+
+				return err
+			}
+
+			// S3 clamps a range that runs past the end of the object rather than refusing it, so a
+			// short answer here means the object is shorter than the read was told it was — an
+			// overwrite between the HEAD and this GET, or a size the caller supplied that never
+			// matched. Either way the assembled buffer would be short, and a short buffer is
+			// indistinguishable from a file that ends there.
+			if int64(len(read.data)) != want {
+				abandonSiblings(errReadAbandoned)
+
+				return shrunkMidRead(key, b.bucket, start, want, nil).
+					WithDetail("returned_bytes", len(read.data))
+			}
+
+			chunks[i] = read.data
+			etags[i] = read.etag
+
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	if err := sameGeneration(etags, key, b.bucket); err != nil {
+		b.metricsCollector.RecordError(err)
+
+		return nil, err
+	}
+
+	assembled := bytes.Join(chunks, nil)
+
+	// The per-chunk checks above make this unreachable, which is the point of keeping it: it is the
+	// invariant the caller actually depends on, and it costs one comparison against a read that
+	// just transferred megabytes. Returning a buffer of the wrong length is silent data corruption
+	// — the caller has no way to distinguish it from the file's real contents.
+	if int64(len(assembled)) != totalSize {
+		return nil, errors.NewError(errors.ErrCodeDataCorruption,
+			"assembled parallel read is not the requested length").
+			WithComponent("s3-backend").
+			WithOperation("GetObject").
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithDetail("requested_bytes", totalSize).
+			WithDetail("assembled_bytes", len(assembled)).
+			WithDetail("chunk_count", numChunks)
 	}
 
 	b.costOptimizer.RecordAccess(key, totalSize)
-	return bytes.Join(chunks, nil), nil
+
+	return assembled, nil
 }
 
+// errReadAbandoned is the cancellation cause for a chunk of a parallel read that was dropped because
+// another chunk failed.
+//
+// It wraps context.Canceled rather than being a bare sentinel, and that is the whole point: Go's HTTP
+// client reports context.Cause on an interrupted body read, so this is what the abandoned chunk's
+// error chain carries — and errors.Is(err, context.Canceled) has to keep matching it, because that is
+// what routes it to translateError's cancellation arm and thus to ErrCodeOperationCanceled, the one
+// code the health tracker heals on rather than degrades.
+var errReadAbandoned = fmt.Errorf("parallel read chunk abandoned after a sibling chunk failed: %w",
+	context.Canceled)
+
+// shrunkMidRead is the error for a chunk of a parallel read whose range the object could not
+// satisfy, in either of the two forms that takes: fewer bytes than requested, or a refusal.
+//
+// One constructor for both because they are one condition — the object is shorter than the size this
+// read was given — and which form it takes says nothing about severity, only about where the chunk
+// happened to land relative to the new end. Reporting them as two different codes would mean a
+// truncation detected or missed depending on chunk alignment.
+//
+// cause is the underlying API error for a refusal and nil for a short read, where there is no
+// underlying error: the request succeeded and returned the wrong length.
+func shrunkMidRead(key, bucket string, offset, want int64, cause error) *errors.ObjectFSError {
+	err := errors.NewError(errors.ErrCodeDataCorruption,
+		"parallel read chunk could not be satisfied: the object is shorter than the read's size").
+		WithComponent("s3-backend").
+		WithOperation("GetObject").
+		WithContext("bucket", bucket).
+		WithContext("key", key).
+		WithDetail("range_offset", offset).
+		WithDetail("requested_bytes", want).
+		WithDetail("suggestion", "The object changed size while it was being read, or the size "+
+			"supplied to the read was stale. Retry the read.")
+
+	if cause != nil {
+		err = err.WithCause(cause)
+	}
+
+	return err
+}
+
+// sameGeneration reports whether every chunk of a parallel read came from the same version of the
+// object, by comparing the ETags the responses carried.
+//
+// An empty ETag from any chunk means the question cannot be answered, so it is not answered: a
+// backend that does not return ETags on ranged GETs would otherwise make every large read fail. That
+// is the same reasoning [verifyChecksum] applies to an object with no recorded hash — an absent piece
+// of evidence is not evidence of corruption — and it is why this check is a supplement to the
+// whole-object checksum rather than a replacement for it.
+func sameGeneration(etags []string, key, bucket string) error {
+	if len(etags) < 2 {
+		return nil
+	}
+
+	first := etags[0]
+	if first == "" {
+		return nil
+	}
+
+	for i, tag := range etags[1:] {
+		if tag == "" {
+			return nil
+		}
+
+		if tag != first {
+			return errors.NewError(errors.ErrCodeDataCorruption,
+				"object changed while it was being read in parallel; refusing to return a mix of versions").
+				WithComponent("s3-backend").
+				WithOperation("GetObject").
+				WithContext("bucket", bucket).
+				WithContext("key", key).
+				WithDetail("first_chunk_etag", first).
+				WithDetail("differing_chunk", i+1).
+				WithDetail("differing_chunk_etag", tag).
+				WithDetail("suggestion", "Another writer replaced the object mid-read. Retry the read; "+
+					"the assembled bytes would have been a splice of two versions that never existed.")
+		}
+	}
+
+	return nil
+}
+
+// translateError turns an error from the AWS SDK into a classified [errors.ObjectFSError].
+//
+// The classification is not cosmetic. errors.IsServiceFailure reads the code to decide whether the
+// health tracker degrades the component and the circuit breaker counts a trip, and
+// errors.IsRetryableByDefault reads it to decide whether the retryer tries again — so a
+// misclassified error either refuses reads of healthy objects or retries something that cannot
+// succeed. The default arm is deliberately pessimistic (ErrCodeStorageRead: a service failure, not
+// retryable), which makes adding an arm the way to fix a wrong classification.
 func (b *Backend) translateError(err error, operation, key string) error {
 	// Check for specific S3 error types and create rich error objects
 	switch {
+	case stderr.Is(err, context.Canceled), stderr.Is(err, context.DeadlineExceeded):
+		// A withdrawn request, classified before anything else because the alternative is not merely
+		// an imprecise message.
+		//
+		// Without this arm a cancellation falls through to the default and becomes
+		// ErrCodeStorageRead, which errors.IsServiceFailure counts as a failure — so the health
+		// tracker degrades s3-reads and the circuit breaker counts a trip toward opening it. Both
+		// then refuse reads of objects that are perfectly readable, because something canceled a
+		// read. And cancellation is not exceptional here: a FUSE interrupt, a killed reader, an
+		// unmount, and a parallel read abandoning its siblings all arrive this way, routinely and in
+		// bursts. ErrorThreshold is 3.
+		//
+		// ErrCodeOperationCanceled is the one code health.RecordError heals on, which is what makes
+		// this the right code rather than merely a better message.
+		return errors.NewError(errors.ErrCodeOperationCanceled, "S3 operation canceled").
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithCause(err)
+
 	case isErrorType[*s3types.NoSuchKey](err):
 		return errors.NewError(errors.ErrCodeObjectNotFound, "object not found").
 			WithComponent("s3-backend").
@@ -1385,6 +1613,26 @@ func (b *Backend) translateError(err error, operation, key string) error {
 
 	case isErrorType[*s3types.NotFound](err):
 		return errors.NewError(errors.ErrCodeObjectNotFound, "resource not found").
+			WithComponent("s3-backend").
+			WithOperation(operation).
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithCause(err)
+
+	case isInvalidRange(err):
+		// A range S3 would not serve, which for the read path is ordinary rather than exceptional: a
+		// caller sizes a read by its buffer, so the last read of any file asks for more than is there,
+		// and a read at exactly EOF asks for a range that starts past the end. GetObject answers that
+		// with no bytes and no error, which is correct — but the classification still matters, because
+		// the health tracker and the breaker are fed inside getObjectRange, before the caller gets to
+		// decide the read succeeded.
+		//
+		// Without this arm the default renders it ErrCodeStorageRead, a service failure. So reading to
+		// the end of three files degrades s3-reads and moves the breaker toward open, and it happens on
+		// the most ordinary read pattern there is. ErrCodeValidationFailed is a non-failure per
+		// errors.IsServiceFailure, which is what stops that, and it is also honest: the request was
+		// invalid for this object, and no retry changes that.
+		return errors.NewError(errors.ErrCodeValidationFailed, "S3 refused the requested byte range").
 			WithComponent("s3-backend").
 			WithOperation(operation).
 			WithContext("bucket", b.bucket).
