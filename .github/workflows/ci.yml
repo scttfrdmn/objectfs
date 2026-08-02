@@ -32,7 +32,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -64,7 +64,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -95,7 +95,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # golangci-lint needs the merge base to diff against, which a shallow clone does not have.
           fetch-depth: 0
@@ -192,7 +192,7 @@ jobs:
           - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
           - {pkg: ./internal/awsname, target: FuzzValidateRegion}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -230,7 +230,7 @@ jobs:
           - {goos: darwin, goarch: amd64}
           - {goos: darwin, goarch: arm64}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -264,7 +264,7 @@ jobs:
   sdk-metrics:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -316,7 +316,7 @@ jobs:
   config-examples:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
