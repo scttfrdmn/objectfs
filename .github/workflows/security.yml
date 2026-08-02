@@ -119,7 +119,26 @@ jobs:
         go install golang.org/x/vuln/cmd/govulncheck@latest
         govulncheck ./...
 
+    # ./cmd/objectfs, not ./... — the check is about what we distribute.
+    #
+    # `./...` pulls in test-only dependencies, which ship in nothing. That is not a hypothetical
+    # distinction: it failed this step on `modernc.org/mathutil`, reached only as
+    # internal/testaws → substrate → sqlite → libc → mathutil, and `go list -deps ./cmd/objectfs`
+    # contains zero modernc.org packages.
+    #
+    # The finding was also wrong on its own terms. mathutil carries a LICENSE file with a textbook
+    # BSD-3-Clause — all three clauses verbatim, Apache-2.0-compatible — and go-licenses fails to
+    # classify it only because the text is reflowed, wrapping mid-clause rather than matching the
+    # layout its matcher expects. So the two available fixes were to add an allowlist entry
+    # asserting a license this project has no standing to assert on someone else's behalf, or to
+    # scope the check to the artifact whose licensing anyone can actually be bound by.
+    #
+    # Never reached before now: this workflow was `disabled_inactivity` from January 2026, and until
+    # the govulncheck step above it was fixed, the job failed earlier every time.
+    #
+    # If a distributable ever includes more than this binary — a container layer, an SDK archive —
+    # its packages belong on this line too.
     - name: License compliance check
       run: |
         go install github.com/google/go-licenses@latest
-        go-licenses check ./...
+        go-licenses check ./cmd/objectfs
