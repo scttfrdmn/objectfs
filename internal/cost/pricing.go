@@ -2,103 +2,46 @@
 // accumulation, ROI reporting, and budget-threshold alerting.
 package cost
 
-import "maps"
+import (
+	"maps"
 
-// S3 storage tier identifiers — mirror constants in internal/storage/s3/tiers.go.
+	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
+)
+
+// S3 storage tier identifiers — aliases of internal/awsname's storage classes rather than string
+// literals, so there is one authority for which tiers exist. They were spelled out here until the
+// rate consolidation; a second spelling is a second thing that can disagree.
 const (
-	TierStandard    = "STANDARD"
-	TierStandardIA  = "STANDARD_IA"
-	TierOneZoneIA   = "ONEZONE_IA"
-	TierGlacierIR   = "GLACIER_IR"
-	TierGlacier     = "GLACIER"
-	TierDeepArchive = "DEEP_ARCHIVE"
-	TierIntelligent = "INTELLIGENT_TIERING"
+	TierStandard          = awsname.StorageClassStandard
+	TierStandardIA        = awsname.StorageClassStandardIA
+	TierOneZoneIA         = awsname.StorageClassOneZoneIA
+	TierReducedRedundancy = awsname.StorageClassReducedRedundancy
+	TierGlacierIR         = awsname.StorageClassGlacierIR
+	TierGlacier           = awsname.StorageClassGlacier
+	TierDeepArchive       = awsname.StorageClassDeepArchive
+	TierIntelligent       = awsname.StorageClassIntelligent
 )
 
 // Price holds per-tier pricing in USD.
-// All per-request costs are for a single API call (not per-1000).
-type Price struct {
-	// StoragePerGBMonth is the cost to store 1 GB for one calendar month.
-	StoragePerGBMonth float64
+//
+// It is an alias of [awsrates.Rate], not a separate struct. It used to be its own type carrying its
+// own copy of the rates, which is how its PUT rate came to differ from the one in
+// internal/storage/s3 by a factor of ten — what a write cost depended on which package the caller
+// reached for. The alias keeps the name that reads well here (a Price, in a cost calculator) while
+// there is exactly one definition of what a rate is and one table of values.
+//
+// All per-request fields are the cost of a single API call, not per 1,000. See [awsrates.Rate] for
+// the field documentation, including which retrieval speed and volume band each figure represents.
+type Price = awsrates.Rate
 
-	// GetRequest is the cost per GET, SELECT, or HEAD API call.
-	GetRequest float64
-
-	// PutRequest is the cost per PUT, COPY, POST, or INITIATE-MULTIPART call.
-	PutRequest float64
-
-	// ListRequest is the cost per LIST API call.
-	ListRequest float64
-
-	// RetrievalPerGB is the per-GB retrieval fee for reads from IA/Glacier tiers.
-	// Zero for Standard and Intelligent-Tiering.
-	RetrievalPerGB float64
-
-	// EgressPerGB is the per-GB transfer-out-to-internet fee.
-	// Set to 0 when traffic stays within the same AWS region/account.
-	EgressPerGB float64
-}
-
-// DefaultPrices contains built-in pricing calibrated to AWS us-east-1 rates (2026).
-// These match the values in internal/storage/s3/tiers.go and pricing_manager.go.
-var DefaultPrices = map[string]Price{
-	TierStandard: {
-		StoragePerGBMonth: 0.023,
-		GetRequest:        0.0000004, // $0.0004 / 1000
-		PutRequest:        0.000005,  // $0.005 / 1000
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.0,
-		EgressPerGB:       0.09,
-	},
-	TierStandardIA: {
-		StoragePerGBMonth: 0.0125,
-		GetRequest:        0.000001, // $0.001 / 1000
-		PutRequest:        0.00001,  // $0.01 / 1000
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.01,
-		EgressPerGB:       0.09,
-	},
-	TierOneZoneIA: {
-		StoragePerGBMonth: 0.01,
-		GetRequest:        0.000001,
-		PutRequest:        0.00001,
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.01,
-		EgressPerGB:       0.09,
-	},
-	TierGlacierIR: {
-		StoragePerGBMonth: 0.004,
-		GetRequest:        0.000002, // $0.002 / 1000
-		PutRequest:        0.000005,
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.03,
-		EgressPerGB:       0.09,
-	},
-	TierGlacier: {
-		StoragePerGBMonth: 0.0036,
-		GetRequest:        0.0000004,
-		PutRequest:        0.000005, // POST: $0.05 / 1000 for archive operations
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.02, // Expedited: $0.03, Standard: $0.01, Bulk: $0.0025
-		EgressPerGB:       0.09,
-	},
-	TierDeepArchive: {
-		StoragePerGBMonth: 0.00099,
-		GetRequest:        0.0000004,
-		PutRequest:        0.000005,
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.02, // Standard: $0.02/GB
-		EgressPerGB:       0.09,
-	},
-	TierIntelligent: {
-		StoragePerGBMonth: 0.023, // frequent tier rate (auto-moves to IA at 0.0125)
-		GetRequest:        0.0000004,
-		PutRequest:        0.000005,
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.0,
-		EgressPerGB:       0.09,
-	},
-}
+// DefaultPrices is the built-in rate table, read from [awsrates].
+//
+// It is a function of the canonical table rather than a literal, so it cannot drift from it. The
+// previous literal claimed in its own comment to "match the values in internal/storage/s3/tiers.go
+// and pricing_manager.go" and did not — which is the argument against comments that assert
+// agreement between two tables instead of removing one of them.
+var DefaultPrices = awsrates.All()
 
 // PriceTable is an immutable pricing lookup with optional per-tier overrides.
 type PriceTable struct {

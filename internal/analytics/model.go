@@ -1,21 +1,33 @@
 package analytics
 
-// S3 storage tier strings — match the constants in internal/storage/s3/tiers.go.
-const (
-	TierStandard    = "STANDARD"
-	TierStandardIA  = "STANDARD_IA"
-	TierGlacierIR   = "GLACIER_IR"
-	TierGlacier     = "GLACIER"
-	TierDeepArchive = "DEEP_ARCHIVE"
+import (
+	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
 )
 
-// Approximate storage costs (USD/GB/month) used to estimate potential savings.
-var tierCostPerGBMonth = map[string]float64{
-	TierStandard:    0.023,
-	TierStandardIA:  0.0125,
-	TierGlacierIR:   0.004,
-	TierGlacier:     0.0036,
-	TierDeepArchive: 0.00099,
+// S3 storage tier strings.
+//
+// Aliases of internal/awsname rather than string literals. They were spelled out here with a comment
+// saying they "match the constants in internal/storage/s3/tiers.go" — a comment asserting agreement
+// between two lists is a promise nothing checks, and the rate table below it did not in fact agree
+// with the one it was copied from.
+const (
+	TierStandard    = awsname.StorageClassStandard
+	TierStandardIA  = awsname.StorageClassStandardIA
+	TierGlacierIR   = awsname.StorageClassGlacierIR
+	TierGlacier     = awsname.StorageClassGlacier
+	TierDeepArchive = awsname.StorageClassDeepArchive
+)
+
+// storagePerGBMonth returns the us-east-1 list price for a tier, used to estimate savings.
+//
+// Read from [awsrates] rather than held as a literal here. This package's own copy was the fifth in
+// the repo; consolidating them is what #209 asked for, on the grounds that five copies is why two of
+// them disagreed. Savings estimates are relative figures, so an absolute rate error moves every
+// recommendation this classifier makes without changing its shape — nothing downstream would notice.
+func storagePerGBMonth(tier string) float64 {
+	rate, _ := awsrates.For(tier)
+	return rate.StoragePerGBMonth
 }
 
 // Recommendation is the output of the TierClassifier.
@@ -160,7 +172,7 @@ func NewTierClassifier() *TierClassifier {
 // Classify returns a Recommendation for key given its feature vector fv.
 func (tc *TierClassifier) Classify(key string, fv FeatureVector) Recommendation {
 	outcome := tc.root.classify(fv)
-	savings := tierCostPerGBMonth[TierStandard] - tierCostPerGBMonth[outcome.tier]
+	savings := storagePerGBMonth(TierStandard) - storagePerGBMonth(outcome.tier)
 	if savings < 0 {
 		savings = 0
 	}
