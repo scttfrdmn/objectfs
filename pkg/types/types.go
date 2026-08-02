@@ -3,7 +3,7 @@ package types
 import (
 	"time"
 
-	"github.com/objectfs/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/config"
 )
 
 // ObjectInfo represents metadata about an object

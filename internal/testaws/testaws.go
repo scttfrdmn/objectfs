@@ -20,7 +20,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/scttfrdmn/substrate/emulator"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
 )
 
 // The built-in credential every substrate emulator accepts, and the account it maps to. Passing

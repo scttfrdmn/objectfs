@@ -12,9 +12,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/health"
-	"github.com/objectfs/objectfs/pkg/status"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/health"
+	"github.com/scttfrdmn/objectfs/pkg/status"
 )
 
 func TestNewServer(t *testing.T) {

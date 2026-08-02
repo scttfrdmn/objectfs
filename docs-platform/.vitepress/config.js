@@ -118,7 +118,7 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/objectfs/objectfs' }
+      { icon: 'github', link: 'https://github.com/scttfrdmn/objectfs' }
     ],
 
     footer: {
@@ -127,7 +127,7 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: 'https://github.com/objectfs/objectfs/edit/main/docs-platform/:path',
+      pattern: 'https://github.com/scttfrdmn/objectfs/edit/main/docs-platform/:path',
       text: 'Edit this page on GitHub'
     },
 

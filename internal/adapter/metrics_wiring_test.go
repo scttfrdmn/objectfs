@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/testhttp"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/testhttp"
 )
 
 // TestStartMetricsBindsTheEndpoint asserts the adapter actually serves /metrics.

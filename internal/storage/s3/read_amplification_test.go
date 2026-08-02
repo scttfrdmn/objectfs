@@ -11,8 +11,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestSmallReadOfLargeObjectDoesNotFetchTheWholeThing is the C4 regression test.

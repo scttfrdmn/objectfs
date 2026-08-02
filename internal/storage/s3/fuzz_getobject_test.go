@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // FuzzGetObjectRange drives the offset/size domain through the real GetObject against a live S3 endpoint,

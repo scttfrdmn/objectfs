@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 // GzipCodec implements Codec using the standard library's compress/gzip.

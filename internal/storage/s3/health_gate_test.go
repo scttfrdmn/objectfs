@@ -28,7 +28,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestReadsOfMissingObjectsDoNotDisableTheMount is the regression test for the composed defect. It

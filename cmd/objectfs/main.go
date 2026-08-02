@@ -13,9 +13,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/objectfs/objectfs/internal/adapter"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/pkg/utils"
+	"github.com/scttfrdmn/objectfs/internal/adapter"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 const (
@@ -60,7 +60,7 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  %s s3://my-bucket /mnt/s3\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s --config /etc/objectfs/config.yaml s3://my-bucket /mnt/s3\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s --cache-size 4GB --max-concurrency 200 s3://my-bucket /mnt/s3\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "\nFor more information, visit: https://github.com/objectfs/objectfs\n")
+		fmt.Fprintf(os.Stderr, "\nFor more information, visit: https://github.com/scttfrdmn/objectfs\n")
 	}
 }
 

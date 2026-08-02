@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/circuit"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/circuit"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestBatchOperationsCompleteWithAnUnsetPoolSize is the deadlock regression test.

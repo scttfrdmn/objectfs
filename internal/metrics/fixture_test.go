@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/testhttp"
+	"github.com/scttfrdmn/objectfs/internal/testhttp"
 )
 
 // fixturePath is the scrape both SDKs parse in their own test suites.

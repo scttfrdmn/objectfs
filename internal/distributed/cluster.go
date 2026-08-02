@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // ClusterManager manages distributed ObjectFS cluster operations

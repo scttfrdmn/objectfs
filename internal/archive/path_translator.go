@@ -4,7 +4,7 @@ import (
 	"path"
 	"strings"
 
-	archivepkg "github.com/objectfs/objectfs/pkg/archive"
+	archivepkg "github.com/scttfrdmn/objectfs/pkg/archive"
 )
 
 // ParsedPath represents a filesystem path that may pass through an archive

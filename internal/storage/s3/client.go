@@ -15,7 +15,7 @@ import (
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
-	"github.com/objectfs/objectfs/internal/network"
+	"github.com/scttfrdmn/objectfs/internal/network"
 )
 
 // clientOptions returns the s3.Options mutator that applies the endpoint and addressing settings

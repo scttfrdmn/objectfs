@@ -38,7 +38,7 @@ import (
 
 	iofs "io/fs"
 
-	"github.com/objectfs/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
 )
 
 // Compile-time proof that both node types satisfy the contract. Every one of these is an interface

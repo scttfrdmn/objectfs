@@ -9,10 +9,12 @@
          .coverage-floors, which is a job in ci.yml, so the CI badge already covers it. There is no
          separate percentage to display and no service to display it.
        - Go Report Card rendered "retired": the service no longer reports for this module.
-       - Go Reference (pkg.go.dev) rendered empty: there is no pkg.go.dev entry for either
-         github.com/objectfs/objectfs or github.com/scttfrdmn/objectfs, because go.mod declares a
-         module path that is not where the code lives. That makes the module un-importable; see #213.
-         The badge comes back when the path does.
+       - Go Reference (pkg.go.dev) rendered empty. go.mod used to declare
+         github.com/objectfs/objectfs, which is not this project — it is an unrelated Python
+         repository from 2017 — so the module could not be fetched under the name it gave for
+         itself and pkg.go.dev had nothing to index (#213). The path is fixed; this badge should be
+         restored once a tag has been published under the corrected path and pkg.go.dev has indexed
+         it, which is not something to assert in advance.
 
      The GitHub stars badge is also gone: a star count is not a property of the software. -->
 

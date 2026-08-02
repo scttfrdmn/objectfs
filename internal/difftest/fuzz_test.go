@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/difftest"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/difftest"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // The wire format decoded by [decodeProgram]: one operation per fixed-width record.

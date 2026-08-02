@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	objerrors "github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/types"
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // DefaultFlushAttempts bounds how many times [Flusher.Flush] rebuilds an upload that lost a race

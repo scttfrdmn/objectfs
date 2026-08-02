@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	objerrors "github.com/objectfs/objectfs/pkg/errors"
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 func TestState_String(t *testing.T) {

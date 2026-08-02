@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // FuzzConfigConstructsBackend asserts the one property whose absence was the worst defect in

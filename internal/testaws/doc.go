@@ -3,14 +3,14 @@ Package testaws provides an in-process AWS S3 endpoint for ObjectFS tests.
 
 It wraps [github.com/scttfrdmn/substrate/emulator].StartTestServer, which serves the S3 API over
 loopback with no network, no credentials, and no charges. A test calls [Start] and gets back an
-[github.com/objectfs/objectfs/internal/storage/s3].Config already pointed at it, so exercising the
+[github.com/scttfrdmn/objectfs/internal/storage/s3].Config already pointed at it, so exercising the
 real backend against real HTTP costs a few milliseconds.
 
 # Why an emulator and not a mock
 
 The v0.10.0 audit found roughly forty-five defects that 32,680 lines of tests across 90 files had
 all missed. They were overwhelmingly *seam* defects: a value produced correctly at one layer and
-dropped at the boundary to the next. A test that mocks [github.com/objectfs/objectfs/pkg/types].Backend
+dropped at the boundary to the next. A test that mocks [github.com/scttfrdmn/objectfs/pkg/types].Backend
 cannot see them, because the mock is on the far side of the seam — it is a restatement of what the
 caller believes, so it agrees with the caller by construction.
 

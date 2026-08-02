@@ -15,8 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/objectfs/objectfs/pkg/health"
-	"github.com/objectfs/objectfs/pkg/status"
+	"github.com/scttfrdmn/objectfs/pkg/health"
+	"github.com/scttfrdmn/objectfs/pkg/status"
 )
 
 // MountManager handles mount/unmount operations.

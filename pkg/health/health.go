@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // HealthState represents the overall health state of a service

@@ -3,7 +3,7 @@ package compression
 import (
 	"testing"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 func TestRuleSelector_AlreadyCompressed(t *testing.T) {

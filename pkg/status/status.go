@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/health"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/health"
 )
 
 var opIDCounter atomic.Uint64

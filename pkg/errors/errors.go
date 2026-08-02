@@ -504,7 +504,7 @@ func (e *ObjectFSError) GetRecommendation() string {
 
 // GetTroubleshootingURL returns a link to troubleshooting documentation
 func (e *ObjectFSError) GetTroubleshootingURL() string {
-	baseURL := "https://github.com/objectfs/objectfs/blob/main/docs/troubleshooting.md"
+	baseURL := "https://github.com/scttfrdmn/objectfs/blob/main/docs/troubleshooting.md"
 
 	urlFragments := map[ErrorCode]string{
 		ErrCodeConnectionTimeout:    "#connection-timeout",

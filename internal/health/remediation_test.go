@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	pkghealth "github.com/objectfs/objectfs/pkg/health"
+	pkghealth "github.com/scttfrdmn/objectfs/pkg/health"
 )
 
 func TestRemediationEngine_DiagnoseProblem(t *testing.T) {

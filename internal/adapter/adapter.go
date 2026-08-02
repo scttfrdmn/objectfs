@@ -7,15 +7,15 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/objectfs/objectfs/internal/cache"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/fuse"
-	"github.com/objectfs/objectfs/internal/health"
-	"github.com/objectfs/objectfs/internal/metrics"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/vfs"
-	"github.com/objectfs/objectfs/pkg/retry"
-	"github.com/objectfs/objectfs/pkg/utils"
+	"github.com/scttfrdmn/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/fuse"
+	"github.com/scttfrdmn/objectfs/internal/health"
+	"github.com/scttfrdmn/objectfs/internal/metrics"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 // Fallback sizes for the two cache capacities, used only if a configured value fails to parse here

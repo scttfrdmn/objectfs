@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // PredictiveCache implements ML-based predictive caching with intelligent prefetching

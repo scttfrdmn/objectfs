@@ -12,9 +12,9 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"github.com/objectfs/objectfs/internal/awsname"
-	"github.com/objectfs/objectfs/internal/compression"
-	"github.com/objectfs/objectfs/pkg/utils"
+	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/compression"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 // Boolean Constants

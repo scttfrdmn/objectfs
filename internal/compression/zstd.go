@@ -5,7 +5,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 // ZstdCodec implements Codec using github.com/klauspost/compress/zstd.

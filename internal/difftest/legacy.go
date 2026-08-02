@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // Legacy is the write path ObjectFS v0.10.0 shipped, wired to a real backend exactly as

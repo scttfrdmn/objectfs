@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/circuit"
-	pkgerrors "github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/internal/circuit"
+	pkgerrors "github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/retry"
 )
 
 func TestNewRecoveryManager(t *testing.T) {

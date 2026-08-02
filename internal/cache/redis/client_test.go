@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/objectfs/objectfs/internal/cache/redis"
-	"github.com/objectfs/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/cache/redis"
+	"github.com/scttfrdmn/objectfs/internal/config"
 )
 
 func newTestCache(t *testing.T) (*redis.Cache, *miniredis.Miniredis) {

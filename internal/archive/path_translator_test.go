@@ -3,7 +3,7 @@ package archive
 import (
 	"testing"
 
-	archivepkg "github.com/objectfs/objectfs/pkg/archive"
+	archivepkg "github.com/scttfrdmn/objectfs/pkg/archive"
 )
 
 func TestTranslate_Empty(t *testing.T) {

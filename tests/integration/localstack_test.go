@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	s3backend "github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/pkg/optimization"
+	s3backend "github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/pkg/optimization"
 )
 
 // LocalStackIntegrationSuite tests ObjectFS against LocalStack S3

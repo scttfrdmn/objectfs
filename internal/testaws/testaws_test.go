@@ -10,7 +10,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // The harness is itself test infrastructure, so it needs its own tests. If the recorder silently

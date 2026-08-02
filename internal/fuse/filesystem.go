@@ -17,8 +17,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/objectfs/objectfs/internal/vfs"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // safeInt64ToUint64 safely converts int64 to uint64, preventing negative values

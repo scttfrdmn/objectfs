@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 func TestRetryer_Success(t *testing.T) {

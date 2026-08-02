@@ -46,7 +46,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	objectfssdk "github.com/objectfs/objectfs/sdks/go/objectfs"
+	objectfssdk "github.com/scttfrdmn/objectfs/sdks/go/objectfs"
 )
 
 // entry holds per-handle state.

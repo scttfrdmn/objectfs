@@ -10,7 +10,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // Config defines retry behavior configuration

@@ -17,7 +17,7 @@ ObjectFS provides a comprehensive structured logging system with support for log
 ### Basic Structured Logger
 
 ```go
-import "github.com/objectfs/objectfs/pkg/utils"
+import "github.com/scttfrdmn/objectfs/pkg/utils"
 
 // Create logger with default configuration
 config := utils.DefaultStructuredLoggerConfig()
@@ -129,6 +129,7 @@ config.Format = utils.FormatText
 ```
 
 Output example:
+
 ```
 2025-10-16 10:30:45.123 [INFO] [app.go:42] User logged in {user_id=12345, ip=192.168.1.1}
 ```
@@ -140,6 +141,7 @@ config.Format = utils.FormatJSON
 ```
 
 Output example:
+
 ```json
 {
   "timestamp": "2025-10-16T10:30:45.123Z",
@@ -181,12 +183,14 @@ rotation := &utils.RotationConfig{
 ### Rotation Triggers
 
 Logs are automatically rotated when:
+
 1. File size exceeds `MaxSize` megabytes
 2. File age exceeds `MaxAge` days
 
 ### Backup File Naming
 
 Rotated files are named with timestamps:
+
 ```
 app-2025-10-16T10-30-45.log
 app-2025-10-16T10-30-45.log.gz  (if compressed)
@@ -210,6 +214,7 @@ if rotator, ok := logger.(*utils.LogRotator); ok {
 ### Cleanup Policy
 
 Old log files are automatically cleaned up based on:
+
 - `MaxBackups`: Keeps only N most recent backup files
 - `MaxAge`: Deletes files older than N days
 
@@ -222,7 +227,7 @@ Debug mode provides advanced tracing and profiling capabilities for troubleshoot
 ### Starting a Debug Session
 
 ```go
-import "github.com/objectfs/objectfs/pkg/utils"
+import "github.com/scttfrdmn/objectfs/pkg/utils"
 
 // Get the debug manager
 dm := utils.GetDebugManager()
@@ -719,6 +724,7 @@ if err := os.MkdirAll(logDir, 0755); err != nil {
 ### Rotation Not Working
 
 Check that:
+
 1. `MaxSize` or `MaxAge` is set (both 0 means no rotation)
 2. Log file path is writable
 3. Sufficient disk space available

@@ -130,7 +130,17 @@ repos:
   hooks:
   - id: pretty-format-yaml
     args: [--autofix, --indent, '2']
-    exclude: ^mkdocs\.yml$
+    # .golangci.yml is excluded because this formatter actively damages it. It dedents every block
+    # sequence to its parent's column, which destroys the nesting that makes `linters.settings.<name>`
+    # readable and pushes the trailing comments out of alignment with the entries they annotate — and
+    # each of those comments is the recorded reason a linter is on or off. It also unquotes the
+    # `path:`/`text:` regexes in the exclusion rules, leaving patterns like `fuzz_.*_test\.go` bare
+    # where the escape sequences are no longer visibly protected.
+    #
+    # None of that is invalid YAML, and golangci-lint parses either form; the file is configuration a
+    # human has to read and argue with, and the formatter optimises for neither. It never ran against
+    # this file until a module-path rename touched one line of it.
+    exclude: ^(mkdocs\.yml|\.golangci\.yml)$
 
   # License and copyright checks
 - repo: local

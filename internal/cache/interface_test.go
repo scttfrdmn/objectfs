@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/objectfs/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/config"
 )
 
 func TestNewFromConfig_DefaultsToMultiLevel(t *testing.T) {

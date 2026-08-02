@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/objectfs/objectfs/internal/adapter"
-	"github.com/objectfs/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/adapter"
+	"github.com/scttfrdmn/objectfs/internal/config"
 )
 
 // E2ETestSuite tests end-to-end functionality without FUSE mounting

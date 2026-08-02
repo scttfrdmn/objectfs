@@ -14,7 +14,7 @@ hero:
       link: /guide/getting-started
     - theme: alt
       text: View on GitHub
-      link: https://github.com/objectfs/objectfs
+      link: https://github.com/scttfrdmn/objectfs
     - theme: alt
       text: Try the Playground
       link: /playground/
@@ -150,7 +150,7 @@ ObjectFS provides native SDKs for popular programming languages:
 ## Community & Support
 
 <div class="community-links">
-  <a href="https://github.com/objectfs/objectfs" class="community-link">
+  <a href="https://github.com/scttfrdmn/objectfs" class="community-link">
     <h4>📚 GitHub</h4>
     <p>Source code, issues, and contributions</p>
   </a>
@@ -276,4 +276,3 @@ ObjectFS provides native SDKs for popular programming languages:
   font-size: 14px;
 }
 </style>
-

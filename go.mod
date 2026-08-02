@@ -1,4 +1,4 @@
-module github.com/objectfs/objectfs
+module github.com/scttfrdmn/objectfs
 
 go 1.26.0
 

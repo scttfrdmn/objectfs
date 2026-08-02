@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 // outcomeRecord stores the observed result of a single compression operation.
