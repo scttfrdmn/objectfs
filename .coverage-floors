@@ -107,13 +107,14 @@ internal/adapter         40
 # need a real mount, which is the live integration suite's job.
 internal/fuse            59
 
-# internal/cache goes from 74 to 76 with the re-keying work. The rise is small and the reason it is
-# small is worth stating: the chunking logic the two caches now share is one 250-line file that is
-# covered exhaustively, but the package also holds the multi-level, predictive, and analytics caches,
-# which are not on the read path and are not what this task touched. The number that moved is the one
-# that matters — the byte-range keying, splitting, coalescing, and coverage checks are now covered by
-# 27 tests and a fuzz target, where before they were two copies of the same untested sprintf.
-internal/cache           76
+# internal/cache went 74 → 76 with the re-keying work — the byte-range keying, splitting, coalescing,
+# and coverage checks are now covered by 27 tests and a fuzz target where before they were two copies
+# of the same untested sprintf — and then 76 → 82 with the predictive-cache shutdown fixes. That
+# second jump has a cause worth recording: every pre-existing test in the package set
+# `EnablePrefetch: false`, so the prefetcher's queue, workers, rate limiter, and shutdown path had no
+# coverage at all, and three defects lived there — a panic on close racing a read, a token bucket that
+# never refilled, and a Close nothing called. Switching prefetch on in tests is what found them.
+internal/cache           82
 
 pkg/api                  73
 pkg/errors               48

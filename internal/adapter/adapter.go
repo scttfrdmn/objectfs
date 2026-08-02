@@ -331,9 +331,19 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 6. Clear cache
+	// 6. Clear the cache, then release the goroutines behind it.
+	//
+	// The Close is what retires the prefetch workers. Prefetch is enabled unconditionally above, so
+	// every mount wraps L1 in a predictive cache with four workers and a statistics ticker, and until
+	// this call existed nothing ever stopped them: a process that mounted and unmounted repeatedly
+	// accumulated a set per mount, each holding a reference to the cache it was built over.
 	if a.cache != nil {
 		a.cache.Clear()
+
+		if err := a.cache.Close(); err != nil {
+			slog.Error("error closing cache", "error", err)
+			lastErr = err
+		}
 	}
 
 	// 7. Stop metrics collection

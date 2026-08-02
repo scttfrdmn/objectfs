@@ -142,7 +142,19 @@ type IntelligentPrefetcher struct {
 	stats         PrefetchStats
 	rateLimiter   *RateLimiter
 	config        *PredictiveCacheConfig
-	stopCh        chan struct{}
+
+	// stopCh is closed once, by stopOnce, to retire the workers.
+	//
+	// prefetchQueue is deliberately never closed. Closing a channel is the sender's prerogative and
+	// the senders here are cache reads: triggerPrefetch is reached from every L1 Get, from arbitrary
+	// goroutines, with no way to know when the last one has returned. A send on a closed channel
+	// panics, and it panics inside a select with a default arm too — the default covers a full
+	// channel, not a closed one — so closing the queue turned a shutdown racing a read into a crash
+	// of the whole process, which on a mount means the filesystem disappearing under every open
+	// descriptor. The workers select on stopCh instead, and the queued jobs are simply abandoned;
+	// they are speculative prefetches, so dropping them costs a future cache miss and nothing else.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // PrefetchJob represents a prefetch operation
@@ -245,6 +257,12 @@ func NewPredictiveCache(config *PredictiveCacheConfig) (*PredictiveCache, error)
 		rateLimiter: &RateLimiter{
 			capacity:   config.PrefetchBandwidth,
 			refillRate: config.PrefetchBandwidth,
+
+			// Start full, which is the usual token-bucket convention and not merely a convenience:
+			// the zero value is an empty bucket, so the first prefetch of a mount's life was refused
+			// and the budget had to be earned by a second of idleness that a busy filesystem never
+			// provides.
+			tokens:     config.PrefetchBandwidth,
 			lastRefill: time.Now(),
 		},
 	}
@@ -756,6 +774,20 @@ func (pc *PredictiveCache) triggerPrefetch(candidates []types.PrefetchCandidate)
 		Confidence: float64(candidates[0].Priority) / 100.0,
 	}
 
+	// Refuse work once the cache is closed. Without this a read arriving after Close leaves a job in
+	// the buffer that no worker will ever take, and enough of them fill the queue — so the visible
+	// symptom of a stale cache reference is prefetch silently ceasing, arbitrarily far from the cause.
+	//
+	// It is a separate check and not another arm of the select below, which is the version this
+	// started as. A select chooses uniformly at random among the arms that are ready, so a closed
+	// stopCh alongside a ready send wins only about half the time: measured, 25 of 64 reads after
+	// Close still queued. The guard has to run before the send is offered, not beside it.
+	select {
+	case <-pc.prefetcher.stopCh:
+		return
+	default:
+	}
+
 	select {
 	case pc.prefetcher.prefetchQueue <- job:
 		atomic.AddUint64(&pc.prefetcher.stats.JobsQueued, 1)
@@ -895,17 +927,38 @@ func (em *IntelligentEvictionManager) generateEvictionCandidates() []*EvictionCa
 
 // Rate Limiter Implementation
 
+// Allow reports whether a transfer of the given size fits in the remaining budget, consuming it if
+// so.
+//
+// The refill arithmetic is where this used to fail, and it failed in the direction that is hardest to
+// notice: `int64(elapsed.Seconds())` truncates, so every call made less than a second after the last
+// one refilled *zero* tokens — while `lastRefill = now` was assigned unconditionally, discarding the
+// elapsed time along with it. Called at 1 Hz or faster, which is what a cache under load does, the
+// bucket never refilled at all. With `tokens` starting at the zero value the bucket also started
+// empty, so the first call was refused too and the whole prefetcher — the predictor, the pattern
+// analysis, four workers — was dead weight that only came alive under light enough load for a whole
+// second to elapse between reads. A rate limiter that works when idle and not when busy is
+// backwards.
+//
+// Two changes fix it. The refill is computed in nanoseconds so a fractional second is worth
+// fractional tokens, and lastRefill only advances by the time actually converted into tokens, so a
+// remainder too small to be a token is carried rather than dropped. Integer division still truncates
+// the last few bytes, which is why the remainder has to be carried and not merely rounded.
 func (rl *RateLimiter) Allow(bytes int64) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	now := time.Now()
-	elapsed := now.Sub(rl.lastRefill)
+	if rl.refillRate > 0 {
+		elapsed := time.Since(rl.lastRefill)
 
-	// Refill tokens
-	newTokens := int64(elapsed.Seconds()) * rl.refillRate
-	rl.tokens = min(rl.capacity, rl.tokens+newTokens)
-	rl.lastRefill = now
+		if newTokens := elapsed.Nanoseconds() * rl.refillRate / int64(time.Second); newTokens > 0 {
+			rl.tokens = min(rl.capacity, rl.tokens+newTokens)
+
+			// Advance only by the span that became tokens. Assigning now would discard the
+			// sub-token remainder on every call, which is the truncation above in a subtler form.
+			rl.lastRefill = rl.lastRefill.Add(time.Duration(newTokens * int64(time.Second) / rl.refillRate))
+		}
+	}
 
 	if rl.tokens >= bytes {
 		rl.tokens -= bytes
@@ -938,12 +991,24 @@ func (pc *PredictiveCache) initializeModel() {
 	pc.predictor.model.bias = -0.5
 }
 
-// Close shuts down the predictive cache and stops all background workers
+// Close shuts down the predictive cache and stops all background workers.
+//
+// It is idempotent and safe to call while reads are in flight, both of which it previously was not:
+// it closed prefetchQueue, whose senders are cache reads that can arrive at any moment, and closed
+// stopCh unconditionally so a second call panicked on its own. See [IntelligentPrefetcher.stopCh]
+// for why the queue is left open.
+//
+// It does not wait for the workers to finish the job each is running. A prefetch is a GET the caller
+// is not waiting on, so blocking an unmount behind one — potentially a multi-megabyte transfer over
+// a slow link — would trade a real delay for no benefit.
 func (pc *PredictiveCache) Close() error {
-	if pc.config.EnablePrefetch && pc.prefetcher != nil {
-		close(pc.prefetcher.stopCh)
-		// Drain the queue to unblock any pending sends
-		close(pc.prefetcher.prefetchQueue)
+	if pc.prefetcher == nil {
+		return nil
 	}
+
+	pc.prefetcher.stopOnce.Do(func() {
+		close(pc.prefetcher.stopCh)
+	})
+
 	return nil
 }

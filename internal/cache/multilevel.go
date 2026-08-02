@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	stderr "errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -547,6 +548,47 @@ func (c *MultiLevelCache) ClearLevel(levelName string) error {
 // CacheClearer interface for caches that support clearing
 type CacheClearer interface {
 	Clear()
+}
+
+// CacheCloser is implemented by a cache level that owns background goroutines.
+//
+// types.Cache does not include Close — it is six methods about bytes — so a level that starts
+// workers has no declared way to be told to stop them. That is not a hypothetical gap: the L1 level
+// is wrapped in a [PredictiveCache] whenever prefetch is enabled, which the mount path enables
+// unconditionally, and its four prefetch workers ran for the life of the process because nothing
+// could reach its Close.
+type CacheCloser interface {
+	Close() error
+}
+
+// Close releases every level that owns background goroutines, and is safe to call more than once.
+//
+// It is the only way the prefetch workers behind the L1 level are ever retired. Before this existed,
+// [PredictiveCache.Close] had no caller anywhere in the repository: a mount enables prefetch
+// unconditionally, so every mount started four workers and a statistics ticker that outlived the
+// unmount, and a process that mounted and unmounted repeatedly accumulated them.
+//
+// A level whose Close fails does not stop the others. This runs on the unmount path, where the useful
+// behavior is to release as much as can be released and report what could not — abandoning the rest
+// after the first failure would leak the goroutines this method exists to reclaim.
+func (c *MultiLevelCache) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var errs []error
+
+	for _, level := range c.levels {
+		closer, ok := level.Cache.(CacheCloser)
+		if !ok {
+			continue
+		}
+
+		if err := closer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing cache level %s: %w", level.Name, err))
+		}
+	}
+
+	return stderr.Join(errs...)
 }
 
 // Clear evicts all entries from every enabled cache level.
