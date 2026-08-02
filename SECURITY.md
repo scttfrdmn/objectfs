@@ -24,7 +24,8 @@ credit the reporter by whatever name or handle they give.
 
 | Version | Supported |
 |---|---|
-| 0.10.1 | ✅ |
+| 0.10.2 | ✅ |
+| 0.10.1 | ❌ Superseded. Not importable as a Go module — the tag declares a module path that is not this repository (#213), so `go get` fails on it |
 | 0.10.0 | ❌ **Withdrawn** — see the banner in [README.md](README.md); it loses data |
 | < 0.10.0 | ❌ |
 

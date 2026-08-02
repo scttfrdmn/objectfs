@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-08-02
+
+A packaging release, cut for one reason: v0.10.1 was tagged two hours before the module-path fix
+merged, so the published tag still declared `module github.com/objectfs/objectfs` and
+`go get github.com/scttfrdmn/objectfs@v0.10.1` failed with *module declares its path as* — the exact
+defect #213 was filed for. The fix existed on `main` and in no tag, which from a user's position is
+indistinguishable from not being fixed. Everything else here is the packaging and contributor-path
+work that landed alongside it.
+
 ### Added
 - `SECURITY.md` — a security policy, with private vulnerability reporting enabled on the repository so a finding has somewhere to go that is not the public issue tracker. It documents what a reader cannot get from the code quickly: that the trust boundary is the mounting host and ObjectFS enforces no authorization of its own, that **two unauthenticated HTTP listeners bind all interfaces by default** (`:8080` metrics and `debug` endpoints, `:8081` health) with the switch that turns each off, that `mode: off` is the encryption default and what changed after the withdrawn v0.10.0 `at_rest` key, and both stated limits of the SHA-256 read verification — a partial read is not verified, and an object with no recorded checksum verifies trivially. Every claim in it was verified by execution rather than read off the configuration schema, which is how the two listener defects below were found
 
