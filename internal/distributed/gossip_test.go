@@ -1,14 +1,13 @@
 package distributed
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 	"time"
 )
 
 // makeGossipMsg marshals payload into a GossipMessage with the given type.
-func makeGossipMsg(t *testing.T, msgType MessageType, payload interface{}) *GossipMessage {
+func makeGossipMsg(t *testing.T, msgType MessageType, payload any) *GossipMessage {
 	t.Helper()
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -100,7 +99,7 @@ func TestGossipProtocol_GetStats_MessagesByType_Initialized(t *testing.T) {
 	stats := cm.gossip.GetStats()
 
 	if stats.MessagesByType == nil {
-		t.Error("MessagesByType should be initialised (non-nil map)")
+		t.Error("MessagesByType should be initialized (non-nil map)")
 	}
 }
 
@@ -548,8 +547,7 @@ func TestGossipProtocol_StartStop(t *testing.T) {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := cm.gossip.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

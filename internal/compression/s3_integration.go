@@ -5,9 +5,31 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/objectfs/objectfs/internal/config"
 	comprpkg "github.com/objectfs/objectfs/pkg/compression"
 )
+
+// Settings are the inputs needed to build a Compressor.
+//
+// This type exists rather than taking a config.CompressionConfig so that a codec package does not
+// depend on the application's configuration package. The dependency used to run that way, and it
+// meant the config layer could not validate an algorithm by the only means that cannot go stale —
+// asking this package to build the codec — because doing so would have been an import cycle. That
+// is why config defaulted to an algorithm with no implementation for an entire release: the check
+// that would have caught it was structurally unavailable.
+//
+// MinSize is a string because it is a human-written size ("4KB") in every configuration format
+// ObjectFS reads.
+type Settings struct {
+	// Enabled turns compression on. When false, the algorithm is not consulted.
+	Enabled bool
+	// Algorithm names the codec. See pkg/compression.SupportedAlgorithms.
+	Algorithm string
+	// Level is the codec-specific compression level; 0 selects the codec's default. Valid ranges
+	// differ per algorithm — zstd accepts 0-22, gzip only 0-9.
+	Level int
+	// MinSize is the smallest object worth compressing, e.g. "4KB". Empty or "0" means no minimum.
+	MinSize string
+}
 
 // Compressor wraps a Codec with minimum-size enforcement for transparent S3
 // object compression.  A Compressor whose codec is AlgorithmNone acts as a
@@ -17,10 +39,13 @@ type Compressor struct {
 	minSize int64
 }
 
-// NewCompressor builds a Compressor from a config.CompressionConfig.
+// NewCompressor builds a Compressor from Settings.
 // When cfg.Enabled is false a nop compressor is returned (no-overhead
 // pass-through).
-func NewCompressor(cfg config.CompressionConfig) (*Compressor, error) {
+//
+// Calling this is also how a caller validates a compression configuration: it is the only check that
+// cannot drift from what the codecs actually support, because it is the code that builds them.
+func NewCompressor(cfg Settings) (*Compressor, error) {
 	if !cfg.Enabled {
 		return &Compressor{codec: &nopCodec{}, minSize: 0}, nil
 	}

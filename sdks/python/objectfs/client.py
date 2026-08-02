@@ -392,17 +392,24 @@ class ObjectFSClient:
 
     async def get_performance_stats(self) -> Dict[str, Any]:
         """
-        Get performance statistics.
+        Not implemented. Raises NotImplementedError.
 
-        Returns:
-            Performance statistics
+        This method returned hardcoded constants -- a cache hit rate of 0.85, 1000 read
+        operations, 1500 requests, 50.5 ms average latency -- the same numbers on every
+        call, from a fresh client, with nothing mounted. They were indistinguishable from
+        telemetry, and a monitoring dashboard built on them would have shown a healthy
+        filesystem regardless of what the filesystem was doing.
+
+        Use ``get_metrics()``, which reaches the mount's real Prometheus endpoint.
+
+        Raises:
+            NotImplementedError: always.
         """
-        stats = {
-            'cache_stats': await self._get_cache_stats(),
-            'io_stats': await self._get_io_stats(),
-            'network_stats': await self._get_network_stats(),
-        }
-        return stats
+        raise NotImplementedError(
+            "get_performance_stats is not implemented. It previously returned fixed "
+            "constants that looked like measurements. Use get_metrics(), which reads "
+            "the mount's Prometheus endpoint."
+        )
 
     # Distributed Operations
 
@@ -521,31 +528,6 @@ class ObjectFSClient:
             return {path: False for path in paths}
 
     # Private helper methods
-
-    async def _get_cache_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        return {
-            'hit_rate': 0.85,
-            'size': '2GB',
-            'entries': 10000,
-        }
-
-    async def _get_io_stats(self) -> Dict[str, Any]:
-        """Get I/O statistics."""
-        return {
-            'read_ops': 1000,
-            'write_ops': 500,
-            'read_bytes': 1024 * 1024 * 100,
-            'write_bytes': 1024 * 1024 * 50,
-        }
-
-    async def _get_network_stats(self) -> Dict[str, Any]:
-        """Get network statistics."""
-        return {
-            'requests': 1500,
-            'errors': 5,
-            'avg_latency': 50.5,
-        }
 
 
 # Convenience functions

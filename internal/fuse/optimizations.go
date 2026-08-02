@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package fuse
 
 import (
@@ -67,7 +69,7 @@ func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadMana
 	}
 
 	// Start prefetch workers
-	for i := 0; i < config.ConcurrentReads; i++ {
+	for range config.ConcurrentReads {
 		go ram.prefetchWorker()
 	}
 
@@ -77,9 +79,13 @@ func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadMana
 	return ram
 }
 
-// OnRead records a read operation and triggers prefetching if patterns are detected
+// OnRead records a read operation and triggers prefetching if patterns are detected.
+//
+// Every read must be reported, hit or miss. The nil receiver is tolerated so that a caller with
+// read-ahead disabled — or a test that turned it off — does not need a guard at each call site; there
+// are two, and the one on the cache-hit path was originally missing altogether.
 func (ram *ReadAheadManager) OnRead(path string, offset, size int64) {
-	if !ram.config.Enabled {
+	if ram == nil || !ram.config.Enabled {
 		return
 	}
 
@@ -116,8 +122,32 @@ func (ram *ReadAheadManager) OnRead(path string, offset, size int64) {
 
 	// Trigger prefetch if pattern is strong enough
 	if pattern.sequentialHits >= ram.config.MinSequential && pattern.confidence > 0.5 {
-		ram.schedulePrefetch(path, pattern.predictedNext, ram.config.WindowSize)
+		ram.schedulePrefetch(path, pattern.predictedNext, ram.prefetchLength(size))
 	}
+}
+
+// prefetchLength is how much to read ahead for a reader whose last read was size bytes.
+//
+// It is at least one read's worth, because a prefetch shorter than the read it anticipates cannot
+// satisfy that read. The cache answers a Get only when it holds the whole requested range — a partial
+// hit is a miss, since it cannot tell a short object from a partially-cached one — so fetching 64 KiB
+// ahead of a 128 KiB reader produces an entry that every subsequent read walks straight past. The read
+// then fetches the full 128 KiB itself and the prefetched half is paid for twice: once in egress, once
+// in the cache capacity it occupies.
+//
+// That was the shipped default, and it is measurable rather than theoretical. Reading a 3 MiB file
+// sequentially at the kernel's 128 KiB MaxRead issued 24 reads plus 18 prefetches of 64 KiB, of which
+// zero were ever hit: 43 GETs and 4,325,644 bytes transferred for a 3,145,728-byte file, a 1.38x
+// amplification whose entire excess was prefetch. With the window at the read size, the same traversal
+// issues 24 GETs and exactly 3,145,728 bytes, and 3 of the 24 reads are served from cache.
+//
+// WindowSize remains the floor, so a deployment can prefetch further ahead than one read but not less.
+func (ram *ReadAheadManager) prefetchLength(size int64) int64 {
+	if size > ram.config.WindowSize {
+		return size
+	}
+
+	return ram.config.WindowSize
 }
 
 // schedulePrefetch schedules a prefetch operation
@@ -150,26 +180,83 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Check if data is already cached
-	if ram.fs.cache.Get(req.path, req.offset, req.size) != nil {
+	// Clamp to the end of the file, and drop a prefetch that starts at or past it.
+	//
+	// A sequential reader's predicted next offset runs off the end of the file by construction: the
+	// last read of every complete traversal is followed by a prediction one read beyond EOF. Sending
+	// that to S3 earns a 416 InvalidRange — a billed request, an error-log line, and a latency spike
+	// on the reliability path, for a range that cannot exist. Reading a 3 MiB file to its end produced
+	// exactly one, every time.
+	//
+	// The size comes from the write path so a file with pending writes is prefetched against its
+	// current length rather than the object's. If it cannot be determined, skip: a prefetch is an
+	// optimization and has no business failing a read or guessing at a bound.
+	size, err := ram.fs.buffer.FileSize(ctx, req.path)
+	if err != nil {
+		return
+	}
+
+	if req.offset >= size {
+		return
+	}
+
+	length := min(req.size, size-req.offset)
+
+	// Only now check the cache, against the clamped length rather than the requested one. Asking for
+	// the unclamped length would miss forever on the last stretch of every file — the cache holds what
+	// it was given and cannot answer for bytes past EOF — so each traversal would re-fetch that tail.
+	if ram.fs.cache.Get(req.path, req.offset, length) != nil {
 		return // Already cached
 	}
 
-	// Fetch data from backend
+	// Trim this prefetch past the end of any read already in flight, and drop it if nothing is left.
+	//
+	// [FileSystem.fetch] deduplicates by containment, which covers a prefetch that arrives while a read
+	// is in flight and a read that arrives while a prefetch is. What neither covers is the third case: a
+	// prefetch whose range *contains* an in-flight read but is not contained by it. Nothing can serve
+	// that from the read's result — the read holds fewer bytes than the prefetch wants — so it issues a
+	// second, overlapping GET and the bytes the read is already fetching are paid for twice. Measured on
+	// a 16 KiB file read in 1 KiB steps with the reader winning every race: 17,408 bytes for a 16,384
+	// byte file.
+	//
+	// Trimming rather than skipping, and that distinction is the whole value of this block. Skipping
+	// entirely also produces the right byte count — but by never prefetching at all, since a reader that
+	// consistently wins the race has a read in flight every time a prefetch is scheduled: the same
+	// traversal then issues 16 GETs of 1 KiB instead of 7, one per read, with the prefetcher contributing
+	// nothing. Advancing past the in-flight read keeps the read-ahead while fetching each byte once.
+	if start := ram.fs.fetches.unclaimedStart(req.path, req.offset); start > req.offset {
+		length -= start - req.offset
+		req.offset = start
+
+		if length <= 0 {
+			return
+		}
+	}
+
+	// Fetch through the shared path, which caches what it reads and joins a covering request already in
+	// flight rather than duplicating it.
+	//
+	// That sharing is the point here rather than an incidental benefit. A prefetch is issued for the
+	// range the reader is predicted to want next, so the read that follows wants bytes this request is
+	// already fetching — and whichever of the two reaches S3 second used to fetch them again. Under load
+	// the reader wins that race, which is when prefetch stops helping and starts doubling every read:
+	// measured at 5,373,952 bytes for a 3,145,728-byte sequential traversal, exactly 41 GETs where 24
+	// were needed.
 	fetchStart := time.Now()
-	data, err := ram.fs.backend.GetObject(ctx, req.path, req.offset, req.size)
+	data, err := ram.fs.fetch(ctx, req.path, req.offset, length)
 	if err != nil {
 		return // Prefetch failed, not critical
 	}
 
-	// Store in cache
-	ram.fs.cache.Put(req.path, req.offset, data)
-
 	// Record metrics using the captured start time (#104).
 	// time.Since(time.Now()) always evaluates to ~0 because time.Now() is
 	// evaluated at the point of the call, not at fetch start.
+	//
+	// The size reported is what was transferred, not what was asked for. Those differ on the last
+	// prefetch of every file, and a prefetch metric that overstates its own egress is the wrong number
+	// to tune a prefetcher with.
 	if ram.fs.metrics != nil {
-		ram.fs.metrics.RecordOperation("prefetch", time.Since(fetchStart), req.size, true)
+		ram.fs.metrics.RecordOperation("prefetch", time.Since(fetchStart), int64(len(data)), true)
 	}
 }
 
@@ -206,207 +293,4 @@ func (ram *ReadAheadManager) Stop() {
 	ram.stopOnce.Do(func() {
 		close(ram.stopCh)
 	})
-}
-
-// WriteCoalescer optimizes write operations by coalescing small writes
-type WriteCoalescer struct {
-	mu            sync.RWMutex
-	pendingWrites map[string]*CoalescedWrite
-	fs            *FileSystem
-	config        *WriteCoalescerConfig
-}
-
-// WriteCoalescerConfig configures write coalescing behavior
-type WriteCoalescerConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	WindowSize int64         `yaml:"window_size"` // Size window for coalescing
-	MaxDelay   time.Duration `yaml:"max_delay"`   // Maximum delay before forced flush
-	MinWrites  int           `yaml:"min_writes"`  // Minimum writes to trigger coalescing
-	BufferSize int64         `yaml:"buffer_size"` // Maximum buffer size per file
-}
-
-// CoalescedWrite represents a coalesced write operation
-type CoalescedWrite struct {
-	path      string
-	writes    []WriteOp
-	totalSize int64
-	firstTime time.Time
-	lastTime  time.Time
-}
-
-// WriteOp represents a single write operation
-type WriteOp struct {
-	offset int64
-	data   []byte
-	time   time.Time
-}
-
-// NewWriteCoalescer creates a new write coalescer
-func NewWriteCoalescer(fs *FileSystem, config *WriteCoalescerConfig) *WriteCoalescer {
-	if config == nil {
-		config = &WriteCoalescerConfig{
-			Enabled:    true,
-			WindowSize: 64 * 1024, // 64KB
-			MaxDelay:   100 * time.Millisecond,
-			MinWrites:  3,
-			BufferSize: 1024 * 1024, // 1MB
-		}
-	}
-
-	return &WriteCoalescer{
-		pendingWrites: make(map[string]*CoalescedWrite),
-		fs:            fs,
-		config:        config,
-	}
-}
-
-// CoalesceWrite attempts to coalesce a write operation
-func (wc *WriteCoalescer) CoalesceWrite(path string, offset int64, data []byte) bool {
-	if !wc.config.Enabled {
-		return false
-	}
-
-	wc.mu.Lock()
-	defer wc.mu.Unlock()
-
-	cw, exists := wc.pendingWrites[path]
-	if !exists {
-		// Start new coalesced write
-		cw = &CoalescedWrite{
-			path:      path,
-			writes:    make([]WriteOp, 0, 10),
-			firstTime: time.Now(),
-		}
-		wc.pendingWrites[path] = cw
-	}
-
-	// Check if this write can be coalesced
-	if wc.canCoalesce(cw, offset, int64(len(data))) {
-		cw.writes = append(cw.writes, WriteOp{
-			offset: offset,
-			data:   append([]byte(nil), data...), // Copy data
-			time:   time.Now(),
-		})
-		cw.totalSize += int64(len(data))
-		cw.lastTime = time.Now()
-
-		// Check if we should flush now
-		if wc.shouldFlush(cw) {
-			wc.flushCoalescedWrite(cw)
-			delete(wc.pendingWrites, path)
-		}
-
-		return true
-	}
-
-	return false
-}
-
-// canCoalesce checks if a write can be coalesced with existing writes
-func (wc *WriteCoalescer) canCoalesce(cw *CoalescedWrite, offset, size int64) bool {
-	// Check buffer size limit
-	if cw.totalSize+size > wc.config.BufferSize {
-		return false
-	}
-
-	// Check time limit
-	if time.Since(cw.firstTime) > wc.config.MaxDelay {
-		return false
-	}
-
-	// Check if writes are within window
-	if len(cw.writes) > 0 {
-		lastWrite := cw.writes[len(cw.writes)-1]
-		distance := offset - (lastWrite.offset + int64(len(lastWrite.data)))
-		if distance > wc.config.WindowSize {
-			return false
-		}
-	}
-
-	return true
-}
-
-// shouldFlush determines if coalesced writes should be flushed
-func (wc *WriteCoalescer) shouldFlush(cw *CoalescedWrite) bool {
-	// Check minimum writes threshold
-	if len(cw.writes) >= wc.config.MinWrites {
-		return true
-	}
-
-	// Check time limit
-	if time.Since(cw.firstTime) >= wc.config.MaxDelay {
-		return true
-	}
-
-	// Check buffer size limit
-	if cw.totalSize >= wc.config.BufferSize {
-		return true
-	}
-
-	return false
-}
-
-// flushCoalescedWrite flushes a coalesced write to the buffer
-func (wc *WriteCoalescer) flushCoalescedWrite(cw *CoalescedWrite) {
-	// Sort writes by offset to ensure proper ordering
-	for i := 0; i < len(cw.writes)-1; i++ {
-		for j := i + 1; j < len(cw.writes); j++ {
-			if cw.writes[i].offset > cw.writes[j].offset {
-				cw.writes[i], cw.writes[j] = cw.writes[j], cw.writes[i]
-			}
-		}
-	}
-
-	// Merge overlapping/adjacent writes
-	merged := wc.mergeWrites(cw.writes)
-
-	// Write to buffer
-	for _, write := range merged {
-		_ = wc.fs.buffer.Write(cw.path, write.offset, write.data)
-	}
-}
-
-// mergeWrites merges overlapping and adjacent writes
-func (wc *WriteCoalescer) mergeWrites(writes []WriteOp) []WriteOp {
-	if len(writes) <= 1 {
-		return writes
-	}
-
-	merged := make([]WriteOp, 0, len(writes))
-	current := writes[0]
-
-	for i := 1; i < len(writes); i++ {
-		next := writes[i]
-		currentEnd := current.offset + int64(len(current.data))
-
-		if next.offset <= currentEnd {
-			// Overlapping or adjacent, merge
-			newEnd := next.offset + int64(len(next.data))
-			if newEnd > currentEnd {
-				// Extend current write
-				newData := make([]byte, newEnd-current.offset)
-				copy(newData, current.data)
-				copy(newData[next.offset-current.offset:], next.data)
-				current.data = newData
-			}
-		} else {
-			// Not adjacent, add current and start new
-			merged = append(merged, current)
-			current = next
-		}
-	}
-
-	merged = append(merged, current)
-	return merged
-}
-
-// FlushAll flushes all pending coalesced writes
-func (wc *WriteCoalescer) FlushAll() {
-	wc.mu.Lock()
-	defer wc.mu.Unlock()
-
-	for path, cw := range wc.pendingWrites {
-		wc.flushCoalescedWrite(cw)
-		delete(wc.pendingWrites, path)
-	}
 }

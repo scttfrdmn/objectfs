@@ -20,7 +20,13 @@ func (n *nopCodec) ContentEncoding() string               { return "" }
 
 // New returns a Codec for the requested algorithm at the given level.
 // Use level 0 (DefaultLevel) to select the algorithm's built-in default.
-// Supported algorithms: "none" / "", "zstd", "lz4".
+//
+// The set of algorithms this function accepts is reported by
+// pkg/compression.SupportedAlgorithms. Anything that validates an algorithm name must consult that
+// list rather than keeping its own: config defaulted the algorithm to "gzip" while this factory had
+// no gzip case, so every layer that read config believed the value was valid and only the factory
+// disagreed — at which point the mount had already been attempted and the process exited with
+// "Failed to start adapter". One list, one authority.
 func New(algo comprpkg.Algorithm, level int) (comprpkg.Codec, error) {
 	switch algo {
 	case comprpkg.AlgorithmNone, "":
@@ -29,7 +35,10 @@ func New(algo comprpkg.Algorithm, level int) (comprpkg.Codec, error) {
 		return NewZstdCodec(level)
 	case comprpkg.AlgorithmLZ4:
 		return NewLZ4Codec(), nil
+	case comprpkg.AlgorithmGzip:
+		return NewGzipCodec(level)
 	default:
-		return nil, fmt.Errorf("unsupported compression algorithm %q", algo)
+		return nil, fmt.Errorf("unsupported compression algorithm %q (supported: %s)",
+			algo, comprpkg.SupportedAlgorithmNames())
 	}
 }

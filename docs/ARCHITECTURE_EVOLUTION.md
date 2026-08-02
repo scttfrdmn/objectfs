@@ -1,6 +1,6 @@
 # ObjectFS Architecture Evolution: FUSE Client → Multi-Protocol Server
 
-## Current Architecture (v0.2.0)
+## Current Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -203,7 +203,7 @@ type NFSHandler struct {
 
 ### 4. **Configuration Evolution**
 ```yaml
-# Current configuration (v0.2.0) - remains unchanged
+# Current configuration - remains unchanged
 backends:
   s3:
     bucket: "research-data"

@@ -3,7 +3,7 @@ package compression
 import comprpkg "github.com/objectfs/objectfs/pkg/compression"
 
 // AccessHint provides context about the expected read pattern for an object.
-// Hot objects should favour fast decompression (LZ4); cold objects can afford
+// Hot objects should favor fast decompression (LZ4); cold objects can afford
 // slower decompression in exchange for a better compression ratio (ZSTD).
 type AccessHint int
 
@@ -59,7 +59,7 @@ func (r *RuleSelector) Select(analysis Analysis, hint AccessHint, size int64) Re
 		}
 	}
 
-	// Hot path: favour LZ4's fast decompression for frequently read objects.
+	// Hot path: favor LZ4's fast decompression for frequently read objects.
 	if hint == AccessHintHot {
 		return Recommendation{
 			Algorithm: comprpkg.AlgorithmLZ4,

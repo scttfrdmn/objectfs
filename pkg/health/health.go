@@ -46,14 +46,31 @@ func (s HealthState) String() string {
 
 // ComponentHealth tracks the health of a specific component
 type ComponentHealth struct {
-	Name              string                 `json:"name"`
-	State             HealthState            `json:"state"`
-	LastStateChange   time.Time              `json:"last_state_change"`
-	LastHealthCheck   time.Time              `json:"last_health_check"`
-	ConsecutiveErrors int                    `json:"consecutive_errors"`
-	LastError         error                  `json:"-"`
-	LastErrorMessage  string                 `json:"last_error_message,omitempty"`
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	Name              string         `json:"name"`
+	State             HealthState    `json:"state"`
+	LastStateChange   time.Time      `json:"last_state_change"`
+	LastHealthCheck   time.Time      `json:"last_health_check"`
+	ConsecutiveErrors int            `json:"consecutive_errors"`
+	LastError         error          `json:"-"`
+	LastErrorMessage  string         `json:"last_error_message,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+
+	// probing marks a component that the availability gate has admitted one operation into after
+	// ProbeAfter elapsed, and whose outcome has not come back yet. It is the half-open state of a
+	// circuit breaker.
+	//
+	// It exists because "one success proves the service works" cannot be expressed with the error
+	// counter alone: RecordSuccess decrements, so recovering from ten consecutive errors would take
+	// ten successes, and the gate only ever admits one operation at a time. The probe's result has
+	// to be decisive in both directions — recover fully or latch again.
+	probing bool
+
+	// nextProbe is the earliest time another probe may be admitted. It gates admission on its own,
+	// without consulting probing, so a probe whose result never arrives — a panicking caller, a
+	// path that forgets to record its outcome — costs one probe interval rather than latching the
+	// component forever. Deciding admission on the flag would rebuild the defect this whole
+	// mechanism exists to fix.
+	nextProbe time.Time
 }
 
 // Tracker tracks the health of multiple components and determines overall system health
@@ -84,6 +101,21 @@ type TrackerConfig struct {
 
 	// EnableAutoRecovery enables automatic recovery from degraded states
 	EnableAutoRecovery bool `yaml:"enable_auto_recovery" json:"enable_auto_recovery"`
+
+	// ProbeAfter is how long a component stays unavailable before one operation is admitted to
+	// find out whether the service came back.
+	//
+	// Without it, StateUnavailable is a one-way door. Reaching it makes the availability gate
+	// refuse every subsequent operation, and the only thing that clears it is RecordSuccess —
+	// which is recorded by the operation the gate just refused. Nothing in ObjectFS calls
+	// StartHealthChecks, so no other path can supply that success either. A component that became
+	// unavailable stayed unavailable for the life of the process: ten reads of a missing key took
+	// the whole mount permanently offline, verified by execution.
+	//
+	// This is the circuit breaker's half-open state, which internal/circuit already implements
+	// correctly on a timer. Two mechanisms guard the same operation; this is the one that runs
+	// first, so it is the one that has to recover.
+	ProbeAfter time.Duration `yaml:"probe_after" json:"probe_after"`
 }
 
 // StateChangeCallback is called when a component's health state changes
@@ -104,6 +136,7 @@ func DefaultConfig() TrackerConfig {
 		HealthCheckInterval:  30 * time.Second,
 		StateHistorySize:     100,
 		EnableAutoRecovery:   true,
+		ProbeAfter:           30 * time.Second,
 	}
 }
 
@@ -128,7 +161,7 @@ func (t *Tracker) RegisterComponent(name string) {
 			State:           StateHealthy,
 			LastStateChange: time.Now(),
 			LastHealthCheck: time.Now(),
-			Metadata:        make(map[string]interface{}),
+			Metadata:        make(map[string]any),
 		}
 	}
 }
@@ -146,8 +179,15 @@ func (t *Tracker) RecordSuccess(component string) {
 	oldState := health.State
 	health.LastHealthCheck = time.Now()
 
-	// Reset error counter on success
-	if health.ConsecutiveErrors > 0 {
+	switch {
+	case health.probing:
+		// The probe the gate admitted came back clean, so the service works. Recover outright
+		// rather than decrementing: see ComponentHealth.probing.
+		health.probing = false
+		health.ConsecutiveErrors = 0
+		t.transitionState(health, StateHealthy, nil)
+
+	case health.ConsecutiveErrors > 0:
 		health.ConsecutiveErrors--
 
 		// Check for recovery
@@ -167,8 +207,18 @@ func (t *Tracker) RecordSuccess(component string) {
 	}
 }
 
-// RecordError records an error for a component
+// RecordError records an error for a component.
+//
+// An error that is not evidence of a service failure — a missing object, a rejected request, a
+// canceled operation — is recorded as a success instead, because that is what it is: the service
+// was asked a question and answered it. See [errors.IsServiceFailure] for why the distinction
+// cannot be skipped.
 func (t *Tracker) RecordError(component string, err error) {
+	if !isServiceFailure(err) {
+		t.RecordSuccess(component)
+		return
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -184,6 +234,12 @@ func (t *Tracker) RecordError(component string, err error) {
 	if err != nil {
 		health.LastErrorMessage = err.Error()
 	}
+
+	// A failed probe is decisive: the service is still down. Clearing the flag leaves the state
+	// where it was — the component was already refusing operations, and a confirmed failure is no
+	// reason to escalate past that. nextProbe was set when the probe was admitted, so the next
+	// attempt is already one interval out.
+	health.probing = false
 
 	// Determine new state based on error count
 	var newState HealthState
@@ -296,16 +352,77 @@ func (t *Tracker) IsHealthy(component string) bool {
 	return t.GetState(component) == StateHealthy
 }
 
-// CanRead returns true if the component can perform read operations
+// CanRead returns true if the component can perform read operations.
+//
+// Like [CanWrite], this admits a probe once ProbeAfter has elapsed in a state that refuses the
+// operation, so it can change the component's state as a side effect. That mirrors a circuit
+// breaker's half-open transition and is the reason a degraded component can ever recover: the
+// success that clears the error count is only ever produced by an operation the gate allowed
+// through.
 func (t *Tracker) CanRead(component string) bool {
-	state := t.GetState(component)
+	state := t.admissionState(component)
 	return state == StateHealthy || state == StateDegraded || state == StateReadOnly
 }
 
-// CanWrite returns true if the component can perform write operations
+// CanWrite returns true if the component can perform write operations.
 func (t *Tracker) CanWrite(component string) bool {
-	state := t.GetState(component)
+	state := t.admissionState(component)
 	return state == StateHealthy || state == StateDegraded
+}
+
+// admissionState returns the state to admit against, letting one operation through to probe a
+// component that has been refusing them once ProbeAfter has elapsed.
+//
+// Every read and every write passes through here, so the common case takes a read lock and returns:
+// a healthy or degraded component already admits its operations and is never a probe candidate.
+func (t *Tracker) admissionState(component string) HealthState {
+	t.mu.RLock()
+	health, exists := t.components[component]
+	if !exists {
+		t.mu.RUnlock()
+		return StateUnavailable
+	}
+	state, due := health.State, health.nextProbe
+	t.mu.RUnlock()
+
+	if t.config.ProbeAfter <= 0 || state == StateHealthy || state == StateDegraded {
+		return state
+	}
+	if time.Now().Before(due) {
+		return state
+	}
+
+	return t.probe(component)
+}
+
+// probe admits one operation against a component that has been refusing them, and reports the state
+// to admit against.
+//
+// The component is left in the state it was in. Only the probing flag changes, so a caller reading
+// GetState during a probe still sees the truth: the component is unavailable and has not yet been
+// shown otherwise. The returned state is degraded purely to get this one operation past the gate,
+// and RecordSuccess or RecordError then settles it.
+func (t *Tracker) probe(component string) HealthState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	health, exists := t.components[component]
+	if !exists {
+		return StateUnavailable
+	}
+
+	// Re-check under the write lock: another caller may have probed or recovered the component
+	// between the read lock above and this one. Without this, a burst of concurrent operations
+	// would all be admitted as probes instead of one, and the gate would stop being a gate exactly
+	// when the service is least able to absorb the load.
+	now := time.Now()
+	if health.State == StateHealthy || health.State == StateDegraded || now.Before(health.nextProbe) {
+		return health.State
+	}
+
+	health.probing = true
+	health.nextProbe = now.Add(t.config.ProbeAfter)
+	return StateDegraded
 }
 
 // AddStateChangeCallback registers a callback for state changes to a specific state
@@ -325,7 +442,7 @@ func (t *Tracker) AddHealthListener(listener HealthListener) {
 }
 
 // SetComponentMetadata sets metadata for a component
-func (t *Tracker) SetComponentMetadata(component, key string, value interface{}) {
+func (t *Tracker) SetComponentMetadata(component, key string, value any) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -336,14 +453,32 @@ func (t *Tracker) SetComponentMetadata(component, key string, value interface{})
 
 // transitionState transitions a component to a new state (must be called with lock held)
 func (t *Tracker) transitionState(health *ComponentHealth, newState HealthState, err error) {
+	now := time.Now()
 	health.State = newState
-	health.LastStateChange = time.Now()
+	health.LastStateChange = now
 
-	// Reset error counter on full recovery
-	if newState == StateHealthy {
+	switch newState {
+	case StateHealthy:
+		// Reset error counter on full recovery
 		health.ConsecutiveErrors = 0
 		health.LastError = nil
 		health.LastErrorMessage = ""
+		health.probing = false
+		health.nextProbe = time.Time{}
+
+	case StateReadOnly, StateUnavailable:
+		// Arm the probe clock on entry to a state that refuses operations. Without this the first
+		// probe would be admitted immediately, turning a component that just failed into one that
+		// retries on every call.
+		health.probing = false
+		health.nextProbe = now.Add(t.config.ProbeAfter)
+
+	case StateDegraded:
+		// Nothing to do, and the emptiness is the point rather than an omission. Degraded admits
+		// operations, so there is no probe clock to arm — GetState returns it without consulting
+		// nextProbe — and ConsecutiveErrors must keep accumulating, because that count is what
+		// escalates degraded to unavailable. Resetting it here would make a component that fails
+		// steadily below the unavailable threshold never reach it.
 	}
 }
 
@@ -360,6 +495,23 @@ func (t *Tracker) notifyStateChange(component string, oldState, newState HealthS
 	for _, listener := range t.healthListeners {
 		go listener.OnStateChange(component, oldState, newState, err)
 	}
+}
+
+// isServiceFailure reports whether err is evidence the service is unwell.
+//
+// An error carrying no ObjectFS code counts as a failure. That is the safe direction for an
+// unclassified error: the tracker degrades, and the probe timer restores it if the service is
+// actually fine.
+func isServiceFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var objErr *errors.ObjectFSError
+	if stderr.As(err, &objErr) {
+		return errors.IsServiceFailure(objErr.Code)
+	}
+	return true
 }
 
 // isWriteError checks if an error indicates a write failure but reads may still work

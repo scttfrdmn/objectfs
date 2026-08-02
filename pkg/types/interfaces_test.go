@@ -29,7 +29,11 @@ func (m *mockBackend) GetObject(ctx context.Context, key string, offset, size in
 	return nil, nil
 }
 
-func (m *mockBackend) PutObject(ctx context.Context, key string, data []byte) error {
+func (m *mockBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
+	return nil
+}
+
+func (m *mockBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	return nil
 }
 
@@ -85,6 +89,14 @@ func (m *mockWriteBuffer) Write(key string, offset int64, data []byte) error {
 	return nil
 }
 
+func (m *mockWriteBuffer) ReadAt(ctx context.Context, key string, buf []byte, offset int64) (int, error) {
+	return 0, nil
+}
+
+func (m *mockWriteBuffer) FileSize(ctx context.Context, key string) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockWriteBuffer) Flush(key string) error {
 	return nil
 }
@@ -112,13 +124,13 @@ func (m *mockMetricsCollector) RecordCacheMiss(key string, size int64) {}
 
 func (m *mockMetricsCollector) RecordError(operation string, err error) {}
 
-func (m *mockMetricsCollector) GetMetrics() map[string]interface{} {
+func (m *mockMetricsCollector) GetMetrics() map[string]any {
 	return nil
 }
 
 type mockConfigManager struct{}
 
-func (m *mockConfigManager) Get(key string) interface{} {
+func (m *mockConfigManager) Get(key string) any {
 	return nil
 }
 
@@ -138,7 +150,7 @@ func (m *mockConfigManager) GetBool(key string) bool {
 	return false
 }
 
-func (m *mockConfigManager) Watch(key string, callback func(interface{})) {}
+func (m *mockConfigManager) Watch(key string, callback func(any)) {}
 
 func (m *mockConfigManager) Reload() error {
 	return nil
@@ -172,11 +184,11 @@ func (m *mockAccessPredictor) GetConfidence(path string) float64 {
 
 type mockConnectionManager struct{}
 
-func (m *mockConnectionManager) GetConnection() interface{} {
+func (m *mockConnectionManager) GetConnection() any {
 	return nil
 }
 
-func (m *mockConnectionManager) ReturnConnection(conn interface{}) {}
+func (m *mockConnectionManager) ReturnConnection(conn any) {}
 
 func (m *mockConnectionManager) HealthCheck() error {
 	return nil

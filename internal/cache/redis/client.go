@@ -8,9 +8,10 @@ import (
 	"strings"
 	"sync/atomic"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	"github.com/objectfs/objectfs/internal/config"
 	"github.com/objectfs/objectfs/pkg/types"
-	goredis "github.com/redis/go-redis/v9"
 )
 
 // Cache implements types.Cache backed by a Redis server.
@@ -108,9 +109,9 @@ func (c *Cache) Size() int64 {
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(info, "\n") {
-		if strings.HasPrefix(line, "used_memory:") {
-			valStr := strings.TrimSpace(strings.TrimPrefix(line, "used_memory:"))
+	for line := range strings.SplitSeq(info, "\n") {
+		if after, ok := strings.CutPrefix(line, "used_memory:"); ok {
+			valStr := strings.TrimSpace(after)
 			if v, err := strconv.ParseInt(valStr, 10, 64); err == nil {
 				return v
 			}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"sync"
@@ -200,9 +201,13 @@ func (c *Checker) Start(ctx context.Context) error {
 	// Start background check loop
 	go c.checkLoop()
 
-	// Start HTTP server if enabled
+	// Start HTTP server if enabled.
+	//
+	// context.WithoutCancel: the listener outlives the Start call, and this ctx is the caller's
+	// request-scoped one. Binding it directly would tear the endpoint down the moment the caller
+	// canceled — Stop is what ends this server.
 	if c.config.HTTPEnabled {
-		go c.startHTTPServer()
+		go c.startHTTPServer(context.WithoutCancel(ctx))
 	}
 
 	return nil
@@ -269,16 +274,14 @@ func (c *Checker) RunAllChecks(ctx context.Context) (map[string]*Result, error) 
 	}
 
 	// Collect results
-	for i := 0; i < len(checks); i++ {
+	for range checks {
 		result := <-resultsChan
 		results[result.Check] = result
 	}
 
 	// Update stored results
 	c.mu.Lock()
-	for name, result := range results {
-		c.results[name] = result
-	}
+	maps.Copy(c.results, results)
 	c.updateStats()
 	c.mu.Unlock()
 
@@ -286,11 +289,11 @@ func (c *Checker) RunAllChecks(ctx context.Context) (map[string]*Result, error) 
 }
 
 // GetStatus returns the current health status
-func (c *Checker) GetStatus() map[string]interface{} {
+func (c *Checker) GetStatus() map[string]any {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	status := make(map[string]interface{})
+	status := make(map[string]any)
 	status["overall_status"] = c.stats.OverallStatus
 	status["timestamp"] = time.Now()
 	status["uptime"] = time.Since(c.lastUpdate)
@@ -298,9 +301,7 @@ func (c *Checker) GetStatus() map[string]interface{} {
 
 	// Add individual check results
 	checks := make(map[string]*Result)
-	for name, result := range c.results {
-		checks[name] = result
-	}
+	maps.Copy(checks, c.results)
 	status["checks"] = checks
 
 	return status
@@ -466,13 +467,38 @@ func (c *Checker) updateStats() {
 	c.stats.SystemUptime = time.Since(c.lastUpdate)
 }
 
-func (c *Checker) startHTTPServer() {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", c.config.HTTPPort))
+// startHTTPServer binds the configured port and serves the health endpoint until Stop.
+//
+// The bind is separated from the serving so that each half is testable. Before that split the only
+// coverage this function had came from tests *failing* to bind: eight tests in this package start a
+// Monitor with the default Config, which enables the endpoint on the fixed port 8081, so the first
+// one to reach it won and the rest took the error arm below. How many did was a matter of goroutine
+// scheduling — the package measured 45.0% coverage on an idle machine and 44.7% under CI's load,
+// which is how a per-package floor came to be set half a statement above what the tests reliably
+// reach. The handler itself, meanwhile, had never served a request in a test at all.
+func (c *Checker) startHTTPServer(ctx context.Context) {
+	var lc net.ListenConfig
+
+	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf(":%d", c.config.HTTPPort))
 	if err != nil {
 		slog.Error("health: failed to bind HTTP server", "port", c.config.HTTPPort, "error", err)
 		return
 	}
 
+	c.serveHealth(ctx, ln)
+}
+
+// serveHealth serves the health endpoint on ln, returning when Stop closes stopCh.
+//
+// Split out from startHTTPServer so a test can supply its own listener on port 0 and address the
+// endpoint it gets back. Binding a fixed port in a test is what made this package's coverage a
+// function of how many parallel tests collided on 8081.
+//
+// ctx is the parent of the shutdown deadline below rather than a second stop signal: closing stopCh
+// is what ends this server. Deriving the shutdown timeout from it instead of from context.Background
+// means a caller that has already given up does not get an extra five seconds of graceful drain it
+// is no longer waiting for.
+func (c *Checker) serveHealth(ctx context.Context, ln net.Listener) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(c.config.HTTPPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -482,7 +508,7 @@ func (c *Checker) startHTTPServer() {
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]any{
 			"status":    status["overall_status"],
 			"timestamp": status["timestamp"],
 			"checks":    status["checks"],
@@ -498,9 +524,9 @@ func (c *Checker) startHTTPServer() {
 
 	go func() {
 		<-c.stopCh
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(ctx)
+		_ = server.Shutdown(shutdownCtx)
 	}()
 
 	slog.Info("health: HTTP server listening", "addr", ln.Addr())
@@ -562,17 +588,17 @@ func NetworkCheck(host string, port int) CheckFunction {
 
 // ServiceStatus represents the health status of the entire service
 type ServiceStatus struct {
-	Status    Status                 `json:"status"`
-	Timestamp time.Time              `json:"timestamp"`
-	Uptime    time.Duration          `json:"uptime"`
-	Version   string                 `json:"version,omitempty"`
-	Checks    map[string]*Result     `json:"checks"`
-	Stats     Stats                  `json:"stats"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Status    Status             `json:"status"`
+	Timestamp time.Time          `json:"timestamp"`
+	Uptime    time.Duration      `json:"uptime"`
+	Version   string             `json:"version,omitempty"`
+	Checks    map[string]*Result `json:"checks"`
+	Stats     Stats              `json:"stats"`
+	Metadata  map[string]any     `json:"metadata,omitempty"`
 }
 
 // NewServiceStatus creates a comprehensive service status
-func (c *Checker) NewServiceStatus(version string, metadata map[string]interface{}) *ServiceStatus {
+func (c *Checker) NewServiceStatus(version string, metadata map[string]any) *ServiceStatus {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -587,9 +613,7 @@ func (c *Checker) NewServiceStatus(version string, metadata map[string]interface
 	}
 
 	// Copy current results
-	for name, result := range c.results {
-		status.Checks[name] = result
-	}
+	maps.Copy(status.Checks, c.results)
 
 	return status
 }

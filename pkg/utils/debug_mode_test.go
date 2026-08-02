@@ -66,7 +66,7 @@ func TestRecordEvent(t *testing.T) {
 	defer dm.StopSession(sessionID)
 
 	// Record event
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"file": "/test/file.txt",
 		"size": 1024,
 	}
@@ -178,7 +178,7 @@ func TestMaxEvents(t *testing.T) {
 	defer dm.StopSession(sessionID)
 
 	// Record more events than max
-	for i := 0; i < maxEvents+3; i++ {
+	for range maxEvents + 3 {
 		dm.RecordEvent("test", "operation", "Test event", nil)
 	}
 
@@ -313,7 +313,7 @@ func TestDebugTrace(t *testing.T) {
 	defer dm.StopSession(sessionID)
 
 	// Start trace
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"operation_id": "op-123",
 	}
 	trace := StartTrace(sessionID, "storage", "write", fields)

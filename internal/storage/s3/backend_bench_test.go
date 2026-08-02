@@ -85,7 +85,7 @@ func makePayload(n int) []byte {
 
 func seedBackend(bb *benchBackend, count int, sizeBytes int) {
 	payload := makePayload(sizeBytes)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		key := fmt.Sprintf("bench/key-%04d", i)
 		bb.objects[key] = payload
 	}

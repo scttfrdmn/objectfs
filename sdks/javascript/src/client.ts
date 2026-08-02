@@ -314,20 +314,22 @@ export class ObjectFSClient extends EventEmitter {
   }
 
   /**
-   * Get performance statistics
+   * Not implemented. Always throws.
+   *
+   * This returned hardcoded constants -- a cache hit rate of 0.85, 1000 read operations,
+   * 1500 requests, 50.5 ms latency -- the same numbers on every call, from a fresh client,
+   * with nothing mounted. They were indistinguishable from telemetry, and a dashboard built
+   * on them would have shown a healthy filesystem regardless of what the filesystem was
+   * doing.
+   *
+   * Use `getMetrics()`, which reaches the mount's real Prometheus endpoint.
    */
   async getPerformanceStats(): Promise<PerformanceStats> {
-    const [cacheStats, ioStats, networkStats] = await Promise.all([
-      this.getCacheStats(),
-      this.getIOStats(),
-      this.getNetworkStats(),
-    ]);
-
-    return {
-      cache: cacheStats,
-      io: ioStats,
-      network: networkStats,
-    };
+    throw new ObjectFSError(
+      'getPerformanceStats is not implemented. It previously returned fixed constants ' +
+        "that looked like measurements. Use getMetrics(), which reads the mount's " +
+        'Prometheus endpoint.'
+    );
   }
 
   // Distributed Operations
@@ -504,34 +506,6 @@ export class ObjectFSClient extends EventEmitter {
     }
   }
 
-  // Private helper methods
-
-  private async getCacheStats(): Promise<any> {
-    return {
-      hits: 850,
-      misses: 150,
-      hitRate: 0.85,
-      size: 2147483648, // 2GB
-      entries: 10000,
-    };
-  }
-
-  private async getIOStats(): Promise<any> {
-    return {
-      readOperations: 1000,
-      writeOperations: 500,
-      readBytes: 104857600, // 100MB
-      writeBytes: 52428800, // 50MB
-    };
-  }
-
-  private async getNetworkStats(): Promise<any> {
-    return {
-      requests: 1500,
-      errors: 5,
-      latency: 50.5,
-    };
-  }
 }
 
 // Convenience functions

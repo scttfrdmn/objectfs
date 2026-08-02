@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"time"
 
 	"github.com/objectfs/objectfs/pkg/errors"
@@ -151,10 +152,8 @@ func (r *Retryer) shouldRetry(err error, attempt int) bool {
 		}
 
 		// Check if error code is in retryable list
-		for _, code := range r.config.RetryableErrors {
-			if objErr.Code == code {
-				return true
-			}
+		if slices.Contains(r.config.RetryableErrors, objErr.Code) {
+			return true
 		}
 	}
 

@@ -99,7 +99,6 @@ func TestNewMultiLevelCache(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // capture range variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cache, err := NewMultiLevelCache(tt.config)
@@ -495,7 +494,7 @@ func TestMultiLevelCache_Evict(t *testing.T) {
 	}
 
 	// Add some data
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 100))
 	}
 
@@ -993,7 +992,7 @@ func TestMultiLevelCache_ShouldPromoteToL2_PredictorStandard(t *testing.T) {
 
 	// Simulate frequent recent access to build Standard-tier pattern.
 	now := time.Now()
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		p.RecordAccessAt("hot-obj", now.Add(time.Duration(-i)*time.Minute), 4096)
 	}
 
@@ -1003,7 +1002,7 @@ func TestMultiLevelCache_ShouldPromoteToL2_PredictorStandard(t *testing.T) {
 		t.Skip("predictor has insufficient history; skipping L2-promotion assertion")
 	}
 
-	// shouldPromoteToL2 should honour the predictor recommendation.
+	// shouldPromoteToL2 should honor the predictor recommendation.
 	promote := c.shouldPromoteToL2("hot-obj", make([]byte, 512)) // < 1 MiB fallback threshold
 	if rec.Tier == analytics.TierStandard || rec.Tier == analytics.TierStandardIA {
 		if !promote {

@@ -2,12 +2,16 @@
 
 ## Project
 
-Enterprise-grade POSIX-compliant FUSE filesystem for AWS S3, optimized for research computing and institutional deployments.
+FUSE filesystem presenting a POSIX interface over AWS S3, for research computing and institutional
+deployments. Not a POSIX-compliant filesystem — see the supported-operations table in `README.md`
+for what works, what fails by design, and which tools are known not to work.
 
 - **Module**: `github.com/objectfs/objectfs`
 - **Go version**: 1.26.0
 - **License**: Apache 2.0, Copyright 2025-2026 Scott Friedman
-- **Current version**: 0.7.0
+- **Current version**: the `version` constant in `cmd/objectfs/main.go` is the only authority. Do
+  not restate it here or in any roadmap: five files claimed five different versions (0.10.0, 0.7.0,
+  v0.3.0, v0.2.0 twice), and a number copied into prose has no way to be told it is stale
 
 ## Project Tracking
 
@@ -37,16 +41,21 @@ User apps → Kernel VFS → FUSE (go-fuse/cgofuse) → Adapter → S3 Backend �
 Key internal packages:
 
 - `internal/adapter/` — central coordinator
-- `internal/fuse/` — POSIX filesystem operations
+- `internal/vfs/` — POSIX-semantics core: attributes, handle table, dirty ranges, read-modify-write flush. Depends on nothing FUSE and is testable without a mount
+- `internal/fuse/` — go-fuse binding: kernel types ⇄ `vfs` calls, error mapping
 - `internal/storage/s3/` — AWS S3 backend + pricing
 - `internal/cache/` — LRU + persistent + predictive cache
-- `internal/buffer/` — write buffering with compression
 - `internal/config/` — YAML + env configuration
 - `internal/circuit/` — circuit breaker
 - `internal/health/` — health monitoring
 - `internal/distributed/` — multi-node coordination (experimental)
 - `pkg/archive/` — archive format metadata (tar.zst, tar.gz, tar.bz2)
 - `pkg/types/` — core interfaces
+
+Test infrastructure:
+
+- `internal/testaws/` — the real S3 backend against an in-process [substrate](https://github.com/scttfrdmn/substrate) endpoint over real HTTP: no network, no credentials, no AWS account. Prefer this to a hand-written mock — a mock on the far side of a seam agrees with the caller by construction, which is why 32,680 lines of tests missed ~45 defects
+- `internal/difftest/` — differential oracle: one operation sequence run against ObjectFS and against the local OS filesystem, asserting they agree on reads, sizes, and durable bytes
 
 ## Related Projects
 

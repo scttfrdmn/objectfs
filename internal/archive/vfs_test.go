@@ -28,8 +28,13 @@ func (m *mockBackend) GetObject(_ context.Context, key string, _, _ int64) ([]by
 	return data, nil
 }
 
-func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte) error { return nil }
-func (m *mockBackend) DeleteObject(_ context.Context, _ string) error        { return nil }
+func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
+	return nil
+}
+func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (m *mockBackend) DeleteObject(_ context.Context, _ string) error { return nil }
 func (m *mockBackend) HeadObject(_ context.Context, _ string) (*types.ObjectInfo, error) {
 	return nil, nil
 }
@@ -385,7 +390,7 @@ func TestVFS_IndexCaching(t *testing.T) {
 	vfs := NewVFS(backend)
 	ctx := context.Background()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := vfs.Stat(ctx, "c.tar.gz", "f.txt"); err != nil {
 			t.Fatalf("Stat iteration %d: %v", i, err)
 		}
@@ -410,7 +415,7 @@ func TestVFS_ContentCaching(t *testing.T) {
 	vfs := NewVFS(backend)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := vfs.ReadFile(ctx, "cc.tar.gz", "data.txt", 0, 0); err != nil {
 			t.Fatalf("ReadFile iteration %d: %v", i, err)
 		}

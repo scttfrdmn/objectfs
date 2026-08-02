@@ -1,6 +1,5 @@
 # ObjectFS Development Guide
 
-**Version:** 2.1
 **Last Updated:** February 2026
 
 ---

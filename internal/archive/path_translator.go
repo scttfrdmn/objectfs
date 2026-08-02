@@ -30,7 +30,7 @@ type ParsedPath struct {
 }
 
 // Translate splits a FUSE-relative path at the first path segment (prefix)
-// that ends with a recognised archive extension.  Path segments are scanned
+// that ends with a recognized archive extension.  Path segments are scanned
 // left-to-right so that the outermost archive is always selected.
 //
 // Examples:

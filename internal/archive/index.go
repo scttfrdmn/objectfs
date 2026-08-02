@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
 	archivepkg "github.com/objectfs/objectfs/pkg/archive"
 	"github.com/objectfs/objectfs/pkg/types"
 )

@@ -95,7 +95,7 @@ func TestStructuredFields(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"user_id": 123,
 		"action":  "login",
 		"ip":      "192.168.1.1",
@@ -160,7 +160,7 @@ func TestWithFields(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	contextFields := map[string]interface{}{
+	contextFields := map[string]any{
 		"user_id":    456,
 		"session_id": "xyz-789",
 	}
@@ -216,7 +216,7 @@ func TestJSONFormat(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"count": 42,
 		"name":  "test",
 	}

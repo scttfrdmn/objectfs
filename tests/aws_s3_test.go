@@ -5,6 +5,8 @@ package tests
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -82,14 +84,12 @@ func (s *AWSS3TestSuite) SetupSuite() {
 
 		// Enable CargoShip optimization for performance testing
 		EnableCargoShipOptimization: true,
-		TargetThroughput:            800.0, // 800 MB/s target
-		OptimizationLevel:           "standard",
 	}
 
 	s.backend, err = s3backend.NewBackend(s.ctx, s.bucket, backendConfig)
 	require.NoError(s.T(), err, "Failed to create S3 backend")
 
-	s.T().Logf("✅ AWS S3 backend initialized with CargoShip optimization (target: 800 MB/s)")
+	s.T().Logf("AWS S3 backend initialized with CargoShip optimization")
 }
 
 func (s *AWSS3TestSuite) TearDownSuite() {
@@ -728,10 +728,112 @@ func (s *AWSS3TestSuite) TestZSTDCompression() {
 	require.NoError(t, err)
 	assert.NotEqual(t, data, raw, "object stored on S3 should be compressed, not plain text")
 
+	// HeadObject must report the UNCOMPRESSED size. Reporting the compressed
+	// ContentLength here is what made the kernel truncate every read of a
+	// compressed file at the compressed length (issue #170). This assertion is
+	// the one the original round-trip test was missing.
+	info, err := zstdBackend.HeadObject(s.ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(data)), info.Size,
+		"HeadObject must report the uncompressed size, not the compressed ContentLength")
+
+	// Confirm the object really is stored compressed, so the assertion above is
+	// meaningful rather than trivially true. This must use the raw S3 client:
+	// HeadObject deliberately reports the uncompressed size to every caller,
+	// since size is a property of the object rather than of the reader.
+	rawHead, err := s.client.HeadObject(s.ctx, &s3.HeadObjectInput{
+		Bucket: &s.bucket,
+		Key:    strPtr(key),
+	})
+	require.NoError(t, err)
+	assert.Less(t, *rawHead.ContentLength, int64(len(data)),
+		"stored ContentLength should be smaller than the original (compression applied)")
+	assert.Equal(t, "zstd", *rawHead.ContentEncoding,
+		"Content-Encoding must be a real header, not user metadata")
+
 	// Clean up.
 	zstdBackend.DeleteObject(s.ctx, key) //nolint:errcheck
 
 	t.Logf("✅ ZSTD compression test passed: %d bytes → compressed → decompressed correctly", len(data))
+}
+
+// TestCompressedObjectSizeReporting is the regression test for issue #170: a
+// compressed object's reported size must be the uncompressed length on every
+// read path the kernel consults, and must survive a multipart upload.
+func (s *AWSS3TestSuite) TestCompressedObjectSizeReporting() {
+	t := s.T()
+
+	cfg := &s3backend.Config{
+		Region:         s.region,
+		MaxRetries:     3,
+		ConnectTimeout: 10 * time.Second,
+		RequestTimeout: 120 * time.Second,
+		PoolSize:       4,
+		Compression: s3backend.CompressionConfig{
+			Enabled:   true,
+			Algorithm: "zstd",
+			Level:     3,
+			MinSize:   "1KB",
+		},
+	}
+	backend, err := s3backend.NewBackend(s.ctx, s.bucket, cfg)
+	require.NoError(t, err)
+	defer backend.Close() //nolint:errcheck
+
+	line := []byte("ObjectFS issue-170 regression: uncompressed size must be reported.\n")
+
+	// Sized to straddle the multipart boundary: the small case exercises the
+	// single-part PutObject metadata, the large case exercises
+	// initiateMultipartUpload, which builds its own metadata map.
+	cases := []struct {
+		name string
+		size int
+	}{
+		{name: "single-part", size: 64 * 1024},
+		{name: "multipart", size: 40 * 1024 * 1024}, // above the 32MB default threshold
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := make([]byte, 0, tc.size)
+			for len(data) < tc.size {
+				data = append(data, line...)
+			}
+			data = data[:tc.size]
+
+			key := "objectfs-test/issue170-" + tc.name
+			require.NoError(t, backend.PutObject(s.ctx, key, data))
+			defer backend.DeleteObject(s.ctx, key) //nolint:errcheck
+
+			info, err := backend.HeadObject(s.ctx, key)
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(data)), info.Size,
+				"HeadObject must report the uncompressed size")
+
+			// The checksum must be over the uncompressed content on BOTH the
+			// single-part and multipart paths. putObjectMultipart previously
+			// recomputed it over the compressed payload, so the two paths
+			// disagreed about what objectfs-sha256 meant.
+			wantSum := sha256.Sum256(data)
+			assert.Equal(t, hex.EncodeToString(wantSum[:]), info.Checksum,
+				"stored checksum must be the SHA-256 of the uncompressed content")
+
+			// Full round-trip still returns every byte.
+			got, err := backend.GetObject(s.ctx, key, 0, 0)
+			require.NoError(t, err)
+			assert.Equal(t, len(data), len(got))
+			assert.Equal(t, data, got)
+
+			// A read of exactly info.Size bytes — what the kernel issues once it
+			// trusts the reported size — must return the whole object.
+			full, err := backend.GetObject(s.ctx, key, 0, info.Size)
+			require.NoError(t, err)
+			assert.Equal(t, len(data), len(full),
+				"a read of the reported size must return the whole object")
+		})
+	}
+
+	t.Logf("✅ Issue #170 regression passed: uncompressed size reported on both upload paths")
 }
 
 // Helper function

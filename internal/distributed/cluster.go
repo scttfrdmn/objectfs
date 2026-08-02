@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -333,9 +334,7 @@ func (cm *ClusterManager) GetNodes() map[string]*NodeInfo {
 		// Create a copy to prevent external modification
 		nodeCopy := *info
 		nodeCopy.Metadata = make(map[string]string)
-		for k, v := range info.Metadata {
-			nodeCopy.Metadata[k] = v
-		}
+		maps.Copy(nodeCopy.Metadata, info.Metadata)
 		nodes[id] = &nodeCopy
 	}
 	return nodes
@@ -515,9 +514,7 @@ func (cm *ClusterManager) updateStats(ctx context.Context) {
 func (cm *ClusterManager) calculateClusterStats() {
 	cm.mu.RLock()
 	nodes := make(map[string]*NodeInfo)
-	for id, info := range cm.nodes {
-		nodes[id] = info
-	}
+	maps.Copy(nodes, cm.nodes)
 	leader := cm.leader
 	cm.mu.RUnlock()
 
@@ -574,16 +571,12 @@ func (cm *ClusterManager) UpdateNodeInfo(nodeID string, info *NodeInfo) {
 		existing.Operations = info.Operations
 
 		// Update metadata
-		for k, v := range info.Metadata {
-			existing.Metadata[k] = v
-		}
+		maps.Copy(existing.Metadata, info.Metadata)
 	} else {
 		// Add new node
 		newNode := *info
 		newNode.Metadata = make(map[string]string)
-		for k, v := range info.Metadata {
-			newNode.Metadata[k] = v
-		}
+		maps.Copy(newNode.Metadata, info.Metadata)
 		cm.nodes[nodeID] = &newNode
 	}
 }
@@ -677,7 +670,7 @@ type coordinatorWrapper struct {
 	*Coordinator
 }
 
-func (cw *coordinatorWrapper) ExecuteOperation(ctx context.Context, op interface{}) (interface{}, error) {
+func (cw *coordinatorWrapper) ExecuteOperation(ctx context.Context, op any) (any, error) {
 	if distOp, ok := op.(*DistributedOperation); ok {
 		return cw.Coordinator.ExecuteOperation(ctx, distOp)
 	}

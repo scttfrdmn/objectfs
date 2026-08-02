@@ -1,161 +1,87 @@
-# ObjectFS Example Configuration
-# Copy to /etc/objectfs/config.yaml or ~/.config/objectfs/config.yaml
+# ObjectFS configuration — minimal, and every key below is read on the mount path.
+#
+# That is a deliberate property of this file, not a description of the schema: several keys in the
+# full schema parse and validate while being read by nothing, and they are excluded here rather
+# than listed with a caveat. examples/config.yaml has the complete set and marks those.
+#
+# Copy to /etc/objectfs/config.yaml (or pass --config), then mount:
+#
+#     objectfs --config /etc/objectfs/config.yaml s3://my-research-data /mnt/objectfs
+#
+# ObjectFS starts from built-in defaults and this file overrides them, so anything you are happy
+# with can simply be left out. For the complete schema with every available setting and its
+# default, see examples/config.yaml.
+#
+# Unknown keys are rejected at startup, naming the key and the line. Before v0.10.1 they were
+# discarded in silence, which is how the previous version of this file came to be 162 lines of
+# settings that did nothing at all — it opened with a top-level `s3:` block where the schema has
+# `storage.s3`, so the region it set never applied and the mount ran in us-east-1. If a key here
+# is misspelled you will now be told, rather than getting defaults while believing otherwise.
+#
+# Credentials are deliberately absent. ObjectFS uses the standard AWS credential chain
+# (AWS_PROFILE, environment variables, the shared credentials file, EC2/ECS instance roles), so
+# it picks up whatever `aws s3 ls` already works with. Do not put secrets in this file.
 
-# S3 Backend Configuration
-s3:
-  endpoint: https://s3.amazonaws.com    # Or MinIO/Ceph endpoint
-  region: us-west-2
-  bucket: my-research-data
-  access_key_id: ${AWS_ACCESS_KEY_ID}    # Or set directly
-  secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+global:
+  log_level: INFO                     # DEBUG, INFO, WARN, ERROR
+  log_file: ""                        # empty = stderr
+  metrics_port: 8080                  # Prometheus /metrics; must differ from health_port
+  health_port: 8081                   # health endpoint; 0 disables it
 
-  # Optional: S3-compatible storage settings
-  # use_path_style: false
-  # disable_ssl: false
+storage:
+  s3:
+    # The bucket comes from the s3:// argument on the command line, not from here.
+    region: us-west-2
+    # endpoint: https://s3.us-west-2.amazonaws.com   # set for MinIO/Ceph/Wasabi
+    # force_path_style: false                        # true for most S3-compatible servers
 
-  # Performance settings
-  max_retries: 3
-  timeout: 30s
-  max_concurrent_requests: 100
+    # STANDARD unless you know the object pattern suits another class. The IA and Glacier classes
+    # bill a 128 KB minimum per object and a 30-day minimum duration, so a mount that writes many
+    # small or short-lived files costs more on them, not less. GLACIER and DEEP_ARCHIVE objects
+    # cannot be read without a restore, which ObjectFS does not perform.
+    storage_tier: STANDARD
 
-# Mount Configuration
-mount:
-  point: /mnt/objectfs
-  options:
-  - allow_other
-  - default_permissions
-  - ro    # Read-only mount (remove for read-write)
+    multipart:
+      threshold: 32MB                 # objects at least this large are uploaded in parts
+      chunk_size: 16MB                # bytes per part; the S3 minimum for a non-final part is 5MB
 
-  # FUSE-specific options
-  fuse_options:
-  - attr_timeout=600
-  - entry_timeout=600
-  - negative_timeout=120
-
-# Cache Configuration
-cache:
-  # Cache type: lru, persistent, or predictive
-  type: persistent
-
-  # Maximum cache size
-  max_size: 100GB
-
-  # Cache location
-  path: /var/cache/objectfs
-
-  # LRU cache settings
-  lru:
-    max_items: 10000
-    ttl: 1h
-
-  # Persistent cache settings
-  persistent:
-    persist_on_shutdown: true
-    preload_on_startup: false
-
-  # Predictive cache settings
-  predictive:
-    enable: true
-    prefetch_threshold: 0.8
-    max_prefetch_size: 10GB
-
-# Write Buffer Configuration
-buffer:
-  # Maximum buffer size before flushing
-  max_size: 10GB
-
-  # Flush interval
-  flush_interval: 5s
-
-  # Flush on close
-  flush_on_close: true
-
-# Compression Configuration
-compression:
-  # Enable compression
-  enable: true
-
-  # Compression algorithm: zstd, lz4, or auto
-  algorithm: auto
-
-  # ZSTD compression level (1-22)
-  zstd_level: 3
-
-  # Minimum file size for compression
-  min_file_size: 1MB
-
-# Metrics Configuration
-metrics:
-  # Enable metrics collection
-  enable: true
-
-  # Metrics endpoint
-  listen: :9090
-
-  # Export format: prometheus, json
-  format: prometheus
-
-# Health Monitoring Configuration
-health:
-  # Enable health checks
-  enable: true
-
-  # Health check interval
-  interval: 30s
-
-  # Auto-remediation
-  auto_remediate: true
-
-# Logging Configuration
-logging:
-  # Log level: debug, info, warn, error
-  level: info
-
-  # Log format: json, text
-  format: json
-
-  # Log file path (empty for stdout)
-  file: /var/log/objectfs/objectfs.log
-
-  # Log rotation
-  max_size: 100MB
-  max_backups: 3
-  max_age: 7  # days
-
-# Performance Tuning
 performance:
-  # Read buffer size
-  read_buffer_size: 4MB
+  cache_size: 2GB                     # in-memory read cache
+  # Pooled S3 clients, batch concurrency, and idle connections per host — one number for all three.
+  connection_pool_size: 8
 
-  # Write buffer size
-  write_buffer_size: 4MB
+  # Fan a large read out into concurrent range GETs. Skipped for compressed objects, whose frames
+  # cannot be sliced.
+  parallel_read:
+    enabled: true
+    threshold: 64MB
+    chunk_size: 16MB
 
-  # Worker pool size
-  worker_pool_size: 10
+cache:
+  ttl: 5m                             # how long a cached read or attribute stays valid
+  max_entries: 100000
+  eviction_policy: weighted_lru       # lru, lfu, weighted_lru
+  persistent_cache:
+    enabled: false                    # spill the read cache to local disk
+    directory: /var/cache/objectfs
+    max_size: 10GB
 
-  # Enable BBR congestion control (requires kernel 4.9+)
-  enable_bbr: true
+# Durations take a unit suffix (ns, us, ms, s, m, h). A bare number is nanoseconds, so `read: 30`
+# means thirty nanoseconds; that is refused at startup with the key named rather than left to fail
+# later as a network timeout.
+network:
+  timeouts:
+    connect: 10s                      # TCP dial timeout
+    read: 30s                         # how long S3 has to start answering, not to finish
+  retry:
+    max_attempts: 3                   # ObjectFS's own retry, on top of the SDK's per-request one
+    base_delay: 1s
+    max_delay: 30s
 
-# Archive Support (v0.5.0+)
-archive:
-  # Enable archive access
-  enable: false
-
-  # Supported formats
-  formats:
-  - tar.zst
-  - tar.gz
-
-  # Archive cache size
-  cache_size: 10GB
-
-# Cost Optimization (v0.5.0+)
-cost:
-  # Enable cost tracking
-  enable: false
-
-  # Budget alert threshold
-  budget_threshold: 1000.0  # USD
-
-  # Alert email
-  alert_email: admin@example.com
+monitoring:
+  metrics:
+    enabled: true
+  health_checks:
+    enabled: true
+    interval: 30s
+    timeout: 5s

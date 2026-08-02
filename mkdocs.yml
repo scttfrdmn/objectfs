@@ -181,7 +181,6 @@ nav:
 
   - Roadmap & Planning:
     - Development Roadmap: ROADMAP.md
-    - v0.5.0 Plan: v0.5.0-implementation-plan.md
     - Technical Debt: development/technical-debt.md
 
   - API Reference:

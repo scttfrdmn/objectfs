@@ -15,15 +15,24 @@ import (
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
-// PersistentCache implements a disk-based cache with optional compression
+// PersistentCache implements a disk-based cache with optional compression.
+//
+// It is keyed the same way LRUCache is — see chunking.go, which is the single definition both share
+// after each having carried its own character-identical copy of the same three defects.
 type PersistentCache struct {
 	mu          sync.RWMutex
 	directory   string
 	maxSize     int64
 	currentSize int64
 	index       map[string]*persistentItem
-	config      *PersistentCacheConfig
-	stats       types.CacheStats
+
+	// byObject maps an object key to the chunk indices held for it, so Delete finds an object's entries
+	// exactly rather than by comparing key prefixes. See LRUCache.byObject for why a prefix compare
+	// cannot be made correct here.
+	byObject map[string]map[int64]struct{}
+
+	config *PersistentCacheConfig
+	stats  types.CacheStats
 	// Lifecycle management
 	stopCh chan struct{}
 	closed bool
@@ -40,16 +49,36 @@ type PersistentCacheConfig struct {
 	SyncInterval    time.Duration `yaml:"sync_interval"`
 }
 
-// persistentItem represents an item in the persistent cache
+// persistentItem represents an item in the persistent cache.
+//
+// Object and ChunkIndex describe which chunk of which object this is; Start and Length describe the
+// contiguous run within that chunk that the file actually holds. Size is the *on-disk* byte count,
+// which differs from Length whenever compression is on and is what the capacity accounting uses.
+//
+// Object and ChunkIndex are stored rather than derived from Key because recovering them by parsing the
+// composed key would reintroduce the delimiter ambiguity entryKey exists to avoid.
 type persistentItem struct {
-	Key        string    `json:"key"`
-	FilePath   string    `json:"file_path"`
-	Offset     int64     `json:"offset"`
-	Size       int64     `json:"size"`
+	Key        string `json:"key"`
+	FilePath   string `json:"file_path"`
+	Object     string `json:"object"`
+	ChunkIndex int64  `json:"chunk_index"`
+
+	// Start is the absolute object offset of the first byte held; Length is how many bytes follow.
+	Start  int64 `json:"start"`
+	Length int64 `json:"length"`
+
+	Size       int64     `json:"size"` // bytes on disk, after any compression
 	Timestamp  time.Time `json:"timestamp"`
 	AccessTime time.Time `json:"access_time"`
 	Compressed bool      `json:"compressed"`
 	Checksum   string    `json:"checksum"`
+}
+
+// run reconstructs the item's coverage for the coverage checks in chunking.go. The data slice is left
+// nil: the bytes live on disk, and only start/end are needed to decide whether a read is satisfiable
+// before paying for the read.
+func (i *persistentItem) span() (start, end int64) {
+	return i.Start, i.Start + i.Length
 }
 
 // NewPersistentCache creates a new persistent cache
@@ -86,6 +115,7 @@ func NewPersistentCache(config *PersistentCacheConfig) (*PersistentCache, error)
 		directory: config.Directory,
 		maxSize:   config.MaxSize,
 		index:     make(map[string]*persistentItem),
+		byObject:  make(map[string]map[int64]struct{}),
 		config:    config,
 		stats: types.CacheStats{
 			Capacity: config.MaxSize,
@@ -106,121 +136,304 @@ func NewPersistentCache(config *PersistentCacheConfig) (*PersistentCache, error)
 	return cache, nil
 }
 
-// Get retrieves data from the persistent cache
+// Get returns the cached bytes for [offset, offset+size), or nil if the cache does not hold all of
+// them. See the types.Cache contract: a partial hit is a miss, and a size of zero or less means
+// "whatever contiguous bytes are held from offset".
 func (c *PersistentCache) Get(key string, offset, size int64) []byte {
+	first, last, ok := chunkSpan(offset, size)
+	if !ok {
+		if offset >= 0 && size <= 0 {
+			return c.openEndedGet(key, offset)
+		}
+
+		c.recordMiss()
+
+		return nil
+	}
+
+	end := offset + size
+
+	// Decide satisfiability under the lock, then read the files outside it. Disk reads must not hold
+	// the mutex — with compression on, a read is a gzip decode, and blocking every other cache
+	// operation behind it would serialize the filesystem on the slowest device in the path.
+	type plan struct {
+		item     *persistentItem
+		from, to int64
+	}
+
 	c.mu.RLock()
-	cacheKey := c.makeCacheKey(key, offset, size)
-	item, exists := c.index[cacheKey]
+	plans := make([]plan, 0, last-first+1)
+
+	for index := first; index <= last; index++ {
+		item, exists := c.index[entryKey(key, index)]
+		if !exists || c.isExpired(item) {
+			c.mu.RUnlock()
+			c.recordMiss()
+
+			return nil
+		}
+
+		from := max(offset, chunkStart(index))
+		to := min(end, chunkStart(index)+ChunkSize)
+
+		if start, held := item.span(); start > from || held < to {
+			c.mu.RUnlock()
+			c.recordMiss()
+
+			return nil
+		}
+
+		plans = append(plans, plan{item: item, from: from, to: to})
+	}
 	c.mu.RUnlock()
 
-	if !exists {
-		c.mu.Lock()
-		c.stats.Misses++
-		c.mu.Unlock()
+	result := make([]byte, 0, size)
+
+	for _, p := range plans {
+		data, err := c.readFromFile(p.item)
+		if err != nil {
+			// The file is missing or its checksum failed. Drop the entry and miss: a cache whose backing
+			// file has gone bad must not answer from it, and the object is still readable from S3.
+			c.dropEntry(p.item)
+			c.recordMiss()
+
+			return nil
+		}
+
+		// The file holds the whole run; slice out the requested part of it.
+		lo := p.from - p.item.Start
+		hi := p.to - p.item.Start
+
+		if lo < 0 || hi > int64(len(data)) {
+			// The file's length disagrees with the index's record of it. Trusting either over the other
+			// would mean returning bytes from an offset that is no longer known.
+			c.dropEntry(p.item)
+			c.recordMiss()
+
+			return nil
+		}
+
+		result = append(result, data[lo:hi]...)
+	}
+
+	// Only now that every chunk was readable is this a hit.
+	c.mu.Lock()
+	now := time.Now()
+	for _, p := range plans {
+		p.item.AccessTime = now
+	}
+	c.stats.Hits++
+	c.updateHitRate()
+	c.mu.Unlock()
+
+	return result
+}
+
+// openEndedGet serves a Get whose size is zero or less: the contiguous run held from offset, bounded
+// to one chunk. See LRUCache.openEndedGet for why the bound exists.
+func (c *PersistentCache) openEndedGet(key string, offset int64) []byte {
+	c.mu.RLock()
+	item, exists := c.index[entryKey(key, chunkIndexOf(offset))]
+	if !exists || c.isExpired(item) {
+		c.mu.RUnlock()
+		c.recordMiss()
+
 		return nil
 	}
 
-	// Check if item has expired
-	if c.isExpired(item) {
-		c.Delete(key)
-		c.mu.Lock()
-		c.stats.Misses++
-		c.mu.Unlock()
+	start, end := item.span()
+	if start > offset || end <= offset {
+		c.mu.RUnlock()
+		c.recordMiss()
+
 		return nil
 	}
+	c.mu.RUnlock()
 
-	// Read data from file
 	data, err := c.readFromFile(item)
 	if err != nil {
-		// File might be corrupted or missing, remove from index
-		c.mu.Lock()
-		delete(c.index, cacheKey)
-		c.currentSize -= item.Size
-		c.stats.Misses++
-		c.mu.Unlock()
+		c.dropEntry(item)
+		c.recordMiss()
+
 		return nil
 	}
 
-	// Update access time
+	skip := offset - start
+	if skip > int64(len(data)) {
+		c.dropEntry(item)
+		c.recordMiss()
+
+		return nil
+	}
+
 	c.mu.Lock()
 	item.AccessTime = time.Now()
 	c.stats.Hits++
 	c.updateHitRate()
 	c.mu.Unlock()
 
-	return data
+	result := make([]byte, int64(len(data))-skip)
+	copy(result, data[skip:])
+
+	return result
 }
 
-// Put stores data in the persistent cache
+// Put stores data read from offset, splitting it across chunk entries and merging each into whatever
+// that chunk already holds.
+//
+// Merging costs a read-back of the existing entry, which for a disk cache is not free. Replacing
+// instead would be cheaper and is wrong: consecutive reads of one file arrive as several runs within
+// the same chunk — a sequential reader gets 128 KiB at a time against a 1 MiB chunk — so a replacing
+// Put would leave only the last eighth of each chunk cached, and every re-read of the rest would go
+// back to S3. Paying one bounded read to keep the other seven eighths is the better side of that trade.
+//
+// This also keeps both cache tiers behaving identically, which is worth something on its own: the
+// coalescing rules live once, in chunking.go, rather than in two implementations that can drift.
+//
+// The read-back happens under c.mu, unlike the reads in Get, which release it first. That is a
+// deliberate difference: Get may need to read an unbounded number of chunks, while this reads at most
+// one entry of at most ChunkSize, and doing it under the lock is what makes read-merge-write atomic.
+// Dropping the lock mid-sequence would let a concurrent Put to the same chunk interleave, and the loser
+// of that race would write a merge computed against bytes that had already been replaced.
 func (c *PersistentCache) Put(key string, offset int64, data []byte) {
-	if len(data) == 0 {
+	if len(data) == 0 || offset < 0 {
 		return
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	cacheKey := c.makeCacheKey(key, offset, int64(len(data)))
+	now := time.Now()
 
-	// Check if item already exists
-	if existingItem, exists := c.index[cacheKey]; exists {
-		// Remove old file
-		_ = os.Remove(existingItem.FilePath) // Ignore error on cleanup
-		c.currentSize -= existingItem.Size
+	for _, piece := range splitIntoChunks(offset, data) {
+		cacheKey := entryKey(key, piece.index)
+
+		if existing, exists := c.index[cacheKey]; exists {
+			// Merge with what is already on disk, unless it cannot be read — in which case the entry was
+			// no good anyway and the incoming run simply replaces it.
+			if held, err := c.readFromFile(existing); err == nil {
+				piece = coalesce(chunkPiece{
+					index: existing.ChunkIndex,
+					start: existing.Start,
+					data:  held,
+				}, piece)
+			}
+
+			_ = os.Remove(existing.FilePath) // Ignore error on cleanup
+			c.currentSize -= existing.Size
+			delete(c.index, cacheKey)
+			c.unindex(existing)
+		}
+
+		item := &persistentItem{
+			Key:        cacheKey,
+			Object:     key,
+			ChunkIndex: piece.index,
+			Start:      piece.start,
+			Length:     int64(len(piece.data)),
+			Timestamp:  now,
+			AccessTime: now,
+			Compressed: c.config.Compression,
+			Checksum:   c.calculateChecksum(piece.data),
+		}
+		item.FilePath = c.generateFilePath(cacheKey)
+
+		actualSize, err := c.writeToFile(item, piece.data)
+		if err != nil {
+			continue // Failed to write; leave this chunk uncached rather than indexing a bad file
+		}
+
+		item.Size = actualSize
+
+		c.index[cacheKey] = item
+		c.currentSize += actualSize
+		c.reindex(item)
 	}
 
-	// Create new item
-	item := &persistentItem{
-		Key:        cacheKey,
-		Offset:     offset,
-		Size:       int64(len(data)),
-		Timestamp:  time.Now(),
-		AccessTime: time.Now(),
-		Compressed: c.config.Compression,
-		Checksum:   c.calculateChecksum(data),
-	}
-
-	// Generate file path
-	item.FilePath = c.generateFilePath(cacheKey)
-
-	// Write data to file
-	actualSize, err := c.writeToFile(item, data)
-	if err != nil {
-		return // Failed to write, don't add to index
-	}
-
-	// Update item with actual file size (might be different due to compression)
-	item.Size = actualSize
-
-	// Add to index
-	c.index[cacheKey] = item
-	c.currentSize += actualSize
-
-	// Evict if necessary
+	// Once, after the whole Put, so eviction cannot discard a chunk this same call just stored.
 	c.evictIfNeeded()
 }
 
-// Delete removes data from the persistent cache
+// Delete removes every entry belonging to key, and only those. See LRUCache.Delete.
 func (c *PersistentCache) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Find and remove all items with matching key prefix
-	var itemsToDelete []*persistentItem
-	for cacheKey, item := range c.index {
-		if c.keyMatches(cacheKey, key) {
-			itemsToDelete = append(itemsToDelete, item)
-		}
+	indices, exists := c.byObject[key]
+	if !exists {
+		return
 	}
 
-	for _, item := range itemsToDelete {
-		// Remove file
+	// Snapshot before mutating, since unindex writes to this same map.
+	cacheKeys := make([]string, 0, len(indices))
+	for index := range indices {
+		cacheKeys = append(cacheKeys, entryKey(key, index))
+	}
+
+	for _, cacheKey := range cacheKeys {
+		item, ok := c.index[cacheKey]
+		if !ok {
+			continue
+		}
+
 		_ = os.Remove(item.FilePath) // Ignore error on cleanup
 
-		// Remove from index
-		delete(c.index, item.Key)
+		delete(c.index, cacheKey)
+		c.unindex(item)
 		c.currentSize -= item.Size
 		c.stats.Evictions++
+	}
+}
+
+// recordMiss counts a miss and refreshes the hit rate.
+func (c *PersistentCache) recordMiss() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.stats.Misses++
+	c.updateHitRate()
+}
+
+// dropEntry removes an entry whose backing file could not be read.
+func (c *PersistentCache) dropEntry(item *persistentItem) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// It may already be gone: the read happened outside the lock.
+	if _, exists := c.index[item.Key]; !exists {
+		return
+	}
+
+	_ = os.Remove(item.FilePath) // Ignore error on cleanup
+
+	delete(c.index, item.Key)
+	c.unindex(item)
+	c.currentSize -= item.Size
+}
+
+// reindex records an item in the object index. Callers must hold c.mu.
+func (c *PersistentCache) reindex(item *persistentItem) {
+	indices, exists := c.byObject[item.Object]
+	if !exists {
+		indices = make(map[int64]struct{})
+		c.byObject[item.Object] = indices
+	}
+
+	indices[item.ChunkIndex] = struct{}{}
+}
+
+// unindex removes an item from the object index, dropping the object once its last chunk is gone.
+// Callers must hold c.mu.
+func (c *PersistentCache) unindex(item *persistentItem) {
+	indices, exists := c.byObject[item.Object]
+	if !exists {
+		return
+	}
+
+	delete(indices, item.ChunkIndex)
+
+	if len(indices) == 0 {
+		delete(c.byObject, item.Object)
 	}
 }
 
@@ -246,7 +459,7 @@ func (c *PersistentCache) Evict(targetSize int64) bool {
 	}
 
 	// Sort by access time (oldest first)
-	for i := 0; i < len(items)-1; i++ {
+	for i := range len(items) - 1 {
 		for j := i + 1; j < len(items); j++ {
 			if items[i].accessTime.After(items[j].accessTime) {
 				items[i], items[j] = items[j], items[i]
@@ -267,6 +480,7 @@ func (c *PersistentCache) Evict(targetSize int64) bool {
 
 		// Remove from index
 		delete(c.index, item.Key)
+		c.unindex(item)
 		freedSize += item.Size
 		c.currentSize -= item.Size
 		c.stats.Evictions++
@@ -307,6 +521,7 @@ func (c *PersistentCache) Clear() {
 	// the reset and always record zero evictions (#103).
 	count := uint64(len(c.index))
 	c.index = make(map[string]*persistentItem)
+	c.byObject = make(map[string]map[int64]struct{})
 	c.currentSize = 0
 	c.stats.Evictions += count
 }
@@ -344,6 +559,7 @@ func (c *PersistentCache) Optimize() {
 		item := c.index[key]
 		_ = os.Remove(item.FilePath) // Ignore error on cleanup
 		delete(c.index, key)
+		c.unindex(item)
 		c.currentSize -= item.Size
 	}
 
@@ -352,14 +568,6 @@ func (c *PersistentCache) Optimize() {
 }
 
 // Helper methods
-
-func (c *PersistentCache) makeCacheKey(key string, offset, size int64) string {
-	return fmt.Sprintf("%s:%d:%d", key, offset, size)
-}
-
-func (c *PersistentCache) keyMatches(cacheKey, key string) bool {
-	return len(cacheKey) >= len(key) && cacheKey[:len(key)] == key
-}
 
 func (c *PersistentCache) isExpired(item *persistentItem) bool {
 	if c.config.TTL == 0 {
@@ -379,34 +587,83 @@ func (c *PersistentCache) calculateChecksum(data []byte) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+// writeToFile writes the entry's bytes and returns how many bytes it occupies on disk.
+//
+// The returned size drives currentSize, which drives eviction, so an undercount means the cache never
+// evicts and fills the disk. That is what this function used to do: gzip.Writer buffers, and the
+// Close that flushes it was deferred — so file.Stat() ran on a file that was still mostly in memory.
+// Measured before the fix: 10 bytes recorded for a 330-byte file, a ~33x undercount, and since Delete
+// subtracted the same bogus figure the counter also drifted negative over time.
+//
+// Both closes are therefore explicit and ordered — compressor first, then stat, then the file — and
+// their errors are returned rather than discarded. A failed flush means the file on disk is truncated,
+// which the checksum in readFromFile would later report as corruption; better to fail the write and
+// leave the entry uncached.
 func (c *PersistentCache) writeToFile(item *persistentItem, data []byte) (int64, error) {
 	file, err := os.Create(item.FilePath)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = file.Close() }()
 
-	var writer io.Writer = file
+	// Tracks whether the ordinary path has already closed the file, so the cleanup path does not close
+	// it twice.
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
 
-	// Use compression if enabled
-	if item.Compressed {
-		gzipWriter := gzip.NewWriter(file)
-		defer func() { _ = gzipWriter.Close() }()
-		writer = gzipWriter
-	}
-
-	n, err := writer.Write(data)
-	if err != nil {
+	fail := func(err error) (int64, error) {
 		_ = os.Remove(item.FilePath) // Clean up on error, ignore result
+
 		return 0, err
 	}
 
-	// Get actual file size
-	if stat, err := file.Stat(); err == nil {
-		return stat.Size(), nil
+	var writer io.Writer = file
+	var gzipWriter *gzip.Writer
+
+	if item.Compressed {
+		gzipWriter = gzip.NewWriter(file)
+		writer = gzipWriter
 	}
 
-	return int64(n), nil
+	if _, err := writer.Write(data); err != nil {
+		return fail(err)
+	}
+
+	// Flush the compressor before measuring, or the measurement is of whatever happened to have been
+	// written so far.
+	if gzipWriter != nil {
+		if err := gzipWriter.Close(); err != nil {
+			return fail(err)
+		}
+	}
+
+	// Sync before Stat: on some filesystems the size is not visible to a stat of the open descriptor
+	// until the data is flushed out of the kernel's page cache for this file.
+	if err := file.Sync(); err != nil {
+		return fail(err)
+	}
+
+	stat, err := file.Stat()
+	if err != nil {
+		return fail(err)
+	}
+
+	closed = true
+	if err := file.Close(); err != nil {
+		return fail(err)
+	}
+
+	size := stat.Size()
+	if size <= 0 {
+		// A zero-length file for a non-empty entry means the write did not reach the disk. Indexing it
+		// would both undercount the cache and hand back an empty buffer on the next read.
+		return fail(fmt.Errorf("cache file %s is %d bytes after writing %d", item.FilePath, size, len(data)))
+	}
+
+	return size, nil
 }
 
 func (c *PersistentCache) readFromFile(item *persistentItem) ([]byte, error) {
@@ -471,7 +728,24 @@ func (c *PersistentCache) loadIndex() error {
 			continue // Skip missing files
 		}
 
+		// Discard entries written by a version with different keying.
+		//
+		// An index persists across restarts and across upgrades, so this loop is the one place that sees
+		// another version's records. An entry from the pre-chunking format has no Object and no Length:
+		// keeping it would put a record in the index that Delete cannot find — since Delete works from
+		// the object name — and whose file the coverage check would read at the wrong offset. Both
+		// failure modes are silent, and the recovery is free: drop the entry and re-fetch from S3.
+		//
+		// key is checked against the item's own fields rather than parsed, because parsing it is what
+		// the NUL separator exists to make unnecessary.
+		if item.Object == "" || item.Length <= 0 || key != entryKey(item.Object, item.ChunkIndex) {
+			_ = os.Remove(item.FilePath) // Ignore error on cleanup
+
+			continue
+		}
+
 		c.index[key] = item
+		c.reindex(item)
 		c.currentSize += item.Size
 	}
 

@@ -1,0 +1,2 @@
+go test fuzz v1
+string("storage:\n  s3:\n    region: e 0000000")

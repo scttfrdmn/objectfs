@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -76,35 +78,35 @@ func NewLogger(level LogLevel, output io.Writer) *Logger {
 }
 
 // Debug logs a debug message
-func (l *Logger) Debug(format string, args ...interface{}) {
+func (l *Logger) Debug(format string, args ...any) {
 	if l.level <= DEBUG {
 		l.log("DEBUG", format, args...)
 	}
 }
 
 // Info logs an info message
-func (l *Logger) Info(format string, args ...interface{}) {
+func (l *Logger) Info(format string, args ...any) {
 	if l.level <= INFO {
 		l.log("INFO", format, args...)
 	}
 }
 
 // Warn logs a warning message
-func (l *Logger) Warn(format string, args ...interface{}) {
+func (l *Logger) Warn(format string, args ...any) {
 	if l.level <= WARN {
 		l.log("WARN", format, args...)
 	}
 }
 
 // Error logs an error message
-func (l *Logger) Error(format string, args ...interface{}) {
+func (l *Logger) Error(format string, args ...any) {
 	if l.level <= ERROR {
 		l.log("ERROR", format, args...)
 	}
 }
 
 // log writes a log message
-func (l *Logger) log(level, format string, args ...interface{}) {
+func (l *Logger) log(level, format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	_, _ = fmt.Fprintf(l.output, "[%s] %s\n", level, message)
 }
@@ -157,47 +159,117 @@ func FormatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// ParseBytes parses a human-readable byte string
+// ParseBytes parses a human-readable byte size — "512", "4KB", "1.5G", " 2 GB " — into a byte count.
+//
+// The accepted form is a decimal number, optional whitespace, an optional K/M/G/T/P multiplier, and
+// an optional trailing B. Multipliers are binary: 1 K is 1024 bytes, as everywhere else in ObjectFS.
+// Case and surrounding whitespace are ignored. A bare number is a count of bytes.
+//
+// This is the only size parser in the repository, and consolidating on it is the point. There were
+// four: this one, [internal/adapter.parseSize], one in internal/compression, and a fourth copy in
+// tests. They disagreed about the cases that matter. The adapter's returned 1 GiB — silently, with no
+// error — for *any* input it could not parse, so `cache_size: 2G` (no B) configured a 1 GiB cache and
+// `cache_size: tiny-typo` configured a 1 GiB cache, and neither said so. internal/compression's
+// treated "0" as zero where the adapter's treated it as a byte count. A configuration value that
+// means one thing to the layer that validates it and another to the layer that acts on it is audit
+// finding C1's mechanism, and four parsers is four chances to reintroduce it.
+//
+// It is strict for the same reason [internal/config.Configuration.LoadFromFile] is strict: this
+// function's callers are reading operator configuration, and a size it accepts becomes a cache
+// capacity, a multipart threshold, or a read chunk size. Rejecting "12abc" costs a person a minute;
+// accepting it as 12 bytes gives them a filesystem quietly configured to something they did not ask
+// for. Specifically it rejects
+//
+//   - trailing garbage: the old implementation used fmt.Sscanf, which stops at the first character
+//     it cannot consume and reports success, so "12abc" parsed as 12 and "64MiB" — the spelling a
+//     person who knows the units writes — parsed as 64 bytes;
+//   - a negative size, which no caller has a meaning for and which reached callers as a negative
+//     capacity;
+//   - "Inf" and "NaN", which strconv.ParseFloat accepts and which became math.MinInt64 on conversion;
+//   - hex float and exponent notation, which is valid Go and is never what a config file means;
+//   - a value that overflows int64 once multiplied.
 func ParseBytes(s string) (int64, error) {
-	if s == "" {
-		return 0, fmt.Errorf("empty string")
-	}
+	original := s
 
 	s = strings.ToUpper(strings.TrimSpace(s))
+	if s == "" {
+		return 0, fmt.Errorf("size is empty; write a byte count, optionally with a K, M, G, T or P " +
+			"unit (for example \"512\", \"4KB\" or \"1.5G\")")
+	}
 
-	// Handle plain numbers
+	// A trailing B is decoration: "4KB" and "4K" are the same size, and a bare "512B" is bytes.
 	s = strings.TrimSuffix(s, "B")
 
 	var multiplier int64 = 1
-	var numStr string
-
-	if len(s) > 0 {
-		lastChar := s[len(s)-1]
-		switch lastChar {
+	if s != "" {
+		switch s[len(s)-1] {
 		case 'K':
-			multiplier = 1024
-			numStr = s[:len(s)-1]
+			multiplier = 1 << 10
 		case 'M':
-			multiplier = 1024 * 1024
-			numStr = s[:len(s)-1]
+			multiplier = 1 << 20
 		case 'G':
-			multiplier = 1024 * 1024 * 1024
-			numStr = s[:len(s)-1]
+			multiplier = 1 << 30
 		case 'T':
-			multiplier = 1024 * 1024 * 1024 * 1024
-			numStr = s[:len(s)-1]
+			multiplier = 1 << 40
 		case 'P':
-			multiplier = 1024 * 1024 * 1024 * 1024 * 1024
-			numStr = s[:len(s)-1]
-		default:
-			numStr = s
+			multiplier = 1 << 50
+		}
+		if multiplier != 1 {
+			s = s[:len(s)-1]
 		}
 	}
 
-	var num float64
-	if _, err := fmt.Sscanf(numStr, "%f", &num); err != nil {
-		return 0, fmt.Errorf("invalid number format: %s", s)
+	numStr := strings.TrimSpace(s)
+	if err := checkDecimal(numStr); err != nil {
+		return 0, fmt.Errorf("size %q is not valid: %w", original, err)
 	}
 
-	return int64(num * float64(multiplier)), nil
+	num, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("size %q is not valid: %q is not a number", original, numStr)
+	}
+
+	// The multiply is done in float64 and range-checked before the conversion, because converting an
+	// out-of-range float to int64 is implementation-defined in Go and yields a large negative number
+	// in practice — a 16 EiB configured cache arriving downstream as a negative capacity.
+	bytes := num * float64(multiplier)
+	if bytes > math.MaxInt64 {
+		return 0, fmt.Errorf("size %q is larger than the maximum representable size (%d bytes)",
+			original, int64(math.MaxInt64))
+	}
+
+	return int64(bytes), nil
+}
+
+// checkDecimal reports whether s is a plain non-negative decimal number.
+//
+// strconv.ParseFloat is deliberately not the gate: it accepts "+1", "-1", "1e9", "0x1p10", "Inf" and
+// "NaN", none of which a size in a configuration file ever means, and two of which convert to
+// nonsense rather than to an error.
+func checkDecimal(s string) error {
+	if s == "" {
+		return fmt.Errorf("no number before the unit")
+	}
+
+	digits, dots := 0, 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '.':
+			dots++
+		default:
+			return fmt.Errorf("%q contains %q, which is not a digit; a size is a plain decimal "+
+				"number and an optional K, M, G, T or P unit", s, string(r))
+		}
+	}
+
+	if digits == 0 {
+		return fmt.Errorf("%q has no digits", s)
+	}
+	if dots > 1 {
+		return fmt.Errorf("%q has more than one decimal point", s)
+	}
+
+	return nil
 }

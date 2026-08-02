@@ -3,7 +3,10 @@
 // internal/compression.
 package compression
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Algorithm identifies a compression algorithm.
 type Algorithm string
@@ -21,6 +24,38 @@ const (
 
 // DefaultLevel instructs the codec to use its built-in default level.
 const DefaultLevel = 0
+
+// SupportedAlgorithms lists every algorithm a codec exists for, in the order they should be
+// presented to a user.
+//
+// This is the single authority on what is valid, and it is here — beside the constants — so that
+// declaring a constant and forgetting the implementation cannot go unnoticed. v0.10.0 shipped with
+// AlgorithmGzip declared, documented in two config files, and set as the default write-buffer
+// algorithm, with no gzip codec anywhere: config validation, the YAML schema, and the S3 config
+// comment all treated it as valid, and the only code that knew better was the codec factory, reached
+// after the user had already asked for a mount.
+//
+// This list is for enumeration — error messages, documentation, and the test that round-trips every
+// entry through its codec. It is deliberately not a validator: a layer checking a user's compression
+// configuration should build the codec instead, which is the only check that cannot go stale and the
+// only one that catches a level out of range for the chosen algorithm (zstd accepts 0-22, gzip only
+// 0-9). A name-matching validator here would be a second authority on the same question, free to
+// drift exactly as the first one did.
+//
+// AlgorithmNone is included: disabling compression is a valid choice, not an absent one.
+func SupportedAlgorithms() []Algorithm {
+	return []Algorithm{AlgorithmNone, AlgorithmZstd, AlgorithmLZ4, AlgorithmGzip}
+}
+
+// SupportedAlgorithmNames renders SupportedAlgorithms for an error message.
+func SupportedAlgorithmNames() string {
+	names := make([]string, 0, len(SupportedAlgorithms()))
+	for _, a := range SupportedAlgorithms() {
+		names = append(names, string(a))
+	}
+
+	return strings.Join(names, ", ")
+}
 
 // Stats records the outcome of a single compress or decompress operation.
 type Stats struct {

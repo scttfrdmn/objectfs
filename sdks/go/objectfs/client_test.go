@@ -16,16 +16,6 @@ func requireAWS(t *testing.T) {
 	}
 }
 
-// testBucket returns the integration-test bucket name from $OBJECTFS_TEST_BUCKET.
-// Falls back to a conventional name when the env var is unset (only for
-// connectivity-only tests that do not perform destructive operations).
-func testBucket() string {
-	if b := os.Getenv("OBJECTFS_TEST_BUCKET"); b != "" {
-		return b
-	}
-	return "objectfs-test-bucket" // fallback for New/Close-only tests
-}
-
 // testRegion returns the AWS region from $AWS_REGION, defaulting to us-east-1.
 func testRegion() string {
 	if r := os.Getenv("AWS_REGION"); r != "" {
@@ -242,16 +232,24 @@ func TestSentinelErrors_Is(t *testing.T) {
 	}
 }
 
-// --- Integration tests (require AWS credentials) ---
+// --- Integration tests (require AWS credentials and a real bucket) ---
+//
+// Each of these calls New, which health-checks the bucket with a HeadBucket, so each needs a bucket
+// that exists. They are therefore gated on requireTestBucket, not on requireAWS. An earlier version
+// fell back to the conventional name "objectfs-test-bucket" when $OBJECTFS_TEST_BUCKET was unset, on
+// the reasoning that a connectivity-only test performs no destructive operation — but a bucket name
+// nobody owns fails HeadBucket with a 404, so all three tests failed for anyone with credentials in
+// their environment and passed in CI only because CI has none. A test that skips where it is run and
+// fails where it is developed is worse than one that skips in both.
 
 func TestNew_WithDefaults(t *testing.T) {
-	requireAWS(t)
+	bucket := requireTestBucket(t)
 	// Default region must be us-east-1; verify via defaultOptions (no S3 call needed).
 	if got := defaultOptions().region; got != "us-east-1" {
 		t.Errorf("default region: got %q, want %q", got, "us-east-1")
 	}
-	// Verify the client initialises successfully against the real test bucket.
-	c, err := New(context.Background(), testBucket(), WithRegion(testRegion()))
+	// Verify the client initializes successfully against the real test bucket.
+	c, err := New(context.Background(), bucket, WithRegion(testRegion()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -262,9 +260,9 @@ func TestNew_WithDefaults(t *testing.T) {
 }
 
 func TestNew_WithRegion(t *testing.T) {
-	requireAWS(t)
+	bucket := requireTestBucket(t)
 	region := testRegion()
-	c, err := New(context.Background(), testBucket(), WithRegion(region))
+	c, err := New(context.Background(), bucket, WithRegion(region))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -275,8 +273,8 @@ func TestNew_WithRegion(t *testing.T) {
 }
 
 func TestClose_NotMounted(t *testing.T) {
-	requireAWS(t)
-	c, err := New(context.Background(), testBucket(), WithRegion(testRegion()))
+	bucket := requireTestBucket(t)
+	c, err := New(context.Background(), bucket, WithRegion(testRegion()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -1,7 +1,6 @@
 # ObjectFS Architecture Overview
 
-**Version:** v0.3.0
-**Last Updated:** October 15, 2025
+**Applies to:** v0.10.1 (in development)
 
 ---
 
@@ -19,26 +18,37 @@
 
 ## Introduction
 
-ObjectFS is a high-performance FUSE filesystem that provides POSIX-compliant
-access to AWS S3 buckets. It's designed for research and enterprise workloads
-requiring both high performance and cost optimization.
+ObjectFS is a FUSE filesystem that presents the objects in an AWS S3 bucket as files, aimed at
+research and institutional workloads: large sequential reads of reference data, datasets too big for
+local disk, and shared buckets read by many nodes.
 
-### Design Goals
+It is **not POSIX-compliant**, and the gap is structural rather than incidental. S3 has no rename, no
+hard links, no partial object write, and no atomicity across objects, so a subset of the POSIX
+surface cannot be implemented on top of it honestly at all. Where that is the case ObjectFS returns
+an error rather than pretending — the
+[supported-operations table](../../README.md#supported-filesystem-operations) is the contract, and it
+is derived from the code.
 
-- **Performance**: Competitive with or exceeding AWS alternatives (FSx, File
-  Cache)
-- **Cost**: Significantly lower than AWS managed services (260x advantage)
-- **Simplicity**: Easy to deploy and operate
-- **Compatibility**: Standard POSIX interface for maximum compatibility
+### Design goals, in priority order
 
-### Key Features
+1. **Integrity** — either do the right thing or fail loudly. Every object ObjectFS writes records a
+   SHA-256 that the read path verifies; `close(2)` returns the PUT's error rather than logging it.
+   See [Data integrity](../../README.md#data-integrity).
+2. **Performance** — a close second, and the reason for the range-aware cache, the concurrent range
+   GETs, and the multipart upload path.
+3. **Cost transparency** — storage stays as ordinary S3 objects at S3 pricing, with no provisioned
+   capacity to pay for, and cost estimates available for planning.
+4. **Simplicity of operation** — built-in defaults that work, and a config loader that rejects a key
+   it does not know rather than ignoring it.
 
-- FUSE-based filesystem with POSIX compliance
-- Multi-level intelligent caching
-- Write buffering and coalescing
-- S3 storage tier optimization
-- Enterprise pricing awareness
-- Integrated cost tracking
+### Key features
+
+- Read and write at any offset, with a real read-modify-write flush
+- Multi-level caching: memory, optionally spilling to local disk
+- Concurrent range GETs for large reads; multipart for large writes
+- SHA-256 integrity verification on complete reads
+- Server-side encryption: SSE-S3 or SSE-KMS, off by default
+- S3 storage tier selection and cost estimation
 
 ---
 
@@ -53,15 +63,15 @@ requiring both high performance and cost optimization.
                       ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Operating System VFS                          │
-│              (Linux/macOS/Windows with FUSE)                   │
+│                  (Linux or macOS with FUSE)                    │
 └─────────────────────┬───────────────────────────────────────────┘
                       │ FUSE protocol
                       ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  ObjectFS FUSE Layer                           │
 │  ┌─────────────┬─────────────┬────────────┬─────────────────┐  │
-│  │ File Ops    │ Dir Ops     │ Metadata   │ Extended Attrs  │  │
-│  │ (read/write)│ (readdir)   │ (stat)     │ (xattr)         │  │
+│  │ File Ops    │ Dir Ops     │ Metadata   │ (no xattrs, no  │  │
+│  │ (read/write)│ (readdir)   │ (stat)     │  rename, no rm) │  │
 │  └─────────────┴─────────────┴────────────┴─────────────────┘  │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
@@ -72,13 +82,12 @@ requiring both high performance and cost optimization.
 │  │ L1: Memory Cache (LRU)                                   │  │
 │  │ - Hot data: Recently accessed files                      │  │
 │  │ - Block-level caching (configurable block size)          │  │
-│  │ - Fast: <1ms access latency                              │  │
+│  │ - Keyed on (key, chunk, etag); invalidated on write      │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │ L2: Disk Cache (persistent)                              │  │
 │  │ - Warm data: Frequently accessed                         │  │
-│  │ - Survives restarts                                      │  │
-│  │ - Fast: <10ms access latency                             │  │
+│  │ - Survives restarts; off by default                      │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
@@ -86,10 +95,10 @@ requiring both high performance and cost optimization.
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Write Buffer Layer                            │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │ - Coalesces small writes into large S3 uploads           │  │
-│  │ - Reduces S3 PUT request costs                           │  │
-│  │ - Configurable flush intervals and size thresholds       │  │
-│  │ - Durability: fsync() forces immediate flush             │  │
+│  │ - Dirty byte ranges per open file (any offset)           │  │
+│  │ - Read-modify-write on flush; no whole-object replace    │  │
+│  │ - Flushes when the kernel asks, or on fsync/close        │  │
+│  │ - Durability: fsync/close are synchronous and return err │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
@@ -114,7 +123,7 @@ requiring both high performance and cost optimization.
 │  │ - Enterprise discount awareness                          │  │
 │  │ - Volume pricing tier tracking                           │  │
 │  │ - Per-operation cost calculation                         │  │
-│  │ - Real-time cost monitoring                              │  │
+│  │ - Estimates for planning, from a snapshot rate table     │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────┬───────────────────────────────────────────┘
                       │ AWS SDK v2 (Go)
@@ -144,15 +153,21 @@ interface that applications interact with.
 **Implementation:**
 
 - Built on `github.com/hanwen/go-fuse` library
-- Supports both Linux and macOS FUSE
-- Windows support via WinFsp
+- Linux and macOS only (`//go:build linux || darwin`). **Windows is not supported** — there is no
+  WinFsp binding. The `cgofuse` build tag that once claimed it never compiled and has been removed
 
-**Supported Operations:**
+**Supported operations:** the authoritative list is the
+[supported-operations table in the README](../../README.md#supported-filesystem-operations), derived
+from the methods that exist in `internal/fuse` and `internal/vfs`.
 
-- File operations: `Open()`, `Read()`, `Write()`, `Release()`, `Flush()`
-- Directory operations: `OpenDir()`, `ReadDir()`, `Mkdir()`, `Rmdir()`
-- Metadata operations: `GetAttr()`, `SetAttr()`, `Chmod()`, `Chown()`
-- Extended: `Create()`, `Unlink()`, `Rename()`, `Link()`, `Symlink()`
+Summarised: read, write at any offset, truncate, flush/fsync, stat, create, mkdir, paginated
+readdir, chmod/chown on files, and statfs are implemented. **`unlink`, `rmdir`, `rename`, symlinks,
+xattrs, `mknod`, `fallocate`, and locking are not**, and each fails rather than silently doing
+nothing — `rm` returns `EROFS` rather than reporting a delete that did not happen.
+
+This list previously named `Rename()`, `Link()`, and `Symlink()` as supported. None of the three
+exists, and `Rmdir` and `Unlink` exist only as loud refusals. That gap is what the README table now
+pins, and it is checked against the code rather than against intent.
 
 ### 2. Cache Layer
 
@@ -164,8 +179,7 @@ Multi-level caching system optimized for S3 access patterns.
 - **Implementation**: LRU (Least Recently Used) eviction
 - **Typical Size**: 512MB - 4GB (configurable)
 - **Block Size**: 1MB - 8MB (configurable)
-- **Latency**: <1ms for cache hits
-- **Hit Rate**: Target 60-80% for typical workloads
+- **Eviction policy**: `lru`, `lfu`, or `weighted_lru` (`cache.eviction_policy`)
 
 **Optimization Strategies:**
 
@@ -179,8 +193,7 @@ Multi-level caching system optimized for S3 access patterns.
 - **Implementation**: Local filesystem-backed cache
 - **Typical Size**: 10GB - 100GB (configurable)
 - **Persistence**: Survives process restarts
-- **Latency**: <10ms for cache hits (depends on disk)
-- **Hit Rate**: Target 20-40% additional hits
+- **Off by default** (`cache.persistent_cache.enabled`)
 
 **Features:**
 
@@ -192,22 +205,33 @@ Multi-level caching system optimized for S3 access patterns.
 
 Coalesces small writes into efficient S3 uploads.
 
-**Key Features:**
+**Key features:**
 
-- **Write Buffering**: Accumulates writes before uploading to S3
-- **Flush Triggers**:
-  - Size threshold: Buffer reaches configured size (e.g., 5MB)
-  - Time threshold: Buffer age exceeds timeout (e.g., 30s)
-  - Explicit flush: `fsync()` or `close()` called
-- **Multipart Uploads**: Automatically uses multipart for large files (>5MB)
-- **Durability**: `fsync()` guarantees data is in S3 before returning
+- **Dirty byte ranges, not a contiguous buffer.** Writes accumulate as an interval list per open
+  file. Later writes over the same bytes win; a write at any offset is accepted. The single
+  contiguous buffer plus offset that preceded this could not represent an offset write at all, which
+  is why appending one byte to a 1 MiB file used to leave a 1-byte object.
+- **Read-modify-write on flush.** The flush fetches exactly the ranges of the stored object it needs
+  to fill the gaps between dirty ranges, splices, and PUTs the result. It does not replace the object
+  with the fragment that was written.
+- **Flush triggers**: `fsync()`, `close()`, or the kernel asking. **There is no size-based or
+  time-based flush.** `write_buffer.flush_interval`, `max_buffers`, and `max_memory` are in the
+  schema and are read by nothing — they are marked `not yet wired` in `examples/config.yaml`.
+- **Multipart uploads** above `storage.s3.multipart.threshold`, which defaults to **32 MB**.
+- **Durability**: `fsync()` and `close()` are synchronous and return the error. A failed PUT —
+  `AccessDenied`, a network failure — fails the syscall rather than being logged and swallowed.
 
 **Trade-offs:**
 
-- **Performance**: Reduces S3 PUT requests by 10-100x
-- **Consistency**: Small delay before data visible in S3
-- **Safety**: Data loss risk if process crashes before flush (mitigated by
-  regular flushes)
+- **Nothing bounds total dirty bytes.** Dirty ranges accumulate per open file until the kernel
+  flushes, so a large enough write set is bounded by available memory rather than by a configured
+  limit. Fixing this needs backpressure in the writer, not a wider config mapping, which is why the
+  three keys above are marked unwired rather than plumbed to a component that cannot honour them.
+- **Consistency**: written bytes are visible to a reader on the same mount immediately; another
+  client sees them after the flush.
+- **Safety**: a crash before flush loses the unflushed ranges. S3 PUTs are atomic per object, so the
+  object is either as it was or as it will be — but there is no journal and no multi-object
+  transaction.
 
 ### 4. S3 Backend Layer
 
@@ -410,30 +434,26 @@ Applies enterprise discounts and volume pricing.
 4. **Parallelize**: Use concurrent S3 requests for large operations
 5. **Optimize Hot Path**: Make common operations extremely fast
 
-### Performance Targets
+### Performance
 
-**Throughput:**
+**No throughput, latency, or IOPS figures are published here.** This section previously carried a
+full table of them — sequential read in MB/s, per-operation latency, cached and uncached IOPS — and
+none of it was measured. A fabricated number is worse than no number, because a reader cannot tell
+that it needs checking, and downstream documents had already begun citing these as findings.
 
-- Sequential read: 400-800 MB/s (limited by S3, not ObjectFS)
-- Sequential write: 300-600 MB/s (with write buffering)
-- Random read (cached): 200-400 MB/s (memory speed)
-- Random read (uncached): 50-100 MB/s (S3 latency bound)
+The honest statements about performance are structural rather than numeric:
 
-**Latency:**
+- Throughput on a large sequential read is bounded by S3 and by the instance's network, not by
+  ObjectFS, once the read is being fanned out into concurrent range GETs.
+- A cache hit avoids a network round trip. How often that happens is entirely a property of the
+  workload's locality, and ObjectFS cannot claim a hit rate on a workload it has not seen.
+- A `stat` of an uncached path costs one S3 `HeadObject` per path component, which is why metadata
+  latency is dominated by directory depth rather than by file size.
+- Every write costs at least one PUT, and a write at an offset also costs the GETs needed to fill the
+  gaps around the dirty ranges.
 
-- File open (cached metadata): <1ms
-- File open (uncached): 20-50ms
-- Small read (4KB, cached): <0.1ms
-- Small read (4KB, uncached): 20-50ms
-- Large read (1MB, cached): 5-10ms
-- Large read (1MB, uncached): 30-80ms
-
-**IOPS:**
-
-- Metadata operations (cached): 10,000+ IOPS
-- Metadata operations (uncached): 100-500 IOPS
-- Small reads (cached): 50,000+ IOPS
-- Small writes (buffered): 20,000+ IOPS
+`benchmarks/run_benchmarks.sh` runs the Go benchmarks against a real bucket. Numbers for your own
+region, instance type, and object-size distribution are the only ones worth acting on.
 
 ### Optimization Techniques
 
@@ -497,23 +517,19 @@ HTTP Keep-Alive: 100 connections
 
 ### Comparison to Alternatives
 
-| Metric | ObjectFS | Amazon FSx | Amazon File Cache | EFS |
-|--------|----------|-----------|-------------------|-----|
-| Sequential Read | 400-800 MB/s | 1-2 GB/s | 1-4 GB/s | 500 MB/s |
-| Sequential Write | 300-600 MB/s | 500 MB/s | 1-2 GB/s | 100 MB/s |
-| Latency (cached) | <1ms | <1ms | <1ms | 1-3ms |
-| Latency (uncached) | 20-50ms | 0.5-1ms | 1-5ms | 1-3ms |
-| **Cost (1TB/month)** | **$23** | **$1,664** | **$4,800** | **$300** |
-| POSIX Compliant | Yes | Yes | Yes | Yes |
-| S3 Backend | Yes | No | Yes | No |
+A table here previously compared ObjectFS's throughput and latency against FSx, Amazon File Cache,
+and EFS, and claimed POSIX compliance for all four. The ObjectFS column was unmeasured, the
+competitors' columns were not sourced, and the POSIX row was wrong for the one entry it could be
+checked against — see the [supported-operations
+table](../../README.md#supported-filesystem-operations). It has been removed rather than corrected,
+because a benchmark of four systems is a piece of work, not a paragraph.
 
-**Key Insights:**
-
-- ObjectFS trades some performance for massive cost savings (260x vs File
-  Cache)
-- For workloads with good cache locality, ObjectFS performs similarly to
-  expensive alternatives
-- Cached operations are comparable or faster than managed services
+The one comparison that holds without measurement is the cost model, and it is a difference in kind
+rather than degree: ObjectFS stores data as ordinary S3 objects and adds no per-hour charge, so
+storage costs S3 list price, while FSx, File Cache, and EFS all provision capacity or throughput and
+bill for it whether or not it is used. That is the trade ObjectFS makes — you keep S3 pricing and
+give up the POSIX semantics a real filesystem provides. Which side of that trade is right depends
+entirely on whether your workload needs the operations in the table above.
 
 ---
 

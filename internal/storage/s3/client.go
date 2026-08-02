@@ -5,27 +5,81 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/objectfs/objectfs/internal/network"
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
+
+	"github.com/objectfs/objectfs/internal/network"
 )
+
+// clientOptions returns the s3.Options mutator that applies the endpoint and addressing settings
+// from cfg. Every S3 client ObjectFS builds must go through this, including the connection pool's
+// factory.
+//
+// It exists because the pool's factory previously called s3.NewFromConfig with no options at all
+// while the direct clients applied Endpoint and ForcePathStyle. HeadObject, DeleteObject,
+// ListObjects, and the health check draw from the pool, so those four operations addressed real AWS
+// S3 while PutObject and GetObject addressed the configured endpoint — making a MinIO, Ceph, or
+// emulator deployment fail in a way that looks like a credentials problem. One mutator, used
+// everywhere, is what stops the two from drifting apart again.
+func clientOptions(cfg *Config) func(*s3.Options) {
+	return func(o *s3.Options) {
+		if cfg.Endpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
+		}
+		if cfg.ForcePathStyle {
+			o.UsePathStyle = true
+		}
+		if cfg.UseDualStack {
+			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
+		}
+	}
+}
 
 // ClientManager handles S3 client creation and management
 type ClientManager struct {
+	// accelMu guards client and accelerationActive, the only mutable state on this struct.
+	//
+	// DisableAcceleration is called from executeWithAccelerationFallback, which is on the path of
+	// every GET and PUT, so any request goroutine can write these two fields while every other
+	// in-flight request reads them through IsAccelerationActive and GetAcceleratedClient. There was
+	// no lock, and -race reports the write/read pair immediately once the two are driven
+	// concurrently (TestAccelerationFallbackIsRaceFree).
+	//
+	// The window is not narrow in practice: a bucket that lacks the Transfer Acceleration
+	// configuration returns InvalidRequest for *every* request, so the first burst of concurrent
+	// reads on such a mount takes the write path on many goroutines at once — under load, which is
+	// when a torn read of client hands an operation a pointer that is neither client.
+	//
+	// The clients themselves are immutable after construction and safe for concurrent use; only the
+	// two fields naming which one is current need guarding.
+	accelMu            sync.RWMutex
 	client             *s3.Client
-	acceleratedClient  *s3.Client // Client with Transfer Acceleration enabled
-	standardClient     *s3.Client // Fallback client without acceleration
-	pool               *ConnectionPool
-	transporter        *cargoships3.Transporter
-	config             *Config
-	logger             *slog.Logger
-	accelerationActive bool             // Tracks if acceleration is currently active
-	networkMonitor     *network.Monitor // Tracks bytes/connections for this client
+	accelerationActive bool // Tracks if acceleration is currently active
+
+	acceleratedClient *s3.Client // Client with Transfer Acceleration enabled
+	standardClient    *s3.Client // Fallback client without acceleration
+	pool              *ConnectionPool
+	transporter       *cargoships3.Transporter
+	config            *Config
+	logger            *slog.Logger
+	networkMonitor    *network.Monitor // Tracks bytes/connections for this client
+
+	// transport is retained so Close can release the sockets it is holding idle.
+	//
+	// Without this the manager had no reference to it: the transport went into an http.Client, the
+	// client into the AWS SDK config, and Close drained the ConnectionPool — which pools *SDK
+	// clients*, not TCP connections. The actual sockets live here, up to MaxIdleConns of them per
+	// manager, and nothing released them. Measured against the emulator: 40 create-and-Close cycles
+	// left 80 sockets open, and a fuzz run doing it in a loop exhausted the ephemeral port range and
+	// failed with "can't assign requested address".
+	transport *http.Transport
 }
 
 // NewClientManager creates a new S3 client manager
@@ -39,8 +93,21 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	}
 
 	// Build a congestion-aware HTTP transport for the AWS SDK.
+	//
+	// ConnectTimeout and RequestTimeout are applied here, and until v0.10.1 they were applied
+	// nowhere: both were defaulted by NewDefaultConfig, documented in the config schema, and read
+	// only to be copied into an error-context map for display. A mount inherited network.NewDialer's
+	// bare *net.Dialer, which has no timeout at all, so a connect to an unroutable address hung until
+	// the kernel gave up — minutes, with a FUSE request blocked behind it.
+	//
+	// RequestTimeout becomes ResponseHeaderTimeout, not a whole-response deadline. The distinction is
+	// the difference between a working filesystem and a broken one: a ranged GET of a large object
+	// legitimately spends minutes streaming its body, and http.Client.Timeout or a context deadline
+	// around the call would abort it as though S3 had stalled. ResponseHeaderTimeout bounds the part
+	// that can actually hang — the wait for S3 to begin answering — and leaves the transfer alone.
 	algo := network.Algorithm(cfg.CongestionAlgorithm)
 	dialer := network.NewDialer(algo)
+	dialer.Timeout = cfg.ConnectTimeout
 	mon := network.NewMonitor(algo)
 	transport := &http.Transport{
 		DialContext:           mon.WrapDialContext(dialer.DialContext),
@@ -49,31 +116,56 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: cfg.RequestTimeout,
 	}
 	httpClient := &http.Client{Transport: transport}
 
 	// Load AWS configuration
-	awsCfg, err := config.LoadDefaultConfig(ctx,
+	loadOpts := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 		config.WithRetryMaxAttempts(cfg.MaxRetries),
 		config.WithHTTPClient(httpClient),
-	)
+	}
+
+	// Static credentials, when configured. configs/example.yaml has documented
+	// access_key_id/secret_access_key since the first release and nothing read them, so a
+	// deployment that set them silently fell through to the default chain — and failed with
+	// "no credentials" or, worse, picked up an unrelated ambient profile. Leaving them empty
+	// keeps the default chain (environment, shared config, IMDS), which is the right default
+	// for EC2 and for anyone using AWS_PROFILE.
+	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+		loadOpts = append(loadOpts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken),
+		))
+	}
+
+	awsCfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
+	// An unset region is legitimate, but only if something resolves it. Check that it did.
+	//
+	// awsname.ValidateRegion accepts "" on the grounds that the SDK resolves it from AWS_REGION, the
+	// shared config file, or instance metadata — which is true wherever one of those is present, and
+	// is why this went unnoticed: it is present on a developer's machine and in any shell with
+	// AWS_PROFILE exported. In a container, a CI runner, or a systemd unit with a clean environment,
+	// nothing resolves it, and the mount failed inside the health check with "failed to resolve
+	// service endpoint, endpoint rule error, A region must be set when sending requests to S3" —
+	// several layers below the configuration, naming no key the operator could edit.
+	//
+	// FuzzConfigConstructsBackend found it from the input `storage:` alone, on CI and not locally,
+	// which is the finding within the finding: a test that consults ambient AWS configuration proves
+	// something different on every machine that runs it. This is audit finding C1's shape a third
+	// time — accepted by every layer that reads configuration, refused by the layer that acts on it.
+	if awsCfg.Region == "" {
+		return nil, fmt.Errorf("no AWS region: storage.s3.region is unset and none could be " +
+			"resolved from AWS_REGION, AWS_DEFAULT_REGION, the shared config file, or instance " +
+			"metadata. Set storage.s3.region (for example \"us-west-2\"), or export AWS_REGION")
+	}
+
 	// Create standard S3 client without acceleration
-	standardClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		if cfg.Endpoint != "" {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
-		}
-		if cfg.ForcePathStyle {
-			o.UsePathStyle = true
-		}
-		if cfg.UseDualStack {
-			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
-		}
-	})
+	standardClient := s3.NewFromConfig(awsCfg, clientOptions(cfg))
 
 	// Create accelerated S3 client if Transfer Acceleration is enabled
 	var acceleratedClient *s3.Client
@@ -81,17 +173,8 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	accelerationActive := false
 
 	if cfg.UseAccelerate {
-		acceleratedClient = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-			if cfg.Endpoint != "" {
-				o.BaseEndpoint = aws.String(cfg.Endpoint)
-			}
-			if cfg.ForcePathStyle {
-				o.UsePathStyle = true
-			}
+		acceleratedClient = s3.NewFromConfig(awsCfg, clientOptions(cfg), func(o *s3.Options) {
 			o.UseAccelerate = true
-			if cfg.UseDualStack {
-				o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
-			}
 		})
 		primaryClient = acceleratedClient
 		accelerationActive = true
@@ -104,9 +187,12 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 			"bucket", bucket)
 	}
 
-	// Create connection pool
+	// Create connection pool. The factory must apply the same options as the direct clients above:
+	// HeadObject, DeleteObject, ListObjects, and HealthCheck all draw from this pool, so a factory
+	// that skips the endpoint sends them to real AWS S3 while the rest of the backend talks to the
+	// configured endpoint.
 	pool, err := NewConnectionPool(cfg.PoolSize, func() (*s3.Client, error) {
-		return s3.NewFromConfig(awsCfg), nil
+		return s3.NewFromConfig(awsCfg, clientOptions(cfg)), nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %w", err)
@@ -115,23 +201,41 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	// Initialize CargoShip S3 transporter if enabled
 	var transporter *cargoships3.Transporter
 	if cfg.EnableCargoShipOptimization {
-		// Create CargoShip S3 config with optimization settings
+		// The storage class comes from the configured tier, not from a constant.
+		//
+		// cargoship's Transporter.optimizeStorageClass falls back to its config's StorageClass for an
+		// Archive with no AccessPattern and no RetentionDays, which is every archive ObjectFS builds —
+		// so a hardcoded value here is the class every object is stored under, whatever storage_tier
+		// says. It read StorageClassIntelligentTiering, and CargoShip is on in the shipped defaults,
+		// so `storage_tier: STANDARD_IA` silently stored INTELLIGENT_TIERING: no error, no log, and a
+		// different bill from the one the config describes. Found by asserting the stored class at the
+		// endpoint rather than the value passed in.
 		cargoConfig := awsconfig.S3Config{
 			Bucket:             bucket,
-			StorageClass:       awsconfig.StorageClassIntelligentTiering, // Intelligent tiering
-			MultipartThreshold: cfg.MultipartThreshold,                   // Use configured threshold
-			MultipartChunkSize: cfg.MultipartChunkSize,                   // Use configured chunk size
-			Concurrency:        cfg.MultipartConcurrency,                 // Use configured concurrency
+			StorageClass:       ConvertTierToCargoShipStorageClass(cfg.StorageTier),
+			MultipartThreshold: cfg.MultipartThreshold,   // Use configured threshold
+			MultipartChunkSize: cfg.MultipartChunkSize,   // Use configured chunk size
+			Concurrency:        cfg.MultipartConcurrency, // Use configured concurrency
+		}
+
+		// The KMS key is passed through so objects that *do* go via CargoShip carry the same encryption
+		// as the direct path. It is set only for sse-kms, because that is the only mode CargoShip can
+		// express — its transporter hardcodes the algorithm to aws:kms and has no bucket-key field — and
+		// PutObject diverts around the transporter for anything else. See cargoShipCanEncrypt: setting
+		// the key here for a mode CargoShip cannot honor is what would let an object be stored under an
+		// encryption nobody configured.
+		if cfg.Encryption.Mode == EncryptionModeKMS {
+			cargoConfig.KMSKeyID = cfg.Encryption.KMSKeyID
 		}
 
 		// Use CargoShip's optimized transporter with BBR/CUBIC algorithms
 		// Use accelerated client if available, otherwise use standard
 		transporter = cargoships3.NewTransporter(primaryClient, cargoConfig)
 		logger.Info("CargoShip S3 optimization enabled",
-			"target_throughput", cfg.TargetThroughput,
 			"multipart_threshold", cfg.MultipartThreshold,
 			"chunk_size", cfg.MultipartChunkSize,
-			"concurrency", cfg.MultipartConcurrency)
+			"concurrency", cfg.MultipartConcurrency,
+			"storage_class", cargoConfig.StorageClass)
 	}
 
 	return &ClientManager{
@@ -144,16 +248,24 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		logger:             logger,
 		accelerationActive: accelerationActive,
 		networkMonitor:     mon,
+		transport:          transport,
 	}, nil
 }
 
-// GetClient returns the main S3 client
+// GetClient returns the main S3 client — whichever of the accelerated and standard clients is
+// currently in use, which the fallback path can change at any time.
 func (cm *ClientManager) GetClient() *s3.Client {
+	cm.accelMu.RLock()
+	defer cm.accelMu.RUnlock()
+
 	return cm.client
 }
 
-// GetPooledClient gets a client from the connection pool
-func (cm *ClientManager) GetPooledClient() *s3.Client {
+// GetPooledClient gets a client from the connection pool.
+//
+// It returns an error rather than a nil client: callers dereference the result immediately, and a nil
+// here previously panicked and unmounted the filesystem once the pool was saturated.
+func (cm *ClientManager) GetPooledClient() (*s3.Client, error) {
 	return cm.pool.Get()
 }
 
@@ -179,7 +291,10 @@ func (cm *ClientManager) IsCargoShipEnabled() bool {
 
 // HealthCheck verifies the client connection
 func (cm *ClientManager) HealthCheck(ctx context.Context, bucket string) error {
-	client := cm.GetPooledClient()
+	client, err := cm.GetPooledClient()
+	if err != nil {
+		return fmt.Errorf("S3 health check failed: %w", err)
+	}
 	defer cm.ReturnPooledClient(client)
 
 	// Try to head the bucket
@@ -187,8 +302,7 @@ func (cm *ClientManager) HealthCheck(ctx context.Context, bucket string) error {
 		Bucket: aws.String(bucket),
 	}
 
-	_, err := client.HeadBucket(ctx, input)
-	if err != nil {
+	if _, err := client.HeadBucket(ctx, input); err != nil {
 		return fmt.Errorf("S3 health check failed: %w", err)
 	}
 
@@ -202,9 +316,29 @@ func (cm *ClientManager) GetNetworkMonitor() *network.Monitor {
 }
 
 // Close closes all client resources
+// Close releases the manager's pooled SDK clients and the TCP sockets its transport holds idle.
+//
+// Both halves are needed, and only the first used to happen. The ConnectionPool holds *s3.Client
+// values, which are cheap structs sharing one transport; draining it frees no sockets at all. The
+// sockets are the transport's idle connections — up to MaxIdleConns of them, kept for
+// IdleConnTimeout, which is 90 seconds. A process that builds and closes backends in a loop
+// therefore accumulated file descriptors until it ran out: measured at 2 leaked sockets per cycle
+// against a local endpoint, and reported by a fuzz run as "can't assign requested address" after the
+// ephemeral port range filled.
+//
+// CloseIdleConnections rather than anything more forceful: it closes connections not currently in
+// use and leaves an in-flight request alone to finish. A caller closing a backend while still using
+// it has a bug this cannot fix, and cutting the request short would turn it into a confusing I/O
+// error instead.
 func (cm *ClientManager) Close() error {
 	// CargoShip transporter doesn't require explicit cleanup
-	return cm.pool.Close()
+	err := cm.pool.Close()
+
+	if cm.transport != nil {
+		cm.transport.CloseIdleConnections()
+	}
+
+	return err
 }
 
 // GetStats returns connection pool statistics
@@ -212,26 +346,51 @@ func (cm *ClientManager) GetStats() PoolStats {
 	return cm.pool.Stats()
 }
 
-// GetAcceleratedClient returns the accelerated client if acceleration is active
+// GetAcceleratedClient returns the accelerated client if acceleration is active, and nil otherwise.
+//
+// Prefer this over checking IsAccelerationActive and then reading the client: between those two
+// calls the fallback path may have run, and only the combined check under one lock can report
+// "active, and here is the client" as a single fact. Callers must still handle nil.
 func (cm *ClientManager) GetAcceleratedClient() *s3.Client {
+	cm.accelMu.RLock()
+	defer cm.accelMu.RUnlock()
+
 	if cm.accelerationActive && cm.acceleratedClient != nil {
 		return cm.acceleratedClient
 	}
+
 	return nil
 }
 
-// GetStandardClient returns the standard (non-accelerated) client
+// GetStandardClient returns the standard (non-accelerated) client.
+//
+// Immutable after construction, so it needs no lock — unlike GetClient, which returns whichever
+// client is currently selected.
 func (cm *ClientManager) GetStandardClient() *s3.Client {
 	return cm.standardClient
 }
 
-// IsAccelerationActive returns whether Transfer Acceleration is currently active
+// IsAccelerationActive returns whether Transfer Acceleration is currently active.
+//
+// A point-in-time answer: the fallback path can flip it on any request. Treat it as a metric, not
+// as a precondition for a later read of the client.
 func (cm *ClientManager) IsAccelerationActive() bool {
+	cm.accelMu.RLock()
+	defer cm.accelMu.RUnlock()
+
 	return cm.accelerationActive
 }
 
-// DisableAcceleration temporarily disables Transfer Acceleration and falls back to standard client
+// DisableAcceleration temporarily disables Transfer Acceleration and falls back to standard client.
+//
+// Idempotent under concurrency: the flag is re-checked under the write lock, so a burst of
+// acceleration errors across many goroutines logs once rather than once per request. This is the
+// common case — a bucket without the acceleration configuration fails every request — and the
+// unsynchronized version could log a hundred identical warnings for one condition.
 func (cm *ClientManager) DisableAcceleration(reason string) {
+	cm.accelMu.Lock()
+	defer cm.accelMu.Unlock()
+
 	if cm.accelerationActive {
 		cm.logger.Warn("Disabling S3 Transfer Acceleration",
 			"reason", reason,
@@ -241,8 +400,18 @@ func (cm *ClientManager) DisableAcceleration(reason string) {
 	}
 }
 
-// EnableAcceleration re-enables Transfer Acceleration if configured
+// EnableAcceleration re-enables Transfer Acceleration if configured.
+//
+// Nothing in ObjectFS calls this. The fallback is one-way for the life of the mount: once an
+// acceleration error is seen, every subsequent request uses the standard endpoint until restart.
+// docs/s3-acceleration.md claimed an "automatic re-enable after successful standard operations";
+// there is no such path, and the doc now says so. Kept as the supported way to re-enable for an
+// embedder that wants to retry periodically, since the alternative — deleting it — leaves callers
+// with no way to undo a fallback at all.
 func (cm *ClientManager) EnableAcceleration() {
+	cm.accelMu.Lock()
+	defer cm.accelMu.Unlock()
+
 	if cm.config.UseAccelerate && cm.acceleratedClient != nil && !cm.accelerationActive {
 		cm.logger.Info("Re-enabling S3 Transfer Acceleration")
 		cm.accelerationActive = true

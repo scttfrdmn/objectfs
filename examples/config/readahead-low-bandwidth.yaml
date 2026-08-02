@@ -1,3 +1,11 @@
+# NOT YET WIRED — see https://github.com/scttfrdmn/objectfs/issues/176
+#
+# The performance.read_ahead block below is validated at load and read by nothing: ObjectFS
+# constructs its read-ahead manager with a nil config and uses that manager's own built-in
+# defaults (64 KB window, 1 MB max distance, 3 sequential reads, 4 concurrent). Copying this file
+# will not change read-ahead behavior. It is kept as a record of the intended shape of the
+# setting, not as a working preset.
+#
 # ObjectFS Configuration - Low Bandwidth / Conservative
 # Best for: Limited bandwidth, mobile, cost-sensitive environments
 

@@ -38,6 +38,13 @@ const (
 	ErrCodeQuotaExceeded  ErrorCode = "QUOTA_EXCEEDED"
 	ErrCodeBucketExists   ErrorCode = "BUCKET_EXISTS"
 
+	// ErrCodeDataCorruption means stored data failed an integrity check: a checksum mismatch, a
+	// length that disagrees with recorded metadata, or content still encoded after decoding was
+	// supposed to have happened. It is never retryable — retrying reads the same bad bytes — and it
+	// is always user-facing, because the alternative to reporting it is handing the caller data that
+	// is wrong.
+	ErrCodeDataCorruption ErrorCode = "DATA_CORRUPTION"
+
 	// Filesystem Errors (4000-4999)
 	ErrCodeMountFailed      ErrorCode = "MOUNT_FAILED"
 	ErrCodeUnmountFailed    ErrorCode = "UNMOUNT_FAILED"
@@ -102,10 +109,10 @@ const (
 // ObjectFSError represents a structured error with context and metadata.
 type ObjectFSError struct {
 	// Core error information
-	Code     ErrorCode              `json:"code"`
-	Category ErrorCategory          `json:"category"`
-	Message  string                 `json:"message"`
-	Details  map[string]interface{} `json:"details,omitempty"`
+	Code     ErrorCode      `json:"code"`
+	Category ErrorCategory  `json:"category"`
+	Message  string         `json:"message"`
+	Details  map[string]any `json:"details,omitempty"`
 
 	// Contextual information
 	Context   map[string]string `json:"context,omitempty"`
@@ -203,7 +210,7 @@ func NewError(code ErrorCode, message string) *ObjectFSError {
 		Category:   GetCategory(code),
 		Message:    message,
 		Timestamp:  time.Now(),
-		Details:    make(map[string]interface{}),
+		Details:    make(map[string]any),
 		Context:    make(map[string]string),
 		Retryable:  IsRetryableByDefault(code),
 		UserFacing: IsUserFacingByDefault(code),
@@ -213,44 +220,45 @@ func NewError(code ErrorCode, message string) *ObjectFSError {
 
 // Category prefix mappings for efficient lookup
 var categoryPrefixes = map[string]ErrorCategory{
-	"INVALID_CONFIG": CategoryConfiguration,
-	"MISSING_CONFIG": CategoryConfiguration,
-	"CONFIG_":        CategoryConfiguration,
-	"CONNECTION_":    CategoryConnection,
-	"NETWORK_":       CategoryConnection,
-	"OBJECT_":        CategoryStorage,
-	"BUCKET_":        CategoryStorage,
-	"STORAGE_":       CategoryStorage,
-	"TIER_":          CategoryStorage,
-	"ACCESS_":        CategoryStorage,
-	"QUOTA_":         CategoryStorage,
-	"MOUNT_":         CategoryFilesystem,
-	"UNMOUNT_":       CategoryFilesystem,
-	"PERMISSION_":    CategoryFilesystem,
-	"PATH_":          CategoryFilesystem,
-	"FILE_":          CategoryFilesystem,
-	"DIRECTORY_":     CategoryFilesystem,
-	"NOT_DIRECTORY":  CategoryFilesystem,
-	"NOT_EMPTY":      CategoryFilesystem,
-	"OUT_OF_":        CategoryResource,
-	"BUFFER_":        CategoryResource,
-	"RESOURCE_":      CategoryResource,
-	"CACHE_":         CategoryResource,
-	"WORKER_":        CategoryResource,
-	"LIMIT_":         CategoryResource,
-	"ALREADY_":       CategoryState,
+	"INVALID_CONFIG":  CategoryConfiguration,
+	"MISSING_CONFIG":  CategoryConfiguration,
+	"CONFIG_":         CategoryConfiguration,
+	"CONNECTION_":     CategoryConnection,
+	"NETWORK_":        CategoryConnection,
+	"OBJECT_":         CategoryStorage,
+	"BUCKET_":         CategoryStorage,
+	"DATA_":           CategoryStorage,
+	"STORAGE_":        CategoryStorage,
+	"TIER_":           CategoryStorage,
+	"ACCESS_":         CategoryStorage,
+	"QUOTA_":          CategoryStorage,
+	"MOUNT_":          CategoryFilesystem,
+	"UNMOUNT_":        CategoryFilesystem,
+	"PERMISSION_":     CategoryFilesystem,
+	"PATH_":           CategoryFilesystem,
+	"FILE_":           CategoryFilesystem,
+	"DIRECTORY_":      CategoryFilesystem,
+	"NOT_DIRECTORY":   CategoryFilesystem,
+	"NOT_EMPTY":       CategoryFilesystem,
+	"OUT_OF_":         CategoryResource,
+	"BUFFER_":         CategoryResource,
+	"RESOURCE_":       CategoryResource,
+	"CACHE_":          CategoryResource,
+	"WORKER_":         CategoryResource,
+	"LIMIT_":          CategoryResource,
+	"ALREADY_":        CategoryState,
 	"NOT_INITIALIZED": CategoryState,
-	"INVALID_STATE":  CategoryState,
-	"SHUTDOWN_":      CategoryState,
-	"COMPONENT_":     CategoryState,
-	"SERVICE_":       CategoryState,
-	"OPERATION_":     CategoryOperation,
-	"RETRY_":         CategoryOperation,
-	"VALIDATION_":    CategoryOperation,
+	"INVALID_STATE":   CategoryState,
+	"SHUTDOWN_":       CategoryState,
+	"COMPONENT_":      CategoryState,
+	"SERVICE_":        CategoryState,
+	"OPERATION_":      CategoryOperation,
+	"RETRY_":          CategoryOperation,
+	"VALIDATION_":     CategoryOperation,
 	"AUTHENTICATION_": CategoryAuth,
-	"AUTHORIZATION_": CategoryAuth,
-	"TOKEN_":         CategoryAuth,
-	"CREDENTIALS_":   CategoryAuth,
+	"AUTHORIZATION_":  CategoryAuth,
+	"TOKEN_":          CategoryAuth,
+	"CREDENTIALS_":    CategoryAuth,
 }
 
 // GetCategory determines the category based on the error code.
@@ -281,6 +289,49 @@ func IsRetryableByDefault(code ErrorCode) bool {
 	return retryableCodes[code]
 }
 
+// IsServiceFailure reports whether an error code is evidence that the service itself is unwell,
+// as opposed to an ordinary answer to an ordinary request.
+//
+// Health tracking needs this distinction and cannot make it from the fact that an error occurred.
+// A 404 for an object that was never written means the service is up, reachable, authenticating,
+// and answering correctly — it is the *filesystem* equivalent of a successful call. Counting it as
+// a health failure is how ten stat(2) calls on absent paths drove the S3 read component to
+// unavailable and refused every subsequent read, including reads of objects that existed. That was
+// verified by execution before this function existed.
+//
+// The listed codes are the non-failures; everything else counts. That direction is deliberate: a
+// code added later defaults to counting, so the failure mode of forgetting to update this list is
+// a component that degrades too eagerly and recovers on the health tracker's probe timer, not one
+// that never notices an outage.
+func IsServiceFailure(code ErrorCode) bool {
+	notAFailure := map[ErrorCode]bool{
+		// The object or path simply is not there. The service said so, which required it to work.
+		ErrCodeObjectNotFound: true,
+		ErrCodeFileNotFound:   true,
+
+		// Ordinary POSIX and S3 conditions: the request was well-formed and the answer was no.
+		ErrCodeNotEmpty:        true,
+		ErrCodeDirectoryExists: true,
+		ErrCodeNotDirectory:    true,
+		ErrCodeBucketExists:    true,
+
+		// The object's own state, not the service's — an unrestored Glacier object, for instance.
+		ErrCodeInvalidState: true,
+
+		// Rejected before the service was asked, or rejected for what the caller sent. Blaming the
+		// service for a caller's invalid request lets one misbehaving process degrade the mount for
+		// every other process on the host.
+		ErrCodeValidationFailed: true,
+		ErrCodeTierValidation:   true,
+		ErrCodePathInvalid:      true,
+
+		// The caller withdrew the request. A FUSE interrupt or an unmount arrives here, and neither
+		// says anything about S3.
+		ErrCodeOperationCanceled: true,
+	}
+	return !notAFailure[code]
+}
+
 // IsUserFacingByDefault determines if an error should be shown to users.
 func IsUserFacingByDefault(code ErrorCode) bool {
 	userFacingCodes := map[ErrorCode]bool{
@@ -294,6 +345,9 @@ func IsUserFacingByDefault(code ErrorCode) bool {
 		ErrCodeMountFailed:      true,
 		ErrCodeOperationTimeout: true,
 		ErrCodeValidationFailed: true,
+		// Corruption is always user-facing: the alternative to telling the caller is handing them
+		// data that is wrong.
+		ErrCodeDataCorruption: true,
 	}
 	return userFacingCodes[code]
 }
@@ -320,6 +374,7 @@ func GetDefaultHTTPStatus(code ErrorCode) int {
 		ErrCodeResourceExhausted:    429, // Too Many Requests
 		ErrCodeLimitExceeded:        429,
 		ErrCodeQuotaExceeded:        429,
+		ErrCodeDataCorruption:       422, // Unprocessable Content — the object is unusable as stored
 		ErrCodeInternalError:        500, // Internal Server Error
 		ErrCodeServiceUnavailable:   503, // Service Unavailable
 		ErrCodeServiceDegraded:      503,
@@ -363,9 +418,9 @@ func (e *ObjectFSError) WithContext(key, value string) *ObjectFSError {
 }
 
 // WithDetail adds detailed information to an error
-func (e *ObjectFSError) WithDetail(key string, value interface{}) *ObjectFSError {
+func (e *ObjectFSError) WithDetail(key string, value any) *ObjectFSError {
 	if e.Details == nil {
-		e.Details = make(map[string]interface{})
+		e.Details = make(map[string]any)
 	}
 	e.Details[key] = value
 	return e
@@ -431,6 +486,11 @@ func (e *ObjectFSError) GetRecommendation() string {
 			"or configure aws credentials in ~/.aws/credentials.",
 		ErrCodeServiceUnavailable: "Service is currently unavailable. " +
 			"The system is temporarily unable to process requests. Please retry later.",
+		ErrCodeDataCorruption: "Stored data failed an integrity check and was not returned. " +
+			"Reading it again will produce the same result — retrying does not help. " +
+			"If the object was written by an older ObjectFS build, rewrite it; otherwise verify the " +
+			"object with the AWS CLI and check whether another tool has modified it in place.",
+
 		ErrCodeServiceDegraded: "Service is running in degraded mode. " +
 			"Some operations may be temporarily unavailable or slower than usual.",
 	}
@@ -462,6 +522,7 @@ func (e *ObjectFSError) GetTroubleshootingURL() string {
 		ErrCodeQuotaExceeded:        "#quota-exceeded",
 		ErrCodeAuthenticationFailed: "#authentication-failed",
 		ErrCodeCredentialsMissing:   "#credentials-missing",
+		ErrCodeDataCorruption:       "#data-corruption",
 	}
 
 	if fragment, exists := urlFragments[e.Code]; exists {
@@ -495,6 +556,7 @@ func (e *ObjectFSError) UserFacingMessage() string {
 		ErrCodeCredentialsMissing:   "AWS credentials not configured",
 		ErrCodeServiceUnavailable:   "Service temporarily unavailable",
 		ErrCodeServiceDegraded:      "Service running in degraded mode",
+		ErrCodeDataCorruption:       "Data failed an integrity check and was not returned",
 	}
 
 	if msg, exists := messages[e.Code]; exists {

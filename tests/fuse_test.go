@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -11,10 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/objectfs/objectfs/internal/buffer"
 	"github.com/objectfs/objectfs/internal/cache"
 	"github.com/objectfs/objectfs/internal/fuse"
 	"github.com/objectfs/objectfs/internal/metrics"
+	"github.com/objectfs/objectfs/internal/vfs"
 	"github.com/objectfs/objectfs/pkg/types"
 )
 
@@ -22,11 +23,17 @@ import (
 type MockBackend struct {
 	mu      sync.RWMutex
 	objects map[string][]byte
+
+	// meta holds each object's user metadata. Stored rather than discarded because that is where POSIX
+	// mode and ownership live: a backend that accepted attributes and dropped them would let an
+	// attribute test pass while nothing was persisted.
+	meta map[string]map[string]string
 }
 
 func NewMockBackend() *MockBackend {
 	return &MockBackend{
 		objects: make(map[string][]byte),
+		meta:    make(map[string]map[string]string),
 	}
 }
 
@@ -51,13 +58,35 @@ func (b *MockBackend) GetObject(ctx context.Context, key string, offset, size in
 	return data[offset:end], nil
 }
 
-func (b *MockBackend) PutObject(ctx context.Context, key string, data []byte) error {
+func (b *MockBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.objects[key] = make([]byte, len(data))
 	copy(b.objects[key], data)
+	// Replaced wholesale, as S3's PutObject does.
+	b.meta[key] = copyMeta(meta)
 	return nil
+}
+
+func (b *MockBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, ok := b.objects[key]; !ok {
+		return os.ErrNotExist
+	}
+	// The bytes are untouched. An implementation that rewrote them would be the defect
+	// vfs.Flusher asserts against by rechecking the size after an attribute write.
+	b.meta[key] = copyMeta(meta)
+	return nil
+}
+
+// copyMeta returns a copy of m, so a caller reusing its map cannot mutate what the backend stored.
+func copyMeta(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	maps.Copy(out, m)
+	return out
 }
 
 func (b *MockBackend) HeadObject(ctx context.Context, key string) (*types.ObjectInfo, error) {
@@ -73,6 +102,7 @@ func (b *MockBackend) HeadObject(ctx context.Context, key string) (*types.Object
 		Key:          key,
 		Size:         int64(len(data)),
 		LastModified: time.Now(),
+		Metadata:     copyMeta(b.meta[key]),
 	}, nil
 }
 
@@ -158,19 +188,7 @@ func TestFUSEOptimizations(t *testing.T) {
 	mlCache, err := cache.NewMultiLevelCache(cacheConfig)
 	require.NoError(t, err)
 
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  1024 * 1024,
-		FlushThreshold: 64 * 1024,
-		AsyncFlush:     false, // Synchronous for testing
-	}
-
-	var flushedData sync.Map
-	flushCallback := func(key string, data []byte, offset int64) error {
-		flushedData.Store(key, data)
-		return backend.PutObject(context.Background(), key, data)
-	}
-
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, flushCallback)
+	writeBuffer, err := vfs.NewWriter(context.Background(), backend)
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
@@ -187,8 +205,6 @@ func TestFUSEOptimizations(t *testing.T) {
 		DefaultUID:  1000,
 		DefaultGID:  1000,
 		DefaultMode: 0644,
-		ReadAhead:   64 * 1024,
-		WriteBuffer: 32 * 1024,
 	}
 
 	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, fuseConfig)
@@ -202,7 +218,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		for i := range testData {
 			testData[i] = byte(i % 256)
 		}
-		err := backend.PutObject(context.Background(), testKey, testData)
+		err := backend.PutObject(context.Background(), testKey, testData, nil)
 		require.NoError(t, err)
 
 		// Get filesystem stats before operations
@@ -211,10 +227,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		// Perform sequential reads to trigger read-ahead
 		readSize := 64 * 1024 // 64KB chunks
 		for offset := 0; offset < len(testData); offset += readSize {
-			end := offset + readSize
-			if end > len(testData) {
-				end = len(testData)
-			}
+			end := min(offset+readSize, len(testData))
 
 			data, err := backend.GetObject(context.Background(), testKey, int64(offset), int64(readSize))
 			require.NoError(t, err)
@@ -267,7 +280,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		testKey := "test-cache.txt"
 		testData := []byte("This data should be cached for fast access")
 
-		err := backend.PutObject(context.Background(), testKey, testData)
+		err := backend.PutObject(context.Background(), testKey, testData, nil)
 		require.NoError(t, err)
 
 		// First read (cache miss)
@@ -284,7 +297,7 @@ func TestFUSEOptimizations(t *testing.T) {
 
 		// Verify cache statistics
 		stats := mlCache.Stats()
-		assert.Greater(t, stats.Hits, uint64(0))
+		assert.Positive(t, stats.Hits)
 	})
 
 	t.Run("TestMetricsCollection", func(t *testing.T) {
@@ -312,7 +325,7 @@ func TestFUSEOptimizations(t *testing.T) {
 			testData[i] = byte(i % 256)
 		}
 
-		err := backend.PutObject(context.Background(), testKey, testData)
+		err := backend.PutObject(context.Background(), testKey, testData, nil)
 		require.NoError(t, err)
 
 		// Benchmark sequential reads
@@ -320,7 +333,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		iterations := 10
 		totalBytes := int64(0)
 
-		for i := 0; i < iterations; i++ {
+		for range iterations {
 			data, err := backend.GetObject(context.Background(), testKey, 0, 0)
 			require.NoError(t, err)
 			totalBytes += int64(len(data))
@@ -349,17 +362,7 @@ func TestFUSEFileOperations(t *testing.T) {
 	mlCache, err := cache.NewMultiLevelCache(cacheConfig)
 	require.NoError(t, err)
 
-	bufferConfig := &buffer.WriteBufferConfig{
-		MaxBufferSize:  512 * 1024,
-		FlushThreshold: 32 * 1024,
-		AsyncFlush:     false,
-	}
-
-	flushCallback := func(key string, data []byte, offset int64) error {
-		return backend.PutObject(context.Background(), key, data)
-	}
-
-	writeBuffer, err := buffer.NewWriteBuffer(bufferConfig, flushCallback)
+	writeBuffer, err := vfs.NewWriter(context.Background(), backend)
 	require.NoError(t, err)
 	defer func() { _ = writeBuffer.Close() }()
 
@@ -374,7 +377,7 @@ func TestFUSEFileOperations(t *testing.T) {
 		testKey := "created-file.txt"
 		testContent := []byte("This file was created through FUSE")
 
-		err := backend.PutObject(context.Background(), testKey, testContent)
+		err := backend.PutObject(context.Background(), testKey, testContent, nil)
 		require.NoError(t, err)
 
 		// Test file reading
@@ -399,7 +402,7 @@ func TestFUSEFileOperations(t *testing.T) {
 
 		for _, file := range files {
 			content := []byte("Content of " + file)
-			err := backend.PutObject(context.Background(), file, content)
+			err := backend.PutObject(context.Background(), file, content, nil)
 			require.NoError(t, err)
 		}
 
@@ -417,7 +420,7 @@ func TestFUSEFileOperations(t *testing.T) {
 		// Test reading beyond file bounds
 		testKey := "small-file.txt"
 		smallContent := []byte("small")
-		err = backend.PutObject(context.Background(), testKey, smallContent)
+		err = backend.PutObject(context.Background(), testKey, smallContent, nil)
 		require.NoError(t, err)
 
 		// Read beyond end of file
@@ -438,15 +441,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		},
 	})
 
-	writeBuffer, _ := buffer.NewWriteBuffer(&buffer.WriteBufferConfig{
-		MaxBufferSize:  10 * 1024 * 1024, // 10MB buffer
-		FlushThreshold: 1024 * 1024,      // 1MB threshold
-		MaxBuffers:     1000,             // More buffers
-		AsyncFlush:     false,
-	}, func(key string, data []byte, offset int64) error {
-		return backend.PutObject(context.Background(), key, data)
-	})
-
+	writeBuffer, _ := vfs.NewWriter(context.Background(), backend)
 	defer func() { _ = writeBuffer.Close() }()
 
 	collector, _ := metrics.NewCollector(&metrics.Config{Enabled: false})
@@ -461,7 +456,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 
 	b.Run("SequentialReads", func(b *testing.B) {
 		testKey := "bench-sequential-read.dat"
-		_ = backend.PutObject(context.Background(), testKey, testData)
+		_ = backend.PutObject(context.Background(), testKey, testData, nil)
 
 		b.ResetTimer()
 		b.ReportAllocs()
@@ -482,7 +477,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			testKey := "bench-write-" + string(rune(i%100)) // Cycle through 100 keys
-			err := backend.PutObject(context.Background(), testKey, testData)
+			err := backend.PutObject(context.Background(), testKey, testData, nil)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -493,7 +488,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 
 	b.Run("CachedReads", func(b *testing.B) {
 		testKey := "bench-cached-read.dat"
-		_ = backend.PutObject(context.Background(), testKey, testData)
+		_ = backend.PutObject(context.Background(), testKey, testData, nil)
 		mlCache.Put(testKey, 0, testData) // Pre-cache the data
 
 		b.ResetTimer()

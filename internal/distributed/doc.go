@@ -13,25 +13,15 @@ Integration tests pending Sprint 4 (LocalStack). Not recommended for production 
 Architecture
 
 	┌──────────────────────────────────────────────────┐
-	│           Coordinator (Operation Manager)         │
-	│  - Executes distributed operations                │
-	│  - Enforces consistency levels                    │
-	│  - Manages operation lifecycle                    │
+	│           Coordinator (Operation Manager)         │  - Executes distributed operations                │  - Enforces consistency levels                    │  - Manages operation lifecycle                    │
 	└────────┬──────────────────┬──────────────────────┘
-	         │                  │
+	         │
 	    ┌────▼─────┐      ┌─────▼──────┐
-	    │  Cluster │      │    Load    │
-	    │  Manager │      │  Balancer  │
-	    │          │      │            │
-	    │ - Nodes  │      │ - Routing  │
-	    │ - Health │      │ - Strategy │
+	    │  Cluster │    Load    │  Manager │  Balancer  │ - Nodes  │ - Routing  │ - Health │ - Strategy │
 	    └────┬─────┘      └─────┬──────┘
-	         │                  │
+	         │
 	    ┌────▼──────────────────▼────┐
-	    │    Gossip Protocol          │
-	    │  - Node discovery           │
-	    │  - State propagation        │
-	    │  - Failure detection        │
+	    │    Gossip Protocol          │  - Node discovery           │  - State propagation        │  - Failure detection        │
 	    └────────────────────────────┘
 
 # Core Components
@@ -202,7 +192,7 @@ Check cluster health and node status:
 	}
 
 	// Get leader
-	leader := cluster.GetLeader()
+	:= cluster.GetLeader()
 	log.Printf("Current leader: %s", leader)
 
 	// Check if this node is leader
@@ -374,7 +364,6 @@ Example: Complete Cluster Setup
 			log.Printf("Operation succeeded on %d nodes",
 				len(result.NodeResults))
 		}
-	}
 
 # See Also
 

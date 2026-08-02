@@ -378,7 +378,7 @@ func (dpm *DetailedPerformanceMetrics) GetTopFiles(n int) []*FileOperationMetric
 	}
 
 	// Sort by total accesses (descending)
-	for i := 0; i < len(files)-1; i++ {
+	for i := range len(files) - 1 {
 		for j := i + 1; j < len(files); j++ {
 			if files[j].TotalAccesses > files[i].TotalAccesses {
 				files[i], files[j] = files[j], files[i]
@@ -394,13 +394,13 @@ func (dpm *DetailedPerformanceMetrics) GetTopFiles(n int) []*FileOperationMetric
 }
 
 // GetSummary returns a summary of all metrics
-func (dpm *DetailedPerformanceMetrics) GetSummary() map[string]interface{} {
+func (dpm *DetailedPerformanceMetrics) GetSummary() map[string]any {
 	dpm.mu.RLock()
 	defer dpm.mu.RUnlock()
 
 	uptime := time.Since(dpm.StartTime)
 
-	summary := map[string]interface{}{
+	summary := map[string]any{
 		"uptime_seconds":         uptime.Seconds(),
 		"total_operations":       dpm.TotalOperations,
 		"total_errors":           dpm.TotalErrors,

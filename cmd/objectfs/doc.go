@@ -1,9 +1,16 @@
 /*
 Package main provides the ObjectFS command-line interface and application entry point.
 
-This package implements the primary user-facing interface for ObjectFS, providing a comprehensive
-command-line tool for mounting object storage buckets as POSIX-compliant filesystems. It handles
-configuration management, command-line argument processing, and application lifecycle management.
+This package implements the primary user-facing interface for ObjectFS: a command-line tool for
+mounting object storage buckets as filesystems. It handles configuration management, command-line
+argument processing, and application lifecycle management.
+
+ObjectFS presents a POSIX *interface* over object storage; it is not a POSIX-compliant filesystem.
+There is no rename, no hard or symbolic links, no locking, and no atomic anything, because S3
+provides none of them and this filesystem does not emulate them. Where an operation cannot be
+supported it returns an error rather than appearing to succeed. The README's supported-operations
+table is the authoritative list of what works, what fails by design, and which tools are known not
+to work against a mount — consult it before pointing a workload at one.
 
 # Command-Line Interface
 

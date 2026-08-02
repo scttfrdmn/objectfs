@@ -277,25 +277,22 @@ func TestLRUCache_Delete(t *testing.T) {
 		TTL:     time.Hour,
 	})
 
-	// Add multiple items with same key prefix
+	// Two objects, one of them holding bytes in two different chunks. Entry counts are deliberately not
+	// asserted: how many entries a set of puts produces is a property of the chunking, and pinning it
+	// here would make this test fail for changes that do not affect what Delete does.
+	// TestDeleteRemovesOnlyItsOwnObject covers the sibling-key precision this one cannot see, since
+	// "user:123" and "user:456" share no prefix.
 	cache.Put("user:123", 0, []byte("data1"))
-	cache.Put("user:123", 100, []byte("data2"))
+	cache.Put("user:123", 2*ChunkSize, []byte("data2"))
 	cache.Put("user:456", 0, []byte("data3"))
 
-	if len(cache.items) != 3 {
-		t.Errorf("expected 3 items, got %d", len(cache.items))
-	}
-
-	// Delete by key prefix
 	cache.Delete("user:123")
 
-	// Should have only user:456 left
-	if len(cache.items) != 1 {
-		t.Errorf("expected 1 item after delete, got %d", len(cache.items))
-	}
-
 	if cache.Get("user:123", 0, 5) != nil {
-		t.Error("user:123:0 should be deleted")
+		t.Error("user:123 chunk 0 should be deleted")
+	}
+	if cache.Get("user:123", 2*ChunkSize, 5) != nil {
+		t.Error("user:123 chunk 2 should be deleted; Delete must remove every chunk of its object")
 	}
 	if cache.Get("user:456", 0, 5) == nil {
 		t.Error("user:456 should still exist")
@@ -309,9 +306,9 @@ func TestLRUCache_Clear(t *testing.T) {
 		TTL:     time.Hour,
 	})
 
-	// Add multiple items
-	for i := 0; i < 10; i++ {
-		cache.Put("key", int64(i*100), []byte("data"))
+	// Ten puts spread across ten chunks, so each is its own entry.
+	for i := range 10 {
+		cache.Put("key", int64(i)*ChunkSize, []byte("data"))
 	}
 
 	if len(cache.items) != 10 {
@@ -342,10 +339,10 @@ func TestLRUCache_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent writes
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOpsPerGoroutine; j++ {
+			for j := range numOpsPerGoroutine {
 				key := "key"
 				offset := int64(id*numOpsPerGoroutine + j)
 				data := []byte("data")
@@ -357,10 +354,10 @@ func TestLRUCache_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent reads
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOpsPerGoroutine; j++ {
+			for j := range numOpsPerGoroutine {
 				key := "key"
 				offset := int64(id*numOpsPerGoroutine + j)
 				cache.Get(key, offset, 4)
@@ -426,7 +423,7 @@ func TestLRUCache_Resize(t *testing.T) {
 	})
 
 	// Fill cache with 500 bytes
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 100))
 	}
 
@@ -455,7 +452,7 @@ func TestLRUCache_Evict(t *testing.T) {
 	})
 
 	// Add 500 bytes
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		cache.Put("key", int64(i*100), make([]byte, 100))
 	}
 
@@ -497,10 +494,18 @@ func TestLRUCache_GetKeys(t *testing.T) {
 		keyMap[key] = true
 	}
 
-	expectedKeys := []string{"key1:0:4", "key2:100:4", "key3:200:4"}
+	// Built with entryKey rather than written out literally: this test's subject is GetKeys returning
+	// every entry, not the entry-key format, and duplicating the format here would have made it a
+	// second place to update when the keying changed. (It was: these read "key1:0:4" — object, offset,
+	// and the *requested length*, which is the defect the rekeying removed.)
+	expectedKeys := []string{
+		entryKey("key1", 0),
+		entryKey("key2", chunkIndexOf(100)),
+		entryKey("key3", chunkIndexOf(200)),
+	}
 	for _, expected := range expectedKeys {
 		if !keyMap[expected] {
-			t.Errorf("expected key %q not found in result", expected)
+			t.Errorf("expected key %q not found in %v", expected, keys)
 		}
 	}
 }
@@ -532,7 +537,7 @@ func TestWeightedLRUCache_EvictByWeight(t *testing.T) {
 	cache.Put("cold", 0, make([]byte, 100)) // Won't be accessed
 
 	// Access "hot" item multiple times to increase its weight
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		cache.Get("hot", 0, 100)
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -564,7 +569,7 @@ func TestLRUCache_AccessTimeUpdate(t *testing.T) {
 	cache.Put("key", 0, []byte("data"))
 
 	// Get initial access time
-	cacheKey := cache.makeCacheKey("key", 0, 4)
+	cacheKey := entryKey("key", 0)
 	cache.mu.RLock()
 	item1 := cache.items[cacheKey]
 	accessTime1 := item1.accessTime

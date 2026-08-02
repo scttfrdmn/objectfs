@@ -22,17 +22,50 @@ RUN go mod download && go mod verify
 # Copy source code
 COPY . .
 
-# Build the binary
+# Build the binary.
+#
+# TARGETARCH, not a hardcoded amd64. It is supplied by the builder from the platform being built, and
+# the release workflow builds linux/amd64,linux/arm64 from this one file — so with GOARCH pinned, the
+# arm64 manifest was published containing an **x86-64 binary**. Verified by ELF header: machine type
+# 0x3e in an image whose manifest reports arm64. It runs on a developer machine, because both Docker
+# Desktop and podman's VM register qemu binfmt handlers and silently emulate it; on a Graviton
+# instance or an arm64 Kubernetes node it is `exec format error` at container start. That is the worst
+# shape for this defect — invisible everywhere it is tested, fatal only where it is deployed.
+#
+# GOOS stays pinned: the runtime stage is Alpine either way.
+ARG TARGETARCH
 ARG VERSION=dev
-ARG COMMIT=unknown
-ARG BUILD_TIME=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
     go build \
-    -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
+    -ldflags="-s -w" \
     -tags="release,netgo" \
     -o /bin/objectfs \
     ./cmd/objectfs
+
+# Fail the build if the image would report a version other than the one it was asked for.
+#
+# The -ldflags above no longer inject anything, and that is the fix rather than an omission. They said
+# `-X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}`, and none of
+# those three symbols exists: cmd/objectfs/main.go declares `version` in a **const** block, which the
+# linker cannot rewrite. -X against a missing symbol is silently ignored, so every image ever built
+# from this file reported whatever the constant happened to say, and appeared to work precisely because
+# someone had remembered to edit it. Proven by building with VERSION=NOT-THE-REAL-VERSION, which
+# produced an image reporting 0.10.1.
+#
+# So the constant is the single authority — as CLAUDE.md and release.yml both already treat it — and
+# this asserts the two agree instead of pretending to overwrite one with the other. VERSION defaults
+# to `dev`, which no release tag matches, so the check applies only when a caller passes a real one.
+RUN if [ "$VERSION" != "dev" ]; then \
+        reported="$(/bin/objectfs --version)"; \
+        case "$reported" in \
+            *"${VERSION#v}") ;; \
+            *) echo "ERROR: --build-arg VERSION=$VERSION but the binary reports: $reported" >&2; \
+               echo "The version is a const in cmd/objectfs/main.go and cannot be injected at link" >&2; \
+               echo "time. Update that constant to match the tag." >&2; \
+               exit 1 ;; \
+        esac; \
+    fi
 
 # Runtime stage
 FROM alpine:3.21

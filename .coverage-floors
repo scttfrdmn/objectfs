@@ -1,0 +1,168 @@
+# Per-package statement-coverage floors, enforced by scripts/coverage-gate.sh in CI.
+#
+# Each floor is that package's measured coverage rounded down to the nearest whole percent, so
+# this file is green on the commit that introduces it. That is the point: a gate set above where
+# the code is gets weakened until it passes, and a gate set at one number across a repo with a
+# real spread has to sit at the floor of the worst package, at which point it gates nothing.
+#
+# Every line is a ratchet. Raising a floor is a deliberate act. Lowering one has to be defended
+# in a diff, which is the only property that makes this file worth having — the alternative is a
+# coverage number that drifts down a percent at a time and is never anyone's fault.
+#
+# CLAUDE.md's target is 80%+ per package. Sixteen of the thirty below are there. Two of the four
+# packages this file originally listed as furthest from it have since been rewritten, and both moved
+# for a structural reason rather than by anyone writing tests harder — which is the useful thing to
+# record, because it says where the remaining two are actually blocked:
+#
+#   internal/fuse       37.7% → 59.9%  the package became a translation shim over internal/vfs, so
+#                                      its behavior is reachable by calling a node method instead of
+#                                      by mounting
+#   internal/adapter    45.7% → 46.9%  see its own note below; the floor stays at 40 on purpose
+#   internal/health     48.5%          reachable now that pkg/health's probe path exists
+#   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
+#                                      work
+#
+# Floors are deliberately absent for four packages with no test files at all. A floor of 0% reads
+# as a target rather than as an absence, and the gate names unlisted packages in every run so the
+# omission stays visible instead of looking like a decision:
+#
+#   cmd/objectfs        no tests — argument parsing and signal handling, currently untestable
+#                       because main() calls log.Fatalf directly
+#   internal/testhttp   no tests, deliberately: it is test support, and every statement in it runs
+#                       under the suites that use it. A test for FreePort would assert that a port
+#                       is free by binding it, which is what the function does — a tautology. Its
+#                       real check is that deleting adapter.Start's metrics call fails the tests
+#                       built on it, which it does, with the message it exists to print
+#   pkg/archive         no tests — metadata types; dead code pending a decision (Part 4)
+#   pkg/compression     no tests in this package; its constants and SupportedAlgorithms list are
+#                       exercised from internal/compression, which is at 87.3%
+#   sdks/c              no tests — cgo shim, not reachable from `go test`
+
+internal/analytics       96
+internal/archive         90
+internal/awsname         100
+internal/cache/redis     87
+internal/circuit         96
+internal/compression     87
+# internal/config goes from 83 to 86 with the validation the config plumbing added. The two points
+# that raise is worth are in what the new tests assert rather than in the number: each case checks
+# that the rejection message names the YAML path, because the failure being prevented is not "a bad
+# value was accepted" but "a bad value was accepted, replaced with something plausible, and never
+# mentioned again" — an unrecognized storage class became STANDARD, and any unparseable size became
+# 1 GiB. An error that says "invalid configuration" leaves the operator exactly as stuck.
+internal/config          86
+internal/cost            98
+internal/difftest        75
+internal/distributed     67
+internal/filesystem      88
+# 45 → 48: the previous floor was not a stable measurement. Eight tests started a Monitor whose
+# default Config enables the health endpoint on the fixed port 8081, so each Start raced its siblings
+# for one port; the losers hit startHTTPServer's bind-error arm, and how many did was a matter of
+# goroutine scheduling. The package measured 45.0% on an idle machine and 44.7% under CI's load, and
+# the floor had been set from the luckier run — so CI failed a gate that passed locally, over two
+# statements nothing had deliberately tested. Tests that are not about the endpoint no longer open
+# one, the two that are bind port 0, and the result is 48.5% at every -cpu value from 1 to 8.
+internal/health          48
+# 79 → 85: the wiring tests scrape the endpoint over a socket rather than inspecting the collector's
+# fields, which is what reaches Start, the HTTP handlers, and the label validation. None of that was
+# callable from a test that only constructed a collector — and a collector with no listener gathers
+# identically to one with a listener, so the six points were exactly where the defects were.
+internal/metrics         85
+
+# 100 → 98, and the drop is the file set changing rather than coverage falling. This floor was
+# measured on macOS, where congestion_stub.go supplies 24 lines; on Linux congestion_linux.go
+# supplies 66 in their place, and three of its functions had no test at all — setTCPCongestion at 0%,
+# newPlatformDialer at 20% with its Control closure never invoked, and both procfs readers missing
+# their absent-file arms. The package measured a clean 100% locally and 86.9% in CI, below a floor
+# nobody could see was wrong from the machine it was set on.
+#
+# congestion_linux_test.go covers those, taking Linux to 98.8%. The floor sits at 98 rather than 100
+# because one arm genuinely resists: rawConn.Control's own error, which needs a socket whose fd is
+# already invalid. The lesson worth keeping is the first one — a per-package floor set on one
+# platform is a claim about a file set that platform does not compile, so CI is the authority for
+# any package with a //go:build split. internal/fuse is the other one.
+internal/network         98
+internal/testaws         61
+internal/vfs             98
+
+# internal/storage/s3 goes from 71 to 73 with the two operations the node contract added to the
+# backend: an attribute-only write and a listing that follows continuation tokens. Both are seam
+# operations in the strict sense — what matters is what crosses the wire, so both are tested by
+# asserting on the endpoint rather than on a return value.
+#
+# The two points that raise is worth: writing the missing assertion for "SetObjectMetadata restates
+# the storage class" found that the configured storage_tier never reached S3 at all on the shipped
+# default path. Every layer in between agreed on the tier — ValidateWrite enforced its minimum size,
+# the logs named it, ConvertTierToStorageClass had a passing unit test — while objects were stored as
+# INTELLIGENT_TIERING. Coverage of a seam is not the same quantity as coverage of a function.
+#
+# The config-plumbing work takes it from 73 to 79, and most of that is the same lesson twice. The
+# backend's config had six fields nothing on the mount path ever set, so the tests that now cover
+# them are seam tests too: they assert what the endpoint recorded for a configured storage tier, and
+# they drive the cost optimizer's access-pattern map through GetObject rather than calling it, because
+# the map was written from the read path and a test that called the optimizer directly would prove
+# the lock works without proving the path that needs it has it.
+#
+# 79 to 81 with the multipart-abort and batch-partial-failure work. Both raises are error paths, which
+# is where this package's coverage was thinnest and where its defects were: the paths that run when
+# something has already gone wrong are the ones a test has to arrange a failure to reach, so they were
+# reachable only by whichever error a happy-path test happened to provoke. Both are now driven by
+# faults injected at the endpoint — a 403 on the Complete of a multipart upload, a 503 that outlasts
+# the retry budget on one key of a batch — which is the only way to reach them at all.
+internal/storage/s3      81
+
+# internal/adapter is the one package whose floor is set below the current measurement on purpose.
+# Its coverage moves with which S3-backed tests the harness can run, and the write-path rebuild
+# will churn it substantially; 40 is the level below which it has genuinely regressed.
+internal/adapter         40
+
+# internal/fuse was lowered from 24 to 17 by the write-path rebuild — the one shape of lowering that
+# is not a weakened gate, because the drop was the deletion of tests for deleted code. The
+# WriteCoalescer and its thirteen tests went with it (the type corrupted data on a routine overwrite
+# while every one of those tests passed), so numerator and denominator both fell and the statements
+# that remained were covered exactly as well as before.
+#
+# The read-path work raises it to 37: nine tests driving FileHandle.Read and the metadata cache
+# against a real byte-range cache, a real write path, and a substrate-backed S3 endpoint. Those are
+# the paths where the cache-keying and prefetch defects lived, and they were previously reachable in
+# tests only through a map-backed stub that answered every request regardless of length.
+#
+# The node-contract work raises it to 56, and the mechanism is the one the previous note predicted:
+# the package became a translation shim over internal/vfs, so its behaviour is now reachable by
+# calling a node method and asserting on S3 rather than by mounting. Getattr, Setattr, Fsync, Statfs,
+# Lookup, Readdir, Mkdir, and Create are covered against a substrate-backed endpoint.
+#
+# A table test over toErrno takes it to 59. That function is the whole of the package's error contract
+# and was at 16.2% — reachable only incidentally, through whichever error an operation test happened to
+# provoke. It is also the one function here whose defects are invisible to every other test, because a
+# wrong errno does not fail an operation, it fails it differently: v0.10.0 collapsed every HeadObject
+# error to ENOENT, and Create read that as "absent" and wrote an empty object over a throttled file.
+#
+# 59 rather than 80 because what remains uncovered is mostly what a unit test cannot reach: the mount
+# and unmount lifecycle, the signal handling around it, and the go-fuse option construction. Those
+# need a real mount, which is the live integration suite's job.
+internal/fuse            59
+
+# internal/cache went 74 → 76 with the re-keying work — the byte-range keying, splitting, coalescing,
+# and coverage checks are now covered by 27 tests and a fuzz target where before they were two copies
+# of the same untested sprintf — and then 76 → 82 with the predictive-cache shutdown fixes. That
+# second jump has a cause worth recording: every pre-existing test in the package set
+# `EnablePrefetch: false`, so the prefetcher's queue, workers, rate limiter, and shutdown path had no
+# coverage at all, and three defects lived there — a panic on close racing a read, a token bucket that
+# never refilled, and a Close nothing called. Switching prefetch on in tests is what found them.
+internal/cache           82
+
+pkg/api                  73
+pkg/errors               48
+pkg/health               93
+pkg/memmon               51
+pkg/profiling            75
+pkg/recovery             86
+pkg/retry                87
+pkg/status               93
+pkg/utils                82
+
+# sdks/go/objectfs measures 54.1% with AWS credentials present and 43.5% without, because several
+# of its tests call requireAWS and skip. CI has no credentials, so the floor is set for the
+# skipping case — the higher number is not something CI can hold it to.
+sdks/go/objectfs         43

@@ -84,7 +84,7 @@ The collector exports standard Prometheus metrics:
 
 Counters:
   - objectfs_operations_total{operation,status}: Total operations by type and status
-  - objectfs_cache_requests_total{type,source}: Cache hits/misses by level
+  - objectfs_cache_requests_total{type}: Cache requests, by hit or miss
   - objectfs_errors_total{operation,type}: Errors by operation and classification
 
 Histograms:
@@ -94,6 +94,17 @@ Histograms:
 Gauges:
   - objectfs_cache_size_bytes{level}: Current cache size per level
   - objectfs_active_connections: Current active S3 connections
+
+Every series additionally carries the operator's monitoring.metrics.custom_labels as constant
+labels — service="objectfs" by default. Consumers must parse the label block: a name identifies a
+family, not a series, so objectfs_cache_requests_total is two samples and not one.
+
+These names are the contract with the Python and TypeScript SDKs, captured as a real scrape in
+sdks/testdata/metrics-scrape.txt. TestSDKFixtureMatchesTheLiveScrape regenerates and compares it,
+so renaming a metric or dropping a label here fails this package's tests and then the SDK suites.
+Regenerate with:
+
+	go test ./internal/metrics/ -run TestSDKFixtureMatchesTheLiveScrape -update-fixture
 
 # HTTP Endpoints
 

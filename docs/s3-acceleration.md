@@ -38,11 +38,21 @@ Before enabling S3 Transfer Acceleration in ObjectFS:
 ### YAML Configuration
 
 ```yaml
-s3:
-  region: us-west-2
-  use_accelerate: true  # Enable S3 Transfer Acceleration
-  pool_size: 20         # Recommended for acceleration
+storage:
+  s3:
+    region: us-west-2
+    use_acceleration: true   # Enable S3 Transfer Acceleration
+
+performance:
+  connection_pool_size: 20   # a larger pool helps acceleration keep its endpoints busy
 ```
+
+The YAML keys and the Go field names are not the same, and this section previously mixed them: it
+showed `use_accelerate` and `pool_size` at a top-level `s3:`, which are the *internal*
+`s3.Config`'s names — spelled `use_acceleration` under `storage.s3` and `connection_pool_size`
+under `performance` in a config file. The loader now decodes strictly, so the old block does not
+quietly do nothing; it refuses to start and names the key. The Go snippet below sets the internal
+struct directly and is correct as written for that use.
 
 ### Go API Configuration
 
@@ -84,8 +94,17 @@ standard S3 endpoints:
 5. Temporarily disable acceleration to avoid repeated failures
 
 **Re-enabling:**
-- Automatic re-enable after successful standard operations
-- Manual re-enable via `backend.GetClientManager().EnableAcceleration()`
+
+There is none. The fallback is one-way for the life of the mount: once an acceleration error is
+seen, every later request uses the standard endpoint until ObjectFS restarts. This section used to
+promise an "automatic re-enable after successful standard operations" and a manual
+`backend.GetClientManager().EnableAcceleration()`; nothing calls the re-enable path, and `Backend`
+has no `GetClientManager` accessor to reach it with.
+
+That is a deliberate trade rather than an oversight worth working around. The error that triggers
+fallback — a bucket without the Transfer Acceleration configuration — does not resolve on its own,
+so retrying it would mean paying a failed round-trip per request forever. Restart after fixing the
+bucket configuration.
 
 ### Metrics Tracking
 
@@ -98,8 +117,14 @@ fmt.Printf("Acceleration Status: %v\n", metrics.AccelerationEnabled)
 fmt.Printf("Accelerated Requests: %d\n", metrics.AcceleratedRequests)
 fmt.Printf("Accelerated Bytes: %d\n", metrics.AcceleratedBytes)
 fmt.Printf("Fallback Events: %d\n", metrics.FallbackEvents)
-fmt.Printf("Acceleration Rate: %.2f%%\n",
-    backend.GetMetricsCollector().GetAccelerationRate())
+
+// AccelerationEnabled reports configuration, not effect. A mount can have it true, have fallen
+// back on its first request, and be serving everything over the standard endpoint since — so
+// derive the rate from the counters rather than reading the flag.
+if metrics.Requests > 0 {
+    fmt.Printf("Acceleration Rate: %.2f%%\n",
+        float64(metrics.AcceleratedRequests)/float64(metrics.Requests)*100)
+}
 ```
 
 ### Integration with CargoShip
@@ -169,17 +194,20 @@ go test -bench='BenchmarkGetObject_(Standard|Accelerated)' \
     ./internal/storage/s3/
 
 # Test specific object sizes
-go test -bench='BenchmarkGetObject_Large' \
+go test -bench='BenchmarkGetObject_Large_(Standard|Accelerated)' \
     ./internal/storage/s3/
 ```
 
-**Example Output:**
-```
-BenchmarkGetObject_Standard-8        100    12.5 MB/s    1048576 B/op
-BenchmarkGetObject_Accelerated-8     250    31.2 MB/s    1048576 B/op
-BenchmarkPutObject_Standard-8        150    10.8 MB/s    1048576 B/op
-BenchmarkPutObject_Accelerated-8     400    27.5 MB/s    1048576 B/op
-```
+These benchmarks need a real bucket: without `OBJECTFS_BENCH_BUCKET` they skip, and a skipped
+benchmark reports nothing rather than reporting zero.
+
+No sample output is shown here on purpose. This section used to print four lines that looked like
+`go test -bench` output and were not — they had no `ns/op` column, which every real benchmark line
+has, because they were written by hand to illustrate a hoped-for ratio. Acceleration's benefit
+depends on your distance from the bucket region and on object size; a number measured from someone
+else's network is not evidence about yours. Run the two benchmarks above against your own bucket
+and compare with `benchstat`. That takes a few minutes and answers the question for your
+deployment, which an invented figure cannot do at any length.
 
 ## Monitoring
 
@@ -188,15 +216,21 @@ BenchmarkPutObject_Accelerated-8     400    27.5 MB/s    1048576 B/op
 ObjectFS tracks acceleration health:
 
 ```go
-// Check if acceleration is active
-if backend.GetClientManager().IsAccelerationActive() {
-    log.Info("S3 Transfer Acceleration is active")
+m := backend.GetMetrics()
+
+// Whether the accelerate endpoint is configured at all.
+if m.AccelerationEnabled {
+    log.Info("S3 Transfer Acceleration is enabled")
 }
 
-// Get acceleration rate
-rate := backend.GetMetricsCollector().GetAccelerationRate()
-if rate < 50.0 {
-    log.Warn("Low acceleration rate", "rate", rate)
+// What share of requests actually took it. FallbackEvents counts the ones that did not:
+// acceleration can be enabled and still be delivering nothing, if the bucket lacks the
+// Transfer Acceleration configuration or the endpoint is unreachable from here.
+if m.Requests > 0 {
+    rate := float64(m.AcceleratedRequests) / float64(m.Requests) * 100
+    if rate < 50.0 {
+        log.Warn("low acceleration rate", "percent", rate, "fallbacks", m.FallbackEvents)
+    }
 }
 ```
 

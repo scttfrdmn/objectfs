@@ -410,7 +410,7 @@ func BenchmarkRetryer_Success(b *testing.B) {
 	retryer := New(DefaultConfig())
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = retryer.Do(func() error {
 			return nil
 		})
@@ -424,7 +424,7 @@ func BenchmarkRetryer_WithRetries(b *testing.B) {
 	retryer := New(config)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		attempts := 0
 		_ = retryer.Do(func() error {
 			attempts++

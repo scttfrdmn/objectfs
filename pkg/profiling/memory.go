@@ -97,7 +97,7 @@ type Alert struct {
 	Type      string       `json:"type"`
 	Message   string       `json:"message"`
 	Current   MemorySample `json:"current"`
-	Threshold interface{}  `json:"threshold"`
+	Threshold any          `json:"threshold"`
 }
 
 // AlertLevel represents alert severity

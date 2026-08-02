@@ -248,13 +248,13 @@ func TestMetricsCollector_AveragePartsPerUpload(t *testing.T) {
 
 	// Upload 1: 4 parts
 	mc.RecordMultipartUploadStart()
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		mc.RecordMultipartUploadPart(16 * 1024 * 1024)
 	}
 
 	// Upload 2: 2 parts
 	mc.RecordMultipartUploadStart()
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		mc.RecordMultipartUploadPart(16 * 1024 * 1024)
 	}
 

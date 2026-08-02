@@ -361,8 +361,7 @@ func TestClusterManager_StartStop(t *testing.T) {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := cm.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

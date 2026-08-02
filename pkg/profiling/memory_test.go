@@ -45,8 +45,7 @@ func TestMemoryMonitor_StartStop(t *testing.T) {
 	monitor := NewMemoryMonitor(config, thresholds)
 
 	// Start monitoring
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := monitor.Start(ctx); err != nil {
 		t.Fatalf("Failed to start monitor: %v", err)
@@ -126,8 +125,7 @@ func TestMemoryMonitor_PeakTracking(t *testing.T) {
 	thresholds := DefaultAlertThresholds()
 	monitor := NewMemoryMonitor(config, thresholds)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := monitor.Start(ctx); err != nil {
 		t.Fatalf("Failed to start monitor: %v", err)
@@ -135,7 +133,7 @@ func TestMemoryMonitor_PeakTracking(t *testing.T) {
 
 	// Allocate some memory to increase heap
 	allocations := make([][]byte, 0, 100)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		data := make([]byte, 1024*1024) // 1MB
 		allocations = append(allocations, data)
 		time.Sleep(10 * time.Millisecond)
@@ -197,7 +195,7 @@ func TestMemoryMonitor_AlertThresholds(t *testing.T) {
 
 	// Allocate some memory to ensure thresholds are exceeded
 	allocations := make([][]byte, 0, 50)
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		data := make([]byte, 100*1024) // 100KB
 		allocations = append(allocations, data)
 	}
@@ -229,8 +227,7 @@ func TestMemoryMonitor_HTTPEndpoints(t *testing.T) {
 	thresholds := DefaultAlertThresholds()
 	monitor := NewMemoryMonitor(config, thresholds)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := monitor.Start(ctx); err != nil {
 		t.Fatalf("Failed to start monitor: %v", err)
@@ -287,8 +284,7 @@ func TestMemoryMonitor_ForceGC(t *testing.T) {
 	thresholds := DefaultAlertThresholds()
 	monitor := NewMemoryMonitor(config, thresholds)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := monitor.Start(ctx); err != nil {
 		t.Fatalf("Failed to start monitor: %v", err)
@@ -508,7 +504,7 @@ func TestMemoryMonitor_ConcurrentStress(t *testing.T) {
 	var wg sync.WaitGroup
 	numWorkers := 10
 
-	for i := 0; i < numWorkers; i++ {
+	for i := range numWorkers {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -602,12 +598,10 @@ func TestMemoryMonitor_GoroutineGrowth(t *testing.T) {
 
 	// Spawn many goroutines
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 100 {
+		wg.Go(func() {
 			time.Sleep(1500 * time.Millisecond)
-		}()
+		})
 	}
 
 	<-ctx.Done()
@@ -636,8 +630,7 @@ func BenchmarkMemoryMonitor_Sampling(b *testing.B) {
 	thresholds := DefaultAlertThresholds()
 	monitor := NewMemoryMonitor(config, thresholds)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := b.Context()
 
 	if err := monitor.Start(ctx); err != nil {
 		b.Fatalf("Failed to start monitor: %v", err)
@@ -666,8 +659,7 @@ func BenchmarkMemoryMonitor_GetStats(b *testing.B) {
 	thresholds := DefaultAlertThresholds()
 	monitor := NewMemoryMonitor(config, thresholds)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := b.Context()
 
 	if err := monitor.Start(ctx); err != nil {
 		b.Fatalf("Failed to start monitor: %v", err)

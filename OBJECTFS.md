@@ -1,11 +1,31 @@
-# ObjectFS
-## Enterprise-Grade High-Performance POSIX Filesystem for Object Storage
+# ObjectFS — original design document
+
+> **This is a design document, not documentation. Most of what it describes does not exist.**
+>
+> It was written before implementation as a proposal for what ObjectFS might be, and it has been
+> kept because it records the original intent and because several code comments cite it when
+> explaining why a config key exists that nothing reads. It is *not* a description of the shipped
+> system and must not be read as one.
+>
+> Concretely, known to be false here:
+>
+> - **The Go in the later sections does not compile.** Roughly 700 lines of it — `OptimizationProfile`,
+>   `contentProfiles`, `LatencyProfile`, and the types they reference — name nothing that exists in
+>   the tree, and some of it is not valid Go.
+> - **The YAML schema is proposed, not implemented.** `mount:`, `latency_profile:`, and
+>   `security.kms_key` are not keys the loader has; with strict decoding a config file using them
+>   fails to start. `internal/config/docs_test.go` exempts this file from the schema check for
+>   exactly this reason.
+> - **"POSIX-compliant" is wrong.** ObjectFS presents a POSIX interface over object storage. There is
+>   no rename, no links, no locking. See the README's supported-operations table.
+> - **The performance and coverage figures are aspirations**, including a "95%" coverage badge and a
+>   "10-100x" speedup, neither of which was measured.
+>
+> For what ObjectFS actually does, read the [README](README.md), the package documentation, and
+> [CHANGELOG.md](CHANGELOG.md). For where it is going, [ROADMAP.md](ROADMAP.md).
 
 [![Go Version](https://img.shields.io/badge/Go-1.19+-blue.svg)](https://golang.org/dl/)
-[![Go Report Card](https://goreportcard.com/badge/github.com/scttfrdmn/objectfs)](https://goreportcard.com/report/github.com/scttfrdmn/objectfs)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)](#)
-[![Coverage](https://img.shields.io/badge/Coverage-95%25-brightgreen.svg)](#)
 
 ---
 
@@ -865,9 +885,21 @@ security:
   tls:
     verify_certificates: true
     min_version: "1.2"
+
+  # Server-side encryption. mode is off, sse-s3 or sse-kms; kms_key_id is required for sse-kms and
+  # refused otherwise; bucket_keys applies only to sse-kms.
+  #
+  # This replaced `in_transit: true` / `at_rest: true` in v0.10.1. Those two booleans defaulted to
+  # true and were read by nothing — no encryption header was sent on any write — so a file that set
+  # them documented a property the code did not have. They are removed rather than deprecated, and
+  # the loader rejects unknown keys, so a config still carrying them fails to load and names them.
+  #
+  # `off` is not "unencrypted": S3 has applied SSE-S3 to all new objects unconditionally since
+  # January 2023. It means ObjectFS sends no header, and it cannot satisfy an SSE-KMS requirement.
   encryption:
-    in_transit: true
-    at_rest: true
+    mode: sse-kms
+    kms_key_id: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012
+    bucket_keys: true
 
 # Monitoring configuration
 monitoring:
@@ -931,6 +963,12 @@ access_patterns:
     ttl: 1h
 
 # Security overrides
+#
+# NOT IMPLEMENTED. Neither key exists in the schema, and per-mount configuration files do not exist
+# either — this whole `mount:` block is proposed, not built. `security.kms_key` in particular is the
+# key that gave audit finding P-7 its documentation: it was read here as evidence that ObjectFS
+# encrypted with a customer managed key, while no encryption header was sent anywhere. The live
+# spelling is `security.encryption.kms_key_id` under mode `sse-kms`, in the global config file.
 security:
   iam_role: arn:aws:iam::123456789012:role/ObjectFSRole
   kms_key: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012

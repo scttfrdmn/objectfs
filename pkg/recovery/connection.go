@@ -94,10 +94,10 @@ func DefaultConnectionConfig() ConnectionConfig {
 }
 
 // ConnectionFactory creates new connections
-type ConnectionFactory func(ctx context.Context) (interface{}, error)
+type ConnectionFactory func(ctx context.Context) (any, error)
 
 // HealthChecker checks if a connection is healthy
-type HealthChecker func(ctx context.Context, conn interface{}) error
+type HealthChecker func(ctx context.Context, conn any) error
 
 // ConnectionManager manages connections with automatic reconnection
 type ConnectionManager struct {
@@ -109,15 +109,15 @@ type ConnectionManager struct {
 
 	mu               sync.RWMutex
 	state            ConnectionState
-	connection       interface{}
+	connection       any
 	connectedAt      time.Time
 	lastError        error
-	reconnectAttempt int32
+	reconnectAttempt atomic.Int32
 	reconnectDelay   time.Duration
 
 	shutdownCh chan struct{}
 	shutdownWg sync.WaitGroup
-	shutdown   int32
+	shutdown   atomic.Int32
 }
 
 // ConnectionStats provides connection statistics
@@ -161,7 +161,7 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	if atomic.LoadInt32(&cm.shutdown) == 1 {
+	if cm.shutdown.Load() == 1 {
 		cm.mu.Unlock()
 		return errors.NewError(errors.ErrCodeShutdownInProgress, "connection manager is shutting down")
 	}
@@ -169,7 +169,7 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 	cm.state = StateConnecting
 	cm.mu.Unlock()
 
-	cm.logger.Info("Establishing connection", map[string]interface{}{
+	cm.logger.Info("Establishing connection", map[string]any{
 		"name": cm.name,
 	})
 
@@ -184,7 +184,7 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 		cm.lastError = err
 		cm.mu.Unlock()
 
-		cm.logger.Error("Connection failed", map[string]interface{}{
+		cm.logger.Error("Connection failed", map[string]any{
 			"name":  cm.name,
 			"error": err.Error(),
 		})
@@ -204,11 +204,11 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 	cm.state = StateConnected
 	cm.connectedAt = time.Now()
 	cm.lastError = nil
-	atomic.StoreInt32(&cm.reconnectAttempt, 0)
+	cm.reconnectAttempt.Store(0)
 	cm.reconnectDelay = cm.config.ReconnectDelay
 	cm.mu.Unlock()
 
-	cm.logger.Info("Connection established", map[string]interface{}{
+	cm.logger.Info("Connection established", map[string]any{
 		"name": cm.name,
 	})
 
@@ -222,7 +222,7 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 }
 
 // GetConnection returns the current connection
-func (cm *ConnectionManager) GetConnection() (interface{}, error) {
+func (cm *ConnectionManager) GetConnection() (any, error) {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
@@ -258,7 +258,7 @@ func (cm *ConnectionManager) GetStats() ConnectionStats {
 		Name:             cm.name,
 		State:            cm.state,
 		Connected:        cm.state == StateConnected,
-		ReconnectAttempt: int(atomic.LoadInt32(&cm.reconnectAttempt)),
+		ReconnectAttempt: int(cm.reconnectAttempt.Load()),
 	}
 
 	if !cm.connectedAt.IsZero() {
@@ -277,7 +277,7 @@ func (cm *ConnectionManager) GetStats() ConnectionStats {
 
 // Reconnect manually triggers a reconnection
 func (cm *ConnectionManager) Reconnect(ctx context.Context) error {
-	cm.logger.Info("Manual reconnection triggered", map[string]interface{}{
+	cm.logger.Info("Manual reconnection triggered", map[string]any{
 		"name": cm.name,
 	})
 
@@ -291,7 +291,7 @@ func (cm *ConnectionManager) Reconnect(ctx context.Context) error {
 
 // scheduleReconnect schedules an automatic reconnection attempt
 func (cm *ConnectionManager) scheduleReconnect() {
-	attempt := atomic.AddInt32(&cm.reconnectAttempt, 1)
+	attempt := cm.reconnectAttempt.Add(1)
 
 	// Check if we've exceeded max attempts
 	if cm.config.MaxReconnectAttempts > 0 && int(attempt) > cm.config.MaxReconnectAttempts {
@@ -299,7 +299,7 @@ func (cm *ConnectionManager) scheduleReconnect() {
 		cm.state = StateFailed
 		cm.mu.Unlock()
 
-		cm.logger.Error("Maximum reconnection attempts exceeded", map[string]interface{}{
+		cm.logger.Error("Maximum reconnection attempts exceeded", map[string]any{
 			"name":     cm.name,
 			"attempts": attempt,
 		})
@@ -309,28 +309,22 @@ func (cm *ConnectionManager) scheduleReconnect() {
 	cm.mu.Lock()
 	delay := cm.reconnectDelay
 	// Increase delay for next attempt
-	cm.reconnectDelay = time.Duration(float64(cm.reconnectDelay) * cm.config.ReconnectBackoffMultiplier)
-	if cm.reconnectDelay > cm.config.MaxReconnectDelay {
-		cm.reconnectDelay = cm.config.MaxReconnectDelay
-	}
+	cm.reconnectDelay = min(time.Duration(float64(cm.reconnectDelay)*cm.config.ReconnectBackoffMultiplier), cm.config.MaxReconnectDelay)
 	cm.mu.Unlock()
 
-	cm.logger.Info("Scheduling reconnection", map[string]interface{}{
+	cm.logger.Info("Scheduling reconnection", map[string]any{
 		"name":    cm.name,
 		"attempt": attempt,
 		"delay":   delay,
 	})
 
-	cm.shutdownWg.Add(1)
-	go func() {
-		defer cm.shutdownWg.Done()
-
+	cm.shutdownWg.Go(func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 
 		select {
 		case <-timer.C:
-			if atomic.LoadInt32(&cm.shutdown) == 1 {
+			if cm.shutdown.Load() == 1 {
 				return
 			}
 
@@ -343,7 +337,7 @@ func (cm *ConnectionManager) scheduleReconnect() {
 			cancel()
 
 			if err != nil {
-				cm.logger.Warn("Reconnection attempt failed", map[string]interface{}{
+				cm.logger.Warn("Reconnection attempt failed", map[string]any{
 					"name":    cm.name,
 					"attempt": attempt,
 					"error":   err.Error(),
@@ -354,7 +348,7 @@ func (cm *ConnectionManager) scheduleReconnect() {
 		case <-cm.shutdownCh:
 			return
 		}
-	}()
+	})
 }
 
 // healthCheckLoop periodically checks connection health
@@ -367,7 +361,7 @@ func (cm *ConnectionManager) healthCheckLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if atomic.LoadInt32(&cm.shutdown) == 1 {
+			if cm.shutdown.Load() == 1 {
 				return
 			}
 
@@ -394,7 +388,7 @@ func (cm *ConnectionManager) performHealthCheck() {
 
 	err := cm.health(ctx, conn)
 	if err != nil {
-		cm.logger.Warn("Health check failed", map[string]interface{}{
+		cm.logger.Warn("Health check failed", map[string]any{
 			"name":  cm.name,
 			"error": err.Error(),
 		})
@@ -421,7 +415,7 @@ func (cm *ConnectionManager) closeConnection() {
 	// If connection implements Close(), call it
 	if closer, ok := cm.connection.(interface{ Close() error }); ok {
 		if err := closer.Close(); err != nil {
-			cm.logger.Warn("Error closing connection", map[string]interface{}{
+			cm.logger.Warn("Error closing connection", map[string]any{
 				"name":  cm.name,
 				"error": err.Error(),
 			})
@@ -433,11 +427,11 @@ func (cm *ConnectionManager) closeConnection() {
 
 // Close closes the connection and stops reconnection attempts
 func (cm *ConnectionManager) Close() error {
-	if !atomic.CompareAndSwapInt32(&cm.shutdown, 0, 1) {
+	if !cm.shutdown.CompareAndSwap(0, 1) {
 		return nil // Already shut down
 	}
 
-	cm.logger.Info("Closing connection manager", map[string]interface{}{
+	cm.logger.Info("Closing connection manager", map[string]any{
 		"name": cm.name,
 	})
 
@@ -451,7 +445,7 @@ func (cm *ConnectionManager) Close() error {
 	// Wait for background goroutines to finish
 	cm.shutdownWg.Wait()
 
-	cm.logger.Info("Connection manager closed", map[string]interface{}{
+	cm.logger.Info("Connection manager closed", map[string]any{
 		"name": cm.name,
 	})
 
@@ -487,7 +481,7 @@ func (cm *ConnectionManager) Wait(ctx context.Context) error {
 type ConnectionPool struct {
 	name      string
 	managers  []*ConnectionManager
-	nextIndex uint32
+	nextIndex atomic.Uint32
 	logger    *utils.StructuredLogger
 }
 
@@ -500,7 +494,7 @@ func NewConnectionPool(name string, size int, config ConnectionConfig, factory C
 	}
 
 	managers := make([]*ConnectionManager, size)
-	for i := 0; i < size; i++ {
+	for i := range size {
 		connName := fmt.Sprintf("%s-%d", name, i)
 		managers[i] = NewConnectionManager(connName, config, factory, health)
 	}
@@ -544,9 +538,9 @@ func (cp *ConnectionPool) ConnectAll(ctx context.Context) error {
 }
 
 // GetConnection returns the next available connection (round-robin)
-func (cp *ConnectionPool) GetConnection() (interface{}, error) {
+func (cp *ConnectionPool) GetConnection() (any, error) {
 	// Try round-robin first
-	index := atomic.AddUint32(&cp.nextIndex, 1) % uint32(len(cp.managers))
+	index := cp.nextIndex.Add(1) % uint32(len(cp.managers))
 	conn, err := cp.managers[index].GetConnection()
 	if err == nil {
 		return conn, nil

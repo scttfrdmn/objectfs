@@ -163,10 +163,7 @@ func (re *RemediationEngine) GetRemediationHistory(limit int) []RemediationAttem
 	}
 
 	// Return most recent attempts
-	start := len(re.history) - limit
-	if start < 0 {
-		start = 0
-	}
+	start := max(len(re.history)-limit, 0)
 
 	return re.history[start:]
 }

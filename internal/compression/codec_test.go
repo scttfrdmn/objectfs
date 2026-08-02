@@ -9,7 +9,6 @@ import (
 func TestNew_None(t *testing.T) {
 	t.Parallel()
 	for _, algo := range []comprpkg.Algorithm{comprpkg.AlgorithmNone, ""} {
-		algo := algo
 		t.Run(string(algo), func(t *testing.T) {
 			t.Parallel()
 			c, err := New(algo, 0)

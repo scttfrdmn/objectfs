@@ -8,37 +8,322 @@ on:
 
 permissions:
   contents: read
-  security-events: write
+
+# A new push to a PR makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Sourced from go.mod so this file cannot drift from the version the module declares. The
+  # previous configuration pinned 1.24.x against a `go 1.26.0` directive, which builds only
+  # because setup-go silently installs a newer toolchain — so CI was not testing the version it
+  # claimed to.
+  GO_VERSION_FILE: go.mod
 
 jobs:
+  # ---------------------------------------------------------------------------------------------
+  # test — the full suite with the race detector, not -short.
+  #
+  # The previous configuration ran `go test -race -short ./...`, and -short is what the harness
+  # uses to skip everything that needs an S3 endpoint. So the one job that was supposed to be the
+  # gate skipped the tests covering the subsystem where every proven data-loss defect lived.
+  # ---------------------------------------------------------------------------------------------
   test:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.24.x
-        cache: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
 
-    - name: Run tests
-      run: go test -race -short ./...
+      - name: Build
+        run: go build ./...
 
+      - name: Vet
+        run: go vet ./...
+
+      # The full suite. Every test that needs an S3 endpoint gets one in-process from substrate,
+      # so this needs no credentials and reaches no network.
+      - name: Test
+        run: go test -race -timeout 20m ./...
+
+  # ---------------------------------------------------------------------------------------------
+  # coverage — a floor per package, ratcheting toward 80%.
+  #
+  # Per-package rather than repo-wide, because a repo-wide number lets a well-tested package pay
+  # for an untested one: the repo sits at 69.3% overall while internal/fuse is at 24.1%, and the
+  # overall figure is the one that looks fine.
+  #
+  # The floors below are each package's measured coverage rounded down, so this gate starts
+  # green and can only be tightened. Raising one is a deliberate act; lowering one has to be
+  # justified in a diff. Packages absent from the list have no floor yet.
+  # ---------------------------------------------------------------------------------------------
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Measure per-package coverage
+        run: go test -covermode=atomic -coverprofile=coverage.out -timeout 20m ./...
+
+      - name: Enforce per-package floors
+        run: ./scripts/coverage-gate.sh coverage.out .coverage-floors
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.out
+
+  # ---------------------------------------------------------------------------------------------
+  # lint — golangci-lint against the config in this repo.
+  #
+  # --new-from-merge-base, deliberately. The repo has ~800 findings under this configuration, most
+  # of them pre-existing and many in code the refactor is about to replace; blocking every PR on
+  # all of them would mean the config gets weakened until it passes, which is how a lint gate
+  # becomes decorative. This gates *new* code at the full configuration and leaves the backlog to
+  # be drawn down deliberately. The whole-repo number is reported below so it stays visible.
+  # ---------------------------------------------------------------------------------------------
   lint:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          # golangci-lint needs the merge base to diff against, which a shallow clone does not have.
+          fetch-depth: 0
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.24.x
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
 
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v4
-      with:
-        version: latest
-        args: --timeout=5m
+      # --new-from-merge-base resolves origin/<base> with git, so the ref has to exist locally.
+      # fetch-depth: 0 above fetches all branches for a push, but a pull_request checkout fetches
+      # the merge ref, and the base branch is not guaranteed among them. Fetching it explicitly
+      # costs seconds and removes the case where the gate silently degrades to linting everything.
+      - name: Fetch the base branch for the diff
+        run: git fetch --no-tags origin ${{ github.base_ref || 'main' }}
+
+      # install-only, then invoke the binary directly in the steps below.
+      #
+      # Three steps here need golangci-lint and the action runs it at most once, so the version
+      # is installed once and the runs are ordinary shell. The previous form had each step re-enter
+      # the action and passed the whole-repo count as a bare `golangci-lint run` — which was
+      # `command not found`, because nothing but the action puts it on PATH. The `|| true` on that
+      # step meant a missing binary and a clean repo were the same observation.
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          install-only: true
+
+      - name: Verify the lint configuration parses
+        run: golangci-lint config verify
+
+      - name: Lint changed code (blocking)
+        run: |
+          golangci-lint run \
+            --new-from-merge-base=origin/${{ github.base_ref || 'main' }} \
+            --timeout=10m
+
+      - name: Whole-repo finding count (informational)
+        if: always()
+        run: |
+          # Not a gate. It is here so the backlog has a number attached to it in every run,
+          # rather than being a thing everyone knows is large and nobody can quantify.
+          golangci-lint run --timeout=10m ./... 2>&1 | tail -30 || true
+
+  # ---------------------------------------------------------------------------------------------
+  # fuzz-smoke — 60 seconds per target, from the committed corpus outward.
+  #
+  # The corpora are committed and the ordinary `go test` run replays them, so this job is not
+  # about regression: it is about finding the *next* defect. Three of the eight targets found a
+  # real shipped defect within seconds of first being run, so a minute each is not a token
+  # gesture.
+  #
+  # Each target is named explicitly rather than discovered, because `-run Fuzz -fuzz .` cannot
+  # fuzz more than one target per invocation, and a loop that silently fuzzes only the first
+  # match would look like coverage.
+  #
+  # GOMEMLIMIT is the reason this job stopped dying, and the value is not arbitrary. `go test
+  # -fuzz` runs one worker *process* per CPU — four on ubuntu-latest — and each is an independent
+  # Go runtime that sizes its heap against the whole machine's memory, because none of them knows
+  # the other three exist. FuzzOperationSequence allocates hard (every iteration is a real
+  # read-modify-write over a real HTTP endpoint), so four workers reached 6 GB of mostly-garbage
+  # RSS within four seconds and the cgroup OOM-killed one: `oom_kill 1`, and `go test` reported it
+  # as "fuzzing process hung or terminated unexpectedly while minimizing: EOF" against whichever
+  # input that worker happened to be holding. That message names an input and writes it to
+  # testdata, which is what makes this failure mode so misleading — every input so written
+  # replayed green, because none of them was the problem.
+  #
+  # 768 MiB per worker measured at 2.9 GB peak against the runner's 16 GB, and *raised* throughput
+  # from 1443 execs (the run that died) to ~21,000 in 45 s: the memory was garbage the collector
+  # had no pressure signal to reclaim, not live data, so capping it costs nothing and buys back
+  # the time that was going into page thrash. Measured alternatives, same 45 s budget: 384 MiB →
+  # 1.4 GB peak, 13.5k execs; 1536 MiB → 5.7 GB peak, 26.1k execs. The knee is here.
+  #
+  # It is set for every target rather than just the one that died, because the cause is the
+  # per-worker runtime's view of memory, which every target shares. A target that allocates less
+  # simply never reaches the limit.
+  # ---------------------------------------------------------------------------------------------
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    env:
+      GOMEMLIMIT: 768MiB
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {pkg: ./internal/vfs, target: FuzzExtentList}
+          - {pkg: ./internal/vfs, target: FuzzAttrFromMetadata}
+          - {pkg: ./internal/vfs, target: FuzzNodeLifecycle}
+          - {pkg: ./internal/difftest, target: FuzzOperationSequence}
+          - {pkg: ./internal/adapter, target: FuzzConfigConstructsBackend}
+          - {pkg: ./internal/storage/s3, target: FuzzRoundTrip}
+          - {pkg: ./internal/storage/s3, target: FuzzSliceRange}
+          - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
+          - {pkg: ./internal/awsname, target: FuzzValidateRegion}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Fuzz ${{ matrix.target }}
+        run: go test ${{ matrix.pkg }} -run '^${{ matrix.target }}$' -fuzz '^${{ matrix.target }}$' -fuzztime=60s
+
+      # A counterexample is the whole point of the job, so it has to leave the machine.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: |
+            **/testdata/fuzz/**
+
+  # ---------------------------------------------------------------------------------------------
+  # cross-build — must fail, not warn.
+  #
+  # The Makefile's cgofuse cross-build targets ended in `|| echo "Failed..."`, so a broken target
+  # produced a green build and a line of log nobody read. Windows is deliberately absent: there is
+  # no Windows FUSE binding, and a binary that cannot mount anything is not a supported target.
+  # internal/fuse carries a build constraint that makes any other GOOS fail with a message naming
+  # the reason.
+  # ---------------------------------------------------------------------------------------------
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./cmd/objectfs
+
+  # ---------------------------------------------------------------------------------------------
+  # sdk-metrics — the two SDK suites that parse sdks/testdata/metrics-scrape.txt.
+  #
+  # That fixture is the contract between the Go exporter and its consumers, and the Go side of it
+  # is already enforced: TestSDKFixtureMatchesTheLiveScrape regenerates the scrape and fails if it
+  # has drifted. The consumer side needs this job, or the contract is only half-checked — a
+  # renamed metric fails the Go suite, someone regenerates the fixture to make it pass, and the
+  # SDK extractors that no longer match it stay green because nothing runs them.
+  #
+  # Which is not a hypothetical failure mode. It is what shipped: both SDKs parsed for metric
+  # names no version of ObjectFS ever exported — cache_hits, objectfs_cache_hits_total,
+  # objectfs_io_read_operations_total — and returned empty dicts to every caller in a release,
+  # because no test anywhere compared what an SDK expected against what the server produced.
+  #
+  # `continue-on-error` is deliberately absent. These suites need no credentials, no network, and
+  # no mount: they read one committed file. There is nothing here for a flake to come from.
+  # ---------------------------------------------------------------------------------------------
+  sdk-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python SDK metrics parsing
+        working-directory: sdks/python
+        run: |
+          # The package rather than a hand-listed subset of its requirements. The tests exercise
+          # parsing, which needs no transport, but they import objectfs.monitoring, and
+          # objectfs/__init__.py imports the client — so the whole install_requires set has to
+          # resolve. Installing `.` also means this job fails if setup.py stops being installable,
+          # which nothing else in CI checks.
+          pip install --quiet pytest .
+          pytest tests/ -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: TypeScript SDK metrics parsing
+        working-directory: sdks/javascript
+        run: |
+          # No lockfile is committed, so `npm install` rather than `npm ci`. ts-jest typechecks the
+          # suite as it runs it, which is the only place prometheus.test.ts gets typechecked at all:
+          # tsconfig.json excludes **/*.test.ts from the build.
+          npm install --no-audit --no-fund
+          npm test
+
+  # ---------------------------------------------------------------------------------------------
+  # config-examples — every config file this repository publishes, in a file or in a doc, must
+  # load against the schema and must actually change something.
+  #
+  # configs/example.yaml — the file the README told users to copy, and the file postinstall.sh
+  # installs as /etc/objectfs/config.yaml — was 162 lines of which exactly one field differed from
+  # the built-in defaults, and nothing read that field. It opened with a top-level `s3:` block
+  # where the schema has `storage.s3`, so `region: us-west-2` loaded as `us-east-1`. That is also
+  # why its compression block documented `enable`/`zstd_level`/`min_file_size` against the real
+  # `enabled`/`level`/`min_size` and nobody noticed: the whole block was already inert, so
+  # correcting the names would not have changed the behavior either.
+  #
+  # This job is its own job rather than a line in the test suite because it is the check whose
+  # failure a reviewer most needs named. The loader is strict now, so a shipped file with an
+  # unknown key fails; the effect assertion additionally fails a file that parses cleanly and
+  # leaves every value at its default, which strict decoding cannot see; and the documentation
+  # check extends both to every YAML block in every markdown file, because a block captioned
+  # `# /etc/objectfs/config.yaml` is a file a user will copy too.
+  # ---------------------------------------------------------------------------------------------
+  config-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Load and validate every shipped and documented config
+        run: |
+          go test ./internal/config/ -v \
+            -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'

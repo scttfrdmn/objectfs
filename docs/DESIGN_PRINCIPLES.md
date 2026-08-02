@@ -127,38 +127,74 @@ return fmt.Errorf("error: %d", 42)
 
 ### What This Means
 
-- ✅ **Atomic operations**: Writes are all-or-nothing
-- ✅ **Checksums**: Verify data integrity
-- ✅ **Consistency guarantees**: Clear consistency model
-- ✅ **Safe defaults**: Crash-safe by default
-- ❌ **Unsafe optimizations**: No "fast but unsafe" modes
-- ❌ **Loose consistency**: No eventual consistency without clear documentation
+- ✅ **Atomic per object**: a PUT either replaces the object or leaves it untouched
+- ✅ **Checksums that are read**: every written object records a SHA-256, and the read path compares it
+- ✅ **Errors reach the caller**: a failed PUT fails `close(2)`; it is not logged and swallowed
+- ✅ **State the limits**: what is *not* guaranteed is documented as prominently as what is
+- ❌ **Unsafe optimizations**: no "fast but unsafe" modes
+- ❌ **Silent fallback**: never return data that could not be verified, or success for a write that failed
 
 ### Examples
 
-**Good**: Atomic writes with verification
+**Good**: write, record the hash, verify it on the way back
+
 ```go
-// Write to temp file, verify, then rename (atomic)
+sum := sha256.Sum256(data)
+_, err := s3.PutObject(ctx, &s3.PutObjectInput{
+    Bucket:   &bucket,
+    Key:      &key,
+    Body:     bytes.NewReader(data),
+    Metadata: map[string]string{"objectfs-sha256": hex.EncodeToString(sum[:])},
+})
+// ... and on the read side, the part that makes it worth anything:
+if err := verifyChecksum(info.Metadata, got, key); err != nil {
+    return nil, err   // an integrity error, not bytes with exit status 0
+}
+```
+
+This is what `internal/storage/s3` does. A single `PutObject` **is** the atomic operation on S3 —
+the object is either the old one or the new one, never a splice of both — so there is nothing a
+temp-key dance would add.
+
+**Bad**: recording a checksum and never reading it
+
+```go
+// BAD, and this was v0.10.0. The hash was computed on every upload and stored as
+// user metadata, and no read path anywhere compared it against the bytes returned.
+sum := sha256.Sum256(data)
+s3.PutObject(ctx, withMetadata(key, data, sum))
+// ... no verification on read. A codec mismatch, a lost Content-Encoding header,
+// a truncated body, or bit-rot all came back with exit status 0.
+```
+
+Evidence that was written and never read is worse than no evidence, because it makes the system look
+verified. This document previously presented a temp-key-plus-`CopyObject` sequence as the good
+pattern and a bare `PutObject` as the bad one — while the bare `PutObject` *was* the implementation.
+That inversion is worth naming: the pattern being labelled was not the defect. The missing read of
+the checksum was.
+
+**Also bad**: the temp-key dance the previous version of this document recommended
+
+```go
+// BAD: strictly less safe than a direct PUT, and more expensive.
 tmpFile := fmt.Sprintf("%s.tmp.%s", key, uuid)
 s3.PutObject(tmpFile, data)
-if !verifyChecksum(tmpFile, data) {
-    s3.DeleteObject(tmpFile)
-    return errors.New("checksum mismatch")
-}
-s3.CopyObject(tmpFile, key) // Atomic
+s3.CopyObject(tmpFile, key)   // NOT atomic with anything; a second PUT under a second key
 s3.DeleteObject(tmpFile)
 ```
 
-**Bad**: Direct overwrite without verification
-```go
-// BAD: Can corrupt on failure
-s3.PutObject(key, data)
-```
+Three requests instead of one, three failure points instead of one, an orphaned temp object on any
+failure between them, and a `CopyObject` that does not inherit the source's `Content-Encoding` or its
+server-side encryption. The direct PUT was already atomic.
 
 ### Trade-offs
 
-- **Write latency**: Atomic operations add overhead
-- **Resolution**: Use write buffering to batch operations, maintain atomicity guarantees
+- **Verification costs a read of the whole object.** The recorded hash is over the whole content, so
+  a partial read of a large object cannot be verified without transferring all of it. ObjectFS does
+  not do that, and says so rather than implying a guarantee it does not provide. Per-range checksums
+  need a change to the stored object layout, tracked with the seekable-framing work.
+- **Synchronous flush costs latency.** `close(2)` waits for the PUT. The alternative is returning
+  success before the data is durable, which is not a trade-off this project makes.
 
 ---
 
@@ -180,9 +216,11 @@ s3.PutObject(key, data)
 **Good**: Documented configuration with validation
 ```yaml
 cache:
-  type: persistent  # Options: lru, persistent, predictive
-  max_size: 100GB   # Validates: must be > 0
-  path: /var/cache/objectfs
+  eviction_policy: weighted_lru   # Options: lru, lfu, weighted_lru
+  persistent_cache:
+    enabled: true
+    max_size: 100GB               # Validated: must parse as a size
+    directory: /var/cache/objectfs
 ```
 
 **Bad**: Hard-coded values or undocumented options

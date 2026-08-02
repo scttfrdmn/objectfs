@@ -128,16 +128,16 @@ func (v *VFS) ReadDir(ctx context.Context, archiveKey, innerPath string) ([]*arc
 		}
 
 		// Split on the first "/" to get the immediate child name.
-		slash := strings.IndexByte(rel, '/')
-		if slash < 0 {
+		before, _, ok := strings.Cut(rel, "/")
+		if !ok {
 			// Direct child — include as-is.
 			if _, ok := seen[rel]; !ok {
 				seen[rel] = struct{}{}
 				entries = append(entries, entry)
 			}
 		} else {
-			// Deeper descendant — synthesise a virtual directory entry.
-			childName := rel[:slash]
+			// Deeper descendant — synthesize a virtual directory entry.
+			childName := before
 			if _, ok := seen[childName]; !ok {
 				seen[childName] = struct{}{}
 				entries = append(entries, &archivepkg.ArchiveEntry{
@@ -232,7 +232,7 @@ func (v *VFS) getIndex(ctx context.Context, archiveKey string) (*archivepkg.Arch
 // extractFile streams through the decompressed archive to extract a single
 // file's content.  It performs a linear scan, which is efficient for
 // sequential access patterns but proportional to entry position for random
-// access.  Content caching in ReadFile amortises repeated accesses.
+// access.  Content caching in ReadFile amortizes repeated accesses.
 func (v *VFS) extractFile(ctx context.Context, archiveKey, innerPath string) ([]byte, error) {
 	_, format := archivepkg.IsArchive(archiveKey)
 	data, err := v.backend.GetObject(ctx, archiveKey, 0, 0)

@@ -4,6 +4,7 @@ package status
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/objectfs/objectfs/pkg/health"
 )
 
-var opIDCounter uint64
+var opIDCounter atomic.Uint64
 
 // OperationStatus represents the status of a long-running operation
 type OperationStatus int
@@ -54,14 +55,14 @@ func (s OperationStatus) String() string {
 
 // Operation represents a tracked operation with progress reporting
 type Operation struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Status    OperationStatus        `json:"status"`
-	Progress  *Progress              `json:"progress,omitempty"`
-	StartTime time.Time              `json:"start_time"`
-	EndTime   *time.Time             `json:"end_time,omitempty"`
-	Error     *errors.ObjectFSError  `json:"error,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	ID        string                `json:"id"`
+	Type      string                `json:"type"`
+	Status    OperationStatus       `json:"status"`
+	Progress  *Progress             `json:"progress,omitempty"`
+	StartTime time.Time             `json:"start_time"`
+	EndTime   *time.Time            `json:"end_time,omitempty"`
+	Error     *errors.ObjectFSError `json:"error,omitempty"`
+	Metadata  map[string]any        `json:"metadata,omitempty"`
 
 	mu          sync.RWMutex
 	cancelFunc  context.CancelFunc
@@ -128,7 +129,7 @@ func NewTracker(config TrackerConfig) *Tracker {
 }
 
 // StartOperation creates and starts tracking a new operation
-func (t *Tracker) StartOperation(ctx context.Context, opType string, metadata map[string]interface{}) (*Operation, context.Context) {
+func (t *Tracker) StartOperation(ctx context.Context, opType string, metadata map[string]any) (*Operation, context.Context) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -510,12 +511,10 @@ func (o *Operation) Copy() *Operation {
 		StartTime: o.StartTime,
 		EndTime:   o.EndTime,
 		Error:     o.Error,
-		Metadata:  make(map[string]interface{}),
+		Metadata:  make(map[string]any),
 	}
 
-	for k, v := range o.Metadata {
-		copy.Metadata[k] = v
-	}
+	maps.Copy(copy.Metadata, o.Metadata)
 
 	if o.Progress != nil {
 		copy.Progress = o.Progress.Copy()
@@ -586,6 +585,6 @@ func (p *Progress) Copy() *Progress {
 // generateOperationID generates a unique operation ID
 func generateOperationID() string {
 	// Use atomic counter combined with timestamp for guaranteed uniqueness
-	counter := atomic.AddUint64(&opIDCounter, 1)
+	counter := opIDCounter.Add(1)
 	return fmt.Sprintf("%d-%d", time.Now().Unix(), counter)
 }

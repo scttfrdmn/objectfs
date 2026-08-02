@@ -1,6 +1,9 @@
 package network
 
-import "net"
+import (
+	"net"
+	"slices"
+)
 
 // MinKernelVersion is the minimum Linux kernel version required for BBR support.
 // BBR was merged into the mainline kernel in v4.9 (December 2016).
@@ -73,10 +76,5 @@ func BestAvailableDialer() *net.Dialer {
 // by the current OS.  On non-Linux platforms this always returns false.
 func IsBBRAvailable() bool {
 	result := Detect()
-	for _, a := range result.Available {
-		if a == AlgorithmBBR {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(result.Available, AlgorithmBBR)
 }

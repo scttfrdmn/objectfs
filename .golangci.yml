@@ -1,0 +1,183 @@
+version: "2"
+
+run:
+  timeout: 10m
+  # Analyse test files too. This is not the default-adjacent choice it looks like: the audit that
+  # motivated this configuration found the test suite was the least trustworthy code in the repo —
+  # 32,680 lines that missed ~45 defects — and a discarded error in a test is how a test passes
+  # without asserting anything.
+  tests: true
+
+linters:
+  default: standard
+
+  enable:
+    # --- Correctness: the reason this file exists ---------------------------------------------
+    # Data integrity is this project's first priority, so every linter that can catch a wrong
+    # answer being returned as a right one is on.
+    - nilerr           # returning nil when err != nil — reports success for a failure
+    - nilnesserr       # the same shape, via a nil-ness comparison
+    - bodyclose        # a leaked response body is a leaked socket
+    - noctx            # an HTTP request with no context cannot be cancelled or timed out
+    - contextcheck     # a function that takes a context and then ignores it
+    - forcetypeassert  # an unchecked type assertion panics, and a panic unmounts the filesystem
+    - makezero         # append to a len-initialised slice silently prepends zeros
+    - exhaustive       # a switch over an algorithm or tier constant that forgot a case — the
+                       # mechanism behind audit finding C1
+    - durationcheck    # a duration multiplied by a duration
+    - fatcontext       # a context created in a loop, nesting once per iteration
+    - reassign         # assignment to a package variable another package owns
+    - copyloopvar      # loop-variable capture (a no-op under Go 1.22+, kept so a downgrade fails)
+    - wastedassign
+    - gosec
+
+    # --- Tests: the harness has to be trustworthy before anything it guards is -----------------
+    - testifylint
+    - usetesting       # os.Setenv/MkdirTemp where t.Setenv/t.TempDir is correct
+    - tparallel        # t.Parallel() on the subtest but not the parent, and the reverse
+    - paralleltest     # CLAUDE.md requires table-driven tests to call t.Parallel()
+
+    # --- Clarity ------------------------------------------------------------------------------
+    - unconvert
+    - whitespace
+    - misspell
+    - predeclared      # shadowing len, cap, new, min, max
+    - usestdlibvars    # http.MethodGet over "GET"
+    - intrange
+    - modernize
+    - errname
+
+    # Two linters are deliberately NOT enabled, both because their auto-fixers were run against
+    # this repo and produced code that was wrong:
+    #
+    # errorlint rewrites `err.(*errors.ObjectFSError)` into `errors.As(...)`, which does not
+    # compile here: pkg/errors shadows the standard library's errors package and exports no As.
+    # The finding it reports is usually right and the fix it applies is not, and a fixer that
+    # breaks the build is worse than a linter that stays quiet. Revisit if pkg/errors ever
+    # re-exports As/Is.
+    #
+    # dupword flagged four things, all of them false, and its fixer silently deleted a token from
+    # test data: `want: "F F S"` in internal/difftest is a compact program notation — flush,
+    # flush, stat — which it read as a duplicated word and rewrote to `"F "`. The test then
+    # asserted that a three-operation program decoded to one operation, which is exactly the kind
+    # of quietly-weakened assertion this whole configuration exists to prevent.
+
+  settings:
+    errcheck:
+      # An error assigned to _ is a decision; an error dropped entirely is an oversight. Checking
+      # the blank assignment would make the two indistinguishable and push people toward the
+      # oversight, because it is quieter.
+      check-blank: false
+      check-type-assertions: true
+
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment orders struct fields by padding, which fights the grouping that makes a
+        # config struct readable. The memory it saves is irrelevant at the number of these structs
+        # that exist.
+        - fieldalignment
+
+        # shadow, on the evidence of running it. It produced 23 findings in this repo and every
+        # single one was `if err := f(); err != nil` — the scoped-error form the Go standard library
+        # uses throughout, and the form that *prevents* the bug shadow exists to find, since an err
+        # confined to the if cannot be mistaken for the outer one further down. Nothing was reported
+        # at the shape that is genuinely dangerous: an inner `err :=` in a block whose outer err is
+        # then returned unchecked. A check whose every finding is a false positive does not get read,
+        # and once it is not read it costs more than it detects. Enable it again if it learns to tell
+        # the two apart.
+        - shadow
+
+    exhaustive:
+      # A default arm is a deliberate statement that the remaining cases are handled together.
+      default-signifies-exhaustive: true
+
+    gosec:
+      excludes:
+        # G104 duplicates errcheck.
+        - G104
+        # G115 (integer conversion overflow) fires on every int64↔int in a filesystem, where the
+        # conversions are between an offset and a length that the surrounding code has already
+        # bounded. The one case where it mattered — sliceRange's offset+size overflowing int64 —
+        # was found by a fuzz target and is pinned by a corpus entry, which is the mechanism that
+        # can tell a real overflow from a conversion that cannot occur.
+        - G115
+
+    staticcheck:
+      checks:
+        - all
+        # ST1000 wants a package comment in a fixed form on every package. The packages that
+        # matter here have long doc.go files; the ones that do not are internal helpers.
+        - -ST1000
+        # ST1003 objects to initialisms in names that the AWS SDK spells the same way.
+        - -ST1003
+
+    misspell:
+      locale: US
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    generated: lax
+
+    rules:
+      # Fuzz targets and the seed-corpus guards are deliberately loose about a few things a
+      # production path must not be. A fuzzer discards most inputs, so an error it does not check
+      # is usually the point.
+      - path: 'fuzz_.*_test\.go'
+        linters:
+          - paralleltest   # a fuzz target must not call t.Parallel(); the harness owns concurrency
+          - errcheck
+
+      # Table tests that share a fixture built once in the parent cannot run their subtests in
+      # parallel against it, and saying so per-case would be noise.
+      - path: '_test\.go'
+        text: 'Range statement for test .* does not reuse test case variable'
+        linters:
+          - paralleltest
+
+      # A test helper that takes *testing.T and no context is not a context violation. The testaws
+      # harness deliberately keeps context out of its assertion helpers — ts.GetObject, ts.Backend,
+      # ts.ObjectStorageClass — because a test that has to thread a context through an assertion
+      # reads as though the context were part of what is being asserted, and the harness fails the
+      # test itself rather than returning an error a caller might ignore. Where a context genuinely
+      # matters the harness offers ClientContext. contextcheck flags the helper's internal use of
+      # context.Background as failing to propagate the test's, which is not a defect it can act on.
+      - path: '_test\.go'
+        text: 'should pass the context parameter'
+        linters:
+          - contextcheck
+
+      # A property test's randomness must be weak, in the specific sense G404 means by it. The
+      # generators here are seeded with fixed PCG constants precisely so a failure reproduces: a
+      # counterexample found on CI has to be reachable on a developer's machine from the same seed,
+      # and crypto/rand cannot be seeded at all. Excluded by path rather than per-line because the
+      # rationale is identical at every site, and three copies of the same paragraph is how a
+      # suppression stops being read.
+      - path: '_test\.go'
+        text: 'G404'
+        linters:
+          - gosec
+
+      # The SDKs are a published surface: an exported symbol with no caller inside this repo is
+      # the normal case there, not dead code.
+      - path: 'sdks/'
+        linters:
+          - unused
+
+issues:
+  # Report everything. A cap that hides findings is how a lint gate becomes decorative.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/objectfs/objectfs

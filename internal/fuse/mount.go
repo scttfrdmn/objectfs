@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package fuse
 
 import (
@@ -12,6 +14,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"github.com/objectfs/objectfs/pkg/status"
 )
 
@@ -46,7 +49,23 @@ type MountConfig struct {
 	Permissions *Permissions  `yaml:"permissions"`
 }
 
-// MountOptions contains FUSE mount options
+// MountOptions contains FUSE mount options.
+//
+// Every field here reaches [MountManager.buildFUSEOptions] and takes effect. Nine did not, and were
+// removed rather than plumbed: DirectIO, KeepCache, BigWrites, MaxRead, AsyncRead, WritebackCache,
+// SpliceRead, SpliceWrite, and SpliceMove. Each looked like a knob — a yaml tag, a name matching a
+// real FUSE capability — and each was a field a caller could set to have nothing happen.
+//
+// Two of the nine were also not implementable as written. `max_read` is not a field on go-fuse's
+// [fuse.MountOptions] at all: go-fuse passes it as a string mount option and sets it equal to
+// MaxWrite, so the read size is not separately settable. BigWrites named a FUSE capability that has
+// been unconditional since kernel 4.20.
+//
+// The yaml tags are what made the whole set look plumbed, and they were never bound to anything:
+// configuration is decoded into [config.Configuration], whose top-level keys include no FUSE
+// section, so nothing has ever decoded YAML into this type. Removing a tag no user could set breaks
+// no config file. #180 tracks the four that name genuine go-fuse capabilities (direct I/O, the
+// writeback cache, splice, and async read) for plumbing with the tests that would show they work.
 type MountOptions struct {
 	// Basic options
 	ReadOnly     bool `yaml:"read_only"`
@@ -54,12 +73,9 @@ type MountOptions struct {
 	AllowRoot    bool `yaml:"allow_root"`
 	DefaultPerms bool `yaml:"default_permissions"`
 
-	// Performance options
-	DirectIO  bool   `yaml:"direct_io"`
-	KeepCache bool   `yaml:"keep_cache"`
-	BigWrites bool   `yaml:"big_writes"`
-	MaxRead   uint32 `yaml:"max_read"`
-	MaxWrite  uint32 `yaml:"max_write"`
+	// MaxWrite is the largest WRITE the kernel may send, and go-fuse derives max_read and MaxPages
+	// from it. It is the one size that is settable.
+	MaxWrite uint32 `yaml:"max_write"`
 
 	// Advanced options
 	Debug        bool          `yaml:"debug"`
@@ -67,13 +83,6 @@ type MountOptions struct {
 	Subtype      string        `yaml:"subtype"`
 	AttrTimeout  time.Duration `yaml:"attr_timeout"`
 	EntryTimeout time.Duration `yaml:"entry_timeout"`
-
-	// Kernel options
-	AsyncRead      bool `yaml:"async_read"`
-	WritebackCache bool `yaml:"writeback_cache"`
-	SpliceRead     bool `yaml:"splice_read"`
-	SpliceWrite    bool `yaml:"splice_write"`
-	SpliceMove     bool `yaml:"splice_move"`
 }
 
 // Permissions contains permission settings
@@ -89,7 +98,6 @@ func NewMountManager(filesystem *FileSystem, config *MountConfig) *MountManager 
 	if config == nil {
 		config = &MountConfig{
 			Options: &MountOptions{
-				MaxRead:      128 * 1024,
 				MaxWrite:     128 * 1024,
 				AttrTimeout:  time.Second,
 				EntryTimeout: time.Second,
@@ -131,7 +139,7 @@ func (m *MountManager) Mount(ctx context.Context) error {
 	m.mu.Unlock()
 
 	// Start tracking the mount operation
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"mount_point": m.config.MountPoint,
 		"fs_name":     m.config.Options.FSName,
 		"read_only":   m.config.Options.ReadOnly,
@@ -237,7 +245,7 @@ func (m *MountManager) Unmount() error {
 	}
 
 	// Start tracking the unmount operation
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"mount_point": m.config.MountPoint,
 	}
 	op, _ := m.statusTracker.StartOperation(context.Background(), "unmount", metadata)

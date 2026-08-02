@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -326,10 +327,7 @@ func (c *Coordinator) selectTargetNodes(op *DistributedOperation) ([]string, err
 
 	case OpTypePut, OpTypeDelete:
 		// For writes, select based on replication factor
-		replicationFactor := c.config.ReplicationFactor
-		if replicationFactor > len(aliveNodes) {
-			replicationFactor = len(aliveNodes)
-		}
+		replicationFactor := min(c.config.ReplicationFactor, len(aliveNodes))
 		return c.loadBalancer.SelectNodes(aliveNodes, replicationFactor)
 
 	case OpTypeList:
@@ -341,10 +339,7 @@ func (c *Coordinator) selectTargetNodes(op *DistributedOperation) ([]string, err
 
 	case OpTypeBatch:
 		// For batch operations, distribute across multiple nodes
-		nodeCount := len(aliveNodes)
-		if nodeCount > 3 {
-			nodeCount = 3
-		}
+		nodeCount := min(len(aliveNodes), 3)
 		return c.loadBalancer.SelectNodes(aliveNodes, nodeCount)
 
 	default:
@@ -531,7 +526,7 @@ func (c *Coordinator) executeOnNode(ctx context.Context, nodeID string, op *Dist
 		return &NodeResult{
 			NodeID:  nodeID,
 			Success: false,
-			Error:   "context cancelled",
+			Error:   "context canceled",
 			Latency: time.Since(start),
 		}
 	case <-time.After(timeout):
@@ -574,7 +569,7 @@ func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *N
 			result.Data = data
 		}
 	case OpTypePut:
-		if err := c.backend.PutObject(ctx, op.Key, op.Data); err != nil {
+		if err := c.backend.PutObject(ctx, op.Key, op.Data, nil); err != nil {
 			result.Error = err.Error()
 		} else {
 			result.Success = true
@@ -882,7 +877,7 @@ func (lb *LoadBalancer) SelectNodes(availableNodes []string, count int) ([]strin
 func (lb *LoadBalancer) selectRoundRobin(nodes []string, count int) ([]string, error) {
 	// Simple round-robin selection
 	selected := make([]string, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		selected[i] = nodes[i%len(nodes)]
 	}
 	return selected, nil
@@ -913,7 +908,7 @@ func (lb *LoadBalancer) selectLeastLoad(nodes []string, count int) ([]string, er
 	}
 
 	selected := make([]string, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		selected[i] = nodeLoads[i].nodeID
 	}
 
@@ -931,7 +926,7 @@ func (lb *LoadBalancer) selectConsistentHash(nodes []string, count int) ([]strin
 }
 
 // GetStats returns coordinator statistics
-func (c *Coordinator) GetStats() map[string]interface{} {
+func (c *Coordinator) GetStats() map[string]any {
 	c.mu.RLock()
 	activeOps := len(c.operations)
 	c.mu.RUnlock()
@@ -954,12 +949,10 @@ func (c *Coordinator) GetStats() map[string]interface{} {
 		Imbalance:       c.loadBalancer.stats.Imbalance,
 		NodeLoad:        make(map[string]int64),
 	}
-	for k, v := range c.loadBalancer.stats.NodeLoad {
-		loadBalancerStats.NodeLoad[k] = v
-	}
+	maps.Copy(loadBalancerStats.NodeLoad, c.loadBalancer.stats.NodeLoad)
 	c.loadBalancer.stats.mu.RUnlock()
 
-	return map[string]interface{}{
+	return map[string]any{
 		"active_operations": activeOps,
 		"replication":       &replicationStats,
 		"load_balancer":     &loadBalancerStats,

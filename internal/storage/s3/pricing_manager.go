@@ -2,16 +2,16 @@ package s3
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/utils"
 	"gopkg.in/yaml.v2"
+
+	"github.com/objectfs/objectfs/pkg/utils"
 )
 
 // Currency Constants
@@ -19,13 +19,16 @@ const (
 	DefaultCurrency = "USD"
 )
 
-// PricingManager handles AWS S3 pricing with custom discounts and overrides
+// PricingManager resolves S3 tier pricing from a built-in static rate table,
+// applying operator-supplied overrides and discounts.
+//
+// Rates are approximate us-east-1 list prices sourced from StorageTiers and are
+// suitable for comparing tiers, not for billing reconciliation. Set
+// PricingConfig.CustomPricing for exact, negotiated, or non-us-east-1 rates.
 type PricingManager struct {
-	config        PricingConfig
-	logger        *slog.Logger
-	cachedPricing map[string]TierPricing
-	lastUpdated   time.Time
-	httpClient    *http.Client
+	config      PricingConfig
+	logger      *slog.Logger
+	lastUpdated time.Time
 }
 
 // NewPricingManager creates a new pricing manager
@@ -35,6 +38,12 @@ func NewPricingManager(config PricingConfig, logger *slog.Logger) *PricingManage
 	}
 	if config.Region == "" {
 		config.Region = "us-east-1" // Default pricing region
+	}
+
+	if config.UsePricingAPI {
+		logger.Warn("pricing_config.use_pricing_api is deprecated and ignored; " +
+			"pricing is served from a built-in static rate table. " +
+			"Set pricing_config.custom_pricing for exact or negotiated rates.")
 	}
 
 	// Load external discount config if specified
@@ -51,10 +60,8 @@ func NewPricingManager(config PricingConfig, logger *slog.Logger) *PricingManage
 	}
 
 	return &PricingManager{
-		config:        config,
-		logger:        logger,
-		cachedPricing: make(map[string]TierPricing),
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		config: config,
+		logger: logger,
 	}
 }
 
@@ -66,141 +73,15 @@ func (pm *PricingManager) GetTierPricing(tier string) (TierPricing, error) {
 		return pm.applyDiscounts(tier, customPricing), nil
 	}
 
-	// Get base pricing (from API or defaults)
-	basePricing, err := pm.getBasePricing(tier)
-	if err != nil {
-		return TierPricing{}, fmt.Errorf("failed to get base pricing for tier %s: %w", tier, err)
-	}
-
-	// Apply discounts to base pricing
-	return pm.applyDiscounts(tier, basePricing), nil
+	// Apply discounts to the built-in rate table.
+	return pm.applyDiscounts(tier, pm.getDefaultPricing(tier)), nil
 }
 
-// getBasePricing retrieves base pricing from AWS API or uses defaults
-func (pm *PricingManager) getBasePricing(tier string) (TierPricing, error) {
-	if pm.config.UsePricingAPI {
-		// Try to fetch from AWS Pricing API
-		if pricing, err := pm.fetchFromPricingAPI(tier); err == nil {
-			pm.cachedPricing[tier] = pricing
-			pm.lastUpdated = time.Now()
-			return pricing, nil
-		} else {
-			pm.logger.Warn("Failed to fetch pricing from AWS API, using defaults",
-				"tier", tier, "error", err)
-		}
-	}
-
-	// Fall back to default pricing
-	return pm.getDefaultPricing(tier), nil
-}
-
-// fetchFromPricingAPI fetches current pricing from AWS Pricing API
-func (pm *PricingManager) fetchFromPricingAPI(tier string) (TierPricing, error) {
-	// AWS Pricing API endpoint for S3
-	url := fmt.Sprintf("https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/%s/index.json", pm.config.Region)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return TierPricing{}, fmt.Errorf("failed to create pricing API request: %w", err)
-	}
-
-	resp, err := pm.httpClient.Do(req)
-	if err != nil {
-		return TierPricing{}, fmt.Errorf("failed to fetch pricing data: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return TierPricing{}, fmt.Errorf("pricing API returned status %d", resp.StatusCode)
-	}
-
-	var pricingData AWSPricingResponse
-	if err := json.NewDecoder(resp.Body).Decode(&pricingData); err != nil {
-		return TierPricing{}, fmt.Errorf("failed to decode pricing response: %w", err)
-	}
-
-	return pm.parsePricingData(tier, pricingData)
-}
-
-// AWSPricingResponse represents the AWS Pricing API response structure
-type AWSPricingResponse struct {
-	FormatVersion   string                 `json:"formatVersion"`
-	Disclaimer      string                 `json:"disclaimer"`
-	OfferCode       string                 `json:"offerCode"`
-	Version         string                 `json:"version"`
-	PublicationDate string                 `json:"publicationDate"`
-	Products        map[string]AWSProduct  `json:"products"`
-	Terms           map[string]interface{} `json:"terms"`
-}
-
-// AWSProduct represents a product in the AWS pricing data
-type AWSProduct struct {
-	SKU           string            `json:"sku"`
-	ProductFamily string            `json:"productFamily"`
-	Attributes    map[string]string `json:"attributes"`
-}
-
-// parsePricingData extracts pricing information from AWS API response
-func (pm *PricingManager) parsePricingData(tier string, data AWSPricingResponse) (TierPricing, error) {
-	// This is a simplified parser - actual AWS pricing API parsing is complex
-	// In production, you'd need more sophisticated parsing logic
-
-	storageClass := pm.mapTierToStorageClass(tier)
-
-	// Look for storage pricing
-	var storageCost = 0.023 // Default fallback
-	var retrievalCost = 0.0
-
-	for _, product := range data.Products {
-		if product.Attributes["storageClass"] == storageClass {
-			// Extract pricing from terms (simplified)
-			storageCost = pm.extractStorageCost(product, data.Terms)
-			retrievalCost = pm.extractRetrievalCost(product, data.Terms)
-			break
-		}
-	}
-
-	return TierPricing{
-		StorageCostPerGBMonth: storageCost,
-		RetrievalCostPerGB:    retrievalCost,
-		RequestCosts: RequestCosts{
-			PutRequestCost:    pm.getDefaultRequestCost("PUT", tier),
-			GetRequestCost:    pm.getDefaultRequestCost("GET", tier),
-			DeleteRequestCost: 0.0, // Usually free
-			ListRequestCost:   pm.getDefaultRequestCost("LIST", tier),
-			HeadRequestCost:   pm.getDefaultRequestCost("HEAD", tier),
-		},
-		MinimumBillableSize: pm.getDefaultMinimumSize(tier),
-		MinimumBillableDays: pm.getDefaultMinimumDays(tier),
-		TransitionCosts:     make(map[string]float64),
-	}, nil
-}
-
-// Helper methods for AWS API parsing
-func (pm *PricingManager) mapTierToStorageClass(tier string) string {
-	mapping := map[string]string{
-		TierStandard:    "General Purpose",
-		TierStandardIA:  "Infrequent Access",
-		TierOneZoneIA:   "One Zone - Infrequent Access",
-		TierGlacierIR:   "Glacier Instant Retrieval",
-		TierGlacier:     "Glacier Flexible Retrieval",
-		TierDeepArchive: "Glacier Deep Archive",
-		TierIntelligent: "Intelligent-Tiering",
-	}
-	return mapping[tier]
-}
-
-func (pm *PricingManager) extractStorageCost(product AWSProduct, terms map[string]interface{}) float64 {
-	// Simplified extraction - real implementation would parse the complex terms structure
-	return 0.023 // Fallback
-}
-
-func (pm *PricingManager) extractRetrievalCost(product AWSProduct, terms map[string]interface{}) float64 {
-	// Simplified extraction
-	return 0.01 // Fallback for IA tiers
-}
-
-// getDefaultPricing returns default pricing when API is unavailable
+// getDefaultPricing returns the built-in rate table for a tier.
+//
+// Rates come from StorageTiers and are approximate us-east-1 list prices. They
+// are intended for relative cost comparison between tiers, not for billing
+// reconciliation. Operators needing exact figures should set CustomPricing.
 func (pm *PricingManager) getDefaultPricing(tier string) TierPricing {
 	// Use the existing StorageTiers data as defaults
 	tierInfo, exists := StorageTiers[tier]
@@ -287,32 +168,6 @@ func (pm *PricingManager) getDefaultRequestCost(requestType, tier string) float6
 	return 0.0005 / 1000.0 // Default fallback
 }
 
-func (pm *PricingManager) getDefaultMinimumSize(tier string) int64 {
-	sizes := map[string]int64{
-		TierStandard:    0,
-		TierStandardIA:  128 * 1024,
-		TierOneZoneIA:   128 * 1024,
-		TierGlacierIR:   128 * 1024,
-		TierGlacier:     40 * 1024,
-		TierDeepArchive: 40 * 1024,
-		TierIntelligent: 0,
-	}
-	return sizes[tier]
-}
-
-func (pm *PricingManager) getDefaultMinimumDays(tier string) int {
-	days := map[string]int{
-		TierStandard:    0,
-		TierStandardIA:  30,
-		TierOneZoneIA:   30,
-		TierGlacierIR:   90,
-		TierGlacier:     90,
-		TierDeepArchive: 180,
-		TierIntelligent: 0,
-	}
-	return days[tier]
-}
-
 // applyDiscounts applies configured discounts to base pricing
 func (pm *PricingManager) applyDiscounts(tier string, basePricing TierPricing) TierPricing {
 	discountedPricing := basePricing
@@ -392,27 +247,15 @@ func (pm *PricingManager) CalculateVolumeDiscount(tier string, sizeGB float64, b
 	return baseCost
 }
 
-// RefreshPricing forces a refresh of pricing data from AWS API
-func (pm *PricingManager) RefreshPricing(ctx context.Context) error {
-	if !pm.config.UsePricingAPI {
-		return fmt.Errorf("pricing API is disabled")
-	}
-
-	pm.logger.Info("Refreshing pricing data from AWS API")
-
-	// Clear cached pricing to force refresh
-	pm.cachedPricing = make(map[string]TierPricing)
-
-	// Refresh pricing for all tiers
-	tiers := []string{TierStandard, TierStandardIA, TierOneZoneIA, TierGlacierIR, TierGlacier, TierDeepArchive, TierIntelligent}
-
-	for _, tier := range tiers {
-		if _, err := pm.getBasePricing(tier); err != nil {
-			pm.logger.Warn("Failed to refresh pricing for tier", "tier", tier, "error", err)
-		}
-	}
-
-	pm.logger.Info("Pricing refresh completed", "last_updated", pm.lastUpdated)
+// RefreshPricing is retained for API compatibility and is a no-op.
+//
+// Pricing is served from a built-in static rate table, so there is nothing to
+// refresh. The AWS Pricing API integration this method used to drive was removed:
+// it downloaded the ~100 MB S3 offer index and then discarded the parse, returning
+// two hardcoded us-east-1 constants for every tier — strictly worse than reading
+// the static table directly.
+func (pm *PricingManager) RefreshPricing(_ context.Context) error {
+	pm.logger.Debug("RefreshPricing is a no-op; pricing is served from a static rate table")
 	return nil
 }
 
@@ -534,9 +377,7 @@ func mergeDiscountConfigs(inline, external DiscountConfig) DiscountConfig {
 		if merged.CustomDiscounts == nil {
 			merged.CustomDiscounts = make(map[string]float64)
 		}
-		for tier, discount := range external.CustomDiscounts {
-			merged.CustomDiscounts[tier] = discount
-		}
+		maps.Copy(merged.CustomDiscounts, external.CustomDiscounts)
 	}
 
 	return merged

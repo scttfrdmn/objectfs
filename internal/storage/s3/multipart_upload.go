@@ -6,7 +6,7 @@ package s3
 //
 //  1. initiateMultipartUpload  – CreateMultipartUpload → uploadID
 //  2. uploadParts              – concurrent UploadPart fan-out
-//  3. abortMultipartUpload     – AbortMultipartUpload on failure (cleanup)
+//  3. abandonMultipartUpload   – AbortMultipartUpload on any non-completing exit (cleanup)
 //  4. completeMultipartUpload  – CompleteMultipartUpload on success
 //
 // partSlice and partResult are pure helpers used by uploadParts.
@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -27,10 +28,7 @@ import (
 func partSlice(data []byte, chunkSize int64, partNum int) []byte {
 	dataSize := int64(len(data))
 	start := int64(partNum-1) * chunkSize
-	end := start + chunkSize
-	if end > dataSize {
-		end = dataSize
-	}
+	end := min(start+chunkSize, dataSize)
 	return data[start:end]
 }
 
@@ -45,11 +43,13 @@ type partResult struct {
 // initiateMultipartUpload calls CreateMultipartUpload and returns the upload ID.
 // contentEncoding is the HTTP Content-Encoding token (e.g. "zstd") or "" if
 // no transparent compression was applied.
-// checksumHex is the hex-encoded SHA-256 of the uncompressed content, stored
-// as "objectfs-sha256" in S3 user metadata.
+// objectMeta is the S3 user metadata to attach: the SHA-256 of the uncompressed
+// content under "objectfs-sha256", plus "objectfs-original-size" when the payload
+// was compressed.
 func (b *Backend) initiateMultipartUpload(
 	ctx context.Context,
-	key, contentType, contentEncoding, checksumHex string,
+	key, contentType, contentEncoding string,
+	objectMeta map[string]string,
 	storageClass s3types.StorageClass,
 ) (string, error) {
 	var uploadID string
@@ -59,13 +59,17 @@ func (b *Backend) initiateMultipartUpload(
 			Key:          aws.String(key),
 			ContentType:  aws.String(contentType),
 			StorageClass: storageClass,
-			Metadata: map[string]string{
-				"objectfs-sha256": checksumHex,
-			},
+			Metadata:     objectMeta,
 		}
 		if contentEncoding != "" {
 			input.ContentEncoding = aws.String(contentEncoding)
 		}
+
+		// The encryption goes here and nowhere else in this file: S3 records it for the upload as a
+		// whole, and an UploadPart that restated it is rejected. So this one call decides whether every
+		// large object is encrypted — and large objects are the ones worth encrypting.
+		applyEncryptionCreateMultipart(input, b.config.Encryption)
+
 		result, err := client.CreateMultipartUpload(ctx, input)
 		if err != nil {
 			b.metricsCollector.RecordError(err)
@@ -145,7 +149,7 @@ func (b *Backend) uploadParts(
 	var uploadErrors []error
 	var totalBytes int64
 
-	for i := 0; i < totalParts; i++ {
+	for range totalParts {
 		r := <-resultCh
 		if r.err != nil {
 			uploadErrors = append(uploadErrors, fmt.Errorf("part %d failed: %w", r.partNumber, r.err))
@@ -170,6 +174,38 @@ func (b *Backend) uploadParts(
 
 	return completedParts, totalBytes, nil
 }
+
+// abandonMultipartUpload releases an upload that will not be completed, on a context of its own.
+//
+// The detachment is the point. The most common reason a multipart upload fails is that the caller's
+// context was canceled — an unmount, a FUSE interrupt, a deadline — and an AbortMultipartUpload
+// issued on a canceled context is never sent, so cleanup would be skipped on exactly the failure that
+// happens most. context.WithoutCancel keeps the values (the SDK reads request-scoped configuration
+// from there) while shedding the cancellation, and a short timeout of its own bounds it, since an
+// abort that hangs would hold up an unmount for no benefit.
+//
+// It logs rather than returning an error because there is nothing the caller could do with one: the
+// upload it was asked for has already failed, and reporting the abort's failure instead would replace
+// the diagnosis with a symptom. The message names the upload ID, which is what an operator needs to
+// abort it by hand or to recognize it in ListMultipartUploads.
+func (b *Backend) abandonMultipartUpload(ctx context.Context, key, uploadID string) {
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), multipartAbortTimeout)
+	defer cancel()
+
+	if err := b.abortMultipartUpload(abortCtx, key, uploadID); err != nil {
+		b.logger.Warn("Failed to abort an incomplete multipart upload; its parts remain in the "+
+			"bucket and are billed as storage until a lifecycle rule or a manual abort removes them",
+			"key", key, "upload_id", uploadID, "abort_error", err)
+
+		return
+	}
+
+	b.logger.Debug("Aborted an incomplete multipart upload", "key", key, "upload_id", uploadID)
+}
+
+// multipartAbortTimeout bounds the cleanup abort. It is deliberately short: the operation is one
+// request against an upload that has already failed, and the caller — often an unmount — is waiting.
+const multipartAbortTimeout = 30 * time.Second
 
 // abortMultipartUpload calls AbortMultipartUpload to release S3 resources after
 // a failed upload.

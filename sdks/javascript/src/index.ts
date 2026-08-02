@@ -18,6 +18,17 @@ export {
 } from './errors';
 export { MountManager } from './mount';
 export { MetricsCollector, HealthChecker } from './monitoring';
+export {
+  parseScrape,
+  parseSampleLine,
+  parseLabels,
+  processMetrics,
+  extractCacheStats,
+  extractIOStats,
+  extractOperationStats,
+  extractErrorStats,
+  extractConnectionStats,
+} from './prometheus';
 export { StorageAdapter } from './storage';
 export * from './types';
 

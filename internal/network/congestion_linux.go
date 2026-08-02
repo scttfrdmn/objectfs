@@ -14,11 +14,43 @@ import (
 // This constant is not exported by the syscall package, so it is defined here.
 const tcpCongestion = 0xd
 
+// The procfs files consulted by detect.
+//
+// Both are worth testing against something other than the host's real procfs. The parse is the part
+// that can be wrong — a kernel lists its algorithms space-separated on one line with a trailing
+// newline, and the file is absent entirely in a container with a masked /proc/sys or on a kernel
+// built without pluggable congestion control — and reading the host's own file exercises whichever
+// single shape that host happens to have. That is how this package came to be at 86.9% on Linux
+// while measuring 100% on macOS, where a 24-line stub stands in for these 66 lines: the coverage
+// floor is per package but the file set is per platform, and CI is the authority because it runs the
+// platform that compiles the larger half.
+//
+// They are constants, and the readers below take the path as a parameter, so that a test redirects
+// them by passing an argument rather than by assigning to package state. The first version of that
+// test did the latter, which made every case in it un-parallelizable — a subtest would have raced
+// the variable a sibling had just set — and being un-parallelizable is itself a defect under this
+// repo's test conventions. A seam that is a parameter costs nothing and has no such shadow.
+const (
+	availableAlgorithmsPath = "/proc/sys/net/ipv4/tcp_available_congestion_control"
+	systemDefaultPath       = "/proc/sys/net/ipv4/tcp_congestion_control"
+)
+
 // detect reads available congestion control algorithms and the system default
 // from Linux procfs, then picks the recommended algorithm for S3 transfers.
 func detect() DetectionResult {
-	available, _ := readAvailableAlgorithms()
-	sysDefault, _ := readSystemDefault()
+	return detectFrom(availableAlgorithmsPath, systemDefaultPath)
+}
+
+// detectFrom is detect against explicit paths, which is what makes it testable without a kernel
+// that happens to be configured the way the assertion needs.
+//
+// Read errors are deliberately discarded. A kernel that does not publish these files supports no
+// per-socket selection to report, and Select falls back to AlgorithmAuto from the zero values — which
+// is the kernel default, i.e. exactly what the caller gets by not setting the option at all. Failing
+// detection would turn "cannot tell" into "cannot dial".
+func detectFrom(availablePath, defaultPath string) DetectionResult {
+	available, _ := readAvailableAlgorithms(availablePath)
+	sysDefault, _ := readSystemDefault(defaultPath)
 
 	result := DetectionResult{
 		Available:     available,
@@ -31,8 +63,11 @@ func detect() DetectionResult {
 
 // readAvailableAlgorithms reads
 // /proc/sys/net/ipv4/tcp_available_congestion_control and returns the list.
-func readAvailableAlgorithms() ([]Algorithm, error) {
-	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_available_congestion_control")
+func readAvailableAlgorithms(path string) ([]Algorithm, error) {
+	//nolint:gosec // G304: path is a procfs constant from detect, or a t.TempDir file from a test.
+	// It is not reachable from configuration or from a mount path — nothing plumbs a user-supplied
+	// string to either caller, and both are in this package.
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read available congestion algorithms: %w", err)
 	}
@@ -45,8 +80,9 @@ func readAvailableAlgorithms() ([]Algorithm, error) {
 }
 
 // readSystemDefault reads /proc/sys/net/ipv4/tcp_congestion_control.
-func readSystemDefault() (Algorithm, error) {
-	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
+func readSystemDefault(path string) (Algorithm, error) {
+	//nolint:gosec // G304: as above — a procfs constant or a test's temporary file, never input.
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read system congestion default: %w", err)
 	}

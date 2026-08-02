@@ -7,7 +7,7 @@ import (
 )
 
 // TestNewConsensusEngine verifies construction succeeds and fields are
-// initialised correctly.
+// initialized correctly.
 func TestNewConsensusEngine(t *testing.T) {
 	t.Parallel()
 	cm, err := NewClusterManager(testConfig("ce-node"))
@@ -149,8 +149,7 @@ func TestConsensusEngine_TriggerElection_BecomesCandidate(t *testing.T) {
 // causes the candidate to receive a real vote and become the leader.
 func TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cfg1 := testConfig("node-a")
 	cfg2 := testConfig("node-b")
@@ -215,8 +214,7 @@ func TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader(t *testing.T) {
 // Uses two real ClusterManagers over loopback UDP to first win an election.
 func TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cfg1 := testConfig("leader-noop-a")
 	cfg2 := testConfig("leader-noop-b")
@@ -302,8 +300,7 @@ func TestConsensusEngine_StartStop(t *testing.T) {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := cm.consensus.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

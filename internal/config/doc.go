@@ -2,8 +2,15 @@
 Package config provides comprehensive configuration management for ObjectFS with multi-source support.
 
 This package implements a hierarchical configuration system that supports YAML files, environment
-variables, and runtime overrides. It provides validation, type safety, and hot-reloading
-capabilities for all ObjectFS components.
+variables, and command-line overrides, with validation at load time. Configuration is read once at
+startup and is not reloadable; see the Reloading section below.
+
+Decoding is strict: a key the schema does not define fails the load with a message naming it. This
+is deliberate and is a change in kind rather than degree. Under the previous non-strict decoding,
+eight of the ten top-level keys in the example config users were told to copy did nothing at all,
+and nobody noticed for several releases because a setting that is silently ignored looks exactly
+like a setting that is applied. Failing at startup is louder and cheaper than a filesystem that
+runs with settings the operator believes are in effect.
 
 # Configuration Architecture
 
@@ -15,13 +22,11 @@ Multi-source configuration hierarchy with precedence:
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│        Environment Variables                │
-	│           (OBJECTFS_*)                     │
+	│        Environment Variables                │           (OBJECTFS_*)                     │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
-	│         Configuration Files                 │
-	│            (YAML format)                    │
+	│         Configuration Files                 │            (YAML format)                    │
 	└─────────────────────────────────────────────┘
 	                      │
 	┌─────────────────────────────────────────────┐
@@ -168,7 +173,6 @@ Example validation:
 			if _, err := utils.ParseLogLevel(c.Global.LogLevel); err != nil {
 				return fmt.Errorf("invalid log level: %w", err)
 			}
-		}
 
 		// Validate performance settings
 		if c.Performance.MaxConcurrency < 1 || c.Performance.MaxConcurrency > 10000 {
@@ -183,73 +187,47 @@ Example validation:
 		return nil
 	}
 
-# Hot Reloading
+# Reloading
 
-Dynamic configuration updates without restart:
+There is none. Configuration is read once at startup; changing the file requires a remount.
 
-Watch Configuration:
+This section previously described a StartWatcher/Updates() API for hot reload, with lists of which
+settings were and were not reloadable. None of it exists — not the function, not the channel, not
+the distinction — and the example was not valid Go (it opened with a bare `:=`), which is a good
+sign that nothing had ever compiled it.
 
-	config := config.NewDefault()
-
-	// Set up file watcher
-	watcher := config.StartWatcher("/etc/objectfs/config.yaml")
-	defer watcher.Stop()
-
-	// Handle updates
-	go func() {
-		for update := range watcher.Updates() {
-			log.Printf("Configuration updated: %s", update.Section)
-			// Apply hot-reloadable changes
-		}
-	}()
-
-Reloadable Settings:
-- Log level changes
-- Cache size adjustments
-- Timeout modifications
-- Feature flag toggles
-
-Non-Reloadable Settings:
-- Network ports
-- Storage backends
-- Core component settings
-- Security credentials
+Be aware of the related trap this created: SIGHUP does not reload configuration. The binary
+registers it and treats any signal as a shutdown request, so sending SIGHUP to ask for a reload
+unmounts the filesystem instead. See the README.
 
 # Default Configuration
 
-Sensible defaults for all environments:
+[NewDefault] is the one set of defaults. There is no environment switch: this section used to list
+"Production Defaults" and "Development Defaults" as though a mode selected between them, and no such
+mechanism has ever existed — the "development" figures (LogLevel DEBUG, a 512MB cache,
+MaxConcurrency 50, Prefetching off) were never returned by anything. Use --log-level, --cache-size,
+and --debug, or a config file, to get that shape.
 
-Production Defaults:
+Read the current values from [NewDefault] rather than trusting a list here; a table in a comment has
+no way to be told it is stale. As of writing:
 
-	Global: {
-		LogLevel:    "INFO",
-		MetricsPort: 8080,
-		HealthPort:  8081,
-	},
-	Performance: {
-		CacheSize:         "2GB",
-		MaxConcurrency:    150,
-		CompressionEnabled: true,
-		ConnectionPoolSize: 8,
-	},
-	Cache: {
-		TTL:            5 * time.Minute,
-		EvictionPolicy: "weighted_lru",
-	}
+	Global.LogLevel               "INFO"
+	Global.MetricsPort            8080
+	Global.HealthPort             8081
+	Performance.CacheSize         "2GB"
+	Performance.MaxConcurrency    150
+	Performance.ConnectionPoolSize 8      // also the batch concurrency and MaxIdleConnsPerHost
+	Cache.TTL                     5m
+	Cache.EvictionPolicy          "weighted_lru"
+	Features.Prefetching          true
 
-Development Defaults:
+Two defaults are worth knowing because they are not what the name suggests:
 
-	Global: {
-		LogLevel:    "DEBUG",
-		ProfilePort: 6060, // pprof enabled
-	},
-	Performance: {
-		CacheSize:      "512MB",
-		MaxConcurrency: 50,
-	},
-	Features: {
-		Prefetching: false, // Simpler debugging
-	}
+  - Performance.CompressionEnabled is true, but this is the *write-buffer* compression switch and is
+    separate from WriteBuffer.Compression.Enabled, which is false. Object compression is off by
+    default: it is a storage-format decision rather than a performance knob, and a compressed object
+    is not readable by `aws s3 cp`.
+  - Global.ProfilePort is 6060 but is read by nothing — no pprof listener is started at any port.
 
 # Security Considerations
 

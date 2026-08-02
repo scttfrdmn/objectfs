@@ -5,9 +5,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/objectfs/objectfs/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/objectfs/objectfs/internal/config"
 )
 
 func TestNewFromConfig_DefaultsToMultiLevel(t *testing.T) {

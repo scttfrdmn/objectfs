@@ -31,18 +31,40 @@ func TestNewBackend_EmptyBucket(t *testing.T) {
 	assert.Contains(t, err.Error(), "bucket name cannot be empty")
 }
 
+// TestNewBackend_NilConfig asserts that a nil config is filled in from the defaults rather than
+// dereferenced, which is the only thing about it this function decides.
+//
+// It used to assert `NotContains(err, "config")`, on the stated expectation of "an AWS credentials
+// error, not a config error". That is a substring check against English prose, and it broke when an
+// error message elsewhere gained the words "shared config file" — while remaining a correct message
+// about a real problem. Worse, the expectation was backwards: a nil config on a machine with no
+// ambient region *is* a configuration error, and the right behavior is to say so. So the assertion
+// forbade the correct outcome and would have passed had NewBackend panicked on a field of the nil
+// config before reaching any message at all.
+//
+// What is actually load-bearing is that the defaults were applied, so that is what is checked. The
+// call may or may not fail depending on whether the environment supplies a region and credentials —
+// both outcomes are legitimate here and neither is what this test is about.
 func TestNewBackend_NilConfig(t *testing.T) {
 	ctx := context.Background()
 
-	// This test may fail without proper AWS credentials
-	// but we can at least test the config defaults
-	_, err := NewBackend(ctx, "test-bucket", nil)
-
-	// We expect this to fail with AWS credentials error, not config error
+	backend, err := NewBackend(ctx, "test-bucket", nil)
 	if err != nil {
-		// Should not be a config-related error
-		assert.NotContains(t, err.Error(), "config")
+		// No region or no credentials in this environment. The nil config was still filled in — had it
+		// not been, this would be a nil-pointer panic rather than an error.
+		require.NotContains(t, err.Error(), "nil pointer",
+			"a nil config must be replaced by the defaults, not dereferenced")
+
+		return
 	}
+
+	defer func() { _ = backend.Close() }()
+
+	defaults := NewDefaultConfig()
+	assert.Equal(t, defaults.MultipartThreshold, backend.config.MultipartThreshold)
+	assert.Equal(t, defaults.PoolSize, backend.config.PoolSize)
+	assert.Equal(t, defaults.MaxRetries, backend.config.MaxRetries)
+	assert.Equal(t, TierStandard, backend.config.StorageTier)
 }
 
 func TestBackendMetrics_InitialState(t *testing.T) {
@@ -53,7 +75,7 @@ func TestBackendMetrics_InitialState(t *testing.T) {
 	assert.Equal(t, int64(0), metrics.BytesUploaded)
 	assert.Equal(t, int64(0), metrics.BytesDownloaded)
 	assert.Equal(t, time.Duration(0), metrics.AverageLatency)
-	assert.Equal(t, "", metrics.LastError)
+	assert.Empty(t, metrics.LastError)
 	assert.True(t, metrics.LastErrorTime.IsZero())
 }
 
@@ -187,7 +209,7 @@ func BenchmarkDetectContentType(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := keys[i%len(keys)]
 		backend.detectContentType(key)
 	}
@@ -201,7 +223,7 @@ func BenchmarkRecordMetrics(b *testing.B) {
 	duration := 100 * time.Millisecond
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		backend.metricsCollector.RecordMetrics(duration, i%10 == 0) // 10% error rate
 	}
 }

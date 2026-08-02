@@ -3,9 +3,12 @@ package circuit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	objerrors "github.com/objectfs/objectfs/pkg/errors"
 )
 
 func TestState_String(t *testing.T) {
@@ -137,6 +140,43 @@ func TestDefaultIsSuccessful(t *testing.T) {
 	}{
 		{"nil error is successful", nil, true},
 		{"non-nil error is not successful", errors.New("test error"), false},
+
+		// A missing object is an answer, not an outage. Counting it as a breaker failure opened the
+		// s3-get breaker after enough reads of absent keys and then refused reads of objects that
+		// existed. Verified by execution against a real S3 endpoint before this case was written.
+		{
+			"a missing object is successful",
+			objerrors.NewError(objerrors.ErrCodeObjectNotFound, "object not found"),
+			true,
+		},
+		{
+			"a rejected request is successful",
+			objerrors.NewError(objerrors.ErrCodeValidationFailed, "invalid range"),
+			true,
+		},
+		{
+			"a canceled operation is successful",
+			objerrors.NewError(objerrors.ErrCodeOperationCanceled, "context canceled"),
+			true,
+		},
+
+		// The other direction: the classifier is worthless if it swallows real outages too.
+		{
+			"a network error is a failure",
+			objerrors.NewError(objerrors.ErrCodeNetworkError, "connection refused"),
+			false,
+		},
+		{
+			"a throttle is a failure",
+			objerrors.NewError(objerrors.ErrCodeResourceExhausted, "SlowDown"),
+			false,
+		},
+		{
+			"a wrapped missing object is still successful",
+			fmt.Errorf("read back: %w",
+				objerrors.NewError(objerrors.ErrCodeObjectNotFound, "object not found")),
+			true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -146,6 +186,31 @@ func TestDefaultIsSuccessful(t *testing.T) {
 				t.Errorf("defaultIsSuccessful() = %v, want %v", result, tt.want)
 			}
 		})
+	}
+}
+
+// TestBreakerDoesNotOpenOnMissingObjects is the behavioral form of the case above: enough reads of
+// absent keys to trip any threshold, then one real request that must still be admitted.
+func TestBreakerDoesNotOpenOnMissingObjects(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker("s3-get", Config{})
+
+	notFound := objerrors.NewError(objerrors.ErrCodeObjectNotFound, "object not found")
+	for range 100 {
+		_ = cb.Execute(func() error { return notFound })
+	}
+
+	if got := cb.GetState(); got != StateClosed {
+		t.Fatalf("breaker is %s after 100 reads of missing objects, want closed", got)
+	}
+
+	var ran bool
+	if err := cb.Execute(func() error { ran = true; return nil }); err != nil {
+		t.Errorf("a read of an object that exists was refused: %v", err)
+	}
+	if !ran {
+		t.Error("the breaker never called the function; a present object would be unreadable")
 	}
 }
 
@@ -231,7 +296,7 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 	}
 
 	// Cause 3 failures to trip the breaker
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_ = cb.Execute(func() error {
 			return errors.New("failure")
 		})
@@ -283,7 +348,7 @@ func TestCircuitBreaker_OpenState_RejectsRequests(t *testing.T) {
 	})
 
 	// Cause 2 failures to open the breaker
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		_ = cb.Execute(func() error {
 			return errors.New("failure")
 		})
@@ -710,7 +775,7 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 	manager := NewManager(Config{})
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()

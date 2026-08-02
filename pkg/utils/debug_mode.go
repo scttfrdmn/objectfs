@@ -25,14 +25,14 @@ type DebugSession struct {
 
 // DebugEvent represents a single debug event
 type DebugEvent struct {
-	Timestamp  time.Time              `json:"timestamp"`
-	Component  string                 `json:"component"`
-	Operation  string                 `json:"operation"`
-	Message    string                 `json:"message"`
-	Fields     map[string]interface{} `json:"fields,omitempty"`
-	Duration   time.Duration          `json:"duration,omitempty"`
-	Goroutine  int                    `json:"goroutine"`
-	StackTrace string                 `json:"stack_trace,omitempty"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Component  string         `json:"component"`
+	Operation  string         `json:"operation"`
+	Message    string         `json:"message"`
+	Fields     map[string]any `json:"fields,omitempty"`
+	Duration   time.Duration  `json:"duration,omitempty"`
+	Goroutine  int            `json:"goroutine"`
+	StackTrace string         `json:"stack_trace,omitempty"`
 }
 
 // DebugManager manages debug sessions
@@ -91,7 +91,7 @@ func (dm *DebugManager) StartSession(id string, components []string, maxEvents i
 	dm.sessions[id] = session
 
 	if dm.logger != nil {
-		dm.logger.Info("Debug session started", map[string]interface{}{
+		dm.logger.Info("Debug session started", map[string]any{
 			"session_id": id,
 			"components": components,
 		})
@@ -116,7 +116,7 @@ func (dm *DebugManager) StopSession(id string) *DebugSession {
 	session.mu.Unlock()
 
 	if dm.logger != nil {
-		dm.logger.Info("Debug session stopped", map[string]interface{}{
+		dm.logger.Info("Debug session stopped", map[string]any{
 			"session_id":    id,
 			"duration":      session.endTime.Sub(session.startTime),
 			"event_count":   len(session.events),
@@ -147,7 +147,7 @@ func (dm *DebugManager) ListSessions() []string {
 }
 
 // RecordEvent records a debug event in active sessions
-func (dm *DebugManager) RecordEvent(component, operation, message string, fields map[string]interface{}) {
+func (dm *DebugManager) RecordEvent(component, operation, message string, fields map[string]any) {
 	dm.mu.RLock()
 	sessions := make([]*DebugSession, 0, len(dm.sessions))
 	for _, session := range dm.sessions {
@@ -164,7 +164,7 @@ func (dm *DebugManager) RecordEvent(component, operation, message string, fields
 }
 
 // RecordEvent records an event in this session
-func (ds *DebugSession) RecordEvent(component, operation, message string, fields map[string]interface{}, goroutineID int) {
+func (ds *DebugSession) RecordEvent(component, operation, message string, fields map[string]any, goroutineID int) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -197,7 +197,7 @@ func (ds *DebugSession) RecordEvent(component, operation, message string, fields
 }
 
 // RecordEventWithDuration records an event with duration
-func (ds *DebugSession) RecordEventWithDuration(component, operation, message string, fields map[string]interface{}, duration time.Duration) {
+func (ds *DebugSession) RecordEventWithDuration(component, operation, message string, fields map[string]any, duration time.Duration) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -306,11 +306,11 @@ func (ds *DebugSession) GetProfile(profileType string) []byte {
 }
 
 // GetStats returns statistics about the debug session
-func (ds *DebugSession) GetStats() map[string]interface{} {
+func (ds *DebugSession) GetStats() map[string]any {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 
-	stats := map[string]interface{}{
+	stats := map[string]any{
 		"id":            ds.id,
 		"start_time":    ds.startTime,
 		"event_count":   len(ds.events),
@@ -343,11 +343,11 @@ type DebugTrace struct {
 	component string
 	operation string
 	startTime time.Time
-	fields    map[string]interface{}
+	fields    map[string]any
 }
 
 // StartTrace starts a debug trace
-func StartTrace(sessionID, component, operation string, fields map[string]interface{}) *DebugTrace {
+func StartTrace(sessionID, component, operation string, fields map[string]any) *DebugTrace {
 	dm := GetDebugManager()
 	session := dm.GetSession(sessionID)
 
@@ -382,7 +382,7 @@ func (dt *DebugTrace) EndWithError(err error) {
 
 	duration := time.Since(dt.startTime)
 	if dt.fields == nil {
-		dt.fields = make(map[string]interface{})
+		dt.fields = make(map[string]any)
 	}
 	dt.fields["error"] = err.Error()
 

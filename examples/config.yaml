@@ -1,236 +1,299 @@
-# ObjectFS Configuration Example
-# This file demonstrates all available configuration options
+# ObjectFS configuration — the complete schema.
+#
+# Every key ObjectFS accepts appears below, set to its built-in default. This file is a reference:
+# for a working starting point, copy configs/example.yaml instead, which is short and sets only
+# what most deployments change.
+#
+# Unknown keys are rejected at startup, naming the key and the line. Nothing here is optional in
+# the sense of "may be misspelled" — but everything is optional in the sense that ObjectFS starts
+# from these defaults, so a config file need only contain what it overrides.
+#
+# Keys marked "not yet wired" parse and validate but are read by nothing on the mount path. They
+# are listed rather than hidden because a documented setting that silently does nothing is the
+# defect this schema was just cleaned up to remove, and deleting them from the schema is a
+# separate change from admitting the gap. See:
+#   https://github.com/scttfrdmn/objectfs/issues/156   (plumb the S3 and read-ahead settings)
+#
+# Credentials do not belong here. ObjectFS uses the standard AWS credential chain (AWS_PROFILE,
+# environment variables, the shared credentials file, EC2/ECS instance roles).
 
-# Global application settings
+# Global application settings.
 global:
-  log_level: INFO                    # DEBUG, INFO, WARN, ERROR
-  log_file: /var/log/objectfs.log   # Leave empty for stdout
-  metrics_port: 8080                # Prometheus metrics endpoint
-  health_port: 8081                 # Health check endpoint
-  profile_port: 6060                # pprof debugging endpoint
+  log_level: INFO                     # DEBUG, INFO, WARN, ERROR
+  log_file: ""                        # empty = stderr
+  metrics_port: 8080                  # Prometheus /metrics; must differ from health_port
+  health_port: 8081                   # health endpoint; 0 disables it
+  profile_port: 6060                  # not yet wired — pprof is not served on this port
 
-# Performance tuning settings
+# Storage backend. The bucket comes from the s3:// command-line argument, not from here.
+storage:
+  s3:
+    region: us-east-1                 # rejected at load if not a well-formed region
+    endpoint: ""                      # set for MinIO/Ceph/Wasabi; empty = AWS
+    profile: ""                       # not yet wired — use AWS_PROFILE
+    use_acceleration: false           # S3 Transfer Acceleration (bucket must have it enabled)
+    force_path_style: false           # true for most S3-compatible servers
+
+    # S3 storage class for written objects. Validated at load: an unrecognized class used to be
+    # silently replaced with STANDARD, so `STANDARD_1A` — digit one for capital I — was billed as
+    # STANDARD with nothing reporting a problem.
+    #
+    # STANDARD_IA, ONEZONE_IA, GLACIER_IR and INTELLIGENT_TIERING bill a 128 KB minimum per object
+    # and IA classes bill a 30-day minimum duration, so a mount that writes many small or
+    # short-lived files costs *more* on these than on STANDARD. GLACIER and DEEP_ARCHIVE cannot be
+    # read without a restore, which ObjectFS does not perform — a read of such an object fails.
+    storage_tier: STANDARD
+
+    # The AWS SDK's attempt limit per HTTP request. Composes with network.retry below rather than
+    # replacing it: 3 SDK attempts inside 3 ObjectFS attempts is up to nine requests.
+    max_retries: 3
+
+    # Route uploads through the CargoShip transporter, which does its own chunking and congestion
+    # control. Off by default: the plain path is the one the filesystem has the most coverage of,
+    # and until v0.10.1 this flag was unreachable from a config file, so leaving it off preserves
+    # what mounts actually did rather than switching every deployment's write path on upgrade.
+    use_cargoship: false
+
+    multipart:
+      threshold: 32MB                 # objects at least this large are uploaded in parts
+      chunk_size: 16MB                # bytes per part; S3 rejects a non-final part under 5MB
+      concurrency: 8                  # parts in flight at once
+
+    cost_optimization:                # not yet wired — none of this block reaches the backend
+      enabled: false
+      tiering_enabled: false
+      lifecycle_enabled: false
+      transition_to_ia: 30
+      transition_to_glacier: 90
+
+# Performance tuning.
 performance:
-  cache_size: 2GB                   # Total cache size (e.g., 1GB, 2GB, 4GB)
-  write_buffer_size: 16MB           # Write buffer size (e.g., 8MB, 16MB, 32MB)
-  max_concurrency: 150              # Maximum concurrent operations
-  read_ahead_size: 64MB             # Read-ahead buffer size
-  compression_enabled: true         # Enable transparent compression
-  connection_pool_size: 8           # Number of backend connections
+  cache_size: 2GB                     # in-memory read cache
+  write_buffer_size: 16MB             # not yet wired — write_buffer.max_memory is the live setting
+  max_concurrency: 150
+  read_ahead_size: 64MB               # not yet wired — see read_ahead below
+  compression_enabled: true           # not yet wired — write_buffer.compression is the live setting
+  # Pooled S3 clients. Also the batch concurrency in GetObjects/PutObjects and MaxIdleConnsPerHost
+  # on the HTTP transport, so it bounds three things at once. Must be > 0: zero reached the batch
+  # paths as an unbuffered channel and blocked forever.
+  connection_pool_size: 8
+  predictive_caching: false           # not yet wired
+  ml_model_path: ""                   # not yet wired
+  multilevel_caching: false           # not yet wired — the multi-level cache is always used
 
-# Cache configuration
+  # Read-ahead and prefetch. Not yet wired: internal/fuse constructs its read-ahead manager with
+  # nil config and uses its own built-in defaults, so nothing in this block is read.
+  read_ahead:
+    enabled: true
+    size: 64MB
+    strategy: predictive              # simple, predictive, ml
+    sequential_min_size: 1MB
+    enable_pattern_detection: true
+    sequential_threshold: 0.7         # 0-1
+    prediction_window: 100
+    enable_prefetch: true
+    max_concurrent_fetch: 4
+    prefetch_ahead: 3
+    prefetch_bandwidth_mbs: 10
+    confidence_threshold: 0.7         # 0-1
+    enable_ml_prediction: false
+    ml_model_path: ""
+    learning_rate: 0.01               # 0-1
+    pattern_depth: 1000
+    metrics_enabled: true
+    statistics_interval: 30s
+    model_update_interval: 5m
+
+  # Fan out a large read into concurrent range GETs.
+  #
+  # enabled: false is carried to the backend as a threshold of zero, which is how it spells
+  # "disabled" — there is deliberately no second flag that could disagree with the threshold.
+  #
+  # Ignored for compressed objects: a compression frame cannot be sliced, so a ranged read of one
+  # has to fetch the whole object and the fan-out would be pure overhead.
+  parallel_read:
+    enabled: true
+    threshold: 64MB                   # objects at least this large are fetched in parallel
+    chunk_size: 16MB                  # bytes per range GET
+
+# Read and attribute cache.
 cache:
-  ttl: 5m                          # Cache time-to-live
-  max_entries: 100000              # Maximum number of cached entries
-  eviction_policy: weighted_lru     # lru, lfu, weighted_lru
+  ttl: 5m
+  max_entries: 100000
+  eviction_policy: weighted_lru       # lru, lfu, weighted_lru
   persistent_cache:
-    enabled: false                 # Enable persistent cache to disk
-    directory: /var/cache/objectfs # Cache directory
-    max_size: 10GB                # Maximum persistent cache size
+    enabled: false                    # spill the read cache to local disk
+    directory: /var/cache/objectfs
+    max_size: 10GB
 
-# Write buffer configuration
+# Write buffering.
+#
+# Not yet wired: vfs.NewWriter takes no configuration, so none of the three sizes below is read.
+# What actually happens is that dirty ranges accumulate per open file until the kernel flushes, and
+# nothing bounds the total — a large enough write set is bounded by available memory rather than by
+# max_memory. Fixing that means backpressure in the writer, not a wider mapping, so these keys stay
+# marked rather than being plumbed to a component that cannot honour them.
 write_buffer:
-  flush_interval: 30s              # Automatic flush interval
-  max_buffers: 1000               # Maximum number of write buffers
-  max_memory: 512MB               # Maximum memory for write buffers
-  compression:
-    enabled: true                  # Enable compression for write buffers
-    min_size: 1KB                 # Minimum size to compress
-    algorithm: gzip               # gzip, lz4, zstd
-    level: 6                      # Compression level (1-9)
+  flush_interval: 30s                 # not yet wired — flushes happen when the kernel asks
+  max_buffers: 1000                   # not yet wired
+  max_memory: 512MB                   # not yet wired — nothing bounds dirty bytes today
 
-# Network configuration
+  # Transparent object compression. Off by default, and worth understanding before turning on: a
+  # compressed object is an opaque frame to `aws s3 cp`, boto3, and every other S3 client, so
+  # enabling this revokes the "my data is just objects in S3" property. A ranged read of a
+  # compressed object must also fetch the whole object, because a compression frame cannot be
+  # sliced.
+  compression:
+    enabled: false
+    min_size: 4KB                     # smaller objects are stored as-is
+    algorithm: zstd                   # none, zstd, lz4, gzip
+    level: 3                          # zstd 0-22, gzip 0-9; 0 = codec default
+
+# Network behavior.
+#
+# Every duration in this file takes a unit suffix — ns, us, ms, s, m, h. A bare number is read as
+# nanoseconds, so `read: 30` is thirty nanoseconds and not thirty seconds. That is refused at startup
+# with the key named, rather than accepted and left to fail later as a network timeout.
 network:
   timeouts:
-    connect: 10s                   # Connection timeout
-    read: 30s                     # Read timeout
-    write: 300s                   # Write timeout
+    connect: 10s                      # TCP dial timeout
+    # How long S3 has to *begin* answering — the transport's ResponseHeaderTimeout, not a deadline
+    # on the whole response. A ranged GET of a large object legitimately spends minutes streaming
+    # its body, and a whole-response deadline would abort it as though S3 had stalled.
+    read: 30s
+    write: 300s                       # not yet wired — see internal/config.TimeoutConfig
+  # ObjectFS's own retry of a failed operation, layered on top of storage.s3.max_retries. *Which*
+  # errors are retried is not configurable: it is a fixed list of timeout, connection-failure and
+  # resource-exhaustion conditions.
   retry:
-    max_attempts: 3               # Maximum retry attempts
-    base_delay: 1s                # Base retry delay
-    max_delay: 30s                # Maximum retry delay
+    max_attempts: 3
+    base_delay: 1s
+    max_delay: 30s
+  # Stop sending to S3 after repeated failures, then probe for recovery after `timeout`.
+  #
+  # failure_threshold is an absolute count of failures within one window. Zero — not the default
+  # here, but accepted — selects a proportional rule instead: trip at 50% failures over at least 20
+  # requests. That is the better rule when the request rate is unknown, since a fixed count of ten
+  # failures is a broken bucket at 1 rps and a rounding error at 1000.
+  #
+  # enabled: false leaves the breaker in the call path counting and reporting state; it simply never
+  # opens. There is no bypass, because a second code path with no coverage is worse than a counter.
   circuit_breaker:
-    enabled: true                 # Enable circuit breaker
-    failure_threshold: 5          # Failures before opening circuit
-    timeout: 60s                  # Circuit breaker timeout
+    enabled: true
+    failure_threshold: 5
+    timeout: 60s
+  congestion_algorithm: auto          # auto, bbr, cubic, reno (Linux only; ignored elsewhere)
 
-# Security configuration
+# Security. Everything here except the encryption block is still unwired: no key under `enabled`,
+# `auth_method` or `tls` has an implementation on the mount path.
 security:
+  enabled: false
+  auth_method: none
+  tls_enabled: false
+  tls_cert_path: ""
+  tls_key_path: ""
   tls:
-    verify_certificates: true     # Verify TLS certificates
-    min_version: "1.2"           # Minimum TLS version
+    verify_certificates: true
+    min_version: "1.2"
+
+  # Server-side encryption, live as of v0.10.1. This block replaces the `in_transit` and `at_rest`
+  # booleans, which defaulted to true and were read by nothing — every object went to S3 with no
+  # encryption header while the file said otherwise (audit finding P-7). They were removed rather
+  # than deprecated: the loader rejects unknown keys, so a file still carrying them fails and says
+  # so, which is the only way the claim gets re-examined.
+  #
+  # mode:
+  #   off      — send no encryption header. Note this is not "unencrypted": S3 has applied SSE-S3 to
+  #              all new objects unconditionally since January 2023, so off means "with S3's keys,
+  #              not requested by us". It cannot satisfy an SSE-KMS requirement.
+  #   sse-s3   — request AES256 with S3-managed keys explicitly.
+  #   sse-kms  — request aws:kms with the key named below. Requires kms_key_id.
+  #
+  # The mode is applied to every write path: PutObject, the CreateMultipartUpload that starts a
+  # large upload, the CopyObject behind an attribute change, and the CopyObject behind an automatic
+  # storage-tier transition. That last one matters most: a copy does not inherit the source's
+  # encryption, so before v0.10.1 a tiering transition would have moved an object off its key.
   encryption:
-    in_transit: true             # Enable encryption in transit
-    at_rest: true                # Enable encryption at rest
+    mode: "off"
 
-# Monitoring and observability
+    # The KMS key, when mode is sse-kms. Four forms are accepted — a key ARN, an alias ARN,
+    # `alias/name`, or a bare key UUID; the last two resolve in this account and region. The key
+    # must be in the same region as the bucket.
+    #
+    # Leaving this empty under sse-kms is refused at load rather than allowed: S3 accepts aws:kms
+    # with no key and silently substitutes the AWS managed `aws/s3` key, which is shared with every
+    # other service in the account and cannot be audited or revoked separately from your data. If
+    # that key is genuinely what you want, name it — `alias/aws/s3` — so that it reads as a choice.
+    kms_key_id: ""
+
+    # S3 Bucket Keys. Only meaningful under sse-kms, and refused elsewhere. It reduces KMS requests
+    # from one per object to roughly one per bucket per short interval, which is both a cost and a
+    # throughput difference on a workload that writes many objects.
+    #
+    # Enabling it diverts uploads around the CargoShip transporter, which has no bucket-key field:
+    # the alternative would be sending an encryption configuration nobody asked for, which is P-7
+    # with an extra step. Objects large enough for multipart never used the transporter anyway.
+    bucket_keys: false
+
+# Metrics, health and logging.
 monitoring:
+  enabled: false                      # not yet wired — see metrics.enabled below
+  metrics_addr: ":9090"               # not yet wired — global.metrics_port is the live setting
+  enable_pprof: false                 # not yet wired
+  health_check_addr: ":8081"          # not yet wired — global.health_port is the live setting
+
+  # Not yet wired: no OpenTelemetry exporter is constructed.
+  opentelemetry:
+    enabled: false
+    endpoint: localhost:4317
+    service_name: objectfs
+
   metrics:
-    enabled: true                # Enable metrics collection
-    prometheus: true             # Enable Prometheus format
-    custom_labels:
-      environment: production    # Custom metric labels
+    enabled: true
+    prometheus: true
+    custom_labels:                    # attached to every exported metric
       service: objectfs
+
   health_checks:
-    enabled: true               # Enable health checks
-    interval: 30s              # Health check interval
-    timeout: 5s                # Health check timeout
+    enabled: true
+    interval: 30s
+    timeout: 5s
+
+  # Not yet wired: logging is configured from global.log_level and global.log_file.
   logging:
-    structured: true           # Enable structured logging (JSON)
-    format: json              # json, text
+    structured: true
+    format: json                      # json, text
     sampling:
-      enabled: true           # Enable log sampling for high-volume operations
-      rate: 1000             # Log every Nth operation
-
-# Feature flags
-features:
-  prefetching: true              # Enable intelligent prefetching
-  batch_operations: true         # Enable batch operations
-  small_file_optimization: true  # Enable small file optimization
-  metadata_caching: true         # Enable metadata caching
-  offline_mode: false           # Enable offline operation mode
-
-# S3 backend configuration
-backends:
-  s3:
-    region: us-west-2
-    endpoint: https://s3.amazonaws.com
-    force_path_style: false
-    bucket: my-bucket
-    prefix: objectfs/
-    
-    # S3 Storage Tier Configuration
-    # Available tiers: STANDARD, STANDARD_IA, ONEZONE_IA, REDUCED_REDUNDANCY, 
-    #                  GLACIER_IR, GLACIER, DEEP_ARCHIVE, INTELLIGENT_TIERING
-    storage_tier: STANDARD_IA           # Default storage tier for new objects
-    
-    # Tier-specific constraints (optional - uses tier defaults if not specified)
-    tier_constraints:
-      min_object_size: 131072           # Minimum object size in bytes (128KB for IA tiers)
-      deletion_embargo: 720h            # Minimum storage duration (30 days = 720h)
-      transition_delay: 0s              # Delay before applying tier (immediate)
-    
-    # Cost optimization settings
-    cost_optimization:
-      enable_auto_tiering: false        # Automatically transition objects based on access patterns
-      lifecycle_management: false       # Enable S3 lifecycle policies (set via AWS Console/CLI)
-      intelligent_tiering: false        # Use S3 Intelligent Tiering (overrides storage_tier)
-      cost_threshold: 0.023             # Cost threshold for optimization decisions ($/GB/month)
-      monitor_access_patterns: false    # Monitor and log access patterns for optimization
-      
-      # Transition rules for automatic tiering (when enable_auto_tiering: true)
-      transition_rules:
-        - from_tier: STANDARD
-          to_tier: STANDARD_IA
-          after_days: 30                # Transition after 30 days of infrequent access
-          access_pattern: infrequent    # infrequent, archive, cold
-          object_size_filter:
-            min_size: 131072            # Only transition objects >= 128KB
-            max_size: -1                # No upper limit (-1 = unlimited)
-        
-        - from_tier: STANDARD_IA
-          to_tier: GLACIER_IR
-          after_days: 90                # Transition to Glacier IR after 90 days
-          access_pattern: archive
-          object_size_filter:
-            min_size: 131072
-            max_size: -1
-    
-    # Pricing Configuration - Essential for Enterprise Customers with AWS Discounts
-    pricing_config:
-      use_pricing_api: false              # Fetch current AWS pricing via API (requires internet)
-      region: us-west-2                   # Pricing region (may differ from bucket region)
-      currency: USD                       # Currency for cost calculations
-      last_updated: "2025-07-28"         # When custom pricing was last updated
-      
-      # External Discount Configuration File (recommended for institutions)
-      # This allows institutions to distribute standardized discount configs
-      discount_config_file: "discount-config.yaml"  # Path to external discount config file
-      
-      # Custom Pricing Overrides - Specify your actual AWS rates
-      custom_pricing:
-        STANDARD:
-          storage_cost_per_gb_month: 0.023   # Your negotiated Standard rate
-          retrieval_cost_per_gb: 0.0         # No retrieval costs for Standard
-          request_costs:
-            put_request_cost: 0.0000005      # Cost per PUT request
-            get_request_cost: 0.0000004      # Cost per GET request  
-            delete_request_cost: 0.0         # Usually free
-            list_request_cost: 0.000005      # Cost per LIST request
-            head_request_cost: 0.0000004     # Cost per HEAD request
-          minimum_billable_size: 0           # No minimum for Standard
-          minimum_billable_days: 0           # No minimum for Standard
-          
-        STANDARD_IA:
-          storage_cost_per_gb_month: 0.0125  # Your negotiated Standard-IA rate
-          retrieval_cost_per_gb: 0.01        # Retrieval cost
-          request_costs:
-            put_request_cost: 0.000001       # Higher PUT cost for IA
-            get_request_cost: 0.0000004
-            delete_request_cost: 0.0
-            list_request_cost: 0.000005
-            head_request_cost: 0.0000004
-          minimum_billable_size: 131072      # 128KB minimum
-          minimum_billable_days: 30          # 30-day minimum
-          
-      # Discount Configuration - Essential for Enterprise Customers
-      # Note: If discount_config_file is specified above, these inline settings
-      # will be merged with the external file (external file takes precedence)
-      discount_config:
-        enable_volume_discounts: true       # Enable volume-based pricing tiers
-        enterprise_discount: 15.0           # Overall enterprise discount (15%)
-        reserved_capacity_discount: 10.0    # Reserved capacity discount (10%)
-        spot_discount: 0.0                  # Spot instance discount (not applicable to S3)
-        
-        # Volume Discount Tiers - Based on your AWS contract
-        volume_tiers:
-          - min_size_gb: 0.0                # 0-1TB: Standard pricing
-            max_size_gb: 1024.0             # 1TB
-            discount_percent: 0.0           # No discount
-            applies_to: ["ALL"]             # Applies to all storage tiers
-            
-          - min_size_gb: 1024.0             # 1-10TB: 5% discount
-            max_size_gb: 10240.0            # 10TB  
-            discount_percent: 5.0           # 5% discount
-            applies_to: ["STANDARD", "STANDARD_IA", "ONEZONE_IA"]
-            
-          - min_size_gb: 10240.0            # 10-100TB: 10% discount
-            max_size_gb: 102400.0           # 100TB
-            discount_percent: 10.0          # 10% discount
-            applies_to: ["STANDARD", "STANDARD_IA", "ONEZONE_IA"]
-            
-          - min_size_gb: 102400.0           # >100TB: 15% discount
-            max_size_gb: -1                 # Unlimited
-            discount_percent: 15.0          # 15% discount
-            applies_to: ["ALL"]
-            
-        # Custom Per-Tier Discounts - For specific negotiated rates
-        custom_discounts:
-          GLACIER_IR: 20.0                  # 20% discount on Glacier IR (special rate)
-          DEEP_ARCHIVE: 25.0                # 25% discount on Deep Archive (bulk commitment)
-          
-      # Additional Cost Factors - Include in total cost calculations  
-      additional_costs:
-        # Data Transfer Out Costs (first TB is often free with enterprise)
-        data_transfer_out:
-          first_tb_per_gb: 0.0              # First TB free (enterprise)
-          next_9tb_per_gb: 0.07             # 1-10 TB rate
-          next_40tb_per_gb: 0.05            # 10-50 TB rate
-          over_50tb_per_gb: 0.03            # >50 TB rate
-          
-        # Cross-Region Replication (if used)
-        replication_costs:
-          replication_per_gb: 0.015         # Cost per GB replicated
-          destination_put_requests: 0.000001 # PUT cost at destination
-          
-        # Monitoring and Logging Costs
-        cloudwatch_metrics: 0.30           # Cost per custom metric per month
-        inventory_reports: 0.0025          # Cost per million objects inventoried
-        access_logging: 0.0                # Often included in enterprise contracts
-    
-    # Legacy storage_class field (deprecated - use storage_tier instead)  
-    # storage_class: STANDARD_IA
-    
-    encryption:
       enabled: true
-      kms_key_id: ""  # Use default S3 encryption if empty
+      rate: 1000                      # log every Nth operation
+
+# Feature flags. Not yet wired: none of these is read on the mount path. Prefetching and metadata
+# caching are unconditionally enabled; batch operations and small-file optimization are properties
+# of the code paths rather than switches; offline mode is not implemented.
+features:
+  prefetching: true
+  batch_operations: true
+  small_file_optimization: true
+  metadata_caching: true
+  offline_mode: false
+
+# Multi-node coordination. Experimental and incomplete — the Raft log is not applied and
+# "strong" consistency fans the same PUT to N nodes rather than ordering operations. Do not
+# depend on this for correctness. The Redis block is the one usable part, and it is reached only
+# through cache.NewFromConfig, which currently has no caller.
+cluster:
+  enabled: false
+  node_id: ""                         # empty = derived at startup
+  listen_addr: 0.0.0.0:8080
+  advertise_addr: 127.0.0.1:8080
+  seed_nodes: []
+  replication_factor: 3
+  consistency_level: eventual         # eventual, strong
+  redis:
+    enabled: false
+    address: localhost:6379
+    password: ""
+    db: 0
+    key_prefix: objectfs
+    ttl: 5m
+    max_retries: 3

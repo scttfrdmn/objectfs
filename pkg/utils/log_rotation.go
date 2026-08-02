@@ -276,7 +276,7 @@ func (lr *LogRotator) cleanupOldBackups() error {
 	// Remove backups exceeding MaxBackups
 	if lr.config.MaxBackups > 0 && len(backups) > lr.config.MaxBackups {
 		excess := len(backups) - lr.config.MaxBackups
-		for i := 0; i < excess; i++ {
+		for i := range excess {
 			toDelete = append(toDelete, backups[i].Name())
 		}
 		backups = backups[excess:]
