@@ -287,10 +287,14 @@ uploadObject(
 // Get health status
 getHealth(endpoint?: string): Promise<HealthStatus>
 
-// Get metrics
+// Get metrics from the mount's Prometheus endpoint (global.metrics_port, default 8080;
+// requires monitoring.metrics.enabled: true). Returns cache, io, operations, errors and
+// connections sections plus the parsed raw samples. A section is absent when the mount has
+// not recorded that family -- absent is not zero.
 getMetrics(endpoint?: string): Promise<Metrics>
 
-// Get performance statistics
+// Not implemented; always throws. It returned fixed constants that looked like
+// measurements. Use getMetrics().
 getPerformanceStats(): Promise<PerformanceStats>
 
 // Start monitoring (enables events)

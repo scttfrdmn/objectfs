@@ -6,7 +6,16 @@
 
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { NetworkError, TimeoutError } from './errors';
-import { HealthStatus, Metrics, CacheMetrics, IOMetrics, NetworkMetrics, StorageMetrics, DistributedMetrics, OperationMetrics } from './types';
+import { HealthStatus, Metrics, RawMetrics, PerformanceStats } from './types';
+import {
+  parseScrape,
+  processMetrics,
+  extractCacheStats,
+  extractIOStats,
+  extractOperationStats,
+  extractErrorStats,
+  extractConnectionStats,
+} from './prometheus';
 
 export class HealthChecker {
   private client: AxiosInstance;
@@ -138,22 +147,29 @@ export class MetricsCollector {
       const response = await this.client.get(metricsUrl);
 
       if (response.status === 200) {
-        let data: any;
-
+        // ObjectFS serves /metrics through promhttp, which is always the text exposition
+        // format. A JSON body means this endpoint is something else -- a reverse proxy's error
+        // page, an API gateway, the wrong port -- and parsing it as metrics would report an
+        // empty but successful scrape. The old code took a JSON body as metrics directly.
         if (response.headers['content-type']?.includes('application/json')) {
-          data = response.data;
-        } else {
-          // Assume Prometheus format
-          data = this.parsePrometheusMetrics(response.data);
+          throw new NetworkError(
+            `${metricsUrl} returned JSON, not the Prometheus text format ObjectFS serves. ` +
+            `Check that this is an ObjectFS metrics port (global.metrics_port, default 8080).`
+          );
         }
 
-        const processedData = this.processMetrics(data);
+        const processedData = this.processMetrics(this.parsePrometheusMetrics(response.data));
         this.cacheMetrics(cacheKey, processedData);
         return processedData;
       } else {
         throw new NetworkError(`Metrics request failed with status ${response.status}`);
       }
     } catch (error) {
+      // Ahead of the catch-all: these were thrown deliberately just above, and re-wrapping
+      // them yields "Metrics collection failed: <the message we just wrote>".
+      if (error instanceof NetworkError || error instanceof TimeoutError) {
+        throw error;
+      }
       if (axios.isAxiosError(error)) {
         if (error.code === 'ECONNABORTED') {
           throw new TimeoutError('Metrics collection timeout');
@@ -168,23 +184,22 @@ export class MetricsCollector {
   }
 
   /**
-   * Collect performance-specific statistics
+   * Collect performance-specific statistics.
+   *
+   * There were `network`, `storage` and `distributed` sections here as well, read off
+   * `objectfs_network_*`, `objectfs_storage_*` and `objectfs_cluster_*` names that no version
+   * of ObjectFS has exported. They are gone rather than stubbed: a caller can tell that a key
+   * is missing, and cannot tell that a present-but-empty one means "not implemented".
    */
-  async collectPerformanceStats(endpoint: string): Promise<{
-    cache: CacheMetrics;
-    io: IOMetrics;
-    network: NetworkMetrics;
-    storage: StorageMetrics;
-    distributed: DistributedMetrics;
-  }> {
+  async collectPerformanceStats(endpoint: string): Promise<PerformanceStats> {
     const metrics = await this.collectMetrics(endpoint);
 
     return {
-      cache: this.extractCacheStats(metrics.raw),
-      io: this.extractIOStats(metrics.raw),
-      network: this.extractNetworkStats(metrics.raw),
-      storage: this.extractStorageStats(metrics.raw),
-      distributed: this.extractDistributedStats(metrics.raw),
+      cache: extractCacheStats(metrics.raw),
+      io: extractIOStats(metrics.raw),
+      operations: extractOperationStats(metrics.raw) ?? {},
+      errors: extractErrorStats(metrics.raw) ?? {},
+      connections: extractConnectionStats(metrics.raw) ?? {},
     };
   }
 
@@ -257,175 +272,18 @@ export class MetricsCollector {
     });
   }
 
-  private parsePrometheusMetrics(text: string): Record<string, number> {
-    const metrics: Record<string, number> = {};
-
-    const lines = text.split('\n');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) {
-        continue;
-      }
-
-      try {
-        // Simple parsing - in production would use prometheus-client
-        const spaceIndex = trimmed.indexOf(' ');
-        if (spaceIndex > 0) {
-          const metricName = trimmed.substring(0, spaceIndex);
-          const value = parseFloat(trimmed.substring(spaceIndex + 1));
-          if (!isNaN(value)) {
-            metrics[metricName] = value;
-          }
-        }
-      } catch (error) {
-        // Ignore parsing errors
-      }
-    }
-
-    return metrics;
+  /**
+   * Parse a Prometheus text exposition into labelled samples.
+   *
+   * Kept as a method for backward compatibility; the implementation lives in ./prometheus,
+   * which has no transport dependency and is therefore covered directly by
+   * prometheus.test.ts against a real captured scrape.
+   */
+  parsePrometheusMetrics(text: string): RawMetrics {
+    return parseScrape(text);
   }
 
-  private processMetrics(data: Record<string, any>): Metrics {
-    const processed: Metrics = {
-      timestamp: Date.now(),
-      raw: data,
-    };
-
-    // Extract organized metrics
-    processed.cache = this.extractCacheStats(data);
-    processed.io = this.extractIOStats(data);
-    processed.network = this.extractNetworkStats(data);
-    processed.operations = this.extractOperationStats(data);
-
-    return processed;
-  }
-
-  private extractCacheStats(data: Record<string, any>): CacheMetrics {
-    const cacheStats: Partial<CacheMetrics> = {};
-
-    // Look for cache metrics in various formats
-    const cacheKeys = [
-      'cache_hits', 'cache_misses', 'cache_size', 'cache_entries',
-      'objectfs_cache_hits_total', 'objectfs_cache_misses_total'
-    ];
-
-    for (const key of cacheKeys) {
-      if (key in data) {
-        const normalizedKey = key
-          .replace('objectfs_cache_', '')
-          .replace('_total', '') as keyof CacheMetrics;
-        (cacheStats as any)[normalizedKey] = data[key];
-      }
-    }
-
-    // Calculate derived metrics
-    if (cacheStats.hits && cacheStats.misses) {
-      const totalRequests = cacheStats.hits + cacheStats.misses;
-      if (totalRequests > 0) {
-        cacheStats.hitRate = cacheStats.hits / totalRequests;
-      }
-    }
-
-    return cacheStats as CacheMetrics;
-  }
-
-  private extractIOStats(data: Record<string, any>): IOMetrics {
-    const ioStats: Partial<IOMetrics> = {};
-
-    const ioKeys = [
-      'read_operations', 'write_operations', 'read_bytes', 'write_bytes',
-      'objectfs_io_read_operations_total', 'objectfs_io_write_operations_total'
-    ];
-
-    for (const key of ioKeys) {
-      if (key in data) {
-        const normalizedKey = key
-          .replace('objectfs_io_', '')
-          .replace('_total', '') as keyof IOMetrics;
-        (ioStats as any)[normalizedKey] = data[key];
-      }
-    }
-
-    return ioStats as IOMetrics;
-  }
-
-  private extractNetworkStats(data: Record<string, any>): NetworkMetrics {
-    const networkStats: Partial<NetworkMetrics> = {};
-
-    const networkKeys = [
-      'network_requests', 'network_errors', 'network_latency',
-      'objectfs_network_requests_total', 'objectfs_network_errors_total'
-    ];
-
-    for (const key of networkKeys) {
-      if (key in data) {
-        const normalizedKey = key
-          .replace('objectfs_network_', '')
-          .replace('_total', '') as keyof NetworkMetrics;
-        (networkStats as any)[normalizedKey] = data[key];
-      }
-    }
-
-    return networkStats as NetworkMetrics;
-  }
-
-  private extractStorageStats(data: Record<string, any>): StorageMetrics {
-    const storageStats: Partial<StorageMetrics> = {};
-
-    const storageKeys = [
-      'storage_operations', 'storage_errors', 'storage_latency',
-      'objectfs_storage_operations_total'
-    ];
-
-    for (const key of storageKeys) {
-      if (key in data) {
-        const normalizedKey = key
-          .replace('objectfs_storage_', '')
-          .replace('_total', '') as keyof StorageMetrics;
-        (storageStats as any)[normalizedKey] = data[key];
-      }
-    }
-
-    return storageStats as StorageMetrics;
-  }
-
-  private extractDistributedStats(data: Record<string, any>): DistributedMetrics {
-    const distributedStats: Partial<DistributedMetrics> = {};
-
-    const distKeys = [
-      'cluster_nodes', 'cluster_operations', 'replication_tasks',
-      'objectfs_cluster_nodes', 'objectfs_distributed_operations_total'
-    ];
-
-    for (const key of distKeys) {
-      if (key in data) {
-        const normalizedKey = key
-          .replace('objectfs_', '')
-          .replace('_total', '') as keyof DistributedMetrics;
-        (distributedStats as any)[normalizedKey] = data[key];
-      }
-    }
-
-    return distributedStats as DistributedMetrics;
-  }
-
-  private extractOperationStats(data: Record<string, any>): OperationMetrics {
-    const operationStats: Partial<OperationMetrics> = {};
-
-    const opKeys = [
-      'operations_total', 'operations_successful', 'operations_failed',
-      'operation_latency', 'objectfs_operations_total'
-    ];
-
-    for (const key of opKeys) {
-      if (key in data) {
-        const normalizedKey = key
-          .replace('objectfs_', '')
-          .replace('operations_', '') as keyof OperationMetrics;
-        (operationStats as any)[normalizedKey] = data[key];
-      }
-    }
-
-    return operationStats as OperationMetrics;
+  private processMetrics(data: RawMetrics): Metrics {
+    return processMetrics(data, Date.now());
   }
 }

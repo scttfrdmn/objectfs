@@ -695,6 +695,14 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		fh.fs.stats.BytesRead += int64(len(cachedData))
 		fh.fs.stats.mu.Unlock()
 
+		// Record the hit for Prometheus as well as internally. Only the miss below was recorded, so
+		// objectfs_cache_requests_total carried misses and nothing else: a hit rate computed from it was
+		// zero on a perfectly-served workload, and the SDKs derive hit_rate from exactly these two
+		// counters — with hits absent they could not derive it at all.
+		if fh.fs.metrics != nil {
+			fh.fs.metrics.RecordCacheHit(fh.file.path, int64(len(cachedData)))
+		}
+
 		// A hit is still a read, and the read-ahead detector has to see it. Recording only misses made
 		// the prefetcher defeat itself: a successful prefetch hid the next read from the detector, whose
 		// contiguity check then compared the read after it against the offset of the read before, found

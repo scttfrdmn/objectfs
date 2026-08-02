@@ -646,11 +646,14 @@ func TestHandleMetrics_WithGatherer(t *testing.T) {
 		Name:      "operations_total",
 		Help:      "Total operations",
 	}, []string{"operation", "status"})
+	// Labels here mirror internal/metrics.Collector exactly. A fixture that invents its own label set
+	// tests the handler against a metric shape nothing emits — this one carried a "source" label after
+	// the collector stopped exporting it, and passed either way.
 	cacheTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "objectfs",
 		Name:      "cache_requests_total",
 		Help:      "Total cache requests",
-	}, []string{"type", "source"})
+	}, []string{"type"})
 	errorsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "objectfs",
 		Name:      "errors_total",
@@ -661,7 +664,7 @@ func TestHandleMetrics_WithGatherer(t *testing.T) {
 
 	// Record some observations so the families appear in the output.
 	opsTotal.With(prometheus.Labels{"operation": "read", "status": "success"}).Inc()
-	cacheTotal.With(prometheus.Labels{"type": "hit", "source": "memory"}).Inc()
+	cacheTotal.With(prometheus.Labels{"type": "hit"}).Inc()
 	errorsTotal.With(prometheus.Labels{"operation": "write", "type": "timeout"}).Inc()
 
 	server := &Server{

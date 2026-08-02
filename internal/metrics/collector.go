@@ -56,18 +56,53 @@ type OperationMetrics struct {
 	AvgSize       float64       `json:"avg_size"`
 }
 
-// NewCollector creates a new metrics collector
+// DefaultConfig returns the metrics configuration ObjectFS uses when nothing overrides it.
+//
+// Exported so a caller building a partial Config can see what the unset fields become, and so the
+// defaults exist in exactly one place rather than being restated by each constructor arm.
+func DefaultConfig() *Config {
+	return &Config{
+		Enabled:        true,
+		Port:           8080,
+		Path:           "/metrics",
+		Namespace:      "objectfs",
+		Subsystem:      "",
+		UpdateInterval: 30 * time.Second,
+		Labels:         make(map[string]string),
+	}
+}
+
+// NewCollector creates a new metrics collector.
+//
+// Unset fields are filled from DefaultConfig field-by-field, not only when config is nil. The
+// all-or-nothing form this replaced was reachable and fatal: internal/adapter builds a Config
+// setting Enabled, Port and Labels and nothing else, which left Path empty — and an empty pattern
+// makes http.ServeMux.Handle panic with "invalid pattern" — and UpdateInterval zero, which makes
+// time.NewTicker panic with "non-positive interval". Both fire inside Start, one of them on a
+// goroutine where no recover can reach it. Namespace was empty on the same path, so every metric
+// would have been exported unprefixed: cache_requests_total rather than the documented
+// objectfs_cache_requests_total that every dashboard and both SDKs look for.
+//
+// This is the same shape as s3.NewBackend's defaulting and the same reasoning: a constructor that
+// honors its defaults only for callers who pass nothing is a constructor whose documented behavior
+// is false for every caller who passes something.
 func NewCollector(config *Config) (*Collector, error) {
 	if config == nil {
-		config = &Config{
-			Enabled:        true,
-			Port:           8080,
-			Path:           "/metrics",
-			Namespace:      "objectfs",
-			Subsystem:      "",
-			UpdateInterval: 30 * time.Second,
-			Labels:         make(map[string]string),
-		}
+		config = DefaultConfig()
+	}
+
+	defaults := DefaultConfig()
+	if config.Port <= 0 {
+		config.Port = defaults.Port
+	}
+	if config.Path == "" {
+		config.Path = defaults.Path
+	}
+	if config.Namespace == "" {
+		config.Namespace = defaults.Namespace
+	}
+	if config.UpdateInterval <= 0 {
+		config.UpdateInterval = defaults.UpdateInterval
 	}
 
 	if !config.Enabled {
@@ -207,28 +242,22 @@ func (c *Collector) RecordOperation(operation string, duration time.Duration, si
 	}
 }
 
-// RecordCacheHit records a cache hit
+// RecordCacheHit records a cache hit.
 func (c *Collector) RecordCacheHit(key string, size int64) {
 	if !c.config.Enabled {
 		return
 	}
 
-	c.cacheHitCounter.With(prometheus.Labels{
-		"type":   "hit",
-		"source": c.determineCacheSource(key),
-	}).Inc()
+	c.cacheHitCounter.With(prometheus.Labels{"type": "hit"}).Inc()
 }
 
-// RecordCacheMiss records a cache miss
+// RecordCacheMiss records a cache miss.
 func (c *Collector) RecordCacheMiss(key string, size int64) {
 	if !c.config.Enabled {
 		return
 	}
 
-	c.cacheHitCounter.With(prometheus.Labels{
-		"type":   "miss",
-		"source": c.determineCacheSource(key),
-	}).Inc()
+	c.cacheHitCounter.With(prometheus.Labels{"type": "miss"}).Inc()
 }
 
 // RecordError records an error
@@ -309,56 +338,79 @@ func (c *Collector) ResetMetrics() {
 // Helper methods
 
 func (c *Collector) initMetrics() error {
+	// Operator-supplied labels are attached to every metric as constant labels, which is what
+	// monitoring.metrics.custom_labels in the config has always promised. Reading the field here is
+	// the whole of that promise: it was declared, defaulted to {service: objectfs}, documented in
+	// examples/config.yaml as "attached to every exported metric", mapped through the adapter — and
+	// then read by nothing, so the labels appeared on no metric.
+	//
+	// An unusable label name (or one colliding with a variable label below) makes Register return an
+	// error rather than panicking, so a bad value fails the mount at construction with the name in
+	// the message instead of exporting silently-unlabelled metrics.
+	labels := prometheus.Labels(c.config.Labels)
+
 	// Operation metrics
 	c.operationCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "operations_total",
-			Help:      "Total number of operations",
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "operations_total",
+			Help:        "Total number of operations",
+			ConstLabels: labels,
 		},
 		[]string{"operation", "status"},
 	)
 
 	c.operationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "operation_duration_seconds",
-			Help:      "Duration of operations in seconds",
-			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms to ~32s
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "operation_duration_seconds",
+			Help:        "Duration of operations in seconds",
+			Buckets:     prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms to ~32s
+			ConstLabels: labels,
 		},
 		[]string{"operation"},
 	)
 
 	c.operationSize = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "operation_size_bytes",
-			Help:      "Size of operations in bytes",
-			Buckets:   prometheus.ExponentialBuckets(1024, 2, 20), // 1KB to ~1GB
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "operation_size_bytes",
+			Help:        "Size of operations in bytes",
+			Buckets:     prometheus.ExponentialBuckets(1024, 2, 20), // 1KB to ~1GB
+			ConstLabels: labels,
 		},
 		[]string{"operation"},
 	)
 
-	// Cache metrics
+	// Cache metrics.
+	//
+	// Labeled by "type" (hit or miss) only. There was a second "source" label meant to carry the
+	// cache level, but determineCacheSource returned the constant "unknown" for every key — its own
+	// comment said "in practice, this would be passed explicitly" — so the label added a dimension
+	// with one value to every series and told a reader nothing. Recording the level means threading it
+	// out of internal/cache, which knows it; until that happens, one honest label beats two where one
+	// is a placeholder. Per-level sizes are already available on cache_size_bytes{level}.
 	c.cacheHitCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "cache_requests_total",
-			Help:      "Total number of cache requests",
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "cache_requests_total",
+			Help:        "Total number of cache requests, by hit or miss",
+			ConstLabels: labels,
 		},
-		[]string{"type", "source"},
+		[]string{"type"},
 	)
 
 	c.cacheSizeGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "cache_size_bytes",
-			Help:      "Current cache size in bytes",
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "cache_size_bytes",
+			Help:        "Current cache size in bytes",
+			ConstLabels: labels,
 		},
 		[]string{"level"},
 	)
@@ -366,20 +418,22 @@ func (c *Collector) initMetrics() error {
 	// Connection metrics
 	c.activeConnections = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "active_connections",
-			Help:      "Number of active connections",
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "active_connections",
+			Help:        "Number of active connections",
+			ConstLabels: labels,
 		},
 	)
 
 	// Error metrics
 	c.errorCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: c.config.Namespace,
-			Subsystem: c.config.Subsystem,
-			Name:      "errors_total",
-			Help:      "Total number of errors",
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "errors_total",
+			Help:        "Total number of errors",
+			ConstLabels: labels,
 		},
 		[]string{"operation", "type"},
 	)
@@ -405,12 +459,6 @@ func (c *Collector) registerMetrics() error {
 	}
 
 	return nil
-}
-
-func (c *Collector) determineCacheSource(key string) string {
-	// Simple heuristic to determine cache level
-	// In practice, this would be passed explicitly
-	return "unknown"
 }
 
 func (c *Collector) classifyError(err error) string {

@@ -89,10 +89,27 @@ func TestPredictiveCacheCloseDuringConcurrentReads(t *testing.T) {
 
 	close(start)
 
-	// Close while the readers are running. Twice, because Close closing stopCh unconditionally made
-	// a second call panic on its own, and a shutdown path is exactly where a double call happens.
-	time.Sleep(time.Millisecond)
+	// Wait for the prefetcher to have real work in flight, rather than sleeping a fixed interval and
+	// hoping. This was `time.Sleep(time.Millisecond)`, which assumed eight goroutines would accumulate
+	// three sequential accesses each inside a millisecond — true on an idle machine, false about half
+	// the time when the rest of the package's tests are running alongside. The failure was not a
+	// spurious one: the vacuity check below correctly reported that no send had raced the close, so the
+	// test had proved nothing. Waiting for the condition the test depends on is the fix; sleeping
+	// longer would only have made the same assumption with a wider margin.
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadUint64(&pc.prefetcher.stats.JobsQueued) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no prefetch job was queued within 5s, so there is no send for the close to race; " +
+				"either the prediction path stopped producing candidates or the queue stopped accepting them")
+		}
 
+		time.Sleep(100 * time.Microsecond)
+	}
+
+	// Close while the readers are running — they each have 512 iterations and the wait above returns on
+	// the first queued job, so the great majority are still to come. Twice, because Close closing
+	// stopCh unconditionally made a second call panic on its own, and a shutdown path is exactly where
+	// a double call happens.
 	if err := pc.Close(); err != nil {
 		t.Errorf("Close: %v", err)
 	}

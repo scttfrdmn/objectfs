@@ -28,6 +28,11 @@
 #
 #   cmd/objectfs        no tests — argument parsing and signal handling, currently untestable
 #                       because main() calls log.Fatalf directly
+#   internal/testhttp   no tests, deliberately: it is test support, and every statement in it runs
+#                       under the suites that use it. A test for FreePort would assert that a port
+#                       is free by binding it, which is what the function does — a tautology. Its
+#                       real check is that deleting adapter.Start's metrics call fails the tests
+#                       built on it, which it does, with the message it exists to print
 #   pkg/archive         no tests — metadata types; dead code pending a decision (Part 4)
 #   pkg/compression     no tests in this package; its constants and SupportedAlgorithms list are
 #                       exercised from internal/compression, which is at 87.3%
@@ -51,7 +56,11 @@ internal/difftest        75
 internal/distributed     67
 internal/filesystem      88
 internal/health          45
-internal/metrics         79
+# 79 → 85: the wiring tests scrape the endpoint over a socket rather than inspecting the collector's
+# fields, which is what reaches Start, the HTTP handlers, and the label validation. None of that was
+# callable from a test that only constructed a collector — and a collector with no listener gathers
+# identically to one with a listener, so the six points were exactly where the defects were.
+internal/metrics         85
 internal/network         100
 internal/testaws         61
 internal/vfs             98

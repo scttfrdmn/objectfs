@@ -11,6 +11,15 @@ objectfs-*
 sdks/c/tests/test_basic
 sdks/c/tests/test_mount
 
+# Python SDK
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# JavaScript SDK
+node_modules/
+
 # Test binary, built with `go test -c`
 *.test
 

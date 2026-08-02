@@ -205,6 +205,56 @@ jobs:
         run: go build ./cmd/objectfs
 
   # ---------------------------------------------------------------------------------------------
+  # sdk-metrics — the two SDK suites that parse sdks/testdata/metrics-scrape.txt.
+  #
+  # That fixture is the contract between the Go exporter and its consumers, and the Go side of it
+  # is already enforced: TestSDKFixtureMatchesTheLiveScrape regenerates the scrape and fails if it
+  # has drifted. The consumer side needs this job, or the contract is only half-checked — a
+  # renamed metric fails the Go suite, someone regenerates the fixture to make it pass, and the
+  # SDK extractors that no longer match it stay green because nothing runs them.
+  #
+  # Which is not a hypothetical failure mode. It is what shipped: both SDKs parsed for metric
+  # names no version of ObjectFS ever exported — cache_hits, objectfs_cache_hits_total,
+  # objectfs_io_read_operations_total — and returned empty dicts to every caller in a release,
+  # because no test anywhere compared what an SDK expected against what the server produced.
+  #
+  # `continue-on-error` is deliberately absent. These suites need no credentials, no network, and
+  # no mount: they read one committed file. There is nothing here for a flake to come from.
+  # ---------------------------------------------------------------------------------------------
+  sdk-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python SDK metrics parsing
+        working-directory: sdks/python
+        run: |
+          # The package rather than a hand-listed subset of its requirements. The tests exercise
+          # parsing, which needs no transport, but they import objectfs.monitoring, and
+          # objectfs/__init__.py imports the client — so the whole install_requires set has to
+          # resolve. Installing `.` also means this job fails if setup.py stops being installable,
+          # which nothing else in CI checks.
+          pip install --quiet pytest .
+          pytest tests/ -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: TypeScript SDK metrics parsing
+        working-directory: sdks/javascript
+        run: |
+          # No lockfile is committed, so `npm install` rather than `npm ci`. ts-jest typechecks the
+          # suite as it runs it, which is the only place prometheus.test.ts gets typechecked at all:
+          # tsconfig.json excludes **/*.test.ts from the build.
+          npm install --no-audit --no-fund
+          npm test
+
+  # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must
   # load against the schema and must actually change something.
   #

@@ -64,13 +64,19 @@ async def main():
         # Mount filesystem
         mount_id = client.mount('s3://my-bucket', '/mnt/objectfs')
 
-        # Get health status
+        # Get health status -- global.health_port, default 8081
         health = await client.get_health('http://localhost:8081')
         print(f"Health: {health['status']}")
 
-        # Collect metrics
-        metrics = await client.get_metrics('http://localhost:9090')
-        print(f"Cache hit rate: {metrics['cache']['hit_rate']:.2%}")
+        # Collect metrics -- global.metrics_port, default 8080.
+        # Requires monitoring.metrics.enabled: true; nothing is bound otherwise.
+        metrics = await client.get_metrics('http://localhost:8080')
+
+        # Present once the mount has served at least one cache request. An idle mount
+        # reports no hit rate rather than a hit rate of zero, because those are different
+        # facts.
+        if 'hit_rate' in metrics['cache']:
+            print(f"Cache hit rate: {metrics['cache']['hit_rate']:.2%}")
 
         # Unmount
         client.unmount('/mnt/objectfs')
@@ -168,7 +174,7 @@ objectfs-python list-mounts
 objectfs-python health --endpoint http://localhost:8081
 
 # Get metrics
-objectfs-python metrics --endpoint http://localhost:9090 --format table
+objectfs-python metrics --endpoint http://localhost:8080 --format table
 
 # Generate configuration
 objectfs-python config generate --preset production --output config.yaml
@@ -190,6 +196,8 @@ objectfs-python unmount /mnt/objectfs
 global:
   log_level: INFO
   log_file: /var/log/objectfs.log
+  metrics_port: 8080    # where /metrics and /health are served
+  health_port: 8081
 
 storage:
   s3:
@@ -212,8 +220,10 @@ cluster:
 
 monitoring:
   enabled: true
-  metrics_addr: :9090
-  health_check_addr: :8081
+  metrics:
+    enabled: true       # required, or nothing binds the metrics endpoint
+    custom_labels:
+      service: objectfs # attached to every exported series
 ```
 
 ### Environment Variables
@@ -256,8 +266,11 @@ Main client class for interacting with ObjectFS.
 #### Async Methods
 
 - `get_health(endpoint=None)`: Get health status
-- `get_metrics(endpoint=None)`: Collect metrics
-- `get_performance_stats()`: Get performance statistics
+- `get_metrics(endpoint=None)`: Collect metrics. Returns `cache`, `io`, `operations`,
+  `errors` and `connections` sections plus the parsed `raw` samples. A section is absent
+  when the mount has not recorded that family -- absent is not zero
+- `get_performance_stats()`: **Not implemented; raises `NotImplementedError`.** It returned
+  fixed constants that looked like measurements. Use `get_metrics()`
 - `list_objects(storage_uri, prefix=None, max_keys=1000)`: List objects
 - `download_object(storage_uri, key, local_path)`: Download object
 - `upload_object(storage_uri, key, local_path, metadata=None)`: Upload object

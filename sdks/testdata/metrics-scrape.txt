@@ -1,0 +1,106 @@
+# HELP objectfs_active_connections Number of active connections
+# TYPE objectfs_active_connections gauge
+objectfs_active_connections{service="objectfs"} 4
+# HELP objectfs_cache_requests_total Total number of cache requests, by hit or miss
+# TYPE objectfs_cache_requests_total counter
+objectfs_cache_requests_total{service="objectfs",type="hit"} 3
+objectfs_cache_requests_total{service="objectfs",type="miss"} 1
+# HELP objectfs_cache_size_bytes Current cache size in bytes
+# TYPE objectfs_cache_size_bytes gauge
+objectfs_cache_size_bytes{level="L1",service="objectfs"} 1.048576e+06
+objectfs_cache_size_bytes{level="L2",service="objectfs"} 5.24288e+06
+# HELP objectfs_errors_total Total number of errors
+# TYPE objectfs_errors_total counter
+objectfs_errors_total{operation="read",service="objectfs",type="failure"} 1
+objectfs_errors_total{operation="read",service="objectfs",type="timeout"} 1
+# HELP objectfs_operation_duration_seconds Duration of operations in seconds
+# TYPE objectfs_operation_duration_seconds histogram
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.001"} 0
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.002"} 0
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.004"} 0
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.008"} 0
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.016"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.032"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.064"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.128"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.256"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="0.512"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="1.024"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="2.048"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="4.096"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="8.192"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="16.384"} 2
+objectfs_operation_duration_seconds_bucket{operation="read",service="objectfs",le="+Inf"} 2
+objectfs_operation_duration_seconds_sum{operation="read",service="objectfs"} 0.020999999999999998
+objectfs_operation_duration_seconds_count{operation="read",service="objectfs"} 2
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.001"} 0
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.002"} 0
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.004"} 0
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.008"} 0
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.016"} 0
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.032"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.064"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.128"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.256"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="0.512"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="1.024"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="2.048"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="4.096"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="8.192"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="16.384"} 1
+objectfs_operation_duration_seconds_bucket{operation="write",service="objectfs",le="+Inf"} 1
+objectfs_operation_duration_seconds_sum{operation="write",service="objectfs"} 0.03
+objectfs_operation_duration_seconds_count{operation="write",service="objectfs"} 1
+# HELP objectfs_operation_size_bytes Size of operations in bytes
+# TYPE objectfs_operation_size_bytes histogram
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="1024"} 0
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="2048"} 0
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="4096"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="8192"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="16384"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="32768"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="65536"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="131072"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="262144"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="524288"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="1.048576e+06"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="2.097152e+06"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="4.194304e+06"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="8.388608e+06"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="1.6777216e+07"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="3.3554432e+07"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="6.7108864e+07"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="1.34217728e+08"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="2.68435456e+08"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="5.36870912e+08"} 2
+objectfs_operation_size_bytes_bucket{operation="read",service="objectfs",le="+Inf"} 2
+objectfs_operation_size_bytes_sum{operation="read",service="objectfs"} 8192
+objectfs_operation_size_bytes_count{operation="read",service="objectfs"} 2
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="1024"} 0
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="2048"} 0
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="4096"} 0
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="8192"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="16384"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="32768"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="65536"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="131072"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="262144"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="524288"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="1.048576e+06"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="2.097152e+06"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="4.194304e+06"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="8.388608e+06"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="1.6777216e+07"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="3.3554432e+07"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="6.7108864e+07"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="1.34217728e+08"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="2.68435456e+08"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="5.36870912e+08"} 1
+objectfs_operation_size_bytes_bucket{operation="write",service="objectfs",le="+Inf"} 1
+objectfs_operation_size_bytes_sum{operation="write",service="objectfs"} 8192
+objectfs_operation_size_bytes_count{operation="write",service="objectfs"} 1
+# HELP objectfs_operations_total Total number of operations
+# TYPE objectfs_operations_total counter
+objectfs_operations_total{operation="read",service="objectfs",status="error"} 1
+objectfs_operations_total{operation="read",service="objectfs",status="success"} 1
+objectfs_operations_total{operation="write",service="objectfs",status="success"} 1

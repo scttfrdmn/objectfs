@@ -111,18 +111,13 @@ func (a *Adapter) Start(ctx context.Context) error {
 	slog.Info("starting ObjectFS adapter")
 	slog.Info("adapter configuration", "storage_uri", a.storageURI, "mount_point", a.mountPoint, "cache_size", a.config.Performance.CacheSize, "max_concurrency", a.config.Performance.MaxConcurrency)
 
-	// 1. Initialize metrics collector
-	var err error
-	a.metrics, err = metrics.NewCollector(&metrics.Config{
-		Enabled: a.config.Monitoring.Metrics.Enabled,
-		Port:    a.config.Global.MetricsPort,
-		Labels:  a.config.Monitoring.Metrics.CustomLabels,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize metrics collector: %w", err)
+	// 1. Initialize and start the metrics collector.
+	if err := a.startMetrics(ctx); err != nil {
+		return err
 	}
 
 	// 2. Initialize S3 backend
+	var err error
 	a.s3Config = a.buildS3Config()
 	slog.Info("S3 backend", "region", a.s3Config.Region)
 
@@ -357,6 +352,42 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.started = false
 	slog.Info("ObjectFS adapter stopped successfully")
 	return lastErr
+}
+
+// startMetrics constructs the metrics collector and binds its HTTP endpoint.
+//
+// Start is what serves /metrics. Without it the collector recorded into a registry no one could read:
+// `monitoring.metrics.enabled: true` and `global.metrics_port: 8080` were both honored as far as
+// constructing the counters, the mount logged nothing amiss, and a scrape of the port got connection
+// refused. Both SDKs' get_metrics(), every documented Prometheus example, and docs/monitoring were
+// describing an endpoint that was never bound.
+//
+// It is a method of its own rather than nine lines inside Start because Start's remaining steps need a
+// bucket, a mountable directory, and a FUSE-capable kernel, so a test that goes through Start cannot
+// reach this at all — which is how the missing call survived. TestStartMetricsBindsTheEndpoint scrapes
+// what this binds; deleting the Start call below fails it.
+func (a *Adapter) startMetrics(ctx context.Context) error {
+	var err error
+	a.metrics, err = metrics.NewCollector(&metrics.Config{
+		Enabled: a.config.Monitoring.Metrics.Enabled,
+		Port:    a.config.Global.MetricsPort,
+		Labels:  a.config.Monitoring.Metrics.CustomLabels,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize metrics collector: %w", err)
+	}
+
+	// The context governs the collector's periodic-update goroutine, so it must be one that lives as
+	// long as the mount rather than a request-scoped one.
+	if err := a.metrics.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start metrics collector: %w", err)
+	}
+
+	if a.config.Monitoring.Metrics.Enabled {
+		slog.Info("metrics server started", "port", a.config.Global.MetricsPort, "path", "/metrics")
+	}
+
+	return nil
 }
 
 // buildS3Config translates the loaded configuration into the backend's configuration.
