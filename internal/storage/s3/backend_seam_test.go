@@ -226,23 +226,10 @@ func TestGetObjectOnMissingKeyIsNotFound(t *testing.T) {
 	}
 }
 
-// TestDeleteObjectOnMissingKeyIsANoOp pins the contract the Go SDK documents at
-// sdks/go/objectfs/client.go — deleting something that is not there succeeds. This currently fails:
-// DeleteObject checks for *s3types.NoSuchKey, but S3's HeadObject reports absence as NotFound
-// (audit M17). Recorded here rather than skipped so the fix has a test waiting for it.
-func TestDeleteObjectOnMissingKeyIsANoOp(t *testing.T) {
-	t.Parallel()
-
-	ts := testaws.Start(t)
-	backend := ts.Backend()
-
-	err := backend.DeleteObject(context.Background(), "never/written")
-	if err != nil {
-		t.Errorf("DeleteObject on a missing key returned %v; S3 semantics make this a no-op. "+
-			"This is audit finding M17: the code matches *s3types.NoSuchKey but HeadObject "+
-			"reports absence as NotFound.", err)
-	}
-}
+// The M17 no-op test that used to live here — deleting a key that is not there — moved to
+// delete_absent_test.go, where it sits beside the case that constrains it from the other side: a
+// HEAD that failed must not be read as absence. The two are one decision and were easy to get
+// half-right.
 
 // TestPoolSaturationDoesNotFailOperations exercises the pool through the backend, concurrently,
 // with more callers than the pool has slots. Before the fix, Get returned a nil client once

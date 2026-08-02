@@ -1014,7 +1014,13 @@ func (b *Backend) DeleteObject(ctx context.Context, key string) error {
 		if isNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to get object metadata for deletion validation: %w", err)
+
+		// The key is named because this is the arm a bulk delete fails on. `rm -r` over a thousand
+		// objects that reports "failed to get object metadata for deletion validation" leaves the
+		// operator with no way to find which object is stuck; the key is in the wrapped error's
+		// context map but not in its rendered message, and the message is what gets logged. The
+		// pool-failure arm below has always named it.
+		return fmt.Errorf("delete %q: metadata read for tier validation failed: %w", key, err)
 	}
 
 	// Validate deletion against tier constraints
