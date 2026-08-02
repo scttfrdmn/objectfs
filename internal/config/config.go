@@ -215,11 +215,50 @@ type TLSConfig struct {
 	MinVersion         string `yaml:"min_version"`
 }
 
-// EncryptionConfig represents encryption settings
+// EncryptionConfig selects the server-side encryption ObjectFS requests for the objects it writes.
+//
+// This block used to be two booleans, `in_transit` and `at_rest`, both defaulting to **true** and both
+// read by nothing — audit finding P-7. A grep for ServerSideEncryption, SSEKMS, or aws:kms across the
+// tree returned zero non-test hits while OBJECTFS.md documented a `kms_key:` ARN in this block. Every
+// object was written with no encryption header at all, and the configuration said otherwise.
+//
+// Both keys are gone rather than deprecated, and since the loader decodes strictly, a config still
+// setting them fails to load with the key named. That is the point: silently accepting `at_rest: true`
+// under a new schema would leave the operator believing the same false thing they believed before,
+// whereas an error is the one way the claim gets re-examined by whoever wrote it.
+//
+// `in_transit` is gone with nothing replacing it because there is nothing to replace it with. The AWS
+// SDK speaks HTTPS to S3 unless an endpoint override says otherwise, so transit encryption is not
+// ObjectFS's to switch on; the only thing that turns it off is pointing `storage.s3.endpoint` at an
+// http:// URL, which the operator has to write explicitly. A boolean whose true value is unconditional
+// and whose false value is unreachable is not a setting.
 type EncryptionConfig struct {
-	InTransit bool `yaml:"in_transit"`
-	AtRest    bool `yaml:"at_rest"`
+	// Mode selects at-rest encryption: "off", "sse-s3", or "sse-kms". Empty means "off".
+	//
+	// "off" sends no header, which is not the same as unencrypted: S3 has applied SSE-S3 to all new
+	// objects unconditionally since January 2023, so data in a default bucket is encrypted whether or
+	// not ObjectFS asks. What "off" gives up is a key the institution controls — one that can be
+	// audited, rotated, and revoked independently of the data.
+	Mode string `yaml:"mode"`
+
+	// KMSKeyID is the key "sse-kms" encrypts with: a key ID, an alias, or either ARN form. Required for
+	// that mode and rejected beside any other, rather than ignored, because an ignored key is P-7 again.
+	KMSKeyID string `yaml:"kms_key_id"`
+
+	// BucketKeys requests S3 Bucket Keys, which cut SSE-KMS's per-object KMS calls by up to 99% by
+	// deriving a bucket-level key. Recommended with "sse-kms" — KMS bills per call and rate-limits per
+	// region, and a filesystem generates far more object operations than a backup tool does — and
+	// rejected without it, since the setting does nothing on its own.
+	BucketKeys bool `yaml:"bucket_keys"`
 }
+
+// The encryption modes the `mode` key accepts, aliased from awsname so this package and
+// internal/storage/s3 cannot disagree about which modes exist. See [awsname.SSEModeOff] and siblings.
+const (
+	EncryptionModeOff = awsname.SSEModeOff
+	EncryptionModeS3  = awsname.SSEModeS3
+	EncryptionModeKMS = awsname.SSEModeKMS
+)
 
 // MonitoringConfig represents monitoring settings
 type MonitoringConfig struct {
@@ -510,9 +549,20 @@ func NewDefault() *Configuration {
 				VerifyCertificates: true,
 				MinVersion:         "1.2",
 			},
+			// Encryption defaults to off, and this is the one field in this struct whose default is
+			// chosen against the grain of "secure by default".
+			//
+			// The reason is that the secure-sounding default is what caused P-7. `at_rest: true` shipped
+			// as the default, which is exactly why nobody questioned it — a default nobody sets is a
+			// default nobody checks, and it went three releases claiming a property no code implemented.
+			// Defaulting to sse-kms is impossible (there is no key to name), and defaulting to sse-s3
+			// would request what S3 already does unconditionally while making the header look like the
+			// reason it happened.
+			//
+			// Off, therefore, and the honest surface documentation says what off means: S3 encrypts the
+			// objects anyway, with its own keys, and an institution that needs its own key has to say so.
 			Encryption: EncryptionConfig{
-				InTransit: true,
-				AtRest:    true,
+				Mode: EncryptionModeOff,
 			},
 		},
 		Monitoring: MonitoringConfig{
@@ -871,6 +921,67 @@ func (c *Configuration) Validate() error {
 	// configuration, rejected only by the layer that acts on it, after a mount has been attempted.
 	if err := awsname.ValidateRegion(c.Storage.S3.Region); err != nil {
 		return fmt.Errorf("storage.s3 configuration invalid: %w", err)
+	}
+
+	if err := validateEncryptionConfig(c.Security.Encryption); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateEncryptionConfig rejects an encryption block that cannot mean what it says.
+//
+// The backend validates this too, in NewBackend, and the duplication is the same trade the region
+// makes: this catches it at load with the YAML path in the message, and the backend catches the SDK
+// path where a caller hand-builds an s3.Config and never passes through this loader. Neither is
+// redundant, because the two entry points have no layer in common that could hold the check.
+//
+// What it does *not* do is check that the key exists, is enabled, is in the bucket's region, or grants
+// this principal kms:GenerateDataKey. Those are questions only KMS can answer, and asking at load
+// would make mounting depend on a second service being reachable. They surface on the first write with
+// S3 naming the key — which is the difference from P-7, where nothing surfaced because nothing was
+// sent.
+func validateEncryptionConfig(cfg EncryptionConfig) error {
+	if err := awsname.ValidateSSEMode(cfg.Mode); err != nil {
+		return fmt.Errorf("security.encryption.mode is invalid: %w", err)
+	}
+
+	// Each arm below rejects a combination that is inert rather than wrong-on-the-wire, deliberately.
+	// Ignoring a KMS key set beside mode "off" would send no header and report no problem, which is
+	// P-7 reproduced exactly: the operator has written the word "encryption" in their config, named a
+	// key, and been told everything is fine.
+	switch cfg.Mode {
+	case "", EncryptionModeOff:
+		if cfg.KMSKeyID != "" {
+			return fmt.Errorf("security.encryption: kms_key_id is set but mode is %q, so no encryption "+
+				"header is sent and the key is unused; set mode to %q to encrypt with it, or remove it",
+				cfg.Mode, EncryptionModeKMS)
+		}
+
+	case EncryptionModeS3:
+		if cfg.KMSKeyID != "" {
+			return fmt.Errorf("security.encryption: kms_key_id is set but mode is %q, which encrypts "+
+				"with S3's own keys and cannot use a KMS key; set mode to %q to use the key, or remove it",
+				EncryptionModeS3, EncryptionModeKMS)
+		}
+
+	case EncryptionModeKMS:
+		if cfg.KMSKeyID == "" {
+			return fmt.Errorf("security.encryption: mode is %q but kms_key_id is empty; S3 would fall "+
+				"back to the AWS managed key aws/s3, which is shared with every other service in the "+
+				"account and cannot be audited or revoked separately from the data — name a key, or use "+
+				"mode %q if S3-managed keys are what you want", EncryptionModeKMS, EncryptionModeS3)
+		}
+
+		if err := awsname.ValidateKMSKeyID(cfg.KMSKeyID); err != nil {
+			return fmt.Errorf("security.encryption: %w", err)
+		}
+	}
+
+	if cfg.BucketKeys && cfg.Mode != EncryptionModeKMS {
+		return fmt.Errorf("security.encryption: bucket_keys is set but mode is %q; bucket keys reduce "+
+			"SSE-KMS's per-object KMS calls and do nothing without mode %q", cfg.Mode, EncryptionModeKMS)
 	}
 
 	return nil

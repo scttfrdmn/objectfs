@@ -10,6 +10,13 @@ import (
 	"github.com/objectfs/objectfs/pkg/retry"
 )
 
+// A syntactically valid KMS key ARN, in the documentation-reserved account 111122223333. Only its
+// shape matters: nothing here reaches KMS, and validateEncryptionConfig checks the form. The region
+// matches the bucket region the fixture sets, because SSE-KMS requires the key and the bucket to be in
+// the same region — a fixture that got that wrong would be asserting the mapping of a configuration
+// S3 would reject.
+const testKMSKeyARN = "arn:aws:kms:eu-west-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+
 // TestBuildS3ConfigMapsEveryConfiguredValue is the other half of internal/config.S3Config.
 //
 // buildS3Config is audit finding D12: it mapped six of s3.Config's thirty fields, so a mount got
@@ -69,6 +76,15 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 	cfg.WriteBuffer.Compression.Algorithm = "zstd"
 	cfg.WriteBuffer.Compression.Level = 5
 	cfg.WriteBuffer.Compression.MinSize = "8KB"
+
+	// sse-kms with bucket keys because it is the only mode that populates all three fields, so a
+	// mapping that carried the mode and dropped the key — the shape of P-7 that is hardest to see,
+	// since S3 accepts it and silently substitutes the AWS managed key — fails here.
+	cfg.Security.Encryption = config.EncryptionConfig{
+		Mode:       config.EncryptionModeKMS,
+		KMSKeyID:   testKMSKeyARN,
+		BucketKeys: true,
+	}
 
 	// The configuration under test must be one the loader would accept, or this test asserts the
 	// mapping of a config that cannot exist.
@@ -187,6 +203,31 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 				"predicate. MaxRequests is the half-open probe limit and is not this",
 		},
 		{field: "CircuitBreaker.Timeout", got: got.CircuitBreaker.Timeout, want: 45 * time.Second},
+
+		{
+			field: "Encryption.Mode",
+			got:   got.Encryption.Mode,
+			want:  s3.EncryptionModeKMS,
+			why: "audit finding P-7. security.encryption was not mapped at all, so the backend saw " +
+				"the zero value, sent no encryption header, and the mount came up reporting nothing " +
+				"wrong — while the config file said at_rest: true and OBJECTFS.md documented a KMS ARN",
+		},
+		{
+			field: "Encryption.KMSKeyID",
+			got:   got.Encryption.KMSKeyID,
+			want:  testKMSKeyARN,
+			why: "the mode without the key is worse than neither: S3 accepts aws:kms with no key and " +
+				"substitutes the AWS managed aws/s3 key, which is shared across the account and cannot " +
+				"be audited or revoked separately from the data. NewBackend now refuses that config, " +
+				"but only if the key reaches it",
+		},
+		{
+			field: "Encryption.BucketKeys",
+			got:   got.Encryption.BucketKeys,
+			want:  true,
+			why: "unmapped, an operator's KMS cost control silently did nothing — bucket keys cut " +
+				"per-object KMS requests, which is the difference between one KMS call and one per object",
+		},
 
 		{field: "RetryConfig.MaxAttempts", got: got.RetryConfig.MaxAttempts, want: 9},
 		{

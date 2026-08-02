@@ -99,13 +99,13 @@ func TestValidateStorageURI(t *testing.T) {
 	}
 }
 
-// TestSizeOrDefault replaces TestParseSize, whose case names pinned the behaviour that had to go:
+// TestSizeOrDefault replaces TestParseSize, whose case names pinned the behavior that had to go:
 // "empty string defaults to 1GB", "invalid format defaults to 1GB". adapter.parseSize returned 1 GiB
 // for any string it could not read, so `cache_size: 2G` — a real spelling, missing only the B — and
 // `cache_size: tpyo` both configured a 1 GiB cache, silently, with the configured value discarded and
 // nothing logged. Three other parsers disagreed with it about the same inputs.
 //
-// utils.ParseBytes is now the only size parser in the repository, and the two behaviours the adapter
+// utils.ParseBytes is now the only size parser in the repository, and the two behaviors the adapter
 // still owns are the ones asserted here: an empty value means "use the default", and a value that
 // somehow reaches Start unparseable falls back to the default rather than to a wrong number. The
 // second arm is unreachable through New — Configuration.Validate rejects it first, which
@@ -459,9 +459,12 @@ func createTestConfig() *config.Configuration {
 				VerifyCertificates: true,
 				MinVersion:         "1.2",
 			},
+			// sse-s3 rather than the zero value, so this fixture carries a mode that produces a header
+			// and the tests using it exercise the encryption mapping rather than skipping past it. The
+			// two booleans this replaces — in_transit and at_rest, both true — were the fields that
+			// made audit finding P-7 look configured while nothing read them.
 			Encryption: config.EncryptionConfig{
-				InTransit: true,
-				AtRest:    true,
+				Mode: config.EncryptionModeS3,
 			},
 		},
 		Monitoring: config.MonitoringConfig{

@@ -64,6 +64,12 @@ func (b *Backend) initiateMultipartUpload(
 		if contentEncoding != "" {
 			input.ContentEncoding = aws.String(contentEncoding)
 		}
+
+		// The encryption goes here and nowhere else in this file: S3 records it for the upload as a
+		// whole, and an UploadPart that restated it is rejected. So this one call decides whether every
+		// large object is encrypted — and large objects are the ones worth encrypting.
+		applyEncryptionCreateMultipart(input, b.config.Encryption)
+
 		result, err := client.CreateMultipartUpload(ctx, input)
 		if err != nil {
 			b.metricsCollector.RecordError(err)

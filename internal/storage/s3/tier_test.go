@@ -336,12 +336,12 @@ func TestTierConversionsCoverEveryStorageClass(t *testing.T) {
 	}
 }
 
-// TestNewTierValidatorFallsBackToStandard documents the behaviour the loader now stands in front of.
+// TestNewTierValidatorFallsBackToStandard documents the behavior the loader now stands in front of.
 //
 // The fallback is not being changed: by the time a tier reaches this constructor the mount is coming
 // up, and refusing to construct would take the filesystem down over a config typo that
 // awsname.ValidateStorageClass should already have caught with a message naming the setting. What
-// makes it safe is that it is now unreachable from a loaded config — this test pins the behaviour so
+// makes it safe is that it is now unreachable from a loaded config — this test pins the behavior so
 // the guarantee is stated somewhere, and pins that the substitution is visible in GetTierInfo rather
 // than leaving the validator claiming the tier it was asked for.
 func TestNewTierValidatorFallsBackToStandard(t *testing.T) {

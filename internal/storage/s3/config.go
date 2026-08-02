@@ -3,6 +3,7 @@ package s3
 import (
 	"time"
 
+	"github.com/objectfs/objectfs/internal/awsname"
 	"github.com/objectfs/objectfs/internal/circuit"
 	"github.com/objectfs/objectfs/pkg/retry"
 )
@@ -75,6 +76,9 @@ type Config struct {
 	// Transparent object compression configuration
 	Compression CompressionConfig `yaml:"compression"`
 
+	// Server-side encryption applied to every object this backend writes.
+	Encryption EncryptionConfig `yaml:"encryption"`
+
 	// CongestionAlgorithm is the TCP congestion control algorithm to request
 	// for each S3 connection: "auto" (detect best), "bbr", "cubic", "reno".
 	// On non-Linux platforms the value is silently ignored.
@@ -100,6 +104,55 @@ type CompressionConfig struct {
 	// MinSize is the minimum object size to compress (e.g. "4KB").
 	// Objects smaller than MinSize are stored uncompressed.
 	MinSize string `yaml:"min_size"`
+}
+
+// Server-side encryption modes, as the values the `mode` config key accepts.
+//
+// Aliases of the awsname constants, exactly as the Tier* constants in tiers.go are: the mode is read
+// by internal/config and acted on here, and config cannot import this package. One authority for the
+// set of modes that exist, in a package both sides can reach. See [awsname.SSEModeOff] and its
+// siblings for what each mode does and costs.
+const (
+	EncryptionModeOff = awsname.SSEModeOff
+	EncryptionModeS3  = awsname.SSEModeS3
+	EncryptionModeKMS = awsname.SSEModeKMS
+)
+
+// EncryptionConfig defines the server-side encryption ObjectFS requests on every object it writes.
+//
+// It exists because v0.10.0 shipped a `security.encryption.at_rest` key that defaulted to **true**
+// and was read by nothing: a grep for ServerSideEncryption, SSEKMS, or aws:kms across the tree
+// returned zero non-test hits, while OBJECTFS.md documented a `kms_key:` ARN (audit finding P-7). A
+// configuration key that claims a security property and sets no header is worse than an absent
+// feature, because an operator who reads it stops looking — and the thing they stopped looking for
+// is the one an auditor will ask about.
+//
+// The mode is the whole of the decision and there is no separate boolean, deliberately. Two switches
+// where one will do is how `at_rest: true` came to coexist with no header: a bool cannot say which
+// of the three things a reader might mean, so it says the one that sounds safest.
+type EncryptionConfig struct {
+	// Mode selects the encryption to request: "off", "sse-s3", or "sse-kms". Empty means "off".
+	Mode string `yaml:"mode"`
+
+	// KMSKeyID is the key SSE-KMS encrypts with — a key ID, an alias, or a full ARN. Required when
+	// Mode is "sse-kms" and rejected otherwise, rather than ignored: a key set beside a mode that
+	// does not use it means the two disagree about what is being asked for, and silently honoring
+	// the mode is how a configuration comes to name a KMS key and encrypt with something else.
+	KMSKeyID string `yaml:"kms_key_id"`
+
+	// BucketKeys requests S3 Bucket Keys, which reduce SSE-KMS's per-object KMS calls by up to 99%
+	// by deriving a bucket-level key. Recommended with "sse-kms" and meaningless without it.
+	//
+	// This is a cost and throughput control rather than a security one, and it is the difference
+	// between SSE-KMS being usable for a filesystem workload and not: without it, every object read
+	// is a billed KMS Decrypt against a per-region rate limit, so a directory traversal can be
+	// throttled by KMS while S3 is entirely idle.
+	BucketKeys bool `yaml:"bucket_keys"`
+}
+
+// Enabled reports whether any encryption header should be sent.
+func (e EncryptionConfig) Enabled() bool {
+	return e.Mode != "" && e.Mode != EncryptionModeOff
 }
 
 // CircuitBreakerConfig defines the breaker that fronts S3 operations.

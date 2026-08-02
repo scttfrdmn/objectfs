@@ -100,6 +100,17 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 		return nil, fmt.Errorf("invalid S3 configuration: %w", err)
 	}
 
+	// Encryption is validated here for a reason the region does not share: failing at construction is
+	// the only place a bad encryption setting can be reported at all.
+	//
+	// A malformed region breaks the first request loudly. A configuration that asks for encryption and
+	// cannot deliver it breaks nothing — objects are written, reads succeed, and the mount looks
+	// healthy. That is audit finding P-7 exactly, and "the mount came up" is the evidence an operator
+	// would cite for believing encryption was on. So the mount does not come up.
+	if err := validateEncryption(cfg.Encryption); err != nil {
+		return nil, fmt.Errorf("invalid S3 configuration: %w", err)
+	}
+
 	// Apply defaults for zero-value critical fields so that partial configs
 	// (e.g. created with &Config{Region: "us-west-2"}) behave correctly.
 	//
@@ -815,6 +826,8 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 			input.ContentEncoding = aws.String(contentEncoding)
 		}
 
+		applyEncryptionPut(input, b.config.Encryption)
+
 		// Use the CargoShip transporter for optimized uploads, but never for a compressed object.
 		//
 		// cargoships3.Archive has no ContentEncoding field — its CompressionType becomes user
@@ -833,6 +846,20 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 			b.logger.Debug("Bypassing CargoShip for a compressed object: the transporter cannot set Content-Encoding",
 				"key", key,
 				"content_encoding", contentEncoding)
+
+			transporter = nil
+		}
+
+		// Bypassed for the same reason when the transporter cannot send the encryption headers this
+		// configuration asks for. See cargoShipCanEncrypt: it hardcodes aws:kms and has no bucket-key
+		// field, so SSE-S3 and bucket keys have no representation there. Uploading through it anyway
+		// would store the object under an encryption the operator did not configure, and the object
+		// reads back fine either way — so nothing would ever surface the difference.
+		if transporter != nil && !cargoShipCanEncrypt(b.config.Encryption) {
+			b.logger.Debug("Bypassing CargoShip: the transporter cannot send the configured encryption headers",
+				"key", key,
+				"encryption_mode", b.config.Encryption.Mode,
+				"bucket_keys", b.config.Encryption.BucketKeys)
 
 			transporter = nil
 		}
@@ -964,6 +991,18 @@ func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[st
 	if ct := aws.ToString(head.ContentType); ct != "" {
 		input.ContentType = aws.String(ct)
 	}
+
+	// Restated for the same reason as the storage class, and it is the sharpest case of the two. A copy
+	// does not inherit the source's encryption: S3 encrypts the destination per the request, and a
+	// request that says nothing gets the bucket default. So a chmod on an SSE-KMS object silently
+	// rewrote it under whatever the bucket does — the object was encrypted correctly when written and
+	// stopped being so when someone changed its mode, with nothing anywhere reporting a change.
+	//
+	// The configured encryption is used rather than the source object's, deliberately. HeadObject does
+	// report the object's SSE headers, so restating those was available; but this backend's contract is
+	// that it writes what the configuration says, and a rewrite is a write. Preserving the old key would
+	// mean a key rotation never took effect on any object anyone touched.
+	applyEncryptionCopy(input, b.config.Encryption)
 
 	if _, err := client.CopyObject(ctx, input); err != nil {
 		b.metricsCollector.RecordError(err)

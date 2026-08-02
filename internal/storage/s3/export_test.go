@@ -26,6 +26,17 @@ func BatchConcurrencyForTest(b *Backend) int {
 	return b.batchConcurrency()
 }
 
+// SeedAccessPatternForTest installs an access pattern on a live backend's cost optimizer.
+//
+// It exists because a tier transition is only reachable through analysis, and analysis refuses any
+// object younger than 30 days. Without a way to plant an aged pattern, the CopyObject that performs
+// the transition has no test at all — which is how it came to be the one write path that dropped the
+// encryption header with nothing to notice. AccessPattern is already exported; only the locked
+// installer is not, and going through it is the point: the map is written from every reader goroutine.
+func SeedAccessPatternForTest(b *Backend, pattern AccessPattern) {
+	b.costOptimizer.putPattern(pattern)
+}
+
 // ReadyToTripForTest exposes the CircuitBreakerConfig → predicate translation.
 //
 // A nil return is meaningful, not an absence: it is how the mapping says "use circuit's proportional

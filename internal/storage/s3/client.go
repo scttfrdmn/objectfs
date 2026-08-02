@@ -180,6 +180,16 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 			Concurrency:        cfg.MultipartConcurrency, // Use configured concurrency
 		}
 
+		// The KMS key is passed through so objects that *do* go via CargoShip carry the same encryption
+		// as the direct path. It is set only for sse-kms, because that is the only mode CargoShip can
+		// express — its transporter hardcodes the algorithm to aws:kms and has no bucket-key field — and
+		// PutObject diverts around the transporter for anything else. See cargoShipCanEncrypt: setting
+		// the key here for a mode CargoShip cannot honor is what would let an object be stored under an
+		// encryption nobody configured.
+		if cfg.Encryption.Mode == EncryptionModeKMS {
+			cargoConfig.KMSKeyID = cfg.Encryption.KMSKeyID
+		}
+
 		// Use CargoShip's optimized transporter with BBR/CUBIC algorithms
 		// Use accelerated client if available, otherwise use standard
 		transporter = cargoships3.NewTransporter(primaryClient, cargoConfig)

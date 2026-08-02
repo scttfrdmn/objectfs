@@ -180,12 +180,8 @@ network:
     timeout: 60s
   congestion_algorithm: auto          # auto, bbr, cubic, reno (Linux only; ignored elsewhere)
 
-# Security. Not yet wired: no key in this block has an implementation on the mount path. In
-# particular `encryption.at_rest: true` does NOT cause ObjectFS to request server-side
-# encryption — there is no SSE header anywhere in the codebase (audit finding P-7). S3 buckets
-# have had SSE-S3 on by default since January 2023, so your data is very likely encrypted at
-# rest regardless; it is simply not ObjectFS doing it, and this setting cannot be relied on for
-# an SSE-KMS requirement.
+# Security. Everything here except the encryption block is still unwired: no key under `enabled`,
+# `auth_method` or `tls` has an implementation on the mount path.
 security:
   enabled: false
   auth_method: none
@@ -195,9 +191,45 @@ security:
   tls:
     verify_certificates: true
     min_version: "1.2"
+
+  # Server-side encryption, live as of v0.10.1. This block replaces the `in_transit` and `at_rest`
+  # booleans, which defaulted to true and were read by nothing — every object went to S3 with no
+  # encryption header while the file said otherwise (audit finding P-7). They were removed rather
+  # than deprecated: the loader rejects unknown keys, so a file still carrying them fails and says
+  # so, which is the only way the claim gets re-examined.
+  #
+  # mode:
+  #   off      — send no encryption header. Note this is not "unencrypted": S3 has applied SSE-S3 to
+  #              all new objects unconditionally since January 2023, so off means "with S3's keys,
+  #              not requested by us". It cannot satisfy an SSE-KMS requirement.
+  #   sse-s3   — request AES256 with S3-managed keys explicitly.
+  #   sse-kms  — request aws:kms with the key named below. Requires kms_key_id.
+  #
+  # The mode is applied to every write path: PutObject, the CreateMultipartUpload that starts a
+  # large upload, the CopyObject behind an attribute change, and the CopyObject behind an automatic
+  # storage-tier transition. That last one matters most: a copy does not inherit the source's
+  # encryption, so before v0.10.1 a tiering transition would have moved an object off its key.
   encryption:
-    in_transit: true
-    at_rest: true
+    mode: "off"
+
+    # The KMS key, when mode is sse-kms. Four forms are accepted — a key ARN, an alias ARN,
+    # `alias/name`, or a bare key UUID; the last two resolve in this account and region. The key
+    # must be in the same region as the bucket.
+    #
+    # Leaving this empty under sse-kms is refused at load rather than allowed: S3 accepts aws:kms
+    # with no key and silently substitutes the AWS managed `aws/s3` key, which is shared with every
+    # other service in the account and cannot be audited or revoked separately from your data. If
+    # that key is genuinely what you want, name it — `alias/aws/s3` — so that it reads as a choice.
+    kms_key_id: ""
+
+    # S3 Bucket Keys. Only meaningful under sse-kms, and refused elsewhere. It reduces KMS requests
+    # from one per object to roughly one per bucket per short interval, which is both a cost and a
+    # throughput difference on a workload that writes many objects.
+    #
+    # Enabling it diverts uploads around the CargoShip transporter, which has no bucket-key field:
+    # the alternative would be sending an encryption configuration nobody asked for, which is P-7
+    # with an extra step. Objects large enough for multipart never used the transporter anyway.
+    bucket_keys: false
 
 # Metrics, health and logging.
 monitoring:

@@ -428,6 +428,17 @@ func (a *Adapter) buildS3Config() *s3.Config {
 		},
 
 		CongestionAlgorithm: a.config.Network.CongestionAlgorithm,
+
+		// The one mapping in this function whose absence was itself the defect. `security.encryption`
+		// was read here by nothing while `at_rest` defaulted to true, so every object was written with
+		// no encryption header and the configuration said otherwise (audit finding P-7). The keys are
+		// under `security` rather than `storage.s3` because the operator's question is "how is my data
+		// encrypted", not "what does the S3 backend send"; the backend is where the answer is executed.
+		Encryption: s3.EncryptionConfig{
+			Mode:       a.config.Security.Encryption.Mode,
+			KMSKeyID:   a.config.Security.Encryption.KMSKeyID,
+			BucketKeys: a.config.Security.Encryption.BucketKeys,
+		},
 	}
 
 	// Parallel reads. Enabled: false is expressed as a threshold of zero, which is how the backend

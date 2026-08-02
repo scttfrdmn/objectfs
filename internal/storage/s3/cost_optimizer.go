@@ -412,13 +412,22 @@ func (co *CostOptimizer) applyOptimization(ctx context.Context, opt TierOptimiza
 	defer co.backend.clientManager.ReturnPooledClient(client)
 
 	copySource := fmt.Sprintf("%s/%s", co.backend.bucket, opt.ObjectKey)
-	_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
+	input := &s3.CopyObjectInput{
 		Bucket:            aws.String(co.backend.bucket),
 		CopySource:        aws.String(copySource),
 		Key:               aws.String(opt.ObjectKey),
 		StorageClass:      s3types.StorageClass(opt.ToTier),
 		MetadataDirective: s3types.MetadataDirectiveCopy,
-	})
+	}
+
+	// MetadataDirectiveCopy carries the metadata across but not the encryption: S3 encrypts a copy's
+	// destination according to the request, whatever the source was stored under. So a tier transition
+	// — which is a rewrite of the object, just without moving bytes — would drop an SSE-KMS object onto
+	// the bucket default. That is the worst instance of the copy problem, because nobody asked for it:
+	// the transition is automatic, so an object silently changes encryption on a timer.
+	applyEncryptionCopy(input, co.backend.config.Encryption)
+
+	_, err = client.CopyObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("CopyObject for tier transition %s→%s: %w", opt.FromTier, opt.ToTier, err)
 	}

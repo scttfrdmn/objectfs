@@ -44,6 +44,20 @@ type Request struct {
 
 	// RequestBytes is the number of body bytes the client sent.
 	RequestBytes int64
+
+	// Header is the request's headers as the emulator received them.
+	//
+	// It is here because for some properties the header *is* the behavior, with no observable
+	// consequence anywhere else. Server-side encryption is the case that forced it: the emulator does
+	// not model SSE at all, so an object written with x-amz-server-side-encryption reads back
+	// byte-identical to one written without it. A test that asserted on the SDK input struct it had
+	// just filled in would be checking its own arithmetic, and a test that asserted on the object's
+	// bytes would pass with no header sent — which is precisely how audit finding P-7 survived three
+	// releases with `at_rest: true` in the shipped defaults.
+	//
+	// Kept whole rather than as a few named fields, because the next header worth pinning is not
+	// predictable and a struct field per header would mean editing the harness for each one.
+	Header http.Header
 }
 
 // IsRanged reports whether the request carried a Range header.
@@ -314,6 +328,11 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 			Path:   r.URL.Path,
 			Query:  r.URL.RawQuery,
 			Range:  r.Header.Get("Range"),
+
+			// Cloned because the proxy hands this same map to the transport, which mutates it — adding
+			// hop-by-hop headers and stripping others. Recording the live map would leave the assertion
+			// reading whatever the transport left behind rather than what the client sent.
+			Header: r.Header.Clone(),
 		}
 
 		if r.Body != nil {
@@ -425,6 +444,28 @@ func (ts *TestServer) GETs(key string) []Request {
 
 	for _, r := range ts.RequestsFor(key) {
 		if r.Method == http.MethodGet {
+			out = append(out, r)
+		}
+	}
+
+	return out
+}
+
+// Writes returns the observed requests that stored bytes or attributes for a key: PUT, POST, and the
+// CopyObject that a metadata update or a tier transition performs.
+//
+// It exists so an assertion about what every write path sent does not have to enumerate the methods
+// itself. That enumeration is where the assertion goes wrong: a test that checked only PUT would pass
+// with a multipart create sending no encryption header, and multipart is the path every large object
+// takes. A CopyObject is a PUT with x-amz-copy-source, so it is included here by method already.
+//
+// Faulted requests are included, because a write that was rejected still carried headers and a test
+// about what was sent should not depend on whether it was accepted.
+func (ts *TestServer) Writes(key string) []Request {
+	var out []Request
+
+	for _, r := range ts.RequestsFor(key) {
+		if r.Method == http.MethodPut || r.Method == http.MethodPost {
 			out = append(out, r)
 		}
 	}

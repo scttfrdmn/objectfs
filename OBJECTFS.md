@@ -865,9 +865,21 @@ security:
   tls:
     verify_certificates: true
     min_version: "1.2"
+
+  # Server-side encryption. mode is off, sse-s3 or sse-kms; kms_key_id is required for sse-kms and
+  # refused otherwise; bucket_keys applies only to sse-kms.
+  #
+  # This replaced `in_transit: true` / `at_rest: true` in v0.10.1. Those two booleans defaulted to
+  # true and were read by nothing — no encryption header was sent on any write — so a file that set
+  # them documented a property the code did not have. They are removed rather than deprecated, and
+  # the loader rejects unknown keys, so a config still carrying them fails to load and names them.
+  #
+  # `off` is not "unencrypted": S3 has applied SSE-S3 to all new objects unconditionally since
+  # January 2023. It means ObjectFS sends no header, and it cannot satisfy an SSE-KMS requirement.
   encryption:
-    in_transit: true
-    at_rest: true
+    mode: sse-kms
+    kms_key_id: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012
+    bucket_keys: true
 
 # Monitoring configuration
 monitoring:
@@ -931,6 +943,12 @@ access_patterns:
     ttl: 1h
 
 # Security overrides
+#
+# NOT IMPLEMENTED. Neither key exists in the schema, and per-mount configuration files do not exist
+# either — this whole `mount:` block is proposed, not built. `security.kms_key` in particular is the
+# key that gave audit finding P-7 its documentation: it was read here as evidence that ObjectFS
+# encrypted with a customer managed key, while no encryption header was sent anywhere. The live
+# spelling is `security.encryption.kms_key_id` under mode `sse-kms`, in the global config file.
 security:
   iam_role: arn:aws:iam::123456789012:role/ObjectFSRole
   kms_key: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012

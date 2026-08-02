@@ -170,6 +170,77 @@ func TestRecorderCountsRequestBodies(t *testing.T) {
 	}
 }
 
+// TestWritesSeesEveryMethodThatStoresSomething is the harness's own coverage of Writes, which exists so
+// that a caller asserting about what a write path sent does not enumerate the HTTP methods itself.
+//
+// The enumeration is where such an assertion goes wrong. A test that checked only PUT would pass while
+// a multipart create sent nothing, and multipart is the path every large object takes — which is how
+// the encryption tests came to need this helper. So the cases below are a plain PUT, a multipart create
+// (a POST), and a HEAD and a GET that must not appear.
+func TestWritesSeesEveryMethodThatStoresSomething(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ctx := context.Background()
+	client := ts.Client()
+
+	const (
+		putKey       = "writes/put"
+		multipartKey = "writes/multipart"
+	)
+
+	ts.ResetRequests()
+
+	ts.PutObject(putKey, testaws.DeterministicBytes(putKey, 512))
+
+	// A read and a HEAD of the same key, to pin that neither is a write. Read amplification and
+	// "what did the write send" are different questions and the recorder must not conflate them.
+	_ = ts.GetObject(putKey)
+	_ = ts.ObjectSize(putKey)
+
+	writes := ts.Writes(putKey)
+	if len(writes) != 1 {
+		t.Fatalf("Writes(%q) = %d requests, want exactly the one PUT: %+v", putKey, len(writes), writes)
+	}
+	if writes[0].Method != http.MethodPut {
+		t.Errorf("Writes returned a %s; the GET and the HEAD must not count as writes", writes[0].Method)
+	}
+
+	// CreateMultipartUpload is a POST, and it is the request that decides the storage class, the
+	// content encoding and the encryption for the whole upload — so a helper that missed POST would
+	// hide every one of those.
+	created, err := client.CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(multipartKey),
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_, _ = client.AbortMultipartUpload(context.Background(), &awss3.AbortMultipartUploadInput{
+			Bucket:   aws.String(ts.Bucket),
+			Key:      aws.String(multipartKey),
+			UploadId: created.UploadId,
+		})
+	})
+
+	mpWrites := ts.Writes(multipartKey)
+	if len(mpWrites) != 1 {
+		t.Fatalf("Writes(%q) = %d requests, want the one CreateMultipartUpload POST: %+v",
+			multipartKey, len(mpWrites), mpWrites)
+	}
+	if mpWrites[0].Method != http.MethodPost {
+		t.Errorf("Writes returned a %s for the multipart create, want POST", mpWrites[0].Method)
+	}
+
+	// Keys do not bleed into each other: Writes filters on the path suffix, and "writes/put" is not a
+	// suffix of "writes/multipart" or the reverse.
+	if n := len(ts.Writes("writes/absent")); n != 0 {
+		t.Errorf("Writes for a key nothing wrote returned %d requests", n)
+	}
+}
+
 func TestResetRequestsKeepsObjects(t *testing.T) {
 	t.Parallel()
 
@@ -352,9 +423,9 @@ func TestCapabilitiesFailsClosed(t *testing.T) {
 	n, _ := out.Body.Read(served)
 	served = served[:n]
 
-	honoursRange := string(served) == "4567"
+	honorsRange := string(served) == "4567"
 
-	if caps.RangeGET != honoursRange {
+	if caps.RangeGET != honorsRange {
 		t.Fatalf("Capabilities().RangeGET = %v but a ranged GET returned %q (want %q if honored); "+
 			"the probe disagrees with the endpoint",
 			caps.RangeGET, served, "4567")
