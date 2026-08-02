@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/analytics"
+	"github.com/scttfrdmn/objectfs/internal/analytics"
 )
 
 // TestNewMultiLevelCache tests cache creation with various configurations

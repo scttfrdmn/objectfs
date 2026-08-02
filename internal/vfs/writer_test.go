@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/vfs"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // The tests in this file are the audit's decisive write-path cases. Each one fails against the

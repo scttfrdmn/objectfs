@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/circuit"
-	"github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/retry"
-	"github.com/objectfs/objectfs/pkg/status"
-	"github.com/objectfs/objectfs/pkg/utils"
+	"github.com/scttfrdmn/objectfs/internal/circuit"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/pkg/status"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 // RecoveryStrategy defines how to handle and recover from errors

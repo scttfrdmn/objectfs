@@ -6,7 +6,7 @@ package compression
 import (
 	"fmt"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 // nopCodec is a pass-through codec that performs no compression.

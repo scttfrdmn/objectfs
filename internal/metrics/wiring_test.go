@@ -9,7 +9,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/objectfs/objectfs/internal/testhttp"
+	"github.com/scttfrdmn/objectfs/internal/testhttp"
 )
 
 // exactAdapterConfig is the Config internal/adapter builds, field-for-field.

@@ -310,6 +310,30 @@
   description: Dependency updates (Dependabot)
   color: 0366d6
 
+# Labels named by .github/dependabot.yml. Dependabot drops labels that do not exist without
+# reporting it, so these are load-bearing: `automerge` is the condition on every approve and merge
+# step in .github/workflows/dependabot-automerge.yml, and while it was missing that workflow could
+# not merge anything. 46 Dependabot PRs were opened and none were ever merged.
+- name: automerge
+  description: Eligible for Dependabot auto-merge (minor/patch, CI green)
+  color: 0e8a16
+
+- name: go
+  description: Go module dependency
+  color: 00add8
+
+- name: docker
+  description: Docker image dependency
+  color: 2496ed
+
+- name: github-actions
+  description: GitHub Actions workflow dependency
+  color: 2088ff
+
+- name: javascript
+  description: npm dependency (docs-platform, sdks/javascript)
+  color: f1e05a
+
 - name: needs-design
   description: Needs design discussion before implementation
   color: d4c5f9
@@ -335,5 +359,7 @@
   color: 006b75
 
 # ============================================================================
-# TOTAL: 90 labels (focused on ObjectFS needs)
+# No total is stated here on purpose. The line that used to live at the bottom of this file said
+# "TOTAL: 90 labels" while the file defined 72 — a count in a comment has no way to be told it is
+# stale. `grep -c '^- name:' .github/labels.yml` answers it correctly, forever.
 # ============================================================================

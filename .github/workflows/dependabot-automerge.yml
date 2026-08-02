@@ -1,5 +1,31 @@
 name: Dependabot Auto-Merge
 
+# Enable GitHub's native auto-merge on minor/patch dependency PRs; comment on majors.
+#
+# This workflow previously merged nothing at all — 46 Dependabot PRs were opened and none were ever
+# merged — for three independent reasons, each of which would have been enough on its own:
+#
+#   1. Every approve/merge step was gated on `contains(labels.*.name, 'automerge')`, and the
+#      `automerge` label did not exist in the repository. Dependabot drops labels it cannot find
+#      without reporting it, so the condition was never true. The label is now declared in
+#      .github/labels.yml; do not reference a label from dependabot.yml that is not defined there.
+#   2. `gh pr merge --auto` requires the repository to allow auto-merge. It was disabled, so that
+#      step would have failed even had the label matched.
+#   3. The wait step used `check-regexp: (test|lint|security).*`, which is case-sensitive and
+#      anchored at the start, so it matched `test` and `lint` and ignored `coverage`,
+#      `config-examples`, `cross-build`, `sdk-metrics`, `fuzz-smoke` and `Security Scan` — six of
+#      the eight jobs, including every cross-platform build.
+#
+# The wait step is gone rather than fixed. Which checks must pass now lives in branch protection on
+# `main`, which is the one place that also governs human PRs and cannot be bypassed by a workflow
+# edit. `--auto` parks the PR until those checks are green and merges it then; if a check fails the
+# PR simply stays open. A regexp in a workflow file duplicating the protection rules is a second
+# source of truth that silently drifts — that is exactly how (3) happened.
+#
+# Auto-merge covers minor and patch only. Majors get a comment and wait for a human, which matters
+# here: the aws-sdk-go-v2 major is explicitly ignored in dependabot.yml, and a go-fuse or cgofuse
+# major is a FUSE-behaviour change no green check would catch.
+
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled]
@@ -19,31 +45,14 @@ jobs:
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Wait for CI to complete
-      uses: lewagon/wait-on-check-action@v1.3.4
-      with:
-        ref: ${{ github.event.pull_request.head.sha }}
-        check-regexp: (test|lint|security).*
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        wait-interval: 10
-        allowed-conclusions: success,skipped
-
-    - name: Auto-approve minor and patch updates
+    - name: Approve and enable auto-merge for minor and patch updates
       if: |
         contains(github.event.pull_request.labels.*.name, 'automerge') &&
         (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
          steps.metadata.outputs.update-type == 'version-update:semver-minor')
-      run: gh pr review --approve "$PR_URL"
-      env:
-        PR_URL: ${{ github.event.pull_request.html_url }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Auto-merge minor and patch updates
-      if: |
-        contains(github.event.pull_request.labels.*.name, 'automerge') &&
-        (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-         steps.metadata.outputs.update-type == 'version-update:semver-minor')
-      run: gh pr merge --auto --squash "$PR_URL"
+      run: |
+        gh pr review --approve "$PR_URL"
+        gh pr merge --auto --squash "$PR_URL"
       env:
         PR_URL: ${{ github.event.pull_request.html_url }}
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

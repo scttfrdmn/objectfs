@@ -18,11 +18,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/compression"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	"github.com/scttfrdmn/objectfs/internal/compression"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 // TestShippedDefaultsConstructABackend is the C1 regression test.

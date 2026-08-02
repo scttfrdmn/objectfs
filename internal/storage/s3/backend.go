@@ -23,13 +23,13 @@ import (
 	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/objectfs/objectfs/internal/awsname"
-	"github.com/objectfs/objectfs/internal/circuit"
-	"github.com/objectfs/objectfs/internal/compression"
-	"github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/health"
-	"github.com/objectfs/objectfs/pkg/retry"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/circuit"
+	"github.com/scttfrdmn/objectfs/internal/compression"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/health"
+	"github.com/scttfrdmn/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // S3 user-metadata keys written by ObjectFS on upload.

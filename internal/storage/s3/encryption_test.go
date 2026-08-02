@@ -33,8 +33,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // The header names S3 spells encryption with. Written out rather than taken from the SDK because the

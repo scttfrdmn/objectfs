@@ -326,7 +326,7 @@ See the [examples](examples/) directory for more detailed usage examples:
 ### Setup
 
 ```bash
-git clone https://github.com/objectfs/objectfs.git
+git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs/sdks/python
 
 # Create virtual environment
@@ -374,6 +374,6 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution guidelines.
 
 ## Support
 
-- GitHub Issues: <https://github.com/objectfs/objectfs/issues>
+- GitHub Issues: <https://github.com/scttfrdmn/objectfs/issues>
 - Documentation: <https://docs.objectfs.io/python>
 - Community: <https://community.objectfs.io>

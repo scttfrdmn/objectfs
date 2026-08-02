@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
-	objerrors "github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/health"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/health"
 )
 
 // parallelReadConfig is the fan-out configuration these tests share: 1 MiB chunks over an 8 MiB

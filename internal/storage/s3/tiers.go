@@ -8,7 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/scttfrdmn/cargoship/pkg/aws/config"
 
-	"github.com/objectfs/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsname"
 )
 
 // S3 Storage Tier Constants.

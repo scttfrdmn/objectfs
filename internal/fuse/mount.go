@@ -15,7 +15,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/objectfs/objectfs/pkg/status"
+	"github.com/scttfrdmn/objectfs/pkg/status"
 )
 
 // FilesystemStats represents filesystem operation statistics

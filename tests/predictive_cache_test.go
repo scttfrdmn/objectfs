@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/cache"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // MockPredictiveBackend implements types.Backend for predictive cache testing

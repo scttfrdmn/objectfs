@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/vfs"
-	objerrors "github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // coded builds an ObjectFSError with a code, which is the shape the S3 backend produces.

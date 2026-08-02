@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/objectfs/objectfs/internal/adapter"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	pkgerrors "github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/adapter"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	pkgerrors "github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // Client provides access to an ObjectFS S3 bucket.

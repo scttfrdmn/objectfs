@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/internal/cache"
 )
 
 func TestMultiLevelCacheWithPredictive(t *testing.T) {

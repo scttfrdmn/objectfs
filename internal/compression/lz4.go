@@ -7,7 +7,7 @@ import (
 
 	"github.com/pierrec/lz4/v4"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 // LZ4Codec implements Codec using the LZ4 frame format via

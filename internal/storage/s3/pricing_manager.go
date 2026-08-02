@@ -11,7 +11,7 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"github.com/objectfs/objectfs/pkg/utils"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 // Currency Constants

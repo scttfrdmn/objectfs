@@ -1,9 +1,9 @@
 package cache
 
 import (
-	"github.com/objectfs/objectfs/internal/cache/redis"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/cache/redis"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // NewFromConfig constructs the appropriate cache backend from cfg.

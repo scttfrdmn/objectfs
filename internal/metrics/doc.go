@@ -228,7 +228,7 @@ Complete example of metrics integration:
 		"log"
 		"time"
 
-		"github.com/objectfs/objectfs/internal/metrics"
+		"github.com/scttfrdmn/objectfs/internal/metrics"
 	)
 
 	func main() {

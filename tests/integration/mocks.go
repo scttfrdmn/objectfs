@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/objectfs/objectfs/pkg/optimization"
+
+	"github.com/scttfrdmn/objectfs/pkg/optimization"
 )
 
 // Mock implementations for testing optimization interfaces

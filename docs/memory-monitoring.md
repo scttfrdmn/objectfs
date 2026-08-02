@@ -5,6 +5,7 @@ ObjectFS includes comprehensive memory monitoring and leak detection capabilitie
 ## Overview
 
 The `pkg/memmon` package provides:
+
 - **Real-time memory monitoring** with configurable sampling
 - **Automatic leak detection** for memory growth, goroutine leaks, GC pressure, and heap fragmentation
 - **Object tracking** for tracking allocations of specific types
@@ -14,7 +15,7 @@ The `pkg/memmon` package provides:
 ## Quick Start
 
 ```go
-import "github.com/objectfs/objectfs/pkg/memmon"
+import "github.com/scttfrdmn/objectfs/pkg/memmon"
 
 // Create monitor with default configuration
 config := memmon.DefaultMonitorConfig()
@@ -147,6 +148,7 @@ monitor.TrackObject("dirty-paths", w.Count())
 **Issue**: The `Clear()` and `removeItem()` methods didn't explicitly nil out data slices and list elements.
 
 **Fix**:
+
 - Explicitly set `item.data = nil` and `item.element = nil`
 - Properly track evictions count before clearing
 - Iterate and delete items individually to help GC
@@ -181,6 +183,7 @@ go tool pprof -png heap.prof > heap.png
 ## Performance Impact
 
 Memory monitoring has minimal overhead:
+
 - **Sampling**: < 1ms per sample
 - **Object tracking**: ~100ns per increment/decrement
 - **Profiling**: Only when explicitly requested

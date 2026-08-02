@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // ── mock backend ──────────────────────────────────────────────────────────────

@@ -8,8 +8,8 @@ import (
 	iofs "io/fs"
 	"syscall"
 
-	"github.com/objectfs/objectfs/internal/vfs"
-	objerrors "github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // toErrno translates an error from internal/vfs, pkg/errors, or a backend into the errno the kernel

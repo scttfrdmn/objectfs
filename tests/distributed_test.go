@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/distributed"
+	"github.com/scttfrdmn/objectfs/internal/distributed"
 )
 
 func TestClusterManager_BasicOperations(t *testing.T) {

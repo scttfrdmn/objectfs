@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // Writer is the [types.WriteBuffer] implementation backed by [Node] and [Flusher]: dirty byte

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/health"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/health"
 )
 
 func TestValidateStorageURI(t *testing.T) {

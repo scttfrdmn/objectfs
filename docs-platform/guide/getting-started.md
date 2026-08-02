@@ -102,7 +102,6 @@ aws configure
 
 </CodeRunner>
 
-
 ### 2. Create a Mount Point
 
 <CodeRunner language="bash">
@@ -384,7 +383,7 @@ Now that you have ObjectFS running, explore these advanced features:
 If you encounter issues or need help:
 
 - Check our [troubleshooting guide](/guide/troubleshooting)
-- Search [GitHub issues](https://github.com/objectfs/objectfs/issues)
+- Search [GitHub issues](https://github.com/scttfrdmn/objectfs/issues)
 - Ask questions on our [community forum](https://community.objectfs.io)
 - Review the [API documentation](/api/)
 

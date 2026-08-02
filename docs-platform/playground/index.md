@@ -134,8 +134,8 @@ import (
     "context"
     "time"
 
-    "github.com/objectfs/objectfs/pkg/client"
-    "github.com/objectfs/objectfs/internal/config"
+    "github.com/scttfrdmn/objectfs/pkg/client"
+    "github.com/scttfrdmn/objectfs/internal/config"
 )
 
 func main() {

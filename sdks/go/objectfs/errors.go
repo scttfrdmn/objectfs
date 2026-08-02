@@ -1,6 +1,6 @@
 package objectfs
 
-import pkgerrors "github.com/objectfs/objectfs/pkg/errors"
+import pkgerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 
 // Sentinel errors for the ObjectFS SDK.
 //

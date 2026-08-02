@@ -14,7 +14,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/scttfrdmn/substrate/emulator"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
 )
 
 // Shared returns an S3 endpoint that outlives the calling test, starting it on first use.

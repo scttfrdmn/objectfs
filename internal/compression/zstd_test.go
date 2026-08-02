@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 func TestNewZstdCodec_DefaultLevel(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 func TestTracker_RegisterComponent(t *testing.T) {

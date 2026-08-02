@@ -3,9 +3,9 @@ package s3
 import (
 	"time"
 
-	"github.com/objectfs/objectfs/internal/awsname"
-	"github.com/objectfs/objectfs/internal/circuit"
-	"github.com/objectfs/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/circuit"
+	"github.com/scttfrdmn/objectfs/pkg/retry"
 )
 
 // Parallel-read fallbacks, applied when a Config reaches [Backend.parallelGetObject] with these

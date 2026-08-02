@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/objectfs/objectfs/internal/vfs"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // VFS is a [FS] built on [vfs.Node] over a real object-storage backend, doing genuine

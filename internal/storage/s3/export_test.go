@@ -8,7 +8,7 @@ package s3
 // that used the harness would be an import cycle.
 
 import (
-	"github.com/objectfs/objectfs/internal/circuit"
+	"github.com/scttfrdmn/objectfs/internal/circuit"
 )
 
 // SetPoolSizeForTest overwrites a live backend's pool size.

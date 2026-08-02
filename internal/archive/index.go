@@ -13,8 +13,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	archivepkg "github.com/objectfs/objectfs/pkg/archive"
-	"github.com/objectfs/objectfs/pkg/types"
+	archivepkg "github.com/scttfrdmn/objectfs/pkg/archive"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // BuildIndex downloads archiveKey from backend, walks its tar headers to build

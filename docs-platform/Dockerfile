@@ -79,6 +79,6 @@ LABEL org.label-schema.build-date=$BUILD_DATE \
       org.label-schema.description="ObjectFS Documentation Platform" \
       org.label-schema.version=$VERSION \
       org.label-schema.vcs-ref=$VCS_REF \
-      org.label-schema.vcs-url="https://github.com/objectfs/objectfs" \
+      org.label-schema.vcs-url="https://github.com/scttfrdmn/objectfs" \
       org.label-schema.schema-version="1.0" \
       maintainer="ObjectFS Team <team@objectfs.io>"

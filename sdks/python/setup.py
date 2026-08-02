@@ -22,7 +22,7 @@ setup(
     long_description_content_type='text/markdown',
     author='ObjectFS Team',
     author_email='team@objectfs.io',
-    url='https://github.com/objectfs/objectfs',
+    url='https://github.com/scttfrdmn/objectfs',
     packages=find_packages(),
     classifiers=[
         'Development Status :: 4 - Beta',
@@ -68,8 +68,8 @@ setup(
         ],
     },
     project_urls={
-        'Bug Reports': 'https://github.com/objectfs/objectfs/issues',
-        'Source': 'https://github.com/objectfs/objectfs',
+        'Bug Reports': 'https://github.com/scttfrdmn/objectfs/issues',
+        'Source': 'https://github.com/scttfrdmn/objectfs',
         'Documentation': 'https://docs.objectfs.io/python',
     },
     keywords='filesystem, object-storage, s3, fuse, distributed, cache, performance',

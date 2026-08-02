@@ -14,8 +14,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestConfiguredStorageTierReachesTheStoredObject asserts the class the endpoint recorded, for each

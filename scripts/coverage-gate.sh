@@ -35,6 +35,25 @@ if [[ ! -f "$floors" ]]; then
   exit 2
 fi
 
+# The module path is read from go.mod rather than written here.
+#
+# It used to be a literal in the awk program below, and a module-path rename broke this gate in the
+# most misleading way available: every package reported "no floor set (add to .coverage-floors)" and
+# the run failed with "at least one package is below its floor" — naming, between those two lines,
+# nothing at all. The prefix no longer matched, so every measured package kept its full import path
+# while every floor was still repo-relative, and the two sets stopped intersecting. A gate that
+# silently stops matching anything is worse than one that fails, because "no floor set" reads as a
+# missing entry rather than as a broken gate.
+#
+# The rename also could not have caught it by search: inside the awk program the path was written
+# with escaped separators (github\.com\/…), so a grep for the real path found nothing. Deriving it
+# means there is one authority, and it is the same file the compiler reads.
+module="$(awk '$1 == "module" { print $2; exit }' go.mod)"
+if [[ -z "$module" ]]; then
+  echo "coverage-gate: could not read the module path from go.mod" >&2
+  exit 2
+fi
+
 # go tool cover reports per-function; per-package is the sum of statements, not the mean of
 # percentages. Weighting by statement count matters: a package with one fully-covered one-line
 # function and one uncovered hundred-line function is not at 50%.
@@ -43,16 +62,17 @@ fi
 measured="$(mktemp)"
 trap 'rm -f "$measured"' EXIT
 
-awk '
+awk -v module="$module" '
   NR == 1 && $0 ~ /^mode:/ { next }
   {
     split($1, loc, ":")
     path = loc[1]
     # Strip the trailing filename to get the package import path.
     sub(/\/[^\/]+$/, "", path)
-    # And the module prefix, so the floors file reads as repo-relative paths.
-    sub(/^github\.com\/objectfs\/objectfs\//, "", path)
-    sub(/^github\.com\/objectfs\/objectfs$/, ".", path)
+    # And the module prefix, so the floors file reads as repo-relative paths. index/substr rather
+    # than sub, because the module path is data here and sub would read its dots as metacharacters.
+    if (index(path, module "/") == 1) path = substr(path, length(module) + 2)
+    else if (path == module) path = "."
 
     total[path] += $2
     if ($3 > 0) covered[path] += $2

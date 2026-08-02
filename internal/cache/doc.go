@@ -144,7 +144,7 @@ Cache operations:
 
 # What a Caller Must Know
 
-The full contract is on [github.com/objectfs/objectfs/pkg/types.Cache]. Three parts of it are easy to
+The full contract is on [github.com/scttfrdmn/objectfs/pkg/types.Cache]. Three parts of it are easy to
 get wrong, and each was a shipped defect:
 
 Ask for the length you need, and no more. Get returns the requested range or nil; a partial hit is a

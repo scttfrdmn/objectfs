@@ -6,8 +6,12 @@ body:
 - type: markdown
   attributes:
     value: |
-      **⚠️ IMPORTANT: For security vulnerabilities, please use GitHub's Private Security Advisory feature instead.**
-      Go to: Security → Advisories → New draft advisory
+      **⚠️ For anything exploitable, report it privately instead — this tracker is public.**
+
+      → **[Open a private security advisory](https://github.com/scttfrdmn/objectfs/security/advisories/new)**
+
+      See [SECURITY.md](https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md) for what is in
+      scope, what the default configuration exposes, and what to include in a report.
 
       Use this template for:
       - Security hardening suggestions

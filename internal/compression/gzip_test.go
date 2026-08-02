@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"testing"
 
-	comprpkg "github.com/objectfs/objectfs/pkg/compression"
+	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
 )
 
 func TestGzipCodec_RoundTrip(t *testing.T) {

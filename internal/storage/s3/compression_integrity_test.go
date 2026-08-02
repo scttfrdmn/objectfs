@@ -23,9 +23,9 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
-	objectfserrors "github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
+	objectfserrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // The metadata keys are spelled out here rather than imported from the package under test. They are

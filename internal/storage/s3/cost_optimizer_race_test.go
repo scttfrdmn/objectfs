@@ -15,8 +15,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
 // TestAccessPatternTrackingIsSafeUnderConcurrentReads is a race regression test, so it is only

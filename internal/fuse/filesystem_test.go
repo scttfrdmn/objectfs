@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // mapCache is a minimal in-memory types.Cache used by tests.

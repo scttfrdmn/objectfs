@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/objectfs/objectfs/internal/cache"
-	"github.com/objectfs/objectfs/internal/config"
-	"github.com/objectfs/objectfs/internal/metrics"
-	"github.com/objectfs/objectfs/internal/storage/s3"
-	"github.com/objectfs/objectfs/internal/vfs"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/metrics"
+	"github.com/scttfrdmn/objectfs/internal/storage/s3"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // IntegrationTestSuite contains all integration tests

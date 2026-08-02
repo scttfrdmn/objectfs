@@ -17,7 +17,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 func TestWholeObjectResponse(t *testing.T) {

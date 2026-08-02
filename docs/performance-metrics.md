@@ -17,7 +17,7 @@ The detailed performance metrics system (`internal/metrics/detailed.go`) provide
 ### Creating a Metrics Collector
 
 ```go
-import "github.com/objectfs/objectfs/internal/metrics"
+import "github.com/scttfrdmn/objectfs/internal/metrics"
 
 // Create with default settings (top 100 files tracked)
 dpm := metrics.NewDetailedPerformanceMetrics()
@@ -40,7 +40,7 @@ dpm := metrics.NewDetailedPerformanceMetricsWithOptions(
 ```go
 import (
     "time"
-    "github.com/objectfs/objectfs/internal/metrics"
+    "github.com/scttfrdmn/objectfs/internal/metrics"
 )
 
 // Record a successful read operation
@@ -314,6 +314,7 @@ Latency percentiles (P50, P95, P99) are calculated using histogram buckets:
 - **P99**: 99% of operations complete faster than this latency
 
 Histogram buckets (in milliseconds):
+
 ```
 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000+
 ```
@@ -442,7 +443,7 @@ func logMetrics(dpm *metrics.DetailedPerformanceMetrics) {
 ### Storage Backend Integration
 
 ```go
-import "github.com/objectfs/objectfs/internal/storage/s3"
+import "github.com/scttfrdmn/objectfs/internal/storage/s3"
 
 // Example: Instrument S3 backend operations
 func (b *S3Backend) ReadObject(ctx context.Context, key string) ([]byte, error) {
@@ -513,6 +514,7 @@ dpm.Reset()
 ```
 
 This is useful for:
+
 - Testing scenarios where you need clean metrics
 - Periodic resets to prevent counter overflow
 - Starting new measurement windows
@@ -544,6 +546,7 @@ This is useful for:
 **Problem**: Metrics using too much memory
 
 **Solutions**:
+
 - Reduce `MaxTrackedFiles` (e.g., from 100 to 10)
 - Disable file tracking: `TopFilesEnabled=false`
 - Reset metrics more frequently
@@ -554,11 +557,13 @@ This is useful for:
 **Problem**: P95/P99 latencies seem wrong
 
 **Causes**:
+
 - Not enough samples (need at least 100 operations for accurate percentiles)
 - Outliers skewing distribution (check max latency)
 - Histogram bucket boundaries not suitable for your latency range
 
 **Solutions**:
+
 - Wait for more samples to accumulate
 - Check for performance issues causing outliers
 - Consider adjusting histogram buckets if needed
@@ -570,6 +575,7 @@ This is useful for:
 **Cause**: Not recording cache source correctly
 
 **Solution**: Ensure you're passing the correct `CacheSourceType` when recording operations:
+
 ```go
 // Wrong
 dpm.RecordOperation(metrics.OpRead, path, latency, bytes, metrics.CacheSourceNone, nil)
@@ -583,11 +589,13 @@ dpm.RecordOperation(metrics.OpRead, path, latency, bytes, metrics.CacheSourceL1,
 **Problem**: Monthly cost projections don't match actual bills
 
 **Causes**:
+
 - Recording costs incorrectly
 - Not accounting for all operation types
 - Usage patterns changed since last projection
 
 **Solutions**:
+
 - Verify cost recording matches AWS pricing
 - Ensure all S3 operations record costs
 - Use shorter projection windows (weekly instead of monthly)

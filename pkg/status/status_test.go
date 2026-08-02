@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
-	"github.com/objectfs/objectfs/pkg/health"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/health"
 )
 
 func TestOperationStatus_String(t *testing.T) {

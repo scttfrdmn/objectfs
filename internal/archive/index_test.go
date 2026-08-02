@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	archivepkg "github.com/objectfs/objectfs/pkg/archive"
-	"github.com/objectfs/objectfs/pkg/types"
+	archivepkg "github.com/scttfrdmn/objectfs/pkg/archive"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // ── BuildIndexFromBytes ───────────────────────────────────────────────────────

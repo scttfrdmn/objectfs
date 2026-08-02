@@ -24,7 +24,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/objectfs/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/internal/vfs"
 )
 
 // setAttrIn builds a SETATTR request carrying exactly the fields named in valid.

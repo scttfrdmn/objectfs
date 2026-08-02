@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/objectfs/objectfs/internal/cache"
-	"github.com/objectfs/objectfs/internal/fuse"
-	"github.com/objectfs/objectfs/pkg/types"
+	"github.com/scttfrdmn/objectfs/internal/cache"
+	"github.com/scttfrdmn/objectfs/internal/fuse"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // POSIXTestSuite tests POSIX functionality of ObjectFS

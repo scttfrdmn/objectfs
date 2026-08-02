@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/objectfs/objectfs/pkg/errors"
+	"github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // TestMissingObjectDoesNotDegradeReads pins the classification defect.
