@@ -360,21 +360,32 @@ predictor is never installed on the mount path. It is listed in the
 
 ## Next Steps
 
-Now that you have ObjectFS running, explore these advanced features:
+This section listed four pages — Performance Tuning, Distributed Clusters, Monitoring, and Security
+— and none of them was ever written. `docs-platform/guide/` contains this page and an introduction.
+What does exist, in the repository:
 
-- **[Performance Tuning](/guide/performance)**: Optimize ObjectFS for your workload
-- **[Distributed Clusters](/guide/distributed)**: Set up multi-node deployments  
-- **[Monitoring](/guide/monitoring)**: Configure comprehensive observability
-- **[Security](/guide/security)**: Implement authentication and authorization
+- **[Supported operations and the integrity contract](https://github.com/scttfrdmn/objectfs/blob/main/README.md)**:
+  what works, what fails by design, and which tools are known not to work. Read this before
+  pointing a workload at a mount
+- **[Configuration reference](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md)**:
+  every key the loader accepts, and the **Not yet wired up** table for the features that have code
+  but no path from a mount
+- **[Benchmarks](https://github.com/scttfrdmn/objectfs/tree/main/benchmarks)**: runnable, which is
+  the only kind of performance figure this project quotes
+
+Security is IAM's and the bucket's: ObjectFS adds no authentication or authorization layer of its
+own. It does write with server-side encryption — SSE-S3 or SSE-KMS, configurable — on every object.
 
 ## Getting Help
 
 If you encounter issues or need help:
 
-- Check our [troubleshooting guide](/guide/troubleshooting)
 - Search [GitHub issues](https://github.com/scttfrdmn/objectfs/issues)
 - Ask questions in [GitHub Discussions](https://github.com/scttfrdmn/objectfs/discussions)
-- Review the [API documentation](/api/)
+
+There is no troubleshooting guide and no API reference site; both were linked here and neither
+exists. For the Go API, `go doc ./internal/adapter` is the authority, with the caveat that these
+packages are under `internal/` and importable only inside this module.
 
 <InteractiveExample>
 

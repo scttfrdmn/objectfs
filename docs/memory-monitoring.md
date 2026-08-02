@@ -255,5 +255,7 @@ See [pkg/memmon](../pkg/memmon/) for complete API documentation.
 ## Related Documentation
 
 - [Error Handling and Recovery](./error-handling-recovery.md)
-- [Performance Tuning](./performance-tuning.md)
-- [Operations Guide](./operations.md)
+- [Concurrency patterns](./concurrency-patterns.md)
+
+`./performance-tuning.md` and `./operations.md` were linked here and neither was written;
+`docs/operations/` exists as an empty directory.

@@ -311,14 +311,18 @@ except ConfigurationError as e:
 
 ## Examples
 
-See the [examples](examples/) directory for more detailed usage examples:
+There is no `examples/` directory. This section listed six files in one, and none of them was ever
+written — the runnable examples are the inline ones above:
 
-- [Basic mounting](examples/basic_mount.py)
-- [Async operations](examples/async_example.py)  
-- [Configuration management](examples/config_example.py)
-- [Storage operations](examples/storage_example.py)
-- [Distributed clusters](examples/cluster_example.py)
-- [Monitoring and metrics](examples/monitoring_example.py)
+- [Basic mounting](#basic-usage)
+- [Async operations](#async-usage)
+- [Configuration management](#configuration)
+- [Storage operations](#storage-operations)
+- [Distributed clusters](#distributed-clusters) — note that multi-node coordination is
+  experimental and not reachable from a mount today
+- Monitoring and metrics: `internal/metrics/doc.go` documents the Prometheus endpoint. The SDK
+  method that reported cache statistics returned a hardcoded `hit_rate`, so there is nothing here
+  to point at yet
 
 ## Development
 

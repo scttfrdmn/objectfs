@@ -49,8 +49,9 @@ which names them rather than leaving them mixed in with the list above.
 ### 📦 Compression
 
 - **ZSTD and LZ4**, opt-in per mount. Off by default, because a compressed object is no longer
-  readable by `aws s3 cp` or boto3 — see [Compression](features/compression.md) for what that costs
-  you and when it pays.
+  readable by `aws s3 cp` or boto3. The guidance page on what that costs and when it pays is
+  [issue 186](https://github.com/scttfrdmn/objectfs/issues/186); until it is written, the one
+  tradeoff that has bitten users is stated in the README's data integrity section.
 
 ### 🔧 Operations
 
@@ -251,13 +252,18 @@ What *can* be said without a benchmark, because it follows from the design:
 
 ## Personas
 
-ObjectFS is designed for academic and research computing personas:
+ObjectFS is aimed at academic and research computing:
 
-- 🧬 **[Computational Biologist](personas/computational-biologist.md)**: Genomics, proteomics, variant analysis
-- ⚛️ **[Physics Researcher](personas/physics-researcher.md)**: HPC simulations, particle data
-- 🌍 **[Climate Scientist](personas/climate-scientist.md)**: Climate models, historical datasets
-- 👨‍🔬 **[Lab Manager / PI](personas/lab-manager.md)**: Team coordination, cost management
-- 🖥️ **[Research Computing Staff](personas/research-computing.md)**: Infrastructure, multi-user deployments
+- 🧬 **Computational Biologist**: genomics, proteomics, variant analysis
+- ⚛️ **Physics Researcher**: HPC simulations, particle data
+- 🌍 **Climate Scientist**: climate models, historical datasets
+- 👨‍🔬 **Lab Manager / PI**: team coordination, cost management
+- 🖥️ **Research Computing Staff**: infrastructure, multi-user deployments
+
+Each of these was a link to a page in `docs/personas/`, and that directory is empty — five links,
+the whole audience section, pointing at nothing. The intent was real: `persona:` labels exist on
+GitHub for all five, so issues can be filed against them. The pages were not written, so the names
+are left as names rather than as promises.
 
 ---
 

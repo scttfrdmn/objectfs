@@ -441,14 +441,16 @@ export OBJECTFS_CLUSTER_ENABLED=true
 
 ## Examples
 
-See the [examples](examples/) directory for complete examples:
+There is no `examples/` directory. This section listed six files in one, and none of them was ever
+written — the runnable examples are the inline ones above:
 
-- [Basic mounting](examples/basic-mount.js)
-- [TypeScript usage](examples/typescript-example.ts)
-- [Configuration management](examples/config-example.js)
-- [Storage operations](examples/storage-example.js)
-- [Event handling](examples/events-example.js)
-- [Distributed clusters](examples/cluster-example.js)
+- [Basic mounting](#basic-usage)
+- [TypeScript usage](#typescript-usage)
+- [Configuration management](#configuration-management)
+- [Storage operations](#storage-operations)
+- [Event handling](#event-handling)
+- [Distributed clusters](#distributed-clusters) — note that multi-node coordination is
+  experimental and not reachable from a mount today
 
 ## Development
 

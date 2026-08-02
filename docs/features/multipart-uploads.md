@@ -406,10 +406,12 @@ Planned improvements for multipart uploads:
 
 ## Related Documentation
 
-- [S3 Backend Configuration](../configuration/s3.md)
-- [CargoShip Optimization](./cargoship.md)
-- [Performance Tuning Guide](./performance.md)
+- [Configuration reference](../index.md) — every key the loader accepts, including the S3 block
+- [S3 Transfer Acceleration](../s3-acceleration.md) — the other half of the large-object path
 - [AWS S3 Multipart Upload Documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html)
+
+`../configuration/s3.md`, `./cargoship.md`, and `./performance.md` were linked here and none was
+written; `docs/configuration/` does not exist as a directory.
 
 ## See Also
 

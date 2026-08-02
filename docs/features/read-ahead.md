@@ -461,10 +461,14 @@ the accesses you make through it and nothing the filesystem does.
 
 ## Related Documentation
 
-- [Cache Configuration](../configuration/cache.md)
-- [Performance Tuning Guide](./performance.md)
+- [Configuration reference](../index.md) — every cache key the loader accepts, and the
+  **Not yet wired up** table, which is where the ML predictor is
 - [Multipart Upload Optimization](./multipart-uploads.md)
-- [ML Model Training Guide](./ml-training.md)
+
+`../configuration/cache.md`, `./performance.md`, and `./ml-training.md` were linked here and none
+was written. The last of the three is the most misleading: there is no model to train — the
+`Predictor` interface `internal/cache` can take is never set on the mount path, so the size
+heuristic is what runs.
 
 ## Implementation Details
 

@@ -131,8 +131,9 @@ none.
 
 ## Getting Started
 
-Head over to the [Installation Guide](/guide/installation) to set up ObjectFS, or the
-[Quick Start](/guide/getting-started) tutorial.
+The [Quick Start](/guide/getting-started) covers building and mounting. There is no separate
+installation guide — that link pointed at a page that was never written, and installation is two
+commands, so it lives in the Quick Start rather than in a page of its own.
 
 ## Community & Support
 
