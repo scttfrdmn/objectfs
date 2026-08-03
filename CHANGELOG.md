@@ -85,7 +85,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payloads are not encrypted, and because every member holds the same key, a compromised node can
   impersonate any other.
 
+- **The documentation platform's three `vite` advisories are closed, by an `overrides` block rather
+  than by the version bump they asked for.** Alerts 1–3 all name `vite` in
+  `docs-platform/package.json`, and every one of them has its lowest patched release on the 6.x line
+  (`<= 6.4.2` → 6.4.3, `<= 6.4.1` → 6.4.2). There is no patched 5.x, so `"vite": "^5.0.10"` was
+  permanently vulnerable no matter how far it moved inside the major.
+
+  Bumping the declared range to `^6.4.3` on its own does not close them, which is worth recording
+  because it looks like it should. `vitepress@1.6.4` — the latest *stable* release — depends on
+  `vite: ^5.4.14` as a regular dependency rather than a peer, so npm is free to satisfy it
+  separately: the install produces `vite@6.4.3` at the top level and
+  `node_modules/vitepress/node_modules/vite@5.4.21` underneath it, and the nested copy is the one
+  that builds the docs. Verified by installing exactly that and running `npm audit`, which still
+  reported `high vite <=6.4.2`. The manifest would have looked fixed while the vulnerable code was
+  still on disk and still executing.
+
+  An `overrides` block is what forces the transitive copy up too. With `vite: ^6.4.3` there,
+  `npm audit` reports zero vite findings and no nested `vite` directory exists. This keeps
+  `vitepress` on its current stable version; the alternative was `vitepress@2.0.0-alpha.19` with
+  `vite@^7`, which also clears the alerts but makes a published pre-release a dependency of the docs
+  build, and an override is the smaller commitment for the same result.
+
+  `uuid: ^11.1.1` is overridden for the same structural reason — a missing buffer-bounds check in
+  `uuid` v3/v5/v6 reachable through `dockerode` → `docker-modem`, which `src/api-server.js` uses to
+  run playground containers. `dockerode@5.0.1` drops the dependency entirely, but that is a major
+  bump of a package with live call sites; the override fixes the vulnerable code without touching
+  them. `dockerode` and `docker-modem` were both confirmed to load and `uuid.v4()` to work under the
+  forced version. `npm audit` in `docs-platform` now reports zero vulnerabilities of any severity,
+  down from three high/moderate vite findings plus two moderate `uuid`/`dockerode` findings that no
+  alert had been opened for.
+
+  A caveat this does not fix, and which is the reason none of it can be verified by CI: **the docs
+  platform does not build, on `main` or with these overrides**, and nothing in CI runs
+  `vitepress build` to notice. Filed as [#317]. The override does move the failure later — vite 6
+  loads the ESM-only `vitepress` that vite 5 refused with *"ESM file cannot be loaded by
+  `require`"*, so the build now reaches page compilation instead of dying in config resolution —
+  but "later" is not "passing", and the version claim here rests on `npm audit` and on module
+  loading, not on a successful build.
+
 [#206]: https://github.com/scttfrdmn/objectfs/issues/206
+[#317]: https://github.com/scttfrdmn/objectfs/issues/317
 
 ### Fixed
 
