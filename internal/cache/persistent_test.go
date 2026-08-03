@@ -230,13 +230,28 @@ func TestPersistentCache_Compression(t *testing.T) {
 	}
 }
 
-// TestPersistentCache_TTLExpiration tests TTL-based expiration
+// TestPersistentCache_TTLExpiration tests TTL-based expiration.
+//
+// The TTL is 2s rather than the 100ms it used to be, because 100ms made this test flaky in a way
+// that reported as a cache defect. `Put` stamps `Timestamp: now` at entry (persistent.go:305) and
+// then gzip-encodes and writes to disk, so the item's clock starts before the write completes. Any
+// delay between `Put` returning and the "immediately after Put" `Get` — GC, scheduler contention on
+// a shared runner, a slow temp filesystem — eats into the same 100ms the assertion depends on. It
+// failed exactly that way on a config-only PR. Reproduced deliberately by sleeping 120ms after the
+// Put: the item is gone before it is ever read.
+//
+// 2s is not a cure for a race; it is a budget wide enough that scheduling noise cannot reach it,
+// while `expiryWait` keeps the test's runtime governed by the TTL rather than a hardcoded sleep.
+// Stamping the timestamp after the write would also fix the flake, but TTL-measured-from-write-start
+// is the defensible semantic — the entry is as old as its data — so the test is what changes.
 func TestPersistentCache_TTLExpiration(t *testing.T) {
+	const ttl = 2 * time.Second
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
 		MaxSize:   10 * 1024 * 1024,
-		TTL:       100 * time.Millisecond, // Very short TTL
+		TTL:       ttl,
 	})
 	if err != nil {
 		t.Fatalf("NewPersistentCache failed: %v", err)
@@ -252,14 +267,19 @@ func TestPersistentCache_TTLExpiration(t *testing.T) {
 		t.Error("item should exist immediately after Put")
 	}
 
-	// Wait for TTL to expire
-	time.Sleep(150 * time.Millisecond)
+	expiryWait(ttl)
 
 	// Should be expired
 	retrieved := cache.Get(key, 0, int64(len(data)))
 	if retrieved != nil {
 		t.Error("item should have expired")
 	}
+}
+
+// expiryWait sleeps until a TTL of the given length has certainly elapsed, with enough margin that
+// a slow runner cannot land inside the window. Callers assert on expiry after this returns.
+func expiryWait(ttl time.Duration) {
+	time.Sleep(ttl + ttl/2)
 }
 
 // TestPersistentCache_Delete tests Delete operation
@@ -386,13 +406,21 @@ func TestPersistentCache_Clear(t *testing.T) {
 	}
 }
 
-// TestPersistentCache_Optimize tests Optimize operation
+// TestPersistentCache_Optimize tests Optimize operation.
+//
+// 2s TTL for the reason given on TestPersistentCache_TTLExpiration, and this one was the more
+// fragile of the two at 100ms: it asserts `finalCount == 1`, which requires key4's own Put plus
+// Optimize to finish inside the TTL. Three writes, a sleep, a fourth write and a full index sweep
+// against a 100ms budget is a coin flip on a loaded runner, and losing it looks like Optimize
+// evicting a fresh entry.
 func TestPersistentCache_Optimize(t *testing.T) {
+	const ttl = 2 * time.Second
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
 		MaxSize:   10 * 1024 * 1024,
-		TTL:       100 * time.Millisecond, // Short TTL
+		TTL:       ttl,
 	})
 	if err != nil {
 		t.Fatalf("NewPersistentCache failed: %v", err)
@@ -404,7 +432,7 @@ func TestPersistentCache_Optimize(t *testing.T) {
 	cache.Put("key3", 0, []byte("data3"))
 
 	// Wait for items to expire
-	time.Sleep(150 * time.Millisecond)
+	expiryWait(ttl)
 
 	// Add fresh item
 	cache.Put("key4", 0, []byte("data4"))
