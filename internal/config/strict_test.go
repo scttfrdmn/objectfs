@@ -174,9 +174,9 @@ func TestLoadFromFileLeavesUnmentionedKeysAtTheirDefaults(t *testing.T) {
 
 	def := NewDefault()
 
-	if cfg.Global.MetricsPort != def.Global.MetricsPort {
-		t.Errorf("a key the document does not mention lost its default: metrics_port = %d, want %d",
-			cfg.Global.MetricsPort, def.Global.MetricsPort)
+	if cfg.Monitoring.Metrics.Addr != def.Monitoring.Metrics.Addr {
+		t.Errorf("a key the document does not mention lost its default: monitoring.metrics.addr = %q, "+
+			"want %q", cfg.Monitoring.Metrics.Addr, def.Monitoring.Metrics.Addr)
 	}
 
 	if cfg.Cache.TTL != def.Cache.TTL {

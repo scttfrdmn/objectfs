@@ -42,9 +42,19 @@ type Config struct {
 	MetricsEnabled bool `yaml:"metrics_enabled"`
 
 	// HTTP endpoint settings
-	HTTPEnabled bool   `yaml:"http_enabled"`
-	HTTPPort    int    `yaml:"http_port"`
-	HTTPPath    string `yaml:"http_path"`
+	HTTPEnabled bool `yaml:"http_enabled"`
+
+	// HTTPAddr is the host:port the endpoint binds, default "127.0.0.1:8081".
+	//
+	// This was HTTPPort, an int, which could only ever produce ":%d" — the wildcard. /health reports
+	// component names, error strings and check timings with no authentication, and it is on by default,
+	// so a stock mount published that to anything that could route to it (#211). The port range is also
+	// checked at config load now rather than at bind: 99999 is a config an operator could write, and it
+	// failed in the address parse on this goroutine, logged, and returned, leaving the mount up with no
+	// endpoint (#192).
+	HTTPAddr string `yaml:"http_addr"`
+
+	HTTPPath string `yaml:"http_path"`
 }
 
 // Check represents a health check function
@@ -141,7 +151,7 @@ func NewChecker(config *Config) (*Checker, error) {
 			AlertThreshold:   2,
 			MetricsEnabled:   true,
 			HTTPEnabled:      true,
-			HTTPPort:         8081,
+			HTTPAddr:         "127.0.0.1:8081",
 			HTTPPath:         "/health",
 		}
 	}
@@ -201,13 +211,30 @@ func (c *Checker) Start(ctx context.Context) error {
 	// Start background check loop
 	go c.checkLoop()
 
-	// Start HTTP server if enabled.
+	// Start the HTTP endpoint if enabled.
+	//
+	// The bind happens here, before returning, and its error fails Start. It used to happen on a
+	// goroutine that logged and returned, which left the mount running with no health endpoint and one
+	// line in the log to say why — and #192, which reported the unvalidated port, called that
+	// non-fatal behavior "the right call for observability". It is the opposite: an operator who asked
+	// for the endpoint and did not get it learns from a scrape failing later, and `enabled: false` is
+	// already how you ask for no endpoint. Config validation now rejects a malformed or out-of-range
+	// address at load naming the field, so what reaches here is a real bind failure — the address is
+	// taken, or the OS refused it — which is worth a startup error the operator can act on immediately.
 	//
 	// context.WithoutCancel: the listener outlives the Start call, and this ctx is the caller's
 	// request-scoped one. Binding it directly would tear the endpoint down the moment the caller
 	// canceled — Stop is what ends this server.
 	if c.config.HTTPEnabled {
-		go c.startHTTPServer(context.WithoutCancel(ctx))
+		serveCtx := context.WithoutCancel(ctx)
+
+		ln, err := c.listenHealth(serveCtx)
+		if err != nil {
+			c.started = false
+			return err
+		}
+
+		go c.serveHealth(serveCtx, ln)
 	}
 
 	return nil
@@ -467,25 +494,27 @@ func (c *Checker) updateStats() {
 	c.stats.SystemUptime = time.Since(c.lastUpdate)
 }
 
-// startHTTPServer binds the configured port and serves the health endpoint until Stop.
+// listenHealth binds the configured address for the health endpoint.
 //
-// The bind is separated from the serving so that each half is testable. Before that split the only
-// coverage this function had came from tests *failing* to bind: eight tests in this package start a
-// Monitor with the default Config, which enables the endpoint on the fixed port 8081, so the first
-// one to reach it won and the rest took the error arm below. How many did was a matter of goroutine
-// scheduling — the package measured 45.0% coverage on an idle machine and 44.7% under CI's load,
-// which is how a per-package floor came to be set half a statement above what the tests reliably
-// reach. The handler itself, meanwhile, had never served a request in a test at all.
-func (c *Checker) startHTTPServer(ctx context.Context) {
+// The bind is separated from the serving so that each half is testable, and so that Start can return
+// the bind error rather than log it from a goroutine. Before the split the only coverage this had came
+// from tests *failing* to bind: eight tests in this package start a Monitor with the default Config,
+// which enabled the endpoint on the fixed port 8081, so the first to reach it won and the rest took
+// the error arm. How many did was a matter of goroutine scheduling — the package measured 45.0%
+// coverage on an idle machine and 44.7% under CI's load, which is how a per-package floor came to be
+// set half a statement above what the tests reliably reach.
+//
+// The address, not a port. fmt.Sprintf(":%d", HTTPPort) could only bind every interface; see
+// Config.HTTPAddr.
+func (c *Checker) listenHealth(ctx context.Context) (net.Listener, error) {
 	var lc net.ListenConfig
 
-	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf(":%d", c.config.HTTPPort))
+	ln, err := lc.Listen(ctx, "tcp", c.config.HTTPAddr)
 	if err != nil {
-		slog.Error("health: failed to bind HTTP server", "port", c.config.HTTPPort, "error", err)
-		return
+		return nil, fmt.Errorf("binding the health endpoint on %s: %w", c.config.HTTPAddr, err)
 	}
 
-	c.serveHealth(ctx, ln)
+	return ln, nil
 }
 
 // serveHealth serves the health endpoint on ln, returning when Stop closes stopCh.

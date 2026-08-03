@@ -1,5 +1,7 @@
 package objectfs
 
+import "github.com/scttfrdmn/objectfs/internal/config"
+
 // Option is a functional option for configuring a Client.
 type Option func(*clientOptions)
 
@@ -10,8 +12,8 @@ type clientOptions struct {
 	cacheSize      string // memory cache size (e.g. "512MB"); default: "512MB"
 	maxConcurrency int    // max concurrent S3 operations; default: 32
 	logLevel       string // log verbosity: DEBUG|INFO|WARN|ERROR; default: "INFO"
-	metricsPort    int    // Prometheus metrics port; default: 8080
-	healthPort     int    // health check port; default: 8081
+	metricsAddr    string // Prometheus endpoint address; default: "127.0.0.1:8080"
+	healthAddr     string // health endpoint address; default: "127.0.0.1:8081"
 	tlsEnabled     bool   // enable TLS; default: false
 }
 
@@ -22,8 +24,8 @@ func defaultOptions() clientOptions {
 		cacheSize:      "512MB",
 		maxConcurrency: 32,
 		logLevel:       "INFO",
-		metricsPort:    8080,
-		healthPort:     8081,
+		metricsAddr:    config.DefaultMetricsAddr,
+		healthAddr:     config.DefaultHealthAddr,
 		tlsEnabled:     false,
 	}
 }
@@ -63,17 +65,27 @@ func WithLogLevel(l string) Option {
 	}
 }
 
-// WithMetricsPort sets the port on which Prometheus metrics are served.
-func WithMetricsPort(p int) Option {
+// WithMetricsAddr sets the host:port on which Prometheus metrics are served.
+//
+// Defaults to loopback. The endpoint has no authentication and reports per-operation counts, error
+// rates, sizes and timings, so exposing it beyond the host is an explicit choice: pass "0.0.0.0:8080"
+// to make it reachable from elsewhere.
+//
+// This replaces WithMetricsPort, which could not express an interface — every value of it bound all of
+// them. Passing an address that is malformed or has a port outside 1-65535 is an error from Mount,
+// naming the field.
+func WithMetricsAddr(addr string) Option {
 	return func(o *clientOptions) {
-		o.metricsPort = p
+		o.metricsAddr = addr
 	}
 }
 
-// WithHealthPort sets the port on which the health check endpoint is served.
-func WithHealthPort(p int) Option {
+// WithHealthAddr sets the host:port on which the health check endpoint is served.
+//
+// Loopback by default, for the reason [WithMetricsAddr] gives. Replaces WithHealthPort.
+func WithHealthAddr(addr string) Option {
 	return func(o *clientOptions) {
-		o.healthPort = p
+		o.healthAddr = addr
 	}
 }
 

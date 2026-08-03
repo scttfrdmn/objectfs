@@ -247,9 +247,12 @@ performance:
   predictive_caching: true
 
 monitoring:
-  enabled: true
-  metrics_addr: :9090
-  health_check_addr: :8081
+  metrics:
+    enabled: true
+    addr: 127.0.0.1:9090
+  health_checks:
+    enabled: true
+    addr: 127.0.0.1:8081
 ```
 
 </CodeRunner>
@@ -278,17 +281,19 @@ Two HTTP endpoints, both served by the mount process itself. There is no `object
 <CodeRunner language="bash">
 
 ```bash
-# Health, on monitoring.health_check_addr (:8081 by default)
-curl http://localhost:8081/health
+# Health, on monitoring.health_checks.addr (127.0.0.1:8081 by default)
+curl http://127.0.0.1:8081/health
 
-# Prometheus metrics, on monitoring.metrics_addr (:9090 in the config above)
-curl http://localhost:9090/metrics
+# Prometheus metrics, on monitoring.metrics.addr (127.0.0.1:9090 in the config above)
+curl http://127.0.0.1:9090/metrics
 ```
 
 </CodeRunner>
 
-Both listeners bind all interfaces and are unauthenticated. [SECURITY.md](https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md)
-documents that and the switches that turn each off.
+Both listeners are unauthenticated, which is why each defaults to loopback: set `addr` to
+`0.0.0.0:8080` to reach one from another host, and understand that anything that can route to you can
+then read it. `enabled: false` is how you turn one off — there is no address value that means "off".
+[SECURITY.md](https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md) has the details.
 
 ## Unmounting
 

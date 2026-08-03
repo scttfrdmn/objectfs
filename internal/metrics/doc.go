@@ -32,7 +32,7 @@ operation tracking (for debugging).
 
 	collector, err := metrics.NewCollector(&metrics.Config{
 		Enabled:   true,
-		Port:      8080,
+		Addr:      "127.0.0.1:8080",
 		Path:      "/metrics",
 		Namespace: "objectfs",
 	})
@@ -108,20 +108,27 @@ Regenerate with:
 
 # HTTP Endpoints
 
-The metrics server exposes several endpoints:
+The metrics server exposes several endpoints. None of them is authenticated, which is why Addr
+defaults to loopback and why Start binds exactly what it is given: through v0.10.x this was a Port
+and the bind was fmt.Sprintf(":%d"), so every configured value published these to every interface
+(#211). Start also binds synchronously and returns the bind error, rather than logging it on a
+goroutine and leaving the mount running with no endpoint.
+
+Curl the address the collector reports from Addr, not a hardcoded one — Config.Addr may name port 0,
+in which case the kernel chose the port.
 
 /metrics - Prometheus-formatted metrics (for scraping)
 
-	curl http://localhost:8080/metrics
+	curl http://127.0.0.1:8080/metrics
 
 /health - Health check endpoint
 
-	curl http://localhost:8080/health
+	curl http://127.0.0.1:8080/health
 	{"status":"healthy","service":"objectfs-metrics"}
 
 /debug/metrics - Human-readable metrics summary
 
-	curl http://localhost:8080/debug/metrics
+	curl http://127.0.0.1:8080/debug/metrics
 	{
 	  "uptime": "2h15m30s",
 	  "operations": {
@@ -136,7 +143,7 @@ The metrics server exposes several endpoints:
 
 /debug/operations - Tabular operations summary
 
-	curl http://localhost:8080/debug/operations
+	curl http://127.0.0.1:8080/debug/operations
 	Operation            Count     Errors   Avg Duration      Avg Size
 	----------           -----     ------   ------------      --------
 	read                 15234         12         45ms        524288
@@ -148,7 +155,7 @@ The Config struct controls metrics behavior:
 
 	config := &metrics.Config{
 		Enabled:        true,              // Enable/disable metrics collection
-		Port:           8080,              // HTTP server port
+		Addr:           "127.0.0.1:8080",  // listener address; Start returns an error if it cannot bind
 		Path:           "/metrics",        // Prometheus metrics endpoint path
 		Namespace:      "objectfs",        // Prometheus namespace
 		Subsystem:      "",                // Optional subsystem prefix
@@ -205,7 +212,7 @@ Prometheus Setup:
 	scrape_configs:
 	  - job_name: 'objectfs'
 	    static_configs:
-	      - targets: ['localhost:8080']
+	      - targets: ['127.0.0.1:8080']
 	    metrics_path: '/metrics'
 	    scrape_interval: 15s
 
@@ -235,7 +242,7 @@ Complete example of metrics integration:
 		// Create metrics collector
 		collector, err := metrics.NewCollector(&metrics.Config{
 			Enabled:   true,
-			Port:      8080,
+			Addr:      "127.0.0.1:8080",
 			Namespace: "objectfs",
 			Labels: map[string]string{
 				"instance": "primary",

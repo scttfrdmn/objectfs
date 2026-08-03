@@ -63,13 +63,13 @@ async def main():
         # Mount filesystem
         mount_id = client.mount('s3://my-bucket', '/mnt/objectfs')
 
-        # Get health status -- global.health_port, default 8081
-        health = await client.get_health('http://localhost:8081')
+        # Get health status -- monitoring.health_checks.addr, default 127.0.0.1:8081
+        health = await client.get_health('http://127.0.0.1:8081')
         print(f"Health: {health['status']}")
 
-        # Collect metrics -- global.metrics_port, default 8080.
+        # Collect metrics -- monitoring.metrics.addr, default 127.0.0.1:8080.
         # Requires monitoring.metrics.enabled: true; nothing is bound otherwise.
-        metrics = await client.get_metrics('http://localhost:8080')
+        metrics = await client.get_metrics('http://127.0.0.1:8080')
 
         # Present once the mount has served at least one cache request. An idle mount
         # reports no hit rate rather than a hit rate of zero, because those are different
@@ -195,8 +195,6 @@ objectfs-python unmount /mnt/objectfs
 global:
   log_level: INFO
   log_file: /var/log/objectfs.log
-  metrics_port: 8080    # where /metrics and /health are served
-  health_port: 8081
 
 storage:
   s3:
@@ -218,11 +216,14 @@ cluster:
   consistency_level: eventual
 
 monitoring:
-  enabled: true
   metrics:
-    enabled: true       # required, or nothing binds the metrics endpoint
+    enabled: true             # required, or nothing binds the metrics endpoint
+    addr: 127.0.0.1:8080      # loopback by default; the endpoint has no authentication
     custom_labels:
-      service: objectfs # attached to every exported series
+      service: objectfs       # attached to every exported series
+  health_checks:
+    enabled: true
+    addr: 127.0.0.1:8081
 ```
 
 ### Environment Variables

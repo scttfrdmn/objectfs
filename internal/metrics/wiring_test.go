@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -14,17 +15,25 @@ import (
 
 // exactAdapterConfig is the Config internal/adapter builds, field-for-field.
 //
-// Nothing here is illustrative. adapter.go sets Enabled, Port and Labels and stops, which leaves
+// Nothing here is illustrative. adapter.go sets Enabled, Addr and Labels and stops, which leaves
 // Path, Namespace, Subsystem and UpdateInterval at their zero values — and two of those zeroes used
 // to panic inside Start. Reproducing the shape rather than a plausible one is the point: every test
-// in this package before it passed a Namespace and a Port, which is why nothing noticed.
-func exactAdapterConfig(port int) *Config {
+// in this package before it passed a Namespace and an address, which is why nothing noticed.
+func exactAdapterConfig(addr string) *Config {
 	return &Config{
 		Enabled: true,
-		Port:    port,
+		Addr:    addr,
 		Labels:  map[string]string{"service": "objectfs"},
 	}
 }
+
+// anyLoopbackAddr is the address to configure when the test does not care which port it gets.
+//
+// Port 0 rather than a fixed number, and rather than testhttp.FreeAddr: the kernel picks a port that
+// is free at the moment of the bind, where FreeAddr picks one that was free a moment earlier and
+// leaves a window. Collector.Addr reports what was chosen, so a scrape still knows where to go. Use
+// FreeAddr only where the address must be known before the server starts.
+const anyLoopbackAddr = "127.0.0.1:0"
 
 // TestStartSurvivesTheConfigTheAdapterBuilds is the regression test for two panics on the live path.
 //
@@ -35,7 +44,7 @@ func exactAdapterConfig(port int) *Config {
 func TestStartSurvivesTheConfigTheAdapterBuilds(t *testing.T) {
 	t.Parallel()
 
-	c, err := NewCollector(exactAdapterConfig(testhttp.FreePort(t)))
+	c, err := NewCollector(exactAdapterConfig(anyLoopbackAddr))
 	if err != nil {
 		t.Fatalf("NewCollector rejected the config the adapter builds: %v", err)
 	}
@@ -66,9 +75,9 @@ func TestNewCollectorFillsEachUnsetFieldIndividually(t *testing.T) {
 	}{
 		{name: "nil", in: nil},
 		{name: "only enabled", in: &Config{Enabled: true}},
-		{name: "only a port", in: &Config{Enabled: true, Port: 19001}},
+		{name: "only an addr", in: &Config{Enabled: true, Addr: anyLoopbackAddr}},
 		{name: "only labels", in: &Config{Enabled: true, Labels: map[string]string{"a": "b"}}},
-		{name: "the adapter's shape", in: exactAdapterConfig(19002)},
+		{name: "the adapter's shape", in: exactAdapterConfig(anyLoopbackAddr)},
 		{
 			name: "disabled",
 			in:   &Config{Enabled: false},
@@ -100,8 +109,15 @@ func TestNewCollectorFillsEachUnsetFieldIndividually(t *testing.T) {
 				t.Errorf("UpdateInterval = %v, want %v — a non-positive interval panics in time.NewTicker",
 					c.config.UpdateInterval, want.UpdateInterval)
 			}
-			if c.config.Port <= 0 {
-				t.Errorf("Port = %d, want a positive port", c.config.Port)
+			// The addr is the one case where a caller-set value is not the default, so it is compared
+			// against what the case asked for rather than against want.Addr.
+			wantAddr := want.Addr
+			if tc.in != nil && tc.in.Addr != "" {
+				wantAddr = tc.in.Addr
+			}
+			if c.config.Addr != wantAddr {
+				t.Errorf("Addr = %q, want %q — an empty address binds every interface, which is what "+
+					"the port form could only ever do", c.config.Addr, wantAddr)
 			}
 		})
 	}
@@ -113,7 +129,7 @@ func TestNewCollectorKeepsWhatTheCallerSet(t *testing.T) {
 
 	in := &Config{
 		Enabled:        true,
-		Port:           19003,
+		Addr:           "127.0.0.1:19003",
 		Path:           "/internal/metrics",
 		Namespace:      "research",
 		Subsystem:      "objectfs",
@@ -127,7 +143,7 @@ func TestNewCollectorKeepsWhatTheCallerSet(t *testing.T) {
 
 	if c.config.Path != "/internal/metrics" || c.config.Namespace != "research" ||
 		c.config.Subsystem != "objectfs" || c.config.UpdateInterval != 5*time.Second ||
-		c.config.Port != 19003 {
+		c.config.Addr != "127.0.0.1:19003" {
 		t.Errorf("defaulting overwrote a value the caller set: %+v", c.config)
 	}
 }
@@ -141,7 +157,7 @@ func TestNewCollectorKeepsWhatTheCallerSet(t *testing.T) {
 func TestExportedNamesAreTheOnesDocumentedAndScraped(t *testing.T) {
 	t.Parallel()
 
-	c, err := NewCollector(exactAdapterConfig(19004))
+	c, err := NewCollector(exactAdapterConfig(anyLoopbackAddr))
 	if err != nil {
 		t.Fatalf("NewCollector: %v", err)
 	}
@@ -184,7 +200,7 @@ func TestCustomLabelsReachEveryMetric(t *testing.T) {
 
 	c, err := NewCollector(&Config{
 		Enabled: true,
-		Port:    19005,
+		Addr:    anyLoopbackAddr,
 		Labels:  map[string]string{"service": "objectfs", "cluster": "research-west"},
 	})
 	if err != nil {
@@ -233,7 +249,7 @@ func TestUnusableCustomLabelFailsTheMount(t *testing.T) {
 
 	_, err := NewCollector(&Config{
 		Enabled: true,
-		Port:    19006,
+		Addr:    anyLoopbackAddr,
 		// "operation" is a variable label on operations_total, errors_total and both histograms.
 		Labels: map[string]string{"operation": "read"},
 	})
@@ -254,7 +270,7 @@ func TestUnusableCustomLabelFailsTheMount(t *testing.T) {
 func TestCacheCounterCarriesBothHitAndMiss(t *testing.T) {
 	t.Parallel()
 
-	c, err := NewCollector(exactAdapterConfig(19007))
+	c, err := NewCollector(exactAdapterConfig(anyLoopbackAddr))
 	if err != nil {
 		t.Fatalf("NewCollector: %v", err)
 	}
@@ -288,14 +304,13 @@ func TestCacheCounterCarriesBothHitAndMiss(t *testing.T) {
 // TestScrapeServesTheDocumentedPath closes the loop over real HTTP.
 //
 // Every other test in this file reads the registry directly, which cannot see whether anything is
-// bound to a port. This one scrapes, because the defect it guards is precisely that: the registry
+// bound to an address. This one scrapes, because the defect it guards is precisely that: the registry
 // was correct and unreachable, since internal/adapter never called Start. A test that gathers
 // in-process agrees with a collector that serves nothing.
 func TestScrapeServesTheDocumentedPath(t *testing.T) {
 	t.Parallel()
 
-	port := testhttp.FreePort(t)
-	c, err := NewCollector(exactAdapterConfig(port))
+	c, err := NewCollector(exactAdapterConfig(anyLoopbackAddr))
 	if err != nil {
 		t.Fatalf("NewCollector: %v", err)
 	}
@@ -308,7 +323,7 @@ func TestScrapeServesTheDocumentedPath(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Stop(context.Background()) })
 
-	body := testhttp.Get(t, port, "/metrics", "Start bound no listener")
+	body := testhttp.Get(t, c.Addr(), "/metrics", "Start bound no listener")
 
 	for _, want := range []string{
 		"objectfs_cache_requests_total",
@@ -320,6 +335,79 @@ func TestScrapeServesTheDocumentedPath(t *testing.T) {
 			t.Errorf("a scrape of /metrics does not contain %q; body:\n%s", want, body)
 		}
 	}
+}
+
+// TestStartBindsWhereConfiguredAndNowhereElse is the regression test for #211.
+//
+// The distinction it draws is the whole issue. Config.Port could only produce fmt.Sprintf(":%d"),
+// which binds every interface, and no test noticed — because a wildcard bind answers on loopback,
+// so scraping 127.0.0.1 passes identically either way. Asserting that something is listening is not
+// the same as asserting where.
+//
+// Two checks, because either alone is weak. The bound address is what the kernel reports for the
+// listener, so a wildcard bind reads back as 0.0.0.0 or [::] rather than the configured host. And a
+// request to a routable address on this machine must be refused, which is the property an operator
+// actually cares about: that the unauthenticated /metrics and /debug/operations endpoints are not
+// reachable from the network.
+func TestStartBindsWhereConfiguredAndNowhereElse(t *testing.T) {
+	t.Parallel()
+
+	addr := testhttp.FreeAddr(t) // fixed port: the assertion is about the host half
+	c, err := NewCollector(exactAdapterConfig(addr))
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Stop(context.Background()) })
+
+	if got := c.Addr(); got != addr {
+		t.Errorf("bound %s, configured %s — a wildcard bind reports 0.0.0.0 or [::] here, and it "+
+			"publishes an unauthenticated endpoint on every interface", got, addr)
+	}
+
+	// Confirm it over a socket too, from an address that is this host but is not loopback.
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("splitting %s: %v", addr, err)
+	}
+
+	routable := routableIPv4(t)
+	if routable == "" {
+		t.Log("no non-loopback IPv4 address on this host; the socket half of this test is skipped " +
+			"and only the bound-address check ran")
+
+		return
+	}
+
+	if !testhttp.Unreachable(t, net.JoinHostPort(routable, port), "/metrics") {
+		t.Errorf("/metrics answered on %s, which is not the configured %s — the endpoint is exposed "+
+			"to anything that can route to this host", routable, addr)
+	}
+}
+
+// routableIPv4 returns a non-loopback IPv4 address of this host, or "" if it has none.
+func routableIPv4(t *testing.T) string {
+	t.Helper()
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("enumerating interface addresses: %v", err)
+	}
+
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if v4 := ipnet.IP.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+
+	return ""
 }
 
 func gather(t *testing.T, c *Collector) []*dto.MetricFamily {

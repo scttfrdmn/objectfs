@@ -154,7 +154,7 @@ export class MetricsCollector {
         if (response.headers['content-type']?.includes('application/json')) {
           throw new NetworkError(
             `${metricsUrl} returned JSON, not the Prometheus text format ObjectFS serves. ` +
-            `Check that this is an ObjectFS metrics port (global.metrics_port, default 8080).`
+            `Check that this is an ObjectFS metrics endpoint (monitoring.metrics.addr, default 127.0.0.1:8080).`
           );
         }
 

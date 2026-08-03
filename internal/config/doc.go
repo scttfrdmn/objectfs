@@ -105,9 +105,6 @@ Configuration file format:
 	global:
 	  log_level: INFO
 	  log_file: "/var/log/objectfs.log"
-	  metrics_port: 8080
-	  health_port: 8081
-	  profile_port: 6060
 
 	performance:
 	  cache_size: "2GB"
@@ -133,12 +130,28 @@ Configuration file format:
 	    directory: "/var/cache/objectfs"
 	    max_size: "10GB"
 
+	monitoring:
+	  metrics:
+	    enabled: true
+	    addr: 127.0.0.1:8080
+	  health_checks:
+	    enabled: true
+	    addr: 127.0.0.1:8081
+
 Environment variable mapping:
 
 	# Global settings
 	OBJECTFS_LOG_LEVEL="DEBUG"
 	OBJECTFS_LOG_FILE="/var/log/objectfs.log"
-	OBJECTFS_METRICS_PORT="9090"
+
+	# Listeners. OBJECTFS_METRICS_PORT and OBJECTFS_HEALTH_PORT no longer exist; a port could not
+	# name an interface, so every value of them bound all of them (#211). The two _ENABLED variables
+	# take a boolean and refuse anything else, because they govern unauthenticated endpoints that
+	# default to on: a typo coerced to false silently removes an endpoint a probe depends on.
+	OBJECTFS_METRICS_ENABLED="false"
+	OBJECTFS_METRICS_ADDR="127.0.0.1:9090"
+	OBJECTFS_HEALTH_ENABLED="true"
+	OBJECTFS_HEALTH_ADDR="127.0.0.1:9091"
 
 	# Performance settings
 	OBJECTFS_CACHE_SIZE="4GB"
@@ -219,8 +232,8 @@ Read the current values from [NewDefault] rather than trusting a list here; a ta
 no way to be told it is stale. As of writing:
 
 	Global.LogLevel               "INFO"
-	Global.MetricsPort            8080
-	Global.HealthPort             8081
+	Monitoring.Metrics.Addr       "127.0.0.1:8080"
+	Monitoring.HealthChecks.Addr  "127.0.0.1:8081"
 	Performance.CacheSize         "2GB"
 	Performance.MaxConcurrency    150
 	Performance.ConnectionPoolSize 8      // also the batch concurrency and MaxIdleConnsPerHost
@@ -238,7 +251,15 @@ Two settings are worth knowing because their names have misled before:
     storage-format decision rather than a performance knob: a compressed object is not readable by
     `aws s3 cp`. Algorithm is safe to change on an existing bucket — the read path decodes every
     algorithm ObjectFS can write, whatever this is set to (#230).
-  - Global.ProfilePort is 6060 but is read by nothing — no pprof listener is started at any port.
+  - Monitoring.Metrics.Addr and Monitoring.HealthChecks.Addr are loopback, and each sits beside the
+    `enabled` flag that governs its listener. They replaced Global.MetricsPort/HealthPort and the
+    never-read Monitoring.MetricsAddr/HealthCheckAddr in v0.11.0: the ports were what the listeners
+    bound, the addresses were read by nothing, and a port cannot name an interface — so every value of
+    metrics_port bound all of them (#211). Both endpoints are unauthenticated, which is why the default
+    is the narrowest thing that still lets a same-host scrape work. To turn one off, set its `enabled`
+    to false; there is no `0`-means-off spelling to get wrong (#212).
+  - No pprof listener is started at any address. Global.EnablePprof and Global.ProfilePort are removed
+    rather than wired; see [GlobalConfig] and #245.
 
 # Security Considerations
 

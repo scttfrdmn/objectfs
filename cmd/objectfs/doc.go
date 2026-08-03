@@ -190,8 +190,6 @@ YAML configuration with comprehensive options:
 	global:
 	  log_level: INFO
 	  log_file: /var/log/objectfs.log
-	  metrics_port: 8080
-	  health_port: 8081
 
 	performance:
 	  cache_size: "4GB"
@@ -209,7 +207,15 @@ YAML configuration with comprehensive options:
 	    directory: "/var/cache/objectfs"
 	    max_size: "10GB"
 
-	# Additional sections: write_buffer, network, security, monitoring, features
+	monitoring:
+	  metrics:
+	    enabled: true
+	    addr: 127.0.0.1:8080   # unauthenticated; loopback by default
+	  health_checks:
+	    enabled: true
+	    addr: 127.0.0.1:8081   # unauthenticated; loopback by default
+
+	# Additional sections: write_buffer, network, security, features
 
 # Environment Variables
 
@@ -238,9 +244,14 @@ AWS Settings:
 
 Monitoring:
 
-	OBJECTFS_METRICS_ENABLED        Enable metrics collection
-	OBJECTFS_METRICS_PORT           Metrics HTTP server port
-	OBJECTFS_HEALTH_PORT            Health check HTTP server port
+	OBJECTFS_METRICS_ENABLED        Serve the metrics endpoint (true/false)
+	OBJECTFS_METRICS_ADDR           Metrics listener address (host:port)
+	OBJECTFS_HEALTH_ENABLED         Serve the health endpoint (true/false)
+	OBJECTFS_HEALTH_ADDR            Health listener address (host:port)
+
+Both endpoints are unauthenticated and both are on by default, so the two _ENABLED variables are how
+a mount closes one without editing a config file. Unlike the feature-flag variables above, a value
+that is not a boolean fails startup and names the variable rather than being coerced to false.
 
 # Validation and Safety
 

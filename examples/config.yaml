@@ -21,9 +21,6 @@
 global:
   log_level: INFO                     # DEBUG, INFO, WARN, ERROR
   log_file: ""                        # empty = stderr
-  metrics_port: 8080                  # Prometheus /metrics; must differ from health_port
-  health_port: 8081                   # health endpoint; 0 disables it
-  profile_port: 6060                  # not yet wired — pprof is not served on this port
 
 # Storage backend. The bucket comes from the s3:// command-line argument, not from here.
 storage:
@@ -242,11 +239,14 @@ security:
     bucket_keys: false
 
 # Metrics, health and logging.
+#
+# Each listener's address lives beside the `enabled` flag that governs it. There used to be a port
+# under `global` and an address here, for each of the two endpoints; the ports were what the listeners
+# read and the addresses were read by nothing, so an operator who set `metrics_addr` to move the
+# endpoint off every interface got the wildcard anyway. Both endpoints are unauthenticated, which is
+# why the defaults are loopback: publishing them further is a choice you write down.
 monitoring:
   enabled: false                      # not yet wired — see metrics.enabled below
-  metrics_addr: ":9090"               # not yet wired — global.metrics_port is the live setting
-  enable_pprof: false                 # not yet wired
-  health_check_addr: ":8081"          # not yet wired — global.health_port is the live setting
 
   # Not yet wired: no OpenTelemetry exporter is constructed.
   opentelemetry:
@@ -256,12 +256,14 @@ monitoring:
 
   metrics:
     enabled: true
+    addr: 127.0.0.1:8080              # /metrics, /debug/metrics, /debug/operations. No auth
     prometheus: true
     custom_labels:                    # attached to every exported metric
       service: objectfs
 
   health_checks:
     enabled: true
+    addr: 127.0.0.1:8081              # /health. No auth: reports component names and error strings
     interval: 30s
     timeout: 5s
 

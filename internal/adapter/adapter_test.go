@@ -381,11 +381,8 @@ func TestAdapterStopNotStarted(t *testing.T) {
 func createTestConfig() *config.Configuration {
 	return &config.Configuration{
 		Global: config.GlobalConfig{
-			LogLevel:    "INFO",
-			LogFile:     "",
-			MetricsPort: 9090,
-			HealthPort:  8080,
-			ProfilePort: 6060,
+			LogLevel: "INFO",
+			LogFile:  "",
 		},
 		Storage: config.StorageConfig{
 			S3: config.S3Config{
@@ -467,22 +464,24 @@ func createTestConfig() *config.Configuration {
 			},
 		},
 		Monitoring: config.MonitoringConfig{
-			Enabled:         true,
-			MetricsAddr:     ":9090",
-			EnablePprof:     false,
-			HealthCheckAddr: ":8081",
+			Enabled: true,
 			OpenTelemetry: config.OpenTelemetryConfig{
 				Enabled:     false,
 				Endpoint:    "localhost:4317",
 				ServiceName: "objectfs",
 			},
+			// Each listener's address sits inside the block whose enabled flag governs it. Both are
+			// non-default and loopback: a fixture equal to the default cannot show that the mapping ran,
+			// and the wildcard is what this change stopped doing.
 			Metrics: config.MetricsConfig{
 				Enabled:      true,
+				Addr:         "127.0.0.1:19090",
 				Prometheus:   true,
 				CustomLabels: map[string]string{"env": "test"},
 			},
 			HealthChecks: config.HealthChecksConfig{
 				Enabled:  true,
+				Addr:     "127.0.0.1:19091",
 				Interval: 30 * time.Second,
 				Timeout:  5 * time.Second,
 			},

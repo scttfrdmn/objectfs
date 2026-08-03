@@ -76,7 +76,7 @@ func TestSDKFixtureMatchesTheLiveScrape(t *testing.T) {
 func liveScrape(t *testing.T) string {
 	t.Helper()
 
-	c, err := NewCollector(exactAdapterConfig(testhttp.FreePort(t)))
+	c, err := NewCollector(exactAdapterConfig(anyLoopbackAddr))
 	if err != nil {
 		t.Fatalf("NewCollector: %v", err)
 	}
@@ -98,5 +98,5 @@ func liveScrape(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = c.Stop(context.Background()) })
 
-	return testhttp.Get(t, c.config.Port, c.config.Path, "Start bound no listener")
+	return testhttp.Get(t, c.Addr(), c.config.Path, "Start bound no listener")
 }

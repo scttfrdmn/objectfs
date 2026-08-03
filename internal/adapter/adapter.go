@@ -205,9 +205,15 @@ func (a *Adapter) Start(ctx context.Context) error {
 				CheckInterval: a.config.Monitoring.HealthChecks.Interval,
 				Timeout:       a.config.Monitoring.HealthChecks.Timeout,
 				MaxFailures:   3,
-				HTTPEnabled:   a.config.Global.HealthPort > 0,
-				HTTPPort:      a.config.Global.HealthPort,
-				HTTPPath:      "/health",
+				// monitoring.health_checks.addr, which is a real setting as of #202 — global.health_port
+				// was, and monitoring.health_check_addr, the one an operator would reach for to move
+				// this listener off the wildcard, was declared, defaulted, documented and read by
+				// nothing. HTTPEnabled is the enclosing `if`, not a second switch derived from a port
+				// being non-zero: `health_port: 0` was how the endpoint got disabled, which is exactly
+				// the overload an address cannot express and no longer has to.
+				HTTPEnabled: true,
+				HTTPAddr:    a.config.Monitoring.HealthChecks.Addr,
+				HTTPPath:    "/health",
 			},
 		}
 		a.monitor, err = health.NewMonitor(monCfg)
@@ -257,7 +263,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		if err := a.monitor.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start health monitor: %w", err)
 		}
-		slog.Info("health monitor started", "port", a.config.Global.HealthPort)
+		slog.Info("health monitor started", "addr", a.config.Monitoring.HealthChecks.Addr)
 	}
 
 	// 7. Mount filesystem
@@ -374,8 +380,11 @@ func (a *Adapter) startMetrics(ctx context.Context) error {
 	var err error
 	a.metrics, err = metrics.NewCollector(&metrics.Config{
 		Enabled: a.config.Monitoring.Metrics.Enabled,
-		Port:    a.config.Global.MetricsPort,
-		Labels:  a.config.Monitoring.Metrics.CustomLabels,
+		// monitoring.metrics.addr, live as of #202. This read global.metrics_port, and an operator who
+		// wanted the endpoint on loopback only had no way to say so: monitoring.metrics_addr existed for
+		// exactly that and reached nothing.
+		Addr:   a.config.Monitoring.Metrics.Addr,
+		Labels: a.config.Monitoring.Metrics.CustomLabels,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize metrics collector: %w", err)
@@ -388,7 +397,9 @@ func (a *Adapter) startMetrics(ctx context.Context) error {
 	}
 
 	if a.config.Monitoring.Metrics.Enabled {
-		slog.Info("metrics server started", "port", a.config.Global.MetricsPort, "path", "/metrics")
+		// The bound address, not the configured one. They differ when the configured port is 0, and a
+		// log line naming a port nothing is listening on is how the missing bind went unnoticed before.
+		slog.Info("metrics server started", "addr", a.metrics.Addr(), "path", "/metrics")
 	}
 
 	return nil

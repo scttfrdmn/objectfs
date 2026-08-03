@@ -2,7 +2,10 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -32,12 +35,26 @@ type Collector struct {
 
 	// HTTP server for metrics endpoint
 	server *http.Server
+
+	// boundAddr is what the listener actually bound, read through Addr. Guarded by mu: Start writes it
+	// before the serving goroutine exists, and a test reads it from another goroutine.
+	boundAddr string
 }
 
 // Config represents metrics configuration
 type Config struct {
-	Enabled        bool              `yaml:"enabled"`
-	Port           int               `yaml:"port"`
+	Enabled bool `yaml:"enabled"`
+
+	// Addr is the host:port the endpoint binds, default "127.0.0.1:8080".
+	//
+	// This was Port, an int, and the change is not cosmetic. A port cannot express an interface, so
+	// Start built "fmt.Sprintf(\":%d\", Port)" and bound every one of them — /metrics and
+	// /debug/operations, unauthenticated, on any host that could route to the mount (#211). Nor could a
+	// port say "off": zero meant "unset" to the defaulting below and came back as 8080, so an operator
+	// writing 0 to close the port got it opened on the default (#212). Enabled is the only disable
+	// switch now, and there is no value of this field that quietly means something else.
+	Addr string `yaml:"addr"`
+
 	Path           string            `yaml:"path"`
 	Labels         map[string]string `yaml:"labels"`
 	Namespace      string            `yaml:"namespace"`
@@ -63,7 +80,7 @@ type OperationMetrics struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled:        true,
-		Port:           8080,
+		Addr:           "127.0.0.1:8080",
 		Path:           "/metrics",
 		Namespace:      "objectfs",
 		Subsystem:      "",
@@ -92,8 +109,8 @@ func NewCollector(config *Config) (*Collector, error) {
 	}
 
 	defaults := DefaultConfig()
-	if config.Port <= 0 {
-		config.Port = defaults.Port
+	if config.Addr == "" {
+		config.Addr = defaults.Addr
 	}
 	if config.Path == "" {
 		config.Path = defaults.Path
@@ -132,7 +149,13 @@ func NewCollector(config *Config) (*Collector, error) {
 	return collector, nil
 }
 
-// Start starts the metrics collection server
+// Start binds the metrics endpoint and starts the periodic-update loop.
+//
+// The listener is created here and not on the goroutine below, so a bind failure is returned to the
+// caller. It used to be inside the goroutine, where the error went to stdout with fmt.Printf and
+// nothing propagated: a port already in use, or an address the OS refused, left the mount running with
+// no endpoint and one line of output the operator had no reason to be watching. Returning it lets
+// adapter.Start fail the mount, which is the only place that can say which setting was at fault.
 func (c *Collector) Start(ctx context.Context) error {
 	if !c.config.Enabled {
 		return nil
@@ -151,8 +174,15 @@ func (c *Collector) Start(ctx context.Context) error {
 	mux.HandleFunc("/debug/metrics", c.debugMetricsHandler)
 	mux.HandleFunc("/debug/operations", c.debugOperationsHandler)
 
+	// Addr, not a port. fmt.Sprintf(":%d", Port) bound every interface, and there was no way to ask for
+	// one — see Config.Addr.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", c.config.Addr)
+	if err != nil {
+		return fmt.Errorf("binding the metrics endpoint on %s: %w", c.config.Addr, err)
+	}
+
 	c.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", c.config.Port),
 		Handler:           mux,
 		ReadHeaderTimeout: 30 * time.Second, // Prevent Slowloris attacks
 		ReadTimeout:       60 * time.Second,
@@ -160,10 +190,14 @@ func (c *Collector) Start(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// The bound address, which is not necessarily the configured one: a test asking for port 0 gets
+	// whatever the kernel assigned, and Addr is how it finds out.
+	c.boundAddr = ln.Addr().String()
+
 	// Start server in background
 	go func() {
-		if err := c.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Printf("Metrics server error: %v\n", err)
+		if err := c.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server stopped serving", "addr", c.config.Addr, "error", err)
 		}
 	}()
 
@@ -171,6 +205,17 @@ func (c *Collector) Start(ctx context.Context) error {
 	go c.updateLoop(ctx)
 
 	return nil
+}
+
+// Addr returns the address the endpoint is bound to, or "" if Start has not bound one.
+//
+// It exists so a test can assert *where* the listener is rather than that a listener exists. The
+// distinction is the whole of #211: the previous wiring test scraped 127.0.0.1 and passed identically
+// against a loopback bind and a wildcard bind, because a wildcard bind answers on loopback too.
+func (c *Collector) Addr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.boundAddr
 }
 
 // Stop stops the metrics collection server
