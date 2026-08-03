@@ -124,6 +124,300 @@ func TestWriterFlushesToMakeRoomBeforeRefusingAWrite(t *testing.T) {
 	}
 }
 
+// TestWriterStreamsOneFilePastItsWholeLimit is the regression for the defect the coverage gate
+// surfaced, and it is the most ordinary workload there is.
+//
+// A program appending to a single file, with nothing else buffered, has no *other* key for reclaim to
+// flush — reclaim excludes the key being written, since its pending writes are about to be extended and
+// uploading them now means uploading the same object twice. As the only rule that made the bound refuse
+// the write it should least refuse: at the shipped 512 MB default, writing any file past 512 MB failed
+// at exactly 512 MB with ENOSPC, in increments far too small for the oversize escape hatch to fire.
+//
+// Sequentially writing a large file is what ObjectFS is for. A bound that forbids it is worse than no
+// bound, which is the same standard the reclaim-before-refuse ordering is held to above.
+func TestWriterStreamsOneFilePastItsWholeLimit(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+
+	w, err := vfs.NewWriterWithOptions(context.Background(), backend, vfs.WriterOptions{MaxMemory: 1024})
+	if err != nil {
+		t.Fatalf("NewWriterWithOptions: %v", err)
+	}
+
+	// 8 KiB to one file in 256-byte appends: eight times the limit, no other key, and every individual
+	// write far below the limit so nothing is admitted as oversize.
+	const (
+		chunk  = 256
+		chunks = 32
+	)
+	for i := range chunks {
+		if err := w.Write("big.log", int64(i*chunk), make([]byte, chunk)); err != nil {
+			t.Fatalf("append %d at offset %d was refused: %v\n"+
+				"One file cannot grow past the buffer limit. At the 512MB default this fails every write "+
+				"beyond 512MB, which is the workload this filesystem exists for", i, i*chunk, err)
+		}
+	}
+
+	// Bounded throughout, not merely accepted: the point is that flushing the target key released the
+	// memory rather than the bound being abandoned.
+	if got := w.Size(); got > 1024 {
+		t.Errorf("held %d dirty bytes with a 1024-byte limit; the bound was abandoned rather than "+
+			"enforced by flushing", got)
+	}
+
+	if err := w.FlushAll(); err != nil {
+		t.Fatalf("FlushAll: %v", err)
+	}
+
+	// And the file is whole. A "reclaim" of the target key that lost or misplaced its earlier bytes would
+	// leave a short or corrupt object, which is worse than the ENOSPC it replaced.
+	data, ok := backend.Object("big.log")
+	if !ok {
+		t.Fatal("big.log is not in storage after FlushAll")
+	}
+	if len(data) != chunk*chunks {
+		t.Errorf("stored %d bytes, want %d — streaming through the bounded buffer lost data",
+			len(data), chunk*chunks)
+	}
+}
+
+// TestWriterRefusesWhenAnotherFileHoldsTheMemoryAndCannotBeFlushed pins that a full buffer whose data
+// cannot be stored refuses the next write rather than growing without limit.
+//
+// The refusal arrives as the flush failure rather than as the "did not release enough" message, and that
+// is the honest outcome: reclaim reports the AccessDenied it hit, which names the cause an operator can
+// act on. The bare memory refusal at the end of admit is not reachable from here — or from any
+// deterministic sequence, per its comment — because every failure it could follow returns earlier with a
+// more specific error. What matters to the caller is asserted below: the write does not succeed, the
+// buffer does not grow, and the error is distinguishable.
+func TestWriterRefusesWhenAnotherFileHoldsTheMemoryAndCannotBeFlushed(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+
+	w, err := vfs.NewWriterWithOptions(context.Background(), backend, vfs.WriterOptions{MaxMemory: 1024})
+	if err != nil {
+		t.Fatalf("NewWriterWithOptions: %v", err)
+	}
+
+	// Fill the limit with one key while flushes still work.
+	if err := w.Write("holder", 0, make([]byte, 1024)); err != nil {
+		t.Fatalf("fill the limit: %v", err)
+	}
+
+	// Now nothing can be flushed, so neither reclaim nor a flush of the target key can free anything.
+	backend.putErr = errors.New("AccessDenied: no")
+
+	err = w.Write("newcomer", 0, make([]byte, 256))
+	if err == nil {
+		t.Fatalf("write was admitted with a full, unflushable buffer; writer now holds %d bytes against "+
+			"a 1024-byte limit", w.Size())
+	}
+
+	if !errors.Is(err, vfs.ErrNoSpace) && !strings.Contains(err.Error(), "AccessDenied") {
+		t.Errorf("refusal is %v, which neither satisfies errors.Is(err, vfs.ErrNoSpace) nor names the "+
+			"flush failure behind it", err)
+	}
+
+	// And the refused write left nothing behind. A refusal that had already created the node would leak a
+	// buffer entry per rejected write, so the bound would consume the very resource it protects — which is
+	// why admit runs before the node is materialized.
+	if w.Dirty("newcomer") {
+		t.Error("the refused write left a buffered node behind")
+	}
+	if got := w.Size(); got != 1024 {
+		t.Errorf("held %d dirty bytes after a refused 256-byte write, want the 1024 held before it", got)
+	}
+}
+
+// TestWriterRefusesToGrowOneFilePastTheLimitWhenItCannotBeFlushed is the failure half of
+// TestWriterStreamsOneFilePastItsWholeLimit.
+//
+// Streaming one file past the bound works by flushing that same file to reclaim its memory. When the
+// flush cannot succeed there is nothing else to try, and the write must be refused rather than admitted
+// — otherwise a backend that is rejecting every upload would let the buffer grow without limit while
+// reporting success to the application, which is unbounded growth plus silent data loss.
+func TestWriterRefusesToGrowOneFilePastTheLimitWhenItCannotBeFlushed(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+
+	w, err := vfs.NewWriterWithOptions(context.Background(), backend, vfs.WriterOptions{MaxMemory: 1024})
+	if err != nil {
+		t.Fatalf("NewWriterWithOptions: %v", err)
+	}
+
+	if err := w.Write("one.log", 0, make([]byte, 1024)); err != nil {
+		t.Fatalf("fill the limit: %v", err)
+	}
+
+	backend.putErr = errors.New("AccessDenied: no")
+
+	err = w.Write("one.log", 1024, make([]byte, 256))
+	if err == nil {
+		t.Fatalf("append past the limit was admitted with an unflushable backend; the writer holds %d "+
+			"dirty bytes against a 1024-byte limit and the application was told the write succeeded",
+			w.Size())
+	}
+	if !strings.Contains(err.Error(), "AccessDenied") {
+		t.Errorf("error is %v, which does not name the flush failure an operator would need to act on", err)
+	}
+}
+
+// TestWriterBufferCountRefusalNamesTheLimit reaches the node-count refusal after a failed reclaim.
+//
+// Distinct from the memory refusal because the two exhaust differently: a million one-byte writes to a
+// million paths is a trivial byte count and a million live nodes. This is the arm that fires when
+// flushing frees no *nodes*.
+func TestWriterBufferCountRefusalNamesTheLimit(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.putErr = errors.New("AccessDenied: no")
+
+	w, err := vfs.NewWriterWithOptions(context.Background(), backend, vfs.WriterOptions{MaxBuffers: 2})
+	if err != nil {
+		t.Fatalf("NewWriterWithOptions: %v", err)
+	}
+
+	for _, k := range []string{"a", "b"} {
+		if err := w.Write(k, 0, []byte("x")); err != nil {
+			t.Fatalf("write %q: %v", k, err)
+		}
+	}
+
+	err = w.Write("c", 0, []byte("x"))
+	if err == nil {
+		t.Fatal("a third key was admitted past a 2-buffer limit")
+	}
+	if !errors.Is(err, vfs.ErrNoSpace) && !strings.Contains(err.Error(), "AccessDenied") {
+		t.Errorf("refusal is %v, want ErrNoSpace or a message naming the flush failure", err)
+	}
+}
+
+// TestWriterDiscardDropsPendingWrites covers Discard in the package that owns it.
+//
+// Its behavior under Unlink is tested in internal/fuse against a real endpoint; this is the unit-level
+// contract, which is narrow: after a Discard the key is not dirty, holds no bytes, and is not flushed by
+// FlushAll.
+func TestWriterDiscardDropsPendingWrites(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.Write("gone", 0, []byte("never stored")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Write("kept", 0, []byte("stored")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := w.Discard("gone"); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+
+	if w.Dirty("gone") {
+		t.Error("the discarded key is still dirty")
+	}
+	if !w.Dirty("kept") {
+		t.Error("Discard dropped a key it was not given; every other key's pending writes are lost")
+	}
+
+	if err := w.FlushAll(); err != nil {
+		t.Fatalf("FlushAll: %v", err)
+	}
+
+	if _, ok := backend.Object("gone"); ok {
+		t.Error("FlushAll uploaded a discarded key; the node survived in the map that FlushAll iterates")
+	}
+	if _, ok := backend.Object("kept"); !ok {
+		t.Error("the key that was not discarded is missing from storage")
+	}
+}
+
+// TestWriterDiscardRejectsAnEmptyKey pins the sentinel, so the FUSE layer's EINVAL mapping holds.
+func TestWriterDiscardRejectsAnEmptyKey(t *testing.T) {
+	t.Parallel()
+
+	w, err := vfs.NewWriter(context.Background(), newFakeBackend())
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.Discard(""); !errors.Is(err, vfs.ErrInvalid) {
+		t.Errorf("Discard(\"\") = %v, want an error satisfying errors.Is(err, vfs.ErrInvalid)", err)
+	}
+}
+
+// TestWriterDiscardOfAnUnknownKeyIsNotAnError pins idempotence.
+//
+// Unlink calls Discard unconditionally, before it knows whether the write path holds anything for the
+// path, so a key that was never written must not produce an error — otherwise deleting a file that was
+// never open would fail.
+func TestWriterDiscardOfAnUnknownKeyIsNotAnError(t *testing.T) {
+	t.Parallel()
+
+	w, err := vfs.NewWriter(context.Background(), newFakeBackend())
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.Discard("never-written"); err != nil {
+		t.Errorf("Discard of an unbuffered key returned %v; Unlink calls it unconditionally, so this "+
+			"makes `rm` fail on any file that was not open for writing", err)
+	}
+}
+
+// TestWriterKeepsAFileUsableWhenItsStoredAttributesAreMalformed pins that a bad metadata value costs
+// the attribute and not the file.
+//
+// Metadata can be written by anything: another tool, an older ObjectFS, a truncated multipart copy. If a
+// non-numeric mode or an unparseable timestamp made the write path refuse the object, a single bad header
+// would render a file permanently unwritable — so the values are dropped, the defaults stand, and the
+// discard is logged rather than silently swallowed, because a chmod that appears to work and does nothing
+// is its own defect.
+func TestWriterKeepsAFileUsableWhenItsStoredAttributesAreMalformed(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+
+	// Every attribute unparseable at once: a non-numeric mode, a non-numeric uid, and a timestamp that is
+	// not RFC 3339.
+	backend.PutWithMeta("odd.txt", []byte("hello"), map[string]string{
+		"objectfs-mode":  "not-a-number",
+		"objectfs-uid":   "twelve",
+		"objectfs-mtime": "last Tuesday",
+	})
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.Write("odd.txt", 5, []byte(" world")); err != nil {
+		t.Fatalf("writing to a file with unparseable stored attributes failed: %v\n"+
+			"A bad metadata value must cost the attribute, not the file", err)
+	}
+	if err := w.Flush("odd.txt"); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	data, ok := backend.Object("odd.txt")
+	if !ok {
+		t.Fatal("odd.txt is not in storage")
+	}
+	if string(data) != "hello world" {
+		t.Errorf("stored %q, want %q — the read-modify-write did not survive the bad attributes",
+			data, "hello world")
+	}
+}
+
 // TestWriterAdmitsAWriteLargerThanTheWholeLimit pins the one case where the bound must yield.
 //
 // A single write bigger than the entire buffer is a legal write, and POSIX has no way to say "this

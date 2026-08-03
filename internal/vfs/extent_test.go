@@ -1571,6 +1571,86 @@ func TestUncoveredStartOfAnEmptyRange(t *testing.T) {
 	}
 }
 
+// TestUncoveredEnd walks the tail-trimming cases, the mirror of TestUncoveredStart.
+//
+// The case that earns this test is the last one: a pending write spanning the whole range, where the
+// answer is lo and the read issues no request at all. That is read-after-write on one descriptor being
+// not merely correct but free, and it is the property v0.10.0 lacked — it consulted the cache and the
+// backend and never the write buffer, so a read after a write returned pre-write bytes for up to the
+// cache's five-minute TTL. Getting it wrong in the other direction is worse than a wasted GET: trimming
+// past a gap skips bytes only the object has, and they come back as zeros.
+func TestUncoveredEnd(t *testing.T) {
+	t.Parallel()
+
+	type write struct {
+		off  int64
+		data string
+	}
+
+	tests := []struct {
+		name   string
+		writes []write
+		lo, hi int64
+		want   int64
+	}{
+		{
+			name: "no writes: nothing to trim",
+			lo:   0, hi: 100, want: 100,
+		},
+		{
+			name:   "a write at the tail moves the end back to its start",
+			writes: []write{{90, "0123456789"}},
+			lo:     0, hi: 100, want: 90,
+		},
+		{
+			name:   "a write short of the tail does not trim",
+			writes: []write{{80, "0123456789"}},
+			lo:     0, hi: 100, want: 100,
+		},
+		{
+			// Adjacent writes merge into one extent, so the whole run is trimmed.
+			name:   "adjacent writes at the tail trim as one",
+			writes: []write{{92, "aaaa"}, {96, "bbbb"}},
+			lo:     0, hi: 100, want: 92,
+		},
+		{
+			// The gap belongs to the object alone and must still be fetched.
+			name:   "a gap before the tail write stops the trim",
+			writes: []write{{80, "aaaa"}, {92, "bbbbbbbb"}},
+			lo:     0, hi: 100, want: 92,
+		},
+		{
+			// The whole range is pending. Nothing to fetch: the read touches no network.
+			name:   "a write covering the range leaves nothing to fetch",
+			writes: []write{{0, "0123456789"}},
+			lo:     0, hi: 10, want: 0,
+		},
+		{
+			// The extent starts before lo, so the trim clamps at lo rather than running past it.
+			name:   "a write starting before lo clamps at lo",
+			writes: []write{{0, "0123456789"}},
+			lo:     4, hi: 10, want: 4,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var l ExtentList
+			for _, w := range tc.writes {
+				if err := l.Add(w.off, []byte(w.data)); err != nil {
+					t.Fatalf("Add(%d): %v", w.off, err)
+				}
+			}
+
+			if got := l.UncoveredEnd(tc.lo, tc.hi); got != tc.want {
+				t.Errorf("UncoveredEnd(%d, %d) = %d, want %d", tc.lo, tc.hi, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestUncoveredStart walks the head-trimming cases, including the ones where it must not trim.
 //
 // Trimming too much is silent corruption: bytes the object has and the pending writes do not would be

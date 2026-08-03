@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every workload writing more than 512 MB in total. A single write larger than the entire limit is
   admitted, since `write(2)`'s ENOSPC means "filesystem full" and a caller retrying it would get the
   same answer forever. A refusal surfaces as ENOSPC through `vfs.ErrNoSpace`, not as EIO.
+- **A single file can grow past the write buffer's memory bound.** Reclaiming flushes other keys and
+  deliberately skips the one being written, since its pending writes are about to be extended and
+  uploading them now guarantees a second upload moments later. As the only rule that made the bound
+  refuse the most ordinary write there is: a program appending to one file has no other key to flush,
+  so at the shipped 512 MB default, writing any file past 512 MB failed at exactly 512 MB with
+  ENOSPC — sequentially writing a large file being the workload ObjectFS exists for. The target key
+  is now flushed as a last resort, which is what streaming a large file through a bounded buffer
+  looks like; a test writes a file to eight times its limit and asserts both that every write
+  succeeds and that the resulting object is whole, so a lossy reclaim fails rather than passing
+  quietly.
 
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205

@@ -1794,6 +1794,57 @@ func TestStoredSizeTreatsAbsenceAsZeroAndReportsOtherFailures(t *testing.T) {
 	}
 }
 
+// TestFlushRefusesANodeWhoseLengthCannotBeComputed pins that the flush protocol declines to upload
+// rather than uploading something.
+//
+// vfs.NewNode has no error return, so a caller can hand the flusher a node with a negative stored size
+// — an unknowable file length. The plan step is where that has to stop: every later step sizes the
+// upload body from the plan, so continuing would PUT a body of a length nobody computed and then record
+// it as durable. Failing costs a close(2) error; not failing costs the object.
+//
+// It also has to fail *without a request*. A flush that reaches the backend and then errors leaves the
+// caller unable to tell whether the object was replaced, which is exactly the ambiguity the read-back
+// confirmation exists to remove.
+func TestFlushRefusesANodeWhoseLengthCannotBeComputed(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.Put("f", []byte("stored contents"))
+
+	flusher, err := vfs.NewFlusher(backend)
+	if err != nil {
+		t.Fatalf("NewFlusher: %v", err)
+	}
+
+	n := vfs.NewNode("f", vfs.Attr{Type: vfs.FileTypeRegular, Mode: vfs.DefaultFileMode}, -1)
+	if _, err := n.Write(0, []byte("new"), false); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	err = flusher.Flush(context.Background(), n)
+	if !errors.Is(err, vfs.ErrInvalid) {
+		t.Fatalf("Flush of a node with a negative stored size = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), `"f"`) {
+		t.Errorf("error %q does not name the file, which is all a mount log has to go on", err)
+	}
+
+	for _, call := range backend.Calls() {
+		if strings.HasPrefix(call, "PutObject") || strings.HasPrefix(call, "SetObjectMetadata") {
+			t.Errorf("the refused flush still issued %q. A write that fails after touching the object "+
+				"leaves the caller unable to tell what is stored", call)
+		}
+	}
+
+	if got, _ := backend.Object("f"); string(got) != "stored contents" {
+		t.Errorf("stored object = %q, want it untouched", got)
+	}
+	if !n.Dirty() {
+		t.Error("the node is clean after a failed flush, so its pending write would be evicted as though " +
+			"it had been stored")
+	}
+}
+
 // TestAttrOnlyFlushErrorPaths covers each way the metadata-only write can fail.
 //
 // They are separated because they mean different things to a caller and must not collapse into one

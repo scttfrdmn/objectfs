@@ -206,6 +206,12 @@ func (w *Writer) admit(ctx context.Context, key string, n int64) error {
 			count = len(w.nodes)
 			w.mu.Unlock()
 
+			// Reached only when reclaim freed no slots while reporting success, which means another
+			// goroutine refilled the map between the flushes and this recount — reclaim itself returns any
+			// flush failure, so a failed flush leaves by the arm above. No test drives this: doing so
+			// requires winning a race, and a test that depends on losing one is a flake. It is kept rather
+			// than replaced with a panic or a silent admission because the condition is real under
+			// concurrency and a bound that quietly stops applying is the defect this whole change fixes.
 			if count >= w.maxNodes {
 				return fmt.Errorf("%w: write path holds pending writes for %d files, the configured "+
 					"limit (write_buffer.max_buffers); flushing did not release any", ErrNoSpace, count)
@@ -227,20 +233,49 @@ func (w *Writer) admit(ctx context.Context, key string, n int64) error {
 		return err
 	}
 
+	if w.Size()+n <= w.maxMemory {
+		return nil
+	}
+
+	// Still over, so the key being written is holding memory that reclaim declined to touch. Flush it
+	// too, as a last resort.
+	//
+	// reclaim excludes it deliberately — its pending writes are about to be extended, so uploading them
+	// now guarantees a second upload of the same object moments later — but that is an optimization, and
+	// as the *only* rule it made the bound refuse the most ordinary write there is. A program appending
+	// to one file, with nothing else buffered, has no other key for reclaim to flush: at the shipped
+	// 512 MB default, writing any file past 512 MB failed at exactly 512 MB with ENOSPC. Sequentially
+	// writing a large file is the workload ObjectFS exists for, so a bound that forbids it is worse than
+	// no bound at all.
+	//
+	// Flushing the target is safe rather than merely expedient: Flush performs the read-modify-write and
+	// leaves the node clean, and the write that follows lands on a clean node at its own offset. This is
+	// what streaming a large file through a bounded buffer looks like.
+	if w.Dirty(key) {
+		if err := w.FlushContext(ctx, key); err != nil {
+			return fmt.Errorf("write path over its memory limit: flushing %q to make room for its own "+
+				"write failed: %w", key, err)
+		}
+	}
+
 	held := w.Size()
 	if held+n <= w.maxMemory {
 		return nil
 	}
 
-	// Still over. If this key alone accounts for it, the write is oversize rather than the buffer being
-	// full, and refusing it would mean a legal write is permanently impossible at this configuration.
-	// Admit it and let the flush that follows return the memory: exceeding the bound transiently is
-	// strictly better than an unserviceable filesystem, and the bound exists to stop unbounded growth
-	// across files, which this is not.
+	// Nothing left to flush and still over. Either the buffer holds only this write's own bytes, or the
+	// write is larger than the entire limit — in both cases refusing would make a legal write permanently
+	// impossible at this configuration rather than the buffer bounded, since write(2) has no way to say
+	// "smaller, please". Admit it: exceeding the bound transiently beats an unserviceable filesystem, and
+	// the bound exists to stop unbounded growth across files, which one write is not.
 	if held == 0 || n > w.maxMemory {
 		return nil
 	}
 
+	// Same reachability note as the count refusal above: every deterministic path out of this function has
+	// already been taken. Getting here means dirty bytes belonging to some other key survived both a
+	// reclaim and a flush of this key that each reported success, which requires a concurrent writer
+	// refilling the buffer between those flushes and this recount.
 	return fmt.Errorf("%w: write path holds %d dirty bytes and this %d-byte write would exceed the "+
 		"%d-byte limit (write_buffer.max_memory); flushing did not release enough",
 		ErrNoSpace, held, n, w.maxMemory)
