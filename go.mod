@@ -18,11 +18,11 @@ toolchain go1.26.5
 
 require (
 	github.com/alicebob/miniredis/v2 v2.36.1
-	github.com/aws/aws-sdk-go-v2 v1.41.5
+	github.com/aws/aws-sdk-go-v2 v1.43.2
 	github.com/aws/aws-sdk-go-v2/config v1.31.12
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.16
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.3
-	github.com/aws/smithy-go v1.24.2
+	github.com/aws/smithy-go v1.27.5
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/klauspost/compress v1.18.7
 	github.com/pierrec/lz4/v4 v4.1.22
