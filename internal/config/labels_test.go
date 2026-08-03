@@ -177,6 +177,81 @@ func dependabotLabelRefs(t *testing.T) []struct {
 	return refs
 }
 
+// dependabotTimeLine matches a `schedule.time` entry and captures its raw, undecoded value.
+var dependabotTimeLine = regexp.MustCompile(`(?m)^\s*time:\s*(\S+)\s*$`)
+
+// TestDependabotScheduleTimesAreQuoted asserts that every `schedule.time` in dependabot.yml is a
+// quoted scalar in the file text, because Dependabot's validator requires a string and rejects the
+// entire file when it sees anything else.
+//
+// `time: 09:00` — unquoted — was in this file from 2025-10-15, when the key was introduced, until
+// 2026-08-03. Dependabot answered with "The property '#/updates/0/schedule/time' of type integer did
+// not match the following type: string", once per ecosystem entry. **An invalid config is not
+// partially applied, it is ignored**, so every labels:, groups:, reviewers: and ignore: block in the
+// file was dead and Dependabot ran on its defaults instead.
+//
+// # Why this checks the text and not the decoded type
+//
+// Asserting the decoded Go type is the obvious design and it does not work. Verified by probe rather
+// than assumed: both gopkg.in/yaml.v2 and gopkg.in/yaml.v3 decode `09:00`, `9:00`, `10:30` and `05:00`
+// as **string**. Go's YAML 1.2 core schema has no sexagesimal integer type; Dependabot's YAML 1.1
+// parser does. So a Go decoder cannot reproduce the coercion — a decode-based test passes on exactly
+// the input that breaks the file, which is what the first version of this test did before being
+// mutation-checked against the unquoted form.
+//
+// The tradeoff that buys: this cannot tell `"9am"` from `"09:00"`, because both are quoted strings and
+// only Dependabot's own schema knows the difference. That is the narrower claim, and it is the one
+// that can actually be enforced from here. The failing `.github/dependabot.yml` check on the pull
+// request remains the authority on validity; this test exists to stop the *known* regression.
+//
+// # Why it is worth a test at all
+//
+// The fix is one line of quoting. The reason it hid for nine months is that it presents as a failing
+// `.github/dependabot.yml` check, which reads like "a dependabot job failed" rather than "your
+// configuration is invalid" — and the file has a `version: 2` key and six well-formed-looking
+// entries, so nothing about reading it suggests it is being discarded.
+//
+// It also masked the fix for the defect in TestDependabotLabelsAreDefined below. The `automerge` label
+// was added to .github/labels.yml and to the repository, and *still* no Dependabot PR carried it,
+// because labels: sat inside a file being ignored wholesale. Two independent causes for one symptom;
+// fixing the visible one left the other invisible.
+func TestDependabotScheduleTimesAreQuoted(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), ".github", "dependabot.yml")
+
+	//nolint:gosec // a path built from the module root this test located itself
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read .github/dependabot.yml: %v", err)
+	}
+
+	matches := dependabotTimeLine.FindAllStringSubmatch(string(raw), -1)
+
+	if len(matches) < 5 {
+		t.Fatalf("found %d schedule.time lines in .github/dependabot.yml, want at least 5 (one per "+
+			"ecosystem entry). Either the key was renamed or this scan has stopped matching, and a "+
+			"test that silently checks nothing is worse than no test.", len(matches))
+	}
+
+	for _, m := range matches {
+		value := m[1]
+
+		if strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "'") {
+			continue
+		}
+
+		t.Errorf("dependabot.yml has `time: %s`, which is not a quoted scalar.\n"+
+			"Quote it: `time: \"09:00\"`. Dependabot's YAML 1.1 parser reads an unquoted 09:00 as a "+
+			"sexagesimal integer, its schema requires a string, and it rejects the WHOLE FILE — not "+
+			"just this entry — so every labels:, groups:, reviewers: and ignore: block stops applying "+
+			"and Dependabot falls back to its defaults. It surfaces only as a failing "+
+			"`.github/dependabot.yml` check, which looks like a failed job rather than an invalid "+
+			"config. Note Go's yaml.v2/v3 decode it as a string, so no decode-based test catches "+
+			"this — only the file text does.", value)
+	}
+}
+
 // TestDependabotLabelsAreDefined is the offline half, and the one with a proven failure behind it.
 //
 // dependabot.yml labeled every PR `automerge`; that label did not exist; Dependabot drops unknown

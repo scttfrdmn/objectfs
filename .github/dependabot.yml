@@ -1,12 +1,24 @@
 # Dependabot configuration.
 #
-# Two things to know before editing, both learned the hard way:
+# Three things to know before editing, all learned the hard way:
 #
-#  1. `labels:` must name labels that EXIST. Dependabot silently drops unknown ones, so
+#  1. `time:` MUST be quoted. `time: 09:00` is not a string in YAML — it parses as an integer, and
+#     Dependabot rejects the WHOLE FILE for it: "The property '#/updates/0/schedule/time' of type
+#     integer did not match the following type: string", once per ecosystem. An invalid file is not
+#     partially applied, it is ignored entirely, so every `labels:`, `groups:`, `reviewers:` and
+#     `ignore:` block below was dead and Dependabot ran on its defaults instead. This was true from
+#     2025-10-15 (d4ff903, where the key was introduced unquoted) until 2026-08-03, and it is why
+#     item 2's fix did not take effect: the `automerge` label exists in .github/labels.yml and on the
+#     repository, and still no Dependabot PR carried it. Two independent causes for one symptom, and
+#     fixing the visible one first left the other invisible.
+#
+#     It reports as a failing `.github/dependabot.yml` check on every PR, which is easy to read as
+#     "a dependabot job failed" rather than "the config is invalid." It is the latter.
+#  2. `labels:` must name labels that EXIST. Dependabot silently drops unknown ones, so
 #     `automerge` — which .github/workflows/dependabot-automerge.yml gates every approve and merge
 #     step on — was never applied to a single PR. 46 PRs were opened and 0 were ever merged. Adding
 #     a label here without adding it to .github/labels.yml re-breaks auto-merge silently.
-#  2. Every manifest that generates a Dependabot ALERT should have an ecosystem entry here, or the
+#  3. Every manifest that generates a Dependabot ALERT should have an ecosystem entry here, or the
 #     alert has nothing to act on it. sdks/java/pom.xml (5 alerts) and docs-platform/package.json
 #     (3 alerts) sat unmonitored; GitHub opened one-off security-update jobs against them anyway,
 #     which is how the missing coverage surfaced.
@@ -18,7 +30,7 @@ updates:
   schedule:
     interval: weekly
     day: monday
-    time: 09:00
+    time: "09:00"
   open-pull-requests-limit: 5
   reviewers:
   - scttfrdmn
@@ -57,7 +69,7 @@ updates:
   schedule:
     interval: weekly
     day: monday
-    time: 09:00
+    time: "09:00"
   open-pull-requests-limit: 5
   reviewers:
   - scttfrdmn
@@ -82,7 +94,7 @@ updates:
   schedule:
     interval: weekly
     day: monday
-    time: 09:00
+    time: "09:00"
   open-pull-requests-limit: 3
   reviewers:
   - scttfrdmn
@@ -101,7 +113,7 @@ updates:
   schedule:
     interval: weekly
     day: monday
-    time: 09:00
+    time: "09:00"
   open-pull-requests-limit: 3
   reviewers:
   - scttfrdmn
@@ -125,7 +137,7 @@ updates:
   schedule:
     interval: weekly
     day: monday
-    time: 09:00
+    time: "09:00"
   open-pull-requests-limit: 3
   reviewers:
   - scttfrdmn
@@ -144,7 +156,7 @@ updates:
   schedule:
     interval: weekly
     day: monday
-    time: 09:00
+    time: "09:00"
   open-pull-requests-limit: 3
   reviewers:
   - scttfrdmn
