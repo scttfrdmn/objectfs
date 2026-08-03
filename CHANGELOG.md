@@ -452,6 +452,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every GitHub Action is on its current major, and CI no longer downloads a Go toolchain mid-build.**
+  Eight actions moved: `setup-go` 5 → 7, `setup-node` 4 → 7, `setup-python` 5 → 7,
+  `docker/metadata-action` 5 → 6, `docker/setup-buildx-action` 3 → 4, `docker/build-push-action`
+  5 → 7, `docker/login-action` 3 → 4, `dependabot/fetch-metadata` 2 → 3. Five of these Dependabot had
+  proposed and five is also `open-pull-requests-limit`, so the other three were never proposed at all —
+  the queue was saturated, which is a thing to watch for rather than a thing to trust.
+
+  The `setup-go` bump changes real behavior, so it was traced rather than assumed. v5 read the `go`
+  line and installed go1.26.0; Go's own toolchain switching then fetched go1.26.5 on the first build,
+  because `toolchain go1.26.5` says to. The right compiler was used, but it arrived at build time,
+  over the network, once per job — the `tar: ... gotoolchain_local.txt: Cannot open: File exists`
+  warnings in every job log were that download racing the module-cache restore. v6 reads the
+  `toolchain` directive directly and exports `GOTOOLCHAIN=local`, so 1.26.5 is installed up front and
+  nothing switches. Same compiler, one fewer moving part, and the log noise is gone. The tradeoff is
+  recorded next to the directive in `go.mod`: under `GOTOOLCHAIN=local` a version setup-go cannot
+  install now fails the build instead of silently falling back.
+
+  Checked for each of the others rather than taken on the release notes: the deprecated `config`,
+  `config-inline` and `install` inputs that buildx v4 removed are not used here; neither are the
+  `DOCKER_BUILD_NO_SUMMARY`/`DOCKER_BUILD_EXPORT_RETENTION_DAYS` envs dropped by build-push-action v7
+  or the `pip-install` input dropped by setup-python v7; and the setup-node v6 change limiting
+  automatic caching to npm cannot apply, because no `cache:` input is set on the Node or Python steps.
+  All eight now require Actions runner ≥ v2.327.1 for their Node 24 runtime, which `ubuntu-latest`
+  satisfies.
+
+  Node itself went 20 → 22 in the `sdk-metrics` job while it was open: 20 reached end of life in
+  April 2026, and `sdks/javascript` declares `node >=16`, so nothing was holding the pin down except
+  never having revisited it. ([#254], [#255], [#256], [#257], [#258])
+
+[#254]: https://github.com/scttfrdmn/objectfs/pull/254
+[#255]: https://github.com/scttfrdmn/objectfs/pull/255
+[#256]: https://github.com/scttfrdmn/objectfs/pull/256
+[#257]: https://github.com/scttfrdmn/objectfs/pull/257
+[#258]: https://github.com/scttfrdmn/objectfs/pull/258
+
 - Updated five direct dependencies: `aws-sdk-go-v2` 1.41.5 → 1.43.2, `aws-sdk-go-v2/config`
   1.31.12 → 1.32.33, `klauspost/compress` 1.18.7 → 1.19.1, `pierrec/lz4/v4` 4.1.22 → 4.1.27, and
   `redis/go-redis/v9` 9.18.0 → 9.21.0. Two consequences are worth naming rather than leaving in the
