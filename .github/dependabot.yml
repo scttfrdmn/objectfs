@@ -163,6 +163,19 @@ updates:
   # Both are correct bumps proposed in an order that cannot install. Grouping makes Dependabot move
   # each set in one PR, which is the only form that resolves. Note this does not make the majors
   # automatic — they are still majors, so dependabot-automerge.yml comments and waits for a human.
+  #
+  # `typedoc` is in the typescript-toolchain group for the same reason, and it was missed the first
+  # time: it constrains the TypeScript version as tightly as ts-jest does, just less visibly. The
+  # regrouped #308 still failed to install because of it, which is the evidence that a group is only
+  # as good as its membership. Two consequences worth knowing before touching these versions:
+  #
+  #   - typedoc@0.24 peers `typescript@"4.6.x || ... || 5.1.x"`, so `typescript: ^5.0.0` in
+  #     package.json silently resolves to 5.1.6 — three minors behind what the range suggests.
+  #   - TypeScript 7 is not reachable at any grouping. ts-jest's latest (29.4.12) peers `<7` and has
+  #     no release above it. The ceiling is TypeScript 6, which typedoc@0.28 allows. See #314.
+  #
+  # #314 also records why none of this is caught: nothing in CI runs `tsc`, so the SDK's 48 build
+  # errors are invisible and only `npm install` failures ever show up here.
 - package-ecosystem: npm
   directory: /sdks/javascript
   schedule:
@@ -186,6 +199,7 @@ updates:
       - ts-jest
       - '@types/jest'
       - jest
+      - typedoc
     typescript-eslint:
       patterns:
       - '@typescript-eslint/*'

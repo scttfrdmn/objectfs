@@ -122,7 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both are the right target version proposed in an order that cannot resolve. `groups:` on the
   `/sdks/javascript` npm entry now moves each set in one PR, which is the only form that installs. It
   does not make them automatic — they are still majors, so `dependabot-automerge.yml` comments and
-  waits for a human, which is right for a TypeScript 5 → 7 jump.
+  waits for a human, which is right for a jump of this size. (The TypeScript half of it turned out to
+  need a third package and a lower target; see the `typedoc` entry below.)
 
   The `gomod` entry has had groups all along; neither npm entry did, which is why this surfaced only on
   the JavaScript side — and only now, since before [#288] the whole config was ignored and these were
@@ -135,6 +136,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#306]: https://github.com/scttfrdmn/objectfs/issues/306
 [#214]: https://github.com/scttfrdmn/objectfs/issues/214
+
+- **`typedoc` joins the `typescript-toolchain` Dependabot group; it constrains the TypeScript version
+  as tightly as `ts-jest` and was missed** ([#314]). The regrouped PR from [#306] still failed
+  `npm install`, which is the useful part: a group is only as good as its membership, and `typedoc`
+  gates the same range without being an obvious member of a "TypeScript toolchain."
+
+  Two things fell out of measuring the actual peer ranges rather than assuming them. `typedoc@0.24`
+  peers `typescript@"4.6.x || … || 5.1.x"`, so `typescript: ^5.0.0` in `package.json` has been
+  resolving to **5.1.6** — three minors behind what the range reads as, and a 2023 compiler. And
+  **TypeScript 7 is not reachable at any grouping**: `ts-jest`'s latest release peers `<7` and has
+  nothing above it, so the ceiling is TypeScript 6, which `typedoc@0.28` permits. Verified by
+  installing the four-package set, not by reading the manifests.
+
+  [#314] records what this was hiding, which is larger than the grouping: `npm run build` in
+  `sdks/javascript` fails with **48 `tsc` errors**, and nothing in CI or the Makefile runs `tsc` at
+  all. Two of the 48 name identifiers that do not exist — `Configuration` in `types.ts:308` and a
+  `StorageAdapter` re-export in `index.ts:32` where `storage.ts` exports `S3StorageAdapter` — both
+  dating to the commit that added the SDK in 2025-08. `sdk-metrics` passes because `ts-jest`
+  typechecks only the one test file and its imports, so the rest of the SDK is checked by nothing.
+
+[#314]: https://github.com/scttfrdmn/objectfs/issues/314
 
 - **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
   unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
