@@ -352,7 +352,6 @@ func (suite *IntegrationTestSuite) TestEndToEndFileOperations() {
 			CacheSize:          "50MB",
 			WriteBufferSize:    "10MB",
 			MaxConcurrency:     10,
-			CompressionEnabled: true,
 			ConnectionPoolSize: 8,
 		},
 		Cache: config.CacheConfig{

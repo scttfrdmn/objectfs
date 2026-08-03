@@ -72,10 +72,14 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 	cfg.Network.CircuitBreaker.FailureThreshold = 13
 	cfg.Network.CircuitBreaker.Timeout = 45 * time.Second
 
-	cfg.WriteBuffer.Compression.Enabled = true
-	cfg.WriteBuffer.Compression.Algorithm = "zstd"
-	cfg.WriteBuffer.Compression.Level = 5
-	cfg.WriteBuffer.Compression.MinSize = "8KB"
+	// lz4 rather than zstd. Every value in this test has to differ from the default it would take if
+	// the mapping were absent, and zstd *is* the default — so `Algorithm: "zstd"` hardcoded in
+	// buildS3Config passes an assertion written against zstd. That is the exact shape of D12, where a
+	// field the mapping never touched still arrived at a plausible value from somewhere else.
+	cfg.Storage.S3.Compression.Enabled = true
+	cfg.Storage.S3.Compression.Algorithm = "lz4"
+	cfg.Storage.S3.Compression.Level = 5
+	cfg.Storage.S3.Compression.MinSize = "8KB"
 
 	// sse-kms with bucket keys because it is the only mode that populates all three fields, so a
 	// mapping that carried the mode and dropped the key — the shape of P-7 that is hardest to see,
@@ -184,7 +188,13 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 		{field: "CongestionAlgorithm", got: got.CongestionAlgorithm, want: "bbr"},
 
 		{field: "Compression.Enabled", got: got.Compression.Enabled, want: true},
-		{field: "Compression.Algorithm", got: got.Compression.Algorithm, want: "zstd"},
+		{
+			field: "Compression.Algorithm",
+			got:   got.Compression.Algorithm,
+			want:  "lz4",
+			why: "deliberately not zstd, which is the default this field would hold anyway if the " +
+				"mapping dropped it",
+		},
 		{field: "Compression.Level", got: got.Compression.Level, want: 5},
 		{
 			field: "Compression.MinSize",

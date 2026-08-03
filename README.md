@@ -331,12 +331,13 @@ compressed object is not readable by `aws s3 cp`, boto3, or the S3 console, whic
 compressed bytes with a successful exit status.
 
 ```yaml
-write_buffer:
-  compression:
-    enabled: true
-    algorithm: zstd     # none, zstd, lz4, gzip
-    level: 3            # zstd 0-22, gzip 0-9; 0 selects the codec default
-    min_size: 4KB       # smaller objects are stored as-is
+storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: zstd   # none, zstd, lz4, gzip
+      level: 3          # zstd 0-22, gzip 0-9; 0 selects the codec default
+      min_size: 4KB     # smaller objects are stored as-is
 ```
 
 Read [docs/features/compression.md](docs/features/compression.md) first. It covers what compresses

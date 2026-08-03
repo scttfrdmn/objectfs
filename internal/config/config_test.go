@@ -34,8 +34,21 @@ func TestNewDefault(t *testing.T) {
 	if cfg.Performance.MaxConcurrency != 150 {
 		t.Errorf("Expected MaxConcurrency to be 150, got %d", cfg.Performance.MaxConcurrency)
 	}
-	if !cfg.Performance.CompressionEnabled {
-		t.Error("Expected CompressionEnabled to be true")
+	// Object compression lives under the backend that stores the objects (#157), and is off by
+	// default: it is a storage-format decision, not a performance knob — a compressed object is not
+	// readable by `aws s3 cp`. The algorithm and level are still asserted, because they are what a
+	// mount uses the moment an operator flips enabled.
+	if cfg.Storage.S3.Compression.Enabled {
+		t.Error("Expected storage.s3.compression.enabled to default to false")
+	}
+	if cfg.Storage.S3.Compression.Algorithm != "zstd" {
+		t.Errorf("Expected compression algorithm zstd, got %s", cfg.Storage.S3.Compression.Algorithm)
+	}
+	if cfg.Storage.S3.Compression.Level != 3 {
+		t.Errorf("Expected compression level 3, got %d", cfg.Storage.S3.Compression.Level)
+	}
+	if cfg.Storage.S3.Compression.MinSize != "4KB" {
+		t.Errorf("Expected compression min_size 4KB, got %s", cfg.Storage.S3.Compression.MinSize)
 	}
 
 	// Test cache defaults
@@ -146,7 +159,12 @@ global:
 performance:
   cache_size: 4GB
   max_concurrency: 200
-  compression_enabled: false
+
+storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: lz4
 
 features:
   prefetching: false
@@ -177,8 +195,18 @@ features:
 	if cfg.Performance.MaxConcurrency != 200 {
 		t.Errorf("Expected MaxConcurrency to be 200, got %d", cfg.Performance.MaxConcurrency)
 	}
-	if cfg.Performance.CompressionEnabled {
-		t.Error("Expected CompressionEnabled to be false")
+	if !cfg.Storage.S3.Compression.Enabled {
+		t.Error("Expected storage.s3.compression.enabled to be true")
+	}
+	if cfg.Storage.S3.Compression.Algorithm != "lz4" {
+		t.Errorf("Expected compression algorithm lz4, got %s", cfg.Storage.S3.Compression.Algorithm)
+	}
+	// Not set in the file, so the default survives the overlay. This is the half of the loader a
+	// partial section can break: yaml.Unmarshal into an already-defaulted struct leaves absent keys
+	// alone, and a file that names only `algorithm` must not zero the level to an invalid 0.
+	if cfg.Storage.S3.Compression.Level != 3 {
+		t.Errorf("Expected compression level to keep its default 3, got %d",
+			cfg.Storage.S3.Compression.Level)
 	}
 	if cfg.Features.Prefetching {
 		t.Error("Expected Prefetching to be false")
@@ -203,7 +231,7 @@ func TestLoadFromEnv(t *testing.T) {
 		"OBJECTFS_METRICS_PORT":        "9090",
 		"OBJECTFS_CACHE_SIZE":          TestCacheSize,
 		"OBJECTFS_MAX_CONCURRENCY":     "300",
-		"OBJECTFS_COMPRESSION_ENABLED": "false",
+		"OBJECTFS_COMPRESSION_ENABLED": "true",
 		"OBJECTFS_PREFETCHING":         "false",
 		"OBJECTFS_BATCH_OPERATIONS":    "false",
 		"OBJECTFS_OFFLINE_MODE":        "true",
@@ -234,8 +262,12 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.Performance.MaxConcurrency != 300 {
 		t.Errorf("Expected MaxConcurrency to be 300, got %d", cfg.Performance.MaxConcurrency)
 	}
-	if cfg.Performance.CompressionEnabled {
-		t.Error("Expected CompressionEnabled to be false")
+	// OBJECTFS_COMPRESSION_ENABLED assigns storage.s3.compression.enabled as of #157. It previously
+	// assigned performance.compression_enabled, which was read by nothing — so exporting this
+	// variable had no effect on whether objects were compressed. Asserted as true against a default
+	// of false: "false" would pass whether or not the handler ran at all.
+	if !cfg.Storage.S3.Compression.Enabled {
+		t.Error("OBJECTFS_COMPRESSION_ENABLED=true did not reach storage.s3.compression.enabled")
 	}
 	if cfg.Features.Prefetching {
 		t.Error("Expected Prefetching to be false")

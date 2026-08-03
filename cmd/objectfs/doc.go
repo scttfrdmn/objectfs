@@ -102,7 +102,6 @@ Configuration file usage:
 	performance:
 	  cache_size: "8GB"
 	  max_concurrency: 300
-	  compression_enabled: true
 	cache:
 	  ttl: 300s
 	  eviction_policy: "weighted_lru"
@@ -199,7 +198,6 @@ YAML configuration with comprehensive options:
 	  write_buffer_size: "64MB"
 	  max_concurrency: 200
 	  read_ahead_size: "128MB"
-	  compression_enabled: true
 	  connection_pool_size: 8
 
 	cache:

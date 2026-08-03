@@ -45,13 +45,20 @@ type GlobalConfig struct {
 	ProfilePort int    `yaml:"profile_port"`
 }
 
-// PerformanceConfig represents performance-related settings
+// PerformanceConfig represents performance-related settings.
+//
+// Its `compression_enabled` key is gone (#157). It defaulted to **true**, was read by nothing, and
+// sat two sections away from the `compression` block that actually controlled compression and
+// defaulted to false — so the configuration contained a prominent `compression_enabled: true` that
+// meant nothing, next to the real setting that said otherwise. It is removed rather than wired
+// because there is nothing to wire it to: compression happens in the S3 backend, on the object, and
+// is configured by `storage.s3.compression`. A second boolean over the same feature could only
+// disagree with the first.
 type PerformanceConfig struct {
-	CacheSize          string `yaml:"cache_size"`
-	WriteBufferSize    string `yaml:"write_buffer_size"`
-	MaxConcurrency     int    `yaml:"max_concurrency"`
-	ReadAheadSize      string `yaml:"read_ahead_size"`
-	CompressionEnabled bool   `yaml:"compression_enabled"`
+	CacheSize       string `yaml:"cache_size"`
+	WriteBufferSize string `yaml:"write_buffer_size"`
+	MaxConcurrency  int    `yaml:"max_concurrency"`
+	ReadAheadSize   string `yaml:"read_ahead_size"`
 	// ConnectionPoolSize is the number of pooled S3 clients, and also the batch concurrency in
 	// GetObjects/PutObjects and MaxIdleConnsPerHost on the HTTP transport. Validated > 0 below:
 	// zero reached the batch paths as an unbuffered semaphore and blocked forever.
@@ -124,20 +131,41 @@ type ReadAheadConfig struct {
 	ModelUpdateInterval string `yaml:"model_update_interval"` // ML model update frequency
 }
 
-// WriteBufferConfig represents write buffer configuration
+// WriteBufferConfig represents write buffer configuration.
+//
+// Its `compression` subsection moved to `storage.s3.compression`, where the thing it configures
+// lives (#157). It is gone rather than deprecated, and the loader is strict, so a file still setting
+// `write_buffer.compression` fails to load with the key named — the same reasoning as the removed
+// encryption booleans above. Silently accepting it under the old path would leave an operator
+// believing they had configured a write buffer when what they had configured was the stored format
+// of every object in their bucket, which is the misunderstanding the move exists to end.
 type WriteBufferConfig struct {
-	FlushInterval time.Duration     `yaml:"flush_interval"`
-	MaxBuffers    int               `yaml:"max_buffers"`
-	MaxMemory     string            `yaml:"max_memory"`
-	Compression   CompressionConfig `yaml:"compression"`
+	FlushInterval time.Duration `yaml:"flush_interval"`
+	MaxBuffers    int           `yaml:"max_buffers"`
+	MaxMemory     string        `yaml:"max_memory"`
 }
 
-// CompressionConfig represents compression settings
+// CompressionConfig configures transparent compression of stored S3 objects. See
+// [S3Config.Compression], its only user.
 type CompressionConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	MinSize   string `yaml:"min_size"`
+	// Enabled turns compression on. Off by default: it is a storage-format decision rather than a
+	// performance knob, and a compressed object is an opaque frame to every S3 client but ObjectFS.
+	Enabled bool `yaml:"enabled"`
+	// MinSize is the smallest object worth compressing, e.g. "4KB". Below it, framing overhead and
+	// any per-tier billing floor dominate whatever the codec saves.
+	MinSize string `yaml:"min_size"`
+	// Algorithm names the codec: "none", "zstd", "lz4", or "gzip". The authority is
+	// pkg/compression.SupportedAlgorithms, and Validate builds the codec rather than checking a list,
+	// because building it is the only check that cannot drift.
+	//
+	// Safe to change on a bucket that already holds compressed objects: the read path decodes every
+	// algorithm ObjectFS can write, chosen from each object's own Content-Encoding (#230). Through
+	// v0.10.x it was not — a mount decoded only its configured algorithm.
 	Algorithm string `yaml:"algorithm"`
-	Level     int    `yaml:"level"`
+	// Level is the codec-specific compression level; 0 selects the codec's default. The valid range
+	// differs per algorithm — zstd accepts 0-22, gzip only 0-9 — so a level valid for one is often
+	// invalid for another, and changing Algorithm may require changing this too.
+	Level int `yaml:"level"`
 }
 
 // NetworkConfig represents network configuration
@@ -371,6 +399,22 @@ type S3Config struct {
 	// Multipart controls when an upload is split into parts and how those parts are sent.
 	Multipart MultipartConfig `yaml:"multipart"`
 
+	// Compression controls transparent compression of the objects ObjectFS writes to S3.
+	//
+	// It lives here, under the backend that stores the objects, because that is what it decides: the
+	// stored format of an object in a bucket. It used to live under `write_buffer`, where the name
+	// implied it compressed data held in memory before upload and where nothing else in the section
+	// was about storage at all (#157). Nothing compressed a buffer — the setting was mapped straight
+	// into the S3 backend's own compression config and always had been — so the key's location
+	// described a feature that did not exist while the feature it did control was documented nowhere
+	// near the backend it configures.
+	//
+	// That mattered beyond tidiness in two directions. An operator tuning write buffering had no
+	// reason to expect they were changing the on-disk format of every object they wrote, and an
+	// operator looking for object compression had no reason to look under `write_buffer`. Both are
+	// how a storage-format decision gets made by accident.
+	Compression CompressionConfig `yaml:"compression"`
+
 	CostOptimization S3CostOptimization `yaml:"cost_optimization"`
 }
 
@@ -446,6 +490,26 @@ func NewDefault() *Configuration {
 					ChunkSize:   "16MB",
 					Concurrency: 8,
 				},
+				// Compression is off by default. It is a storage-format decision, not a performance
+				// knob: a compressed object is an opaque frame to `aws s3 cp`, boto3, and every other
+				// S3 client, so enabling it by default would silently revoke the "my data is just
+				// objects in S3" property that most users assume. It also makes a ranged read fetch
+				// the whole object, since a compression frame cannot be sliced. Opt in when the
+				// tradeoff is wanted.
+				//
+				// Off here and on in internal/storage/s3.NewDefaultConfig, the same split as
+				// UseCargoShip and for the same reason: that constructor serves the Go SDK, where the
+				// caller chose the S3 backend explicitly, and this file serves a mount.
+				//
+				// The algorithm is named even though compression is disabled, so that flipping
+				// Enabled to true does not also have to supply one. zstd/3/4KB matches what
+				// NewDefaultConfig chooses, so the two entry points agree on everything but Enabled.
+				Compression: CompressionConfig{
+					Enabled:   false,
+					MinSize:   "4KB",
+					Algorithm: "zstd",
+					Level:     3,
+				},
 				CostOptimization: S3CostOptimization{
 					Enabled:             false,
 					TieringEnabled:      false,
@@ -460,7 +524,6 @@ func NewDefault() *Configuration {
 			WriteBufferSize:    "16MB",
 			MaxConcurrency:     150,
 			ReadAheadSize:      "64MB",
-			CompressionEnabled: true,
 			ConnectionPoolSize: 8,
 			PredictiveCaching:  false,
 			MLModelPath:        "",
@@ -506,20 +569,6 @@ func NewDefault() *Configuration {
 			FlushInterval: 30 * time.Second,
 			MaxBuffers:    1000,
 			MaxMemory:     "512MB",
-			// Compression is off by default. It is a storage-format decision, not a performance
-			// knob: a compressed object is an opaque frame to `aws s3 cp`, boto3, and every other
-			// S3 client, so enabling it by default would silently revoke the "my data is just
-			// objects in S3" property that most users assume. It also makes a ranged read fetch the
-			// whole object, since a zstd frame cannot be sliced. Opt in when the tradeoff is wanted.
-			//
-			// The algorithm is named even though compression is disabled, so that flipping Enabled
-			// to true does not also have to supply an algorithm.
-			Compression: CompressionConfig{
-				Enabled:   false,
-				MinSize:   "4KB",
-				Algorithm: "zstd",
-				Level:     3,
-			},
 		},
 		Network: NetworkConfig{
 			Timeouts: TimeoutConfig{
@@ -755,8 +804,11 @@ func getEnvMappings() []envMapping {
 			c.Performance.ReadAheadSize = val
 			return nil
 		}},
+		// Repointed from the removed performance.compression_enabled to the setting that actually
+		// controls compression (#157). The variable's name was never wrong; what it assigned to was
+		// read by nothing, so exporting it had no effect on whether objects were compressed.
 		{"OBJECTFS_COMPRESSION_ENABLED", func(c *Configuration, val string) error {
-			c.Performance.CompressionEnabled = strings.ToLower(val) == TrueValue
+			c.Storage.S3.Compression.Enabled = strings.ToLower(val) == TrueValue
 			return nil
 		}},
 		{"OBJECTFS_CONNECTION_POOL_SIZE", func(c *Configuration, val string) error {
@@ -898,8 +950,8 @@ func (c *Configuration) Validate() error {
 		return fmt.Errorf("read_ahead configuration invalid: %w", err)
 	}
 
-	if err := validateCompressionConfig(c.WriteBuffer.Compression); err != nil {
-		return fmt.Errorf("write_buffer.compression configuration invalid: %w", err)
+	if err := validateCompressionConfig(c.Storage.S3.Compression); err != nil {
+		return fmt.Errorf("storage.s3.compression configuration invalid: %w", err)
 	}
 
 	if err := c.validateSizes(); err != nil {
@@ -1129,7 +1181,7 @@ func (c *Configuration) validateSizes() error {
 		}
 	}
 
-	// write_buffer.compression.min_size is validated by validateCompressionConfig, which builds the
+	// storage.s3.compression.min_size is validated by validateCompressionConfig, which builds the
 	// codec — and only when compression is enabled, since a disabled block is not consulted.
 
 	return nil
