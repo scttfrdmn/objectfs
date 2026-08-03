@@ -852,9 +852,6 @@ ObjectFS uses a hierarchical configuration system:
 global:
   log_level: INFO
   log_file: /var/log/objectfs.log
-  metrics_port: 8080
-  health_port: 8081
-  profile_port: 6060  # pprof debugging
 
 # Performance settings
 performance:
@@ -922,16 +919,25 @@ security:
     kms_key_id: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012
     bucket_keys: true
 
-# Monitoring configuration
+# Monitoring configuration.
+#
+# Each listener's address sits beside the enabled flag that governs it, and defaults to loopback:
+# both endpoints are unauthenticated, and /health reports component names and error strings. These
+# replaced global.metrics_port/health_port, which were what the listeners read, and
+# monitoring.metrics_addr/health_check_addr, which were read by nothing — so a port was the only way
+# to move an endpoint and a port cannot name an interface (#211). There is no profile_port: no pprof
+# listener is started at any address (#245).
 monitoring:
   metrics:
     enabled: true
+    addr: 127.0.0.1:8080
     prometheus: true
     custom_labels:
       environment: production
       service: objectfs
   health_checks:
     enabled: true
+    addr: 127.0.0.1:8081
     interval: 30s
     timeout: 5s
   logging:
@@ -1024,11 +1030,12 @@ export OBJECTFS_OFFLINE_CACHE="/mnt/ssd/objectfs-cache"
 export OBJECTFS_TLS_VERIFY="true"
 export OBJECTFS_ENCRYPTION_ENABLED="true"
 
-# Monitoring
+# Monitoring. Addresses, not ports: a port cannot name an interface (#211). There is no pprof
+# variable — no pprof listener is started at any address (#245).
 export OBJECTFS_METRICS_ENABLED="true"
-export OBJECTFS_METRICS_PORT="8080"
-export OBJECTFS_HEALTH_PORT="8081"
-export OBJECTFS_PPROF_PORT="6060"
+export OBJECTFS_METRICS_ADDR="127.0.0.1:8080"
+export OBJECTFS_HEALTH_ENABLED="true"
+export OBJECTFS_HEALTH_ADDR="127.0.0.1:8081"
 
 # Feature flags
 export OBJECTFS_COMPRESSION_ENABLED="true"

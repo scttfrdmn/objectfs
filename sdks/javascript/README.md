@@ -292,10 +292,10 @@ uploadObject(
 // Get health status
 getHealth(endpoint?: string): Promise<HealthStatus>
 
-// Get metrics from the mount's Prometheus endpoint (global.metrics_port, default 8080;
-// requires monitoring.metrics.enabled: true). Returns cache, io, operations, errors and
-// connections sections plus the parsed raw samples. A section is absent when the mount has
-// not recorded that family -- absent is not zero.
+// Get metrics from the mount's Prometheus endpoint (monitoring.metrics.addr, default
+// 127.0.0.1:8080; requires monitoring.metrics.enabled: true). Returns cache, io, operations,
+// errors and connections sections plus the parsed raw samples. A section is absent when the
+// mount has not recorded that family -- absent is not zero.
 getMetrics(endpoint?: string): Promise<Metrics>
 
 // Not implemented; always throws. It returned fixed constants that looked like

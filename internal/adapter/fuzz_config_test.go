@@ -333,8 +333,13 @@ network:
   connection_pool_size: 1
 global:
   log_level: DEBUG
-  metrics_port: 9090
-  health_port: 8080
+monitoring:
+  metrics:
+    enabled: true
+    addr: 127.0.0.1:19090
+  health_checks:
+    enabled: true
+    addr: 127.0.0.1:19091
 `,
 	},
 	{

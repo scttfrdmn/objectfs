@@ -277,8 +277,11 @@ func (suite *IntegrationTestSuite) TestMetricsIntegration() {
 
 	// Create metrics configuration
 	metricsConfig := &metrics.Config{
-		Enabled:        true,
-		Port:           0, // Use random port for testing
+		Enabled: true,
+		// Port 0 on loopback: the kernel picks a port that is free at the moment of the bind, and
+		// Collector.Addr reports which. The setting is an address rather than a port because a port
+		// could not name an interface, so every value of it bound all of them (#211).
+		Addr:           "127.0.0.1:0",
 		Path:           "/metrics",
 		Namespace:      "objectfs_test",
 		UpdateInterval: time.Second,
@@ -344,9 +347,11 @@ func (suite *IntegrationTestSuite) TestEndToEndFileOperations() {
 	// Create full ObjectFS configuration
 	objectfsConfig := &config.Configuration{
 		Global: config.GlobalConfig{
-			LogLevel:    "info",
-			MetricsPort: 8080,
-			HealthPort:  8081,
+			LogLevel: "info",
+		},
+		Monitoring: config.MonitoringConfig{
+			Metrics:      config.MetricsConfig{Enabled: true, Addr: "127.0.0.1:18080"},
+			HealthChecks: config.HealthChecksConfig{Enabled: true, Addr: "127.0.0.1:18081"},
 		},
 		Performance: config.PerformanceConfig{
 			CacheSize:          "50MB",
@@ -372,7 +377,7 @@ func (suite *IntegrationTestSuite) TestEndToEndFileOperations() {
 	// For now, just verify the configuration is valid
 	assert.NotNil(t, objectfsConfig)
 	assert.Equal(t, "info", objectfsConfig.Global.LogLevel)
-	assert.Equal(t, 8080, objectfsConfig.Global.MetricsPort)
+	assert.Equal(t, "127.0.0.1:18080", objectfsConfig.Monitoring.Metrics.Addr)
 	assert.Equal(t, "50MB", objectfsConfig.Performance.CacheSize)
 }
 

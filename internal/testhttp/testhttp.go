@@ -6,11 +6,18 @@
 // way, and only a request over a socket tells them apart. So the missing bind survived a release,
 // and deleting the call left every test in the package green.
 //
-// A test that wants that guarantee needs two unglamorous things — a port nothing else is using, and
-// a fetch that tolerates a listener still coming up — and both were copied into
+// A test that wants that guarantee needs two unglamorous things — an address nothing else is using,
+// and a fetch that tolerates a listener still coming up — and both were copied into
 // internal/metrics/wiring_test.go and internal/adapter/metrics_wiring_test.go, where they had
 // already drifted apart in their failure messages. One copy, in one place, is what keeps the
 // message that explains the failure attached to the check that finds it.
+//
+// Addresses, not ports. The settings these helpers exercise are host:port now — a port could not
+// name an interface, so every value of monitoring.metrics_port bound all of them (#211) — and a
+// helper that takes a port cannot express the assertion those issues turn on: not that something is
+// listening, but that it is listening *where the configuration said*. Get dials the host it is
+// given, so scraping a loopback address proves a wildcard bind was not what happened; the old
+// port-only form dialed 127.0.0.1 unconditionally and passed against either.
 package testhttp
 
 import (
@@ -18,7 +25,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -32,50 +38,50 @@ const (
 	maxPolls     = 50
 )
 
-// FreePort returns a TCP port on the loopback interface that is currently unused.
+// FreeAddr returns a loopback host:port that is currently unused.
 //
 // Tests run in parallel with each other and with whatever else is on the machine, and the ports
 // these servers default to are the popular ones: 8080 for ObjectFS's metrics endpoint, 9090 for the
 // Prometheus a developer may well have running. Asking the kernel is the only way to be sure.
 //
 // There is a window between the close here and the bind by the caller, which nothing can eliminate
-// without handing over the listener itself. Where that matters — a server that can accept a
-// net.Listener — pass one instead; the servers here take a port.
-func FreePort(t *testing.T) int {
+// without handing over the listener itself. Prefer configuring "127.0.0.1:0" and reading back where
+// the server bound — [metrics.Collector.Addr] reports it — and use this only where the address has
+// to be known before the server starts, which is every test that supplies it through a config file
+// or a Configuration.
+func FreeAddr(t *testing.T) string {
 	t.Helper()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("reserving a port: %v", err)
+		t.Fatalf("reserving an address: %v", err)
 	}
 
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("a TCP listener reported a %T address", ln.Addr())
-	}
-	port := addr.Port
+	addr := ln.Addr().String()
 
 	if err := ln.Close(); err != nil {
-		t.Fatalf("releasing the reserved port: %v", err)
+		t.Fatalf("releasing the reserved address %s: %v", addr, err)
 	}
 
-	return port
+	return addr
 }
 
-// Get fetches a path from a server on the loopback interface, retrying until it answers, and fails
-// the test if nothing ever does.
+// Get fetches a path from a server at addr, retrying until it answers, and fails the test if nothing
+// ever does.
 //
-// whatBound describes what the caller expected to bind the listener, and is quoted in the failure:
-// "nothing ever answered … — the adapter bound no metrics listener" is a sentence someone reading a
-// CI log can act on, where a bare dial error is a sentence they have to go and interpret.
+// addr is a host:port, and the host is dialed as given — that is the point of taking an address
+// rather than a port. whatBound describes what the caller expected to bind the listener, and is
+// quoted in the failure: "nothing ever answered … — the adapter bound no metrics listener" is a
+// sentence someone reading a CI log can act on, where a bare dial error is a sentence they have to
+// go and interpret.
 //
 // A non-200 is fatal immediately rather than retried. A server that answers with a status is up, so
 // retrying only delays the report by a second and buries the status behind a timeout.
-func Get(t *testing.T, port int, path, whatBound string) string {
+func Get(t *testing.T, addr, path, whatBound string) string {
 	t.Helper()
 
-	url := "http://127.0.0.1:" + strconv.Itoa(port) + path
+	url := "http://" + addr + path
 	client := &http.Client{Timeout: time.Second}
 
 	var lastErr error
@@ -96,16 +102,17 @@ func Get(t *testing.T, port int, path, whatBound string) string {
 	return ""
 }
 
-// Unreachable reports whether nothing is listening, having waited out the same budget [Get] allows.
+// Unreachable reports whether nothing is listening at addr, having waited out the same budget [Get]
+// allows.
 //
 // This is the assertion for a disabled configuration, and it is worth having as its own function
 // because the naive version of it is wrong: a single immediate dial fails against a listener that is
 // merely slow to bind, so a test written that way passes whether the feature is off or just late.
 // Waiting the full budget is the cost of the distinction.
-func Unreachable(t *testing.T, port, path string) bool {
+func Unreachable(t *testing.T, addr, path string) bool {
 	t.Helper()
 
-	url := "http://127.0.0.1:" + port + path
+	url := "http://" + addr + path
 	client := &http.Client{Timeout: time.Second}
 
 	for range maxPolls {

@@ -56,9 +56,17 @@ which names them rather than leaving them mixed in with the list above.
 ### 🔧 Operations
 
 - **Systemd integration**: service templates under `deployments/`
-- **Health monitoring**: health endpoint and internal checks
-- **Metrics export**: Prometheus-compatible metrics endpoint
+- **Health monitoring**: `/health` on `monitoring.health_checks.addr`, plus internal component checks
+- **Metrics export**: Prometheus-compatible `/metrics` on `monitoring.metrics.addr`
 - **Structured logging**: JSON logs with configurable levels
+
+Both listeners are on by default, both default to loopback (`127.0.0.1:8080` and `127.0.0.1:8081`),
+and neither is authenticated. `enabled: false` beside the address is the only way to turn one off; a
+port of `0` is rejected rather than read as "off". [Metrics and health
+endpoints](https://github.com/scttfrdmn/objectfs#metrics-and-health-endpoints) in the README has the
+configuration, and
+[SECURITY.md](https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md) has what publishing one
+exposes.
 
 ---
 

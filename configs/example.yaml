@@ -25,8 +25,6 @@
 global:
   log_level: INFO                     # DEBUG, INFO, WARN, ERROR
   log_file: ""                        # empty = stderr
-  metrics_port: 8080                  # Prometheus /metrics; must differ from health_port
-  health_port: 8081                   # health endpoint; 0 disables it
 
 storage:
   s3:
@@ -78,10 +76,15 @@ network:
     base_delay: 1s
     max_delay: 30s
 
+# Each endpoint's address sits beside the flag that enables it, and both default to loopback because
+# neither has any authentication. Set enabled: false to turn one off — there is no port value that
+# means "off".
 monitoring:
   metrics:
     enabled: true
+    addr: 127.0.0.1:8080              # /metrics and /debug/*
   health_checks:
     enabled: true
+    addr: 127.0.0.1:8081              # /health
     interval: 30s
     timeout: 5s

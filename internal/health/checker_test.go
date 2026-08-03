@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -231,27 +230,46 @@ func TestHealthEndpointStopsServingAfterStop(t *testing.T) {
 	}
 }
 
-// TestStartHTTPServerSurvivesAnUnbindablePort covers the bind-failure arm deliberately.
+// TestStartFailsWhenTheHealthAddressCannotBeBound pins the bind-failure contract.
 //
-// This arm had coverage before only because parallel tests collided on port 8081 — it was exercised
-// by accident, in tests written to assert something else, a variable number of times per run. That is
-// what made this package's coverage percentage depend on the scheduler.
+// The contract is the opposite of what it was. The bind used to happen on a goroutine that logged the
+// error and returned, so the mount came up with no health endpoint and one line in the log to say
+// why — and #192, reporting the unvalidated port, called that non-fatal behavior "the right call for
+// observability". It is the inversion: an operator who asked for the endpoint and did not get it finds
+// out when a liveness probe starts failing, and `enabled: false` is already how you ask for no
+// endpoint. So Start binds before returning and returns the error.
 //
-// The port numbers here are out of range rather than merely occupied, and that is not laziness: an
-// occupied port does not reliably fail. startHTTPServer binds the wildcard (fmt.Sprintf(":%d")), so
-// a listener already holding 127.0.0.1:N does not stop it from binding [::]:N — the first draft of
-// this test asserted a collision and watched the server come up on [::] instead. An out-of-range
-// port fails in the address parse, before any of that, on every platform.
+// Two cases, and they fail at different depths on purpose. An occupied address is a real conflict that
+// reaches the bind. A malformed one is rejected by net.Listen's address parse — the same class as
+// health_port: 99999, which used to reach here from YAML unchecked and now cannot, because
+// config.Validate range-checks the port at load. Both must reach the caller as an error naming the
+// address.
 //
-// It is also the realistic failure: Global.HealthPort comes from YAML and nothing range-checks it,
-// so health_port: 99999 is a config an operator can actually write. The contract is that it logs and
-// returns. A health endpoint that cannot bind must not be fatal — it is observability, and taking a
-// mount down because a diagnostic port is unusable inverts the priority.
-func TestStartHTTPServerSurvivesAnUnbindablePort(t *testing.T) {
+// Note the occupied case has to be occupied on the *same host*, not merely the same port. The previous
+// implementation bound fmt.Sprintf(":%d") — the wildcard — so a listener holding 127.0.0.1:N did not
+// stop it coming up on [::]:N, and the first draft of the old test asserted a collision and watched
+// exactly that happen. That is #211 seen from the test's side.
+func TestStartFailsWhenTheHealthAddressCannotBeBound(t *testing.T) {
 	t.Parallel()
 
-	for _, port := range []int{-1, 99999} {
-		t.Run(fmt.Sprintf("port %d", port), func(t *testing.T) {
+	var lc net.ListenConfig
+
+	held, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen on loopback in this environment: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{name: "the address is already in use", addr: held.Addr().String()},
+		{name: "the address is not a host:port", addr: "127.0.0.1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			checker, err := NewChecker(&Config{
@@ -259,29 +277,124 @@ func TestStartHTTPServerSurvivesAnUnbindablePort(t *testing.T) {
 				CheckInterval: time.Hour,
 				Timeout:       5 * time.Second,
 				HTTPEnabled:   true,
-				HTTPPort:      port,
+				HTTPAddr:      tc.addr,
 				HTTPPath:      "/health",
 			})
 			if err != nil {
 				t.Fatalf("NewChecker() error = %v", err)
 			}
 
-			returned := make(chan struct{})
+			err = checker.Start(t.Context())
+			if err == nil {
+				t.Fatalf("Start succeeded with health_checks.addr %q. The mount would run with no "+
+					"health endpoint, so every probe against it fails and nothing says why", tc.addr)
+			}
+			if !strings.Contains(err.Error(), tc.addr) {
+				t.Errorf("the error does not name the address that could not be bound, which is the "+
+					"one thing the operator has to change: %v", err)
+			}
 
-			go func() {
-				defer close(returned)
-				checker.startHTTPServer(t.Context())
-			}()
-
-			select {
-			case <-returned:
-			case <-time.After(10 * time.Second):
-				t.Fatalf("startHTTPServer did not return after failing to bind port %d. It must log "+
-					"and give up: a goroutine wedged here would hold whatever it acquired for the "+
-					"life of the mount", port)
+			// Start must not leave the checker looking started when it failed, or Stop is unreachable
+			// and a caller retrying gets "already started" for a checker that never ran.
+			if checker.started {
+				t.Error("Start reported an error but left started true; Stop would then be the only " +
+					"way to clear it and Stop is not reachable from a failed Start")
 			}
 		})
 	}
+}
+
+// TestStartServesTheEndpointWhereConfigured is the regression test for #211 on the health side.
+//
+// Nothing asserted where this listener was, only that requests to it succeeded — and a wildcard bind
+// answers on loopback, so a test that scrapes 127.0.0.1 passes either way. /health reports component
+// names, error strings and check timings with no authentication and is on by default, so a stock
+// mount published that to anything that could route to it.
+func TestStartServesTheEndpointWhereConfigured(t *testing.T) {
+	t.Parallel()
+
+	// A reserved-then-released address, because the address has to be known before Start binds it.
+	var lc net.ListenConfig
+
+	probe, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen on loopback in this environment: %v", err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatalf("releasing the reserved address: %v", err)
+	}
+
+	checker, err := NewChecker(&Config{
+		Enabled:       true,
+		CheckInterval: time.Hour,
+		Timeout:       5 * time.Second,
+		HTTPEnabled:   true,
+		HTTPAddr:      addr,
+		HTTPPath:      "/health",
+	})
+	if err != nil {
+		t.Fatalf("NewChecker() error = %v", err)
+	}
+
+	if err := checker.Start(t.Context()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = checker.Stop() })
+
+	if code, _ := get(t, "http://"+addr+"/health"); code != http.StatusOK &&
+		code != http.StatusServiceUnavailable {
+		t.Fatalf("the endpoint answered %d on the configured address; it should be serving", code)
+	}
+
+	// And not on an address that is this host but is not the configured one.
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("splitting %s: %v", addr, err)
+	}
+
+	routable := routableIPv4(t)
+	if routable == "" {
+		t.Log("no non-loopback IPv4 address on this host; only the configured-address half of this " +
+			"test ran")
+
+		return
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		"http://"+net.JoinHostPort(routable, port)+"/health", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Errorf("/health answered on %s, which is not the configured %s — an unauthenticated "+
+			"endpoint is reachable from anything that can route to this host", routable, addr)
+	}
+}
+
+// routableIPv4 returns a non-loopback IPv4 address of this host, or "" if it has none.
+func routableIPv4(t *testing.T) string {
+	t.Helper()
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("enumerating interface addresses: %v", err)
+	}
+
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if v4 := ipnet.IP.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+
+	return ""
 }
 
 // TestCheckerAccessorsReflectRegisteredChecks covers GetStats, EnableCheck, and DisableCheck.

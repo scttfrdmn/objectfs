@@ -75,8 +75,12 @@ func validateOptions(o clientOptions) error {
 			WithComponent("objectfs-sdk").
 			WithOperation("New")
 	}
-	if o.metricsPort == o.healthPort {
-		return pkgerrors.NewError(pkgerrors.ErrCodeInvalidConfig, "metrics_port and health_port cannot be the same").
+	// Addresses, not ports, and only equality is checked here. Their shape is checked by
+	// Configuration.Validate, which Mount reaches — one implementation, so the SDK and a config file
+	// cannot come to different conclusions about what a valid address is.
+	if o.metricsAddr == o.healthAddr {
+		return pkgerrors.NewError(pkgerrors.ErrCodeInvalidConfig,
+			"metrics_addr and health_addr cannot be the same; two listeners cannot share one address").
 			WithComponent("objectfs-sdk").
 			WithOperation("New")
 	}
@@ -91,8 +95,8 @@ func (c *Client) buildConfig() *config.Configuration {
 	cfg.Performance.CacheSize = c.opts.cacheSize
 	cfg.Performance.MaxConcurrency = c.opts.maxConcurrency
 	cfg.Global.LogLevel = c.opts.logLevel
-	cfg.Global.MetricsPort = c.opts.metricsPort
-	cfg.Global.HealthPort = c.opts.healthPort
+	cfg.Monitoring.Metrics.Addr = c.opts.metricsAddr
+	cfg.Monitoring.HealthChecks.Addr = c.opts.healthAddr
 	cfg.Security.TLSEnabled = c.opts.tlsEnabled
 	return cfg
 }

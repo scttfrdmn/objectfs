@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,6 +23,20 @@ const (
 	TrueValue = "true"
 )
 
+// Default bind addresses for the two monitoring listeners.
+//
+// Loopback, not the wildcard. Both endpoints are on by default, so a stock `objectfs s3://bucket /mnt`
+// used to open two unauthenticated ports to every host that could route to it (#211); neither serves
+// object contents, but between them they report per-operation counts, error rates, sizes and timings.
+// Loopback keeps a same-host Prometheus scrape working and makes a cross-host one explicit.
+//
+// The ports are unchanged from the global.metrics_port and global.health_port these replaced, so an
+// existing same-host scrape keeps working across the upgrade.
+const (
+	DefaultMetricsAddr = "127.0.0.1:8080"
+	DefaultHealthAddr  = "127.0.0.1:8081"
+)
+
 // Configuration represents the complete application configuration
 type Configuration struct {
 	Global      GlobalConfig      `yaml:"global"`
@@ -36,13 +51,37 @@ type Configuration struct {
 	Cluster     ClusterConfig     `yaml:"cluster"`
 }
 
-// GlobalConfig represents global application settings
+// GlobalConfig represents global application settings.
+//
+// Its three port keys are gone as of v0.11.0, replaced by an address per listener beside that
+// listener's own `enabled` flag (#202, #211, #212):
+//
+//	global.metrics_port  →  monitoring.metrics.addr
+//	global.health_port   →  monitoring.health_checks.addr
+//	global.profile_port  →  removed outright
+//
+// A port and an address were never two settings. `monitoring` already declared `metrics_addr` and
+// `health_check_addr`, defaulted them, documented them — and read neither, while the ports two
+// sections away were what the listeners used. So an operator who set `health_check_addr:
+// 127.0.0.1:8081` to keep a diagnostic endpoint off the network got a wildcard bind and no warning:
+// the setting that would have changed it was inert and the setting that was live could not express a
+// host at all.
+//
+// An address subsumes a port, so keeping both would have preserved the disagreement. It also settles
+// what a port could not: `health_port: 0` disabled the health endpoint while `metrics_port: 0`
+// defaulted back to 8080 and bound it, so the two adjacent fields spelled "off" differently and the
+// metrics one failed in the direction that leaves a port open. There is no `0` in an address, and each
+// listener already has an `enabled` flag next to its new `addr` — one way to disable, per listener.
+//
+// global.profile_port is removed rather than wired. It defaulted to 6060 and started nothing; the one
+// pprof server in the tree is pkg/profiling's, which has no importer, also binds every interface, and
+// serves mutating /memory/gc and /memory/free endpoints with no authentication. Binding a third
+// unauthenticated listener inside the change that stops binding two of them was the wrong trade to
+// make on the strength of a boolean nothing read. Tracked as #245, where the profiling package's fate
+// is decided with it.
 type GlobalConfig struct {
-	LogLevel    string `yaml:"log_level"`
-	LogFile     string `yaml:"log_file"`
-	MetricsPort int    `yaml:"metrics_port"`
-	HealthPort  int    `yaml:"health_port"`
-	ProfilePort int    `yaml:"profile_port"`
+	LogLevel string `yaml:"log_level"`
+	LogFile  string `yaml:"log_file"`
 }
 
 // PerformanceConfig represents performance-related settings.
@@ -288,28 +327,62 @@ const (
 	EncryptionModeKMS = awsname.SSEModeKMS
 )
 
-// MonitoringConfig represents monitoring settings
+// MonitoringConfig represents monitoring settings.
+//
+// Its `metrics_addr`, `health_check_addr` and `enable_pprof` keys are gone as of v0.11.0. The first
+// two moved to `monitoring.metrics.addr` and `monitoring.health_checks.addr`, beside the `enabled`
+// flag each governs — an address belongs to the listener it binds, and at the top of this block they
+// were two sections away from the ports the listeners actually used, which is how both came to be
+// read by nothing. `enable_pprof` is removed outright; see [GlobalConfig] for why no pprof listener
+// was started in its place.
+//
+// `enabled` remains read by nothing. It is not the switch for this block — `metrics.enabled` and
+// `health_checks.enabled` are, one per listener, and both are honored. Left in place rather than
+// removed with the others because deciding whether a whole-block switch should exist is a design
+// question, not a plumbing one.
 type MonitoringConfig struct {
-	Enabled         bool                `yaml:"enabled"`
-	MetricsAddr     string              `yaml:"metrics_addr"`
-	EnablePprof     bool                `yaml:"enable_pprof"`
-	HealthCheckAddr string              `yaml:"health_check_addr"`
-	OpenTelemetry   OpenTelemetryConfig `yaml:"opentelemetry"`
-	Metrics         MetricsConfig       `yaml:"metrics"`
-	HealthChecks    HealthChecksConfig  `yaml:"health_checks"`
-	Logging         LoggingConfig       `yaml:"logging"`
+	Enabled       bool                `yaml:"enabled"`
+	OpenTelemetry OpenTelemetryConfig `yaml:"opentelemetry"`
+	Metrics       MetricsConfig       `yaml:"metrics"`
+	HealthChecks  HealthChecksConfig  `yaml:"health_checks"`
+	Logging       LoggingConfig       `yaml:"logging"`
 }
 
 // MetricsConfig represents metrics settings
 type MetricsConfig struct {
-	Enabled      bool              `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+
+	// Addr is the host:port the Prometheus endpoint binds, default "127.0.0.1:8080".
+	//
+	// Loopback by default. /metrics and /debug/operations between them report per-operation counts,
+	// error rates, sizes and timings — enough to characterize what a bucket is used for and when — and
+	// neither has any authentication, so a wildcard bind exposed that to every host that could route
+	// to the mount. A same-host Prometheus scrape still works; a cross-host one is now something an
+	// operator writes down.
+	//
+	// Set "0.0.0.0:8080" for every interface, or ":8080", which means the same thing. Setting Enabled
+	// false is how the endpoint is disabled — there is no port 0 to write, which is deliberate: this
+	// field replaced global.metrics_port, where 0 read as "off" and defaulted back to 8080.
+	Addr string `yaml:"addr"`
+
 	Prometheus   bool              `yaml:"prometheus"`
 	CustomLabels map[string]string `yaml:"custom_labels"`
 }
 
 // HealthChecksConfig represents health check settings
 type HealthChecksConfig struct {
-	Enabled  bool          `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+
+	// Addr is the host:port the health endpoint binds, default "127.0.0.1:8081".
+	//
+	// Loopback by default, for the reason [MetricsConfig.Addr] gives: /health reports component names,
+	// error strings and check timings with no authentication. This was found the hard way — a test
+	// asserting a bind *collision* held 127.0.0.1:8081 and watched the server come up on [::]:8081 and
+	// serve happily (#192).
+	//
+	// Setting Enabled false disables the endpoint and the checks behind it.
+	Addr string `yaml:"addr"`
+
 	Interval time.Duration `yaml:"interval"`
 	Timeout  time.Duration `yaml:"timeout"`
 }
@@ -468,11 +541,8 @@ type RedisConfig struct {
 func NewDefault() *Configuration {
 	return &Configuration{
 		Global: GlobalConfig{
-			LogLevel:    "INFO",
-			LogFile:     "",
-			MetricsPort: 8080,
-			HealthPort:  8081,
-			ProfilePort: 6060,
+			LogLevel: "INFO",
+			LogFile:  "",
 		},
 		Storage: StorageConfig{
 			S3: S3Config{
@@ -615,10 +685,7 @@ func NewDefault() *Configuration {
 			},
 		},
 		Monitoring: MonitoringConfig{
-			Enabled:         false,
-			MetricsAddr:     ":9090",
-			EnablePprof:     false,
-			HealthCheckAddr: ":8081",
+			Enabled: false,
 			OpenTelemetry: OpenTelemetryConfig{
 				Enabled:     false,
 				Endpoint:    "localhost:4317",
@@ -626,6 +693,7 @@ func NewDefault() *Configuration {
 			},
 			Metrics: MetricsConfig{
 				Enabled:    true,
+				Addr:       DefaultMetricsAddr,
 				Prometheus: true,
 				CustomLabels: map[string]string{
 					"service": "objectfs",
@@ -633,6 +701,7 @@ func NewDefault() *Configuration {
 			},
 			HealthChecks: HealthChecksConfig{
 				Enabled:  true,
+				Addr:     DefaultHealthAddr,
 				Interval: 30 * time.Second,
 				Timeout:  5 * time.Second,
 			},
@@ -778,10 +847,50 @@ func getEnvMappings() []envMapping {
 			c.Global.LogFile = val
 			return nil
 		}},
-		{"OBJECTFS_METRICS_PORT", func(c *Configuration, val string) error {
-			if port, err := strconv.Atoi(val); err == nil {
-				c.Global.MetricsPort = port
+		// Repointed from the removed global.metrics_port, and renamed with it: the variable assigns an
+		// address now, so a name saying PORT would be the same two-names-one-setting problem the ports
+		// had. Both endpoints get one, because an operator who moves one listener off loopback usually
+		// has to move the other.
+		//
+		// Assigned verbatim rather than parsed. Validate rejects a malformed address naming the field,
+		// which is more use than a handler that swallows the error and leaves the default in place —
+		// what OBJECTFS_METRICS_PORT did, so `OBJECTFS_METRICS_PORT=eighty` was silently ignored.
+		{"OBJECTFS_METRICS_ADDR", func(c *Configuration, val string) error {
+			c.Monitoring.Metrics.Addr = val
+			return nil
+		}},
+		{"OBJECTFS_HEALTH_ADDR", func(c *Configuration, val string) error {
+			c.Monitoring.HealthChecks.Addr = val
+			return nil
+		}},
+		// OBJECTFS_METRICS_ENABLED was documented in cmd/objectfs/doc.go and OBJECTFS.md and assigned
+		// nothing — the same defect as the addresses above, in the setting that turns the listener off
+		// rather than the one that moves it. It is the only way to close an unauthenticated endpoint
+		// without editing a config file, so it is wired rather than undocumented.
+		//
+		// strconv.ParseBool, and the error is returned, unlike the feature-flag handlers below which
+		// coerce anything that is not "true" to false. That asymmetry is deliberate: these two govern
+		// listeners that default to on, so a typo coerced to false silently removes an endpoint a probe
+		// depends on, and coerced to true silently keeps one an operator asked to close. Both are worse
+		// than refusing to start and naming the variable.
+		{"OBJECTFS_METRICS_ENABLED", func(c *Configuration, val string) error {
+			enabled, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("OBJECTFS_METRICS_ENABLED=%q is not a boolean: %w", val, err)
 			}
+
+			c.Monitoring.Metrics.Enabled = enabled
+
+			return nil
+		}},
+		{"OBJECTFS_HEALTH_ENABLED", func(c *Configuration, val string) error {
+			enabled, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("OBJECTFS_HEALTH_ENABLED=%q is not a boolean: %w", val, err)
+			}
+
+			c.Monitoring.HealthChecks.Enabled = enabled
+
 			return nil
 		}},
 
@@ -934,8 +1043,29 @@ func (c *Configuration) Validate() error {
 		return fmt.Errorf("connection_pool_size must be greater than 0")
 	}
 
-	if c.Global.MetricsPort == c.Global.HealthPort {
-		return fmt.Errorf("metrics_port and health_port cannot be the same")
+	// Only the enabled listener's address is checked. Refusing to start over a malformed address in a
+	// block that binds nothing would fail a mount over a setting with no effect — the same reasoning as
+	// the disabled-compression arm in validateCompressionConfig.
+	if c.Monitoring.Metrics.Enabled {
+		if err := validateListenAddr("monitoring.metrics.addr", c.Monitoring.Metrics.Addr); err != nil {
+			return err
+		}
+	}
+	if c.Monitoring.HealthChecks.Enabled {
+		if err := validateListenAddr("monitoring.health_checks.addr", c.Monitoring.HealthChecks.Addr); err != nil {
+			return err
+		}
+	}
+
+	// Two listeners on one address is a startup failure with no error, not a conflict the OS resolves:
+	// whichever binds second logs from a goroutine and returns, leaving the mount up with one endpoint
+	// missing. Compared as strings deliberately — "127.0.0.1:8080" and ":8080" are different addresses
+	// and do not collide, since the first binds one interface and the second every interface, so
+	// normalizing them together would reject a pair that works.
+	if c.Monitoring.Metrics.Enabled && c.Monitoring.HealthChecks.Enabled &&
+		c.Monitoring.Metrics.Addr == c.Monitoring.HealthChecks.Addr {
+		return fmt.Errorf("monitoring.metrics.addr and monitoring.health_checks.addr are both %q; "+
+			"two listeners cannot share one address", c.Monitoring.Metrics.Addr)
 	}
 
 	validLogLevels := []string{"DEBUG", "INFO", "WARN", "ERROR"}
@@ -1050,6 +1180,52 @@ func validateEncryptionConfig(cfg EncryptionConfig) error {
 	if cfg.BucketKeys && cfg.Mode != EncryptionModeKMS {
 		return fmt.Errorf("security.encryption: bucket_keys is set but mode is %q; bucket keys reduce "+
 			"SSE-KMS's per-object KMS calls and do nothing without mode %q", cfg.Mode, EncryptionModeKMS)
+	}
+
+	return nil
+}
+
+// validateListenAddr rejects a monitoring listen address the runtime cannot bind.
+//
+// Both listeners now bind synchronously and return the error, so a malformed address does fail the
+// mount without this check. What this adds is where the failure is reported: net.Listen can only say
+// "address 127.0.0.1:99999: invalid port", naming neither the setting nor the file. Validation here
+// names the field an operator has to edit, and does it before the backend is constructed and a bucket
+// is contacted. Both servers used to bind on a goroutine and log — metrics from inside a `go func()`
+// whose result nothing read, health from startHTTPServer, which logged and returned — so the mount
+// came up working with no endpoint and one line in a log the operator had no reason to be reading.
+//
+// port is what this most needs to catch. `health_port: 99999` was a config an operator could write;
+// it reached net.Listen as "[::]:99999" and failed there, producing exactly that silent
+// no-endpoint (#192). net.SplitHostPort accepts it — "99999" is a syntactically fine port string —
+// so the range is checked here explicitly.
+//
+// A name is allowed to fail resolution: "localhost" is the address an operator is most likely to
+// write, and refusing anything that does not parse as an IP would reject it. What is checked is the
+// shape, which is the part a typo breaks.
+func validateListenAddr(field, addr string) error {
+	if addr == "" {
+		return fmt.Errorf("%s must be set to a host:port; leave it at its default or set enabled: false "+
+			"to turn the endpoint off", field)
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s is not a host:port address: %q (%w)", field, addr, err)
+	}
+
+	// An empty host is the wildcard, which is legal and is what this change stopped doing by default.
+	// Written explicitly it is a choice, so it is accepted.
+	_ = host
+
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("%s has a non-numeric port: %q. A service name is not looked up in "+
+			"/etc/services here; write the number", field, port)
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("%s port %d is outside 1-65535. Port 0 is not how these endpoints are "+
+			"disabled — set the enabled flag beside this field to false", field, n)
 	}
 
 	return nil

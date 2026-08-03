@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/scttfrdmn/objectfs/internal/config"
 )
 
 // requireAWS skips the test unless AWS credentials are available.
@@ -41,11 +44,14 @@ func TestDefaultOptions(t *testing.T) {
 	if o.logLevel != "INFO" {
 		t.Errorf("logLevel: got %q, want %q", o.logLevel, "INFO")
 	}
-	if o.metricsPort != 8080 {
-		t.Errorf("metricsPort: got %d, want 8080", o.metricsPort)
+	// Loopback, and the same value internal/config defaults the file-based setting to, read from
+	// there rather than restated: two constants for one default is how the ports these replaced came
+	// to disagree with the config loader in the first place.
+	if o.metricsAddr != config.DefaultMetricsAddr {
+		t.Errorf("metricsAddr: got %q, want %q", o.metricsAddr, config.DefaultMetricsAddr)
 	}
-	if o.healthPort != 8081 {
-		t.Errorf("healthPort: got %d, want 8081", o.healthPort)
+	if o.healthAddr != config.DefaultHealthAddr {
+		t.Errorf("healthAddr: got %q, want %q", o.healthAddr, config.DefaultHealthAddr)
 	}
 	if o.tlsEnabled {
 		t.Error("tlsEnabled: got true, want false")
@@ -97,21 +103,21 @@ func TestWithLogLevel(t *testing.T) {
 	}
 }
 
-func TestWithMetricsPort(t *testing.T) {
+func TestWithMetricsAddr(t *testing.T) {
 	t.Parallel()
 	o := defaultOptions()
-	WithMetricsPort(9090)(&o)
-	if o.metricsPort != 9090 {
-		t.Errorf("metricsPort: got %d, want 9090", o.metricsPort)
+	WithMetricsAddr("0.0.0.0:9090")(&o)
+	if o.metricsAddr != "0.0.0.0:9090" {
+		t.Errorf("metricsAddr: got %q, want %q", o.metricsAddr, "0.0.0.0:9090")
 	}
 }
 
-func TestWithHealthPort(t *testing.T) {
+func TestWithHealthAddr(t *testing.T) {
 	t.Parallel()
 	o := defaultOptions()
-	WithHealthPort(9091)(&o)
-	if o.healthPort != 9091 {
-		t.Errorf("healthPort: got %d, want 9091", o.healthPort)
+	WithHealthAddr("0.0.0.0:9091")(&o)
+	if o.healthAddr != "0.0.0.0:9091" {
+		t.Errorf("healthAddr: got %q, want %q", o.healthAddr, "0.0.0.0:9091")
 	}
 }
 
@@ -150,17 +156,106 @@ func TestValidateOptions_ZeroConcurrency(t *testing.T) {
 	}
 }
 
-func TestValidateOptions_SamePorts(t *testing.T) {
+func TestValidateOptions_SameAddrs(t *testing.T) {
 	t.Parallel()
 	o := defaultOptions()
-	o.metricsPort = 9000
-	o.healthPort = 9000
+	o.metricsAddr = "127.0.0.1:9000"
+	o.healthAddr = "127.0.0.1:9000"
 	err := validateOptions(o)
 	if err == nil {
-		t.Fatal("expected error for same metrics/health port")
+		t.Fatal("expected error for the same metrics and health address")
 	}
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Errorf("expected ErrInvalidConfig, got %v", err)
+	}
+}
+
+// TestBuildConfigCarriesEveryOptionToWhereItIsRead asserts the values the consumers receive.
+//
+// Not that buildConfig was called, and not by recomputing its mapping — a test that restates
+// `cfg.X = o.x` cannot fail. It asserts each field of the *output*, against a value that differs from
+// the default the field would hold if the mapping were absent. That distinction is what #202 turns
+// on: `monitoring.metrics_addr` was declared, defaulted, documented and mapped nowhere, and a test
+// asserting it equalled its own default would have passed throughout.
+//
+// The two addresses in particular go through this function to reach a listener. WithMetricsAddr sets
+// an option; only this mapping makes the option a bind address, and only Configuration.Validate makes
+// a malformed one an error rather than a mount with a missing endpoint.
+func TestBuildConfigCarriesEveryOptionToWhereItIsRead(t *testing.T) {
+	t.Parallel()
+
+	c := &Client{opts: clientOptions{
+		region:         "eu-west-1",
+		endpoint:       "https://minio.example.internal:9000",
+		cacheSize:      "7GB",
+		maxConcurrency: 77,
+		logLevel:       "WARN",
+		metricsAddr:    "0.0.0.0:19090",
+		healthAddr:     "0.0.0.0:19091",
+		tlsEnabled:     true,
+	}}
+
+	cfg := c.buildConfig()
+
+	cases := []struct {
+		field string
+		got   any
+		want  any
+	}{
+		{"storage.s3.region", cfg.Storage.S3.Region, "eu-west-1"},
+		{"storage.s3.endpoint", cfg.Storage.S3.Endpoint, "https://minio.example.internal:9000"},
+		{"performance.cache_size", cfg.Performance.CacheSize, "7GB"},
+		{"performance.max_concurrency", cfg.Performance.MaxConcurrency, 77},
+		{"global.log_level", cfg.Global.LogLevel, "WARN"},
+		{"monitoring.metrics.addr", cfg.Monitoring.Metrics.Addr, "0.0.0.0:19090"},
+		{"monitoring.health_checks.addr", cfg.Monitoring.HealthChecks.Addr, "0.0.0.0:19091"},
+		{"security.tls_enabled", cfg.Security.TLSEnabled, true},
+	}
+
+	def := config.NewDefault()
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want %v — the option never reached the configuration the mount reads",
+				tc.field, tc.got, tc.want)
+		}
+	}
+
+	// And the fixtures must not equal the defaults, or the assertions above prove nothing.
+	if cfg.Monitoring.Metrics.Addr == def.Monitoring.Metrics.Addr ||
+		cfg.Monitoring.HealthChecks.Addr == def.Monitoring.HealthChecks.Addr {
+		t.Error("a fixture in this test equals the value the field would hold with no mapping at all, " +
+			"so the assertion for it cannot fail; pick a different one")
+	}
+
+	// The result has to survive the validation Mount performs, or the SDK builds a Configuration the
+	// adapter rejects — which is how the SDK and the config loader would come to disagree about what a
+	// valid address is.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the configuration built from valid options does not validate: %v", err)
+	}
+}
+
+// TestBuildConfigRejectsAMalformedAddressThroughValidate pins where SDK address checking happens.
+//
+// validateOptions deliberately checks only that the two addresses differ. Their shape is
+// Configuration.Validate's job, so there is one implementation of "what is a valid listen address"
+// and the SDK cannot come to a different conclusion than a config file would. This asserts the
+// error does arrive, and names the field.
+func TestBuildConfigRejectsAMalformedAddressThroughValidate(t *testing.T) {
+	t.Parallel()
+
+	o := defaultOptions()
+	o.metricsAddr = "127.0.0.1:99999" // accepted by net.SplitHostPort; out of range for a port
+
+	c := &Client{opts: o}
+
+	err := c.buildConfig().Validate()
+	if err == nil {
+		t.Fatal("a port outside 1-65535 validated; the bind would fail on a goroutine and the mount " +
+			"would come up with no metrics endpoint")
+	}
+	if !strings.Contains(err.Error(), "monitoring.metrics.addr") {
+		t.Errorf("the error does not name the setting at fault: %v", err)
 	}
 }
 

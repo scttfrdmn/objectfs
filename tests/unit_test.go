@@ -160,7 +160,7 @@ func TestWriteBufferUnit(t *testing.T) {
 func TestMetricsCollectorUnit(t *testing.T) {
 	config := &metrics.Config{
 		Enabled:        true,
-		Port:           0, // Use random port for testing
+		Addr:           "127.0.0.1:0", // the kernel picks a free port; Collector.Addr reports which
 		Path:           "/metrics",
 		Namespace:      "objectfs_test",
 		UpdateInterval: 100 * time.Millisecond,
@@ -247,7 +247,9 @@ func TestConfigUnit(t *testing.T) {
 
 	// Verify default values
 	assert.Equal(t, "INFO", defaultConfig.Global.LogLevel)
-	assert.Equal(t, 8080, defaultConfig.Global.MetricsPort)
+	// Loopback, not the wildcard: both endpoints are unauthenticated, so the default is the narrowest
+	// thing that still works and publishing them further is a choice an operator writes down (#211).
+	assert.Equal(t, config.DefaultMetricsAddr, defaultConfig.Monitoring.Metrics.Addr)
 	assert.Equal(t, "weighted_lru", defaultConfig.Cache.EvictionPolicy)
 
 	// Test configuration validation
@@ -262,9 +264,11 @@ func TestConfigUnit(t *testing.T) {
 	// environment-dependence FuzzConfigConstructsBackend found in the loader.
 	validConfig := &config.Configuration{
 		Global: config.GlobalConfig{
-			LogLevel:    "DEBUG",
-			MetricsPort: 9090,
-			HealthPort:  9091,
+			LogLevel: "DEBUG",
+		},
+		Monitoring: config.MonitoringConfig{
+			Metrics:      config.MetricsConfig{Enabled: true, Addr: "127.0.0.1:19090"},
+			HealthChecks: config.HealthChecksConfig{Enabled: true, Addr: "127.0.0.1:19091"},
 		},
 		Storage: config.StorageConfig{
 			S3: config.S3Config{Region: "us-west-2"},

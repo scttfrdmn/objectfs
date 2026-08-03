@@ -29,8 +29,9 @@
 #   cmd/objectfs        no tests — argument parsing and signal handling, currently untestable
 #                       because main() calls log.Fatalf directly
 #   internal/testhttp   no tests, deliberately: it is test support, and every statement in it runs
-#                       under the suites that use it. A test for FreePort would assert that a port
-#                       is free by binding it, which is what the function does — a tautology. Its
+#                       under the suites that use it. A test for FreeAddr would assert that an
+#                       address is free by binding it, which is what the function does — a
+#                       tautology. Its
 #                       real check is that deleting adapter.Start's metrics call fails the tests
 #                       built on it, which it does, with the message it exists to print
 #   pkg/archive         no tests — metadata types; dead code pending a decision (Part 4)

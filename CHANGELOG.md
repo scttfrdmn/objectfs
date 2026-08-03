@@ -245,6 +245,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Each listener's address is one setting, beside the `enabled` flag that governs it
+  ([#202], [#211], [#212]).** `global.metrics_port`, `global.health_port`, `global.profile_port`,
+  `monitoring.metrics_addr`, `monitoring.health_check_addr` and `monitoring.enable_pprof` are all
+  removed, replaced by `monitoring.metrics.addr` and `monitoring.health_checks.addr`, both defaulting
+  to **loopback** — `127.0.0.1:8080` and `127.0.0.1:8081`. Same ports, so an existing same-host
+  Prometheus scrape keeps working; the host is what changed.
+
+  A port and an address were never two settings. `monitoring` declared the two addresses, defaulted
+  them, documented them — and read neither, while the ports two sections away were what the listeners
+  used. So an operator who set `health_check_addr: 127.0.0.1:8081` to keep an unauthenticated
+  diagnostic endpoint off the network got a wildcard bind and no warning: the setting that would have
+  changed it was inert, and the setting that was live could not express a host at all, because the bind
+  was `fmt.Sprintf(":%d", port)`. Both endpoints are on by default, so a stock
+  `objectfs s3://bucket /mnt` published per-operation counts, error rates, sizes and timings — and, on
+  `/health`, component names and error strings — to anything that could route to the host.
+
+  An address subsumes a port, so keeping both would have preserved the disagreement. It also settles
+  what a port could not: `health_port: 0` disabled the health endpoint while `metrics_port: 0` was
+  treated as unset and defaulted back to 8080 and bound it, so two adjacent fields spelled "off"
+  differently and the metrics one failed in the direction that leaves a port open. There is no `0` in
+  an address, and each listener already has an `enabled` flag next to its new `addr`.
+
+  `global.enable_pprof` and `global.profile_port` are removed rather than wired. Nothing read either.
+  The one pprof server in the tree is `pkg/profiling`'s, which has no importer, also binds every
+  interface, and serves *mutating* `/memory/gc` and `/memory/free` handlers with no authentication —
+  binding a third unauthenticated listener inside the change that stops binding two of them was the
+  wrong trade to make on the strength of a boolean nothing read. Its fate is [#245].
+
+  Three further consequences:
+
+  - **A bind failure now fails startup and names the address.** Both servers used to bind on a
+    goroutine and log, so a mount whose metrics port was taken came up with no endpoint and one line
+    in the log to say why — an operator finds that out when a probe starts failing. This deliberately
+    contradicts [#192]'s reasoning that non-fatal was "the right call for observability":
+    `enabled: false` is already how you ask for no endpoint.
+  - **Validation catches what a listener reports badly.** `net.SplitHostPort` accepts `"99999"`, so
+    the port range is checked explicitly and the error names the field. `health_port: 99999` used to
+    reach `net.Listen` from YAML unchecked.
+  - **`OBJECTFS_METRICS_PORT`/`OBJECTFS_HEALTH_PORT` become `OBJECTFS_METRICS_ADDR`/`_HEALTH_ADDR`,**
+    and `OBJECTFS_METRICS_ENABLED` — documented in two places and assigned by nothing, which is
+    [#202]'s shape in the setting that *closes* an endpoint rather than the one that moves it — is now
+    wired, along with a new `OBJECTFS_HEALTH_ENABLED`. Both parse strictly: a value that is not a
+    boolean fails startup naming the variable, where the feature-flag variables coerce anything but
+    `"true"` to false. These two govern unauthenticated endpoints that default to on, so silent
+    coercion is wrong in whichever direction it picks.
+  - **The endpoints are documented.** `grep -rn health_port docs/ README.md configs/ examples/` used to
+    return nothing: the knobs existed, were read, changed behavior, and appeared in no shipped
+    documentation or example config ([#192]). The README now has a *Metrics and health endpoints*
+    section with both addresses, the `curl` that reaches each, the environment overrides, and why the
+    defaults are loopback; `docs/index.md` names the addresses beside the features rather than listing
+    "health monitoring" with nowhere to point a probe.
+
+  The test gap is the more interesting half. `TestStartMetricsBindsTheEndpoint` scraped `127.0.0.1`
+  and passed against a wildcard bind, because a wildcard bind answers on loopback too — so the tests
+  asserted that *something* was listening and never that it was listening where the configuration
+  said. `Collector.Addr()` now reports the bound address, and the regression tests assert two things:
+  that it equals what was configured (a wildcard bind reports `0.0.0.0` or `[::]` here), and that the
+  endpoint does *not* answer on a routable non-loopback address of the host. Verified by mutation —
+  restoring the `":"+port` bind fails both halves while the old-shaped test stays green.
+
 - **Compression is configured under `storage.s3.compression`, not `write_buffer.compression`
   ([#157]).** Nothing has ever compressed a write buffer. The block always configured the codec the
   S3 backend applies to a whole object on its way to the wire, and the misplacement mattered in both
@@ -282,8 +342,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
+[#192]: https://github.com/scttfrdmn/objectfs/issues/192
+[#202]: https://github.com/scttfrdmn/objectfs/issues/202
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205
+[#211]: https://github.com/scttfrdmn/objectfs/issues/211
+[#212]: https://github.com/scttfrdmn/objectfs/issues/212
 [#230]: https://github.com/scttfrdmn/objectfs/issues/230
+[#245]: https://github.com/scttfrdmn/objectfs/issues/245
 
 ## [0.10.3] - 2026-08-02
 

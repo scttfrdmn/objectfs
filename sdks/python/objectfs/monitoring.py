@@ -215,8 +215,8 @@ class MetricsCollector:
                     if response.content_type == 'application/json':
                         raise NetworkError(
                             f"{metrics_url} returned JSON; ObjectFS serves /metrics as a "
-                            "Prometheus text exposition. Check that the port belongs to "
-                            "ObjectFS (global.metrics_port) and not to another service."
+                            "Prometheus text exposition. Check that the address belongs to "
+                            "ObjectFS (monitoring.metrics.addr) and not to another service."
                         )
 
                     text = await response.text()

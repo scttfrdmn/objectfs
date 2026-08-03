@@ -46,29 +46,38 @@ enforces no authorization of its own. `mount.options.allow_other` (`false` by de
 that widens the mountpoint beyond the mounting user; turning it on hands every local user the
 bucket. Scope this at the IAM policy, not in ObjectFS.
 
-**Two HTTP listeners bind on all interfaces by default.** With the shipped defaults
+**Two HTTP listeners are on by default, on loopback.** With the shipped defaults
 (`monitoring.metrics.enabled: true`, `monitoring.health_checks.enabled: true`) a mount listens on
-`:8080` and `:8081`:
+`127.0.0.1:8080` and `127.0.0.1:8081`:
 
-| Port | Path | Serves | How to turn it off |
+| Address | Path | Serves | How to turn it off |
 |---|---|---|---|
-| `global.metrics_port` (8080) | `/metrics`, `/health`, `/debug/metrics`, `/debug/operations` | Prometheus counters, latencies, cache statistics; per-operation counts, errors, sizes and timings | `monitoring.metrics.enabled: false` |
-| `global.health_port` (8081) | `/health` | Component health status | `monitoring.health_checks.enabled: false`, or `global.health_port: 0` |
+| `monitoring.metrics.addr` (127.0.0.1:8080) | `/metrics`, `/health`, `/debug/metrics`, `/debug/operations` | Prometheus counters, latencies, cache statistics; per-operation counts, errors, sizes and timings | `monitoring.metrics.enabled: false` |
+| `monitoring.health_checks.addr` (127.0.0.1:8081) | `/health` | Component health status, including component names and error strings | `monitoring.health_checks.enabled: false` |
 
-Neither is authenticated, and both bind `:port` — all interfaces — rather than a loopback address.
-Verified by dialling a mount's metrics port on a non-loopback address of the host. They expose
-operational telemetry, not object contents, keys, or credentials, but the volumes and error rates are
-enough to characterize a workload. On a multi-tenant or internet-facing host, disable them or
-firewall the ports. The bind address is not configurable today; that is
-[#211](https://github.com/scttfrdmn/objectfs/issues/211).
+Neither is authenticated. They expose operational telemetry, not object contents, keys, or
+credentials, but the volumes and error rates are enough to characterize a workload — and `/health`
+names components and repeats their error strings. Set `enabled: false`, or point the address
+somewhere deliberate. Anything wider than loopback is now something an operator writes down: through
+v0.10.x both listeners bound `:port` — every interface — whatever the configuration said, because the
+setting was a port and a port cannot name an interface
+([#211](https://github.com/scttfrdmn/objectfs/issues/211)).
 
-**`metrics_port: 0` does not disable the metrics listener** — `metrics.NewCollector` treats any
-non-positive port as unset and defaults it back to 8080, so an operator who sets `0` meaning "off"
-gets a listener on the default port. Use `monitoring.metrics.enabled: false`. This is
-[#212](https://github.com/scttfrdmn/objectfs/issues/212). `health_port: 0` *does* disable the health
-listener; setting both ports to `0` fails validation, because they would then be equal.
+**Turning a listener off is `enabled: false`, and only that.** `metrics_port: 0` used to read as
+"unset" and default back to 8080, so an operator who wrote `0` meaning "off" got a listener on the
+default port ([#212](https://github.com/scttfrdmn/objectfs/issues/212)); `health_port: 0` disabled its
+listener, so the same value meant opposite things in the two blocks. An address cannot be overloaded
+that way, and there is no second spelling of "off". Setting both addresses equal fails validation
+rather than starting one listener and losing the other.
 
-`global.profile_port` is read by nothing — no pprof listener is started at any port.
+A bind failure is now fatal to startup and names the address. Both servers used to bind on a goroutine
+and log the error, so a mount whose metrics port was taken came up with no endpoint and one line in the
+log to say why — an operator finds that out when a probe starts failing.
+
+No pprof listener is started at any address. `global.enable_pprof` and `global.profile_port` were
+removed rather than wired: the server they would have started serves mutating `/memory/gc` and
+`/memory/free` handlers with no authentication. See
+[#245](https://github.com/scttfrdmn/objectfs/issues/245).
 
 ## Credentials
 

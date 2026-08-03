@@ -115,11 +115,38 @@ class SecurityConfig:
 
 @dataclass
 class MonitoringConfig:
-    """Monitoring and observability configuration."""
+    """Monitoring and observability configuration.
+
+    Each listener's address lives beside the ``enabled`` flag that governs it, matching the Go
+    schema this class serializes to. It previously declared flat ``metrics_addr`` and
+    ``health_check_addr`` keys defaulting to ``:9090``/``:8081``: the Go loader read neither --
+    it read ``global.metrics_port``/``global.health_port`` -- so ``to_yaml`` produced a document
+    that set no listener address, and the empty host meant every interface rather than loopback
+    anyway. Both keys are gone from the Go schema as of v0.11.0, and the loader now rejects
+    unknown keys, so a file written by an older SDK fails at load and names the key to fix.
+
+    ``enable_pprof`` is gone with them. Nothing ever started a pprof listener, and the server it
+    would have started serves mutating ``/memory/gc`` and ``/memory/free`` handlers with no
+    authentication.
+
+    Both endpoints below are unauthenticated -- ``/metrics`` reports per-operation counts and
+    timings, ``/health`` reports component names and error strings -- which is why the defaults
+    are loopback. Publishing them further is a choice you write down.
+    """
     enabled: bool = False
-    metrics_addr: str = ":9090"
-    health_check_addr: str = ":8081"
-    enable_pprof: bool = False
+
+    metrics: Dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "addr": "127.0.0.1:8080",
+        "prometheus": True,
+    })
+
+    health_checks: Dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "addr": "127.0.0.1:8081",
+        "interval": "30s",
+        "timeout": "5s",
+    })
 
     # OpenTelemetry
     opentelemetry: Dict[str, Any] = field(default_factory=lambda: {

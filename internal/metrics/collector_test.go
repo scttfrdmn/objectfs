@@ -13,7 +13,7 @@ func TestNewCollector(t *testing.T) {
 	t.Run("with valid config", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9090,
+			Addr:      "127.0.0.1:0",
 			Path:      "/metrics",
 			Namespace: "objectfs",
 			Subsystem: "test",
@@ -47,8 +47,10 @@ func TestNewCollector(t *testing.T) {
 		if collector.config == nil {
 			t.Fatal("default config is nil")
 		}
-		if collector.config.Port != 8080 {
-			t.Errorf("default port = %d, want 8080", collector.config.Port)
+		// Loopback, not the wildcard. The default is what a mount with no monitoring block in its
+		// config file gets, and this endpoint is unauthenticated (#211).
+		if collector.config.Addr != "127.0.0.1:8080" {
+			t.Errorf("default addr = %q, want %q", collector.config.Addr, "127.0.0.1:8080")
 		}
 		if collector.config.Path != "/metrics" {
 			t.Errorf("default path = %q, want %q", collector.config.Path, "/metrics")
@@ -81,7 +83,7 @@ func TestRecordOperation(t *testing.T) {
 	t.Run("record successful operation", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9091,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -120,7 +122,7 @@ func TestRecordOperation(t *testing.T) {
 	t.Run("record failed operation", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9092,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -140,7 +142,7 @@ func TestRecordOperation(t *testing.T) {
 	t.Run("record multiple operations", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9093,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -195,7 +197,7 @@ func TestRecordCacheOperations(t *testing.T) {
 	t.Run("record cache hit", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9094,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -210,7 +212,7 @@ func TestRecordCacheOperations(t *testing.T) {
 	t.Run("record cache miss", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9095,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -243,7 +245,7 @@ func TestRecordError(t *testing.T) {
 	t.Run("record error", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9096,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -274,7 +276,7 @@ func TestClassifyError(t *testing.T) {
 
 	config := &Config{
 		Enabled:   true,
-		Port:      9097,
+		Addr:      "127.0.0.1:0",
 		Namespace: "test",
 	}
 	collector, err := NewCollector(config)
@@ -335,7 +337,7 @@ func TestUpdateCacheSize(t *testing.T) {
 	t.Run("update cache size", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9098,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -366,7 +368,7 @@ func TestUpdateActiveConnections(t *testing.T) {
 	t.Run("update active connections", func(t *testing.T) {
 		config := &Config{
 			Enabled:   true,
-			Port:      9099,
+			Addr:      "127.0.0.1:0",
 			Namespace: "test",
 		}
 		collector, err := NewCollector(config)
@@ -396,7 +398,7 @@ func TestGetMetrics(t *testing.T) {
 
 	config := &Config{
 		Enabled:   true,
-		Port:      9100,
+		Addr:      "127.0.0.1:0",
 		Namespace: "test",
 	}
 	collector, err := NewCollector(config)
@@ -449,7 +451,7 @@ func TestResetMetrics(t *testing.T) {
 
 	config := &Config{
 		Enabled:   true,
-		Port:      9101,
+		Addr:      "127.0.0.1:0",
 		Namespace: "test",
 	}
 	collector, err := NewCollector(config)
@@ -491,7 +493,7 @@ func TestStopWithoutStart(t *testing.T) {
 
 	config := &Config{
 		Enabled:   true,
-		Port:      9102,
+		Addr:      "127.0.0.1:0",
 		Namespace: "test",
 	}
 	collector, err := NewCollector(config)

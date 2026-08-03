@@ -41,8 +41,8 @@ func (s *E2ETestSuite) SetupSuite() {
 	s.config.Performance.MaxConcurrency = 10
 	s.config.WriteBuffer.MaxMemory = "16MB"
 	s.config.Cache.TTL = 30 * time.Second
-	s.config.Global.MetricsPort = 9090
-	s.config.Global.HealthPort = 9091
+	s.config.Monitoring.Metrics.Addr = "127.0.0.1:19090"
+	s.config.Monitoring.HealthChecks.Addr = "127.0.0.1:19091"
 
 	s.T().Logf("✅ E2E test suite initialized")
 }
@@ -113,8 +113,8 @@ func (s *E2ETestSuite) TestConfigurationParsing() {
 
 	// Test configuration values
 	assert.Equal(t, "INFO", defaultConfig.Global.LogLevel)
-	assert.Equal(t, 8080, defaultConfig.Global.MetricsPort)
-	assert.Equal(t, 8081, defaultConfig.Global.HealthPort)
+	assert.Equal(t, config.DefaultMetricsAddr, defaultConfig.Monitoring.Metrics.Addr)
+	assert.Equal(t, config.DefaultHealthAddr, defaultConfig.Monitoring.HealthChecks.Addr)
 	assert.Equal(t, "2GB", defaultConfig.Performance.CacheSize)
 	assert.Equal(t, 150, defaultConfig.Performance.MaxConcurrency)
 	assert.True(t, defaultConfig.Features.Prefetching)

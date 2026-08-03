@@ -345,6 +345,47 @@ Read [docs/features/compression.md](docs/features/compression.md) first. It cove
 transfers the whole object, which storage tiers make the saving zero, and why compression inside the
 file format is usually the better answer.
 
+### Metrics and health endpoints
+
+A mount starts two HTTP listeners with the built-in defaults. Both are on, and neither is
+authenticated, which is why both default to loopback:
+
+```yaml
+monitoring:
+  metrics:
+    enabled: true
+    addr: 127.0.0.1:8080    # /metrics, /health, /debug/metrics, /debug/operations
+  health_checks:
+    enabled: true
+    addr: 127.0.0.1:8081    # /health
+    interval: 30s
+    timeout: 5s
+```
+
+There are no `objectfs metrics` or `objectfs health` subcommands — the mount process serves both, so
+`curl` is the interface:
+
+```bash
+curl -s 127.0.0.1:8080/metrics
+curl -s 127.0.0.1:8081/health
+```
+
+`enabled: false` is the only way to turn a listener off. A port of `0` is rejected rather than read as
+"off" — through v0.10.x `health_port: 0` disabled its listener while `metrics_port: 0` defaulted back
+to 8080 and bound it, so the same value meant opposite things in adjacent blocks. Those port keys are
+gone: a port cannot name an interface, so `:8080` — every interface the host has — was the only bind
+either setting could produce, whatever it was set to. Prometheus scraping `localhost:8080` needs no
+change; a scraper on another host needs an address written here deliberately, and
+[SECURITY.md](SECURITY.md) covers what it then exposes.
+
+An address that cannot be bound fails the mount and names the field, rather than logging and leaving a
+mount up with a probe endpoint that answers nothing. `OBJECTFS_METRICS_ENABLED`,
+`OBJECTFS_METRICS_ADDR`, `OBJECTFS_HEALTH_ENABLED`, and `OBJECTFS_HEALTH_ADDR` override all four
+without a config file; a non-boolean in either `_ENABLED` fails startup instead of being coerced.
+
+There is no pprof listener at any address. See
+[#245](https://github.com/scttfrdmn/objectfs/issues/245).
+
 ### The two shipped config files
 
 - [`configs/example.yaml`](configs/example.yaml) — a short, copyable starting point. Every key in it is read on the mount path.
