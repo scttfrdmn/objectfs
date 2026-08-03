@@ -71,6 +71,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A three-node cluster could not form at the default gossip packet size, and said the cluster secret
+  was wrong** ([#277]). `MaxGossipPacket` defaulted to 1024 bytes. A sealed sync message costs about 200
+  bytes of envelope plus about 415 bytes per member — measured, not estimated, because `seal` wraps the
+  payload in JSON with a hex MAC and base64-encodes the byte field, so the payload-to-datagram ratio is
+  not a constant one can reason to. 1024 bytes therefore held **two** members. A third node's sync was
+  truncated by the receive buffer, the truncated JSON failed the authentication envelope parse, and the
+  failure was counted and logged as `MessagesUnauthenticated` — whose documented meaning is a peer
+  configured with a different cluster secret. So the symptom of a size limit was a message sending the
+  operator to verify a secret that was correct, and membership stalled at two nodes.
+
+  Three separable defects, each fixed on its own terms rather than by raising one number:
+
+  The default is now 8192 bytes, which carries about nineteen members in a single datagram. Not 65507,
+  the maximum UDP payload: a datagram over the path MTU is fragmented by IP and one lost fragment loses
+  the whole datagram, so the effective loss rate rises with size. 8 KiB does exceed a 1500-byte MTU and
+  will fragment — a deliberate trade, since six fragments for a sync that runs once per join is worth
+  more than chunking every small cluster's membership across several round trips. Per-round alive
+  messages are about 483 bytes sealed and never fragment.
+
+  Truncation is now detected and reported as truncation. The receive buffer is sized `MaxGossipPacket+1`,
+  because a buffer sized exactly to the limit cannot distinguish "at the limit" from "truncated" —
+  `ReadFromUDP` discards an oversize datagram's tail and reports only what it copied, so with one spare
+  byte `n > MaxGossipPacket` is unambiguous evidence. Such a datagram is dropped before it reaches the
+  authenticator, counted as `MessagesTruncated`, and logged with the limit and the instruction to set
+  the same value on every node. An oversize *send* is likewise refused after sealing, counted as
+  `MessagesOversize`, and returns an error naming the size and the limit — the two directions are
+  counted separately because the operator action differs: an oversize send is this node's memberlist
+  outgrowing its own limit, while a truncated receive is a peer whose limit is larger than ours.
+
+  Sync messages are now chunked rather than unbounded, so a memberlist larger than one datagram is sent
+  as several. Each chunk is a complete `SyncMessage`; this is sound because `handleSyncMessage` merges
+  per node rather than replacing wholesale, so a receiver applying two chunks reaches the same state as
+  one applying their union. Chunk boundaries are computed over a sorted key order so they are a function
+  of the membership rather than of Go's map iteration order, and each candidate chunk is sealed to
+  measure it, so the budget includes the envelope, the MAC, and the message ID. A single member too
+  large for any datagram is emitted alone and logged, so `sendMessage` refuses it loudly rather than a
+  member being silently dropped.
+
+  A fourth defect was found along the way: `NewClusterManager`'s nil-config literal restated sixteen
+  fields that `applyConfigDefaults` sets to the same values two lines later, including a second
+  `MaxGossipPacket: 1024`. That literal is now one field — `CacheReplication`, the only one it was ever
+  load-bearing for, because it is a bool defaulting to true and a bool's zero value cannot be
+  distinguished from unset. A duplicated default is how a stale copy survives a fix to the default.
+
+  The `-tags=distributed` suite no longer overrides `MaxGossipPacket` anywhere, which is what makes it
+  cover this: a test that sets the value cannot notice the default regressing. That suite now passes
+  unaided, and the unit test for the default asserts that a three-member sync fits in one datagram —
+  the property the issue was about — rather than asserting that a constant equals itself.
+
 - `MountManager.Wait` and the FUSE serving goroutine read `m.server` without holding the mutex that
   `Unmount` writes it under. Both reads are also nil dereferences: if the unmount lands first,
   `m.server.Wait()` panics on a background goroutine, which is unrecoverable and takes the process
@@ -270,9 +319,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mechanism — it learns of a peer from an inbound message, and the only unsolicited send is
   `joinCluster`, which runs only when seeds are configured. So its three managers were three clusters of
   one that had never heard of each other, which is what "Node *i* sees 1 nodes in cluster" three times
-  was saying. It now seeds all three from node 0, gives each a backend because strong consistency fans
-  the write out, and raises `MaxGossipPacket` past the default that would otherwise truncate the sync
-  ([#277]). `TestLoadBalancer_NodeSelection` registered four peers at addresses nothing listens on and
+  was saying. It now seeds all three from node 0 and gives each a backend, because strong consistency
+  fans the write out. It also raised `MaxGossipPacket` past the default that would otherwise truncate
+  the sync — a workaround, since removed once the default itself was fixed ([#277]).
+  `TestLoadBalancer_NodeSelection` registered four peers at addresses nothing listens on and
   then asserted a strong-consistency PUT across two of them succeeded; it timed out for 30 seconds and
   reported that as a defect. It now asserts what its name promises — that selection chooses from the
   whole membership, and that the operation executes and the bytes reach storage — and says in a comment

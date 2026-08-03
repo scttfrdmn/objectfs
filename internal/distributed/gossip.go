@@ -185,6 +185,18 @@ type GossipStats struct {
 	// node that refutes repeatedly is alive and being falsely accused, which points at packet loss
 	// or a heartbeat interval set below the network's actual latency — not at the node.
 	SuspicionRefutations int64 `json:"suspicion_refutations"`
+
+	// Datagrams that did not fit MaxGossipPacket, counted separately in each direction because the
+	// operator action differs: an oversize send is this node's memberlist outgrowing the limit and is
+	// refused before it reaches the socket, while a truncated receive is a *peer* whose limit is
+	// larger than ours, which is a configuration mismatch across the cluster.
+	//
+	// These exist because a truncated datagram used to present as an authentication failure. The JSON
+	// was cut mid-object, the envelope parse failed, and MessagesUnauthenticated went up — whose
+	// documented reading, two fields above, is "a peer with a different cluster secret." An operator
+	// chasing a size problem was sent to check a secret that was correct (#277).
+	MessagesTruncated int64 `json:"messages_truncated"`
+	MessagesOversize  int64 `json:"messages_oversize"`
 }
 
 // NewGossipProtocol creates a new gossip protocol instance.
@@ -330,7 +342,12 @@ func (gp *GossipProtocol) LeaveCluster(ctx context.Context) error {
 // Background goroutines
 
 func (gp *GossipProtocol) receiveMessages(ctx context.Context) {
-	buffer := make([]byte, gp.config.MaxGossipPacket)
+	// One byte larger than the limit, so a datagram of exactly MaxGossipPacket is distinguishable from
+	// one that exceeded it. ReadFromUDP discards the remainder of an oversize datagram and reports only
+	// what it copied, so n == len(buffer) is the only evidence available that anything was lost — and
+	// with a buffer sized exactly to the limit, a legitimate maximum-size message is indistinguishable
+	// from a truncated larger one. The extra byte makes n > MaxGossipPacket mean truncated, full stop.
+	buffer := make([]byte, gp.config.MaxGossipPacket+1)
 
 	for {
 		// Check stop conditions without blocking before each receive.
@@ -362,6 +379,25 @@ func (gp *GossipProtocol) receiveMessages(ctx context.Context) {
 			gp.stats.mu.Lock()
 			gp.stats.NetworkErrors++
 			gp.stats.mu.Unlock()
+			continue
+		}
+
+		// Truncation is reported as truncation, not handed to the authenticator. A datagram larger than
+		// the buffer arrives with its tail discarded by the kernel, so the JSON is cut mid-object and
+		// the envelope parse fails — which used to be counted and logged as an authentication failure,
+		// sending the operator to check a cluster secret that was correct. The size is what is wrong and
+		// the size is what the message says (#277).
+		if n > gp.config.MaxGossipPacket {
+			gp.stats.mu.Lock()
+			gp.stats.MessagesTruncated++
+			gp.stats.mu.Unlock()
+
+			slog.Warn("dropped a truncated gossip datagram",
+				"peer", addr,
+				"max_gossip_packet", gp.config.MaxGossipPacket,
+				"hint", "the sending node's max_gossip_packet is larger than this node's; raise it here "+
+					"or lower it there, and set the same value on every node")
+
 			continue
 		}
 
@@ -1077,6 +1113,23 @@ func (gp *GossipProtocol) sendMessage(addr string, msg *GossipMessage) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
+	// Refused here rather than sent and silently truncated at the far end. The sealed length is what
+	// goes on the wire, so this is the last point at which the size is knowable and the first at which
+	// it is final — checking before sealing would miss the envelope and the MAC.
+	//
+	// An error rather than a best-effort send, because the receiver cannot do anything useful with a
+	// prefix: the JSON is cut mid-object and the datagram is dropped. Returning the error gives the
+	// caller the chance to send something smaller, and gives an operator a message naming the limit
+	// instead of a peer that has mysteriously stopped converging (#277).
+	if len(data) > gp.config.MaxGossipPacket {
+		gp.stats.mu.Lock()
+		gp.stats.MessagesOversize++
+		gp.stats.mu.Unlock()
+
+		return fmt.Errorf("a %s message is %d bytes sealed, over the %d-byte max_gossip_packet: "+
+			"raise it on every node in the cluster", msg.Type, len(data), gp.config.MaxGossipPacket)
+	}
+
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve address: %w", err)
@@ -1131,13 +1184,17 @@ func (gp *GossipProtocol) broadcastMessage(msg *GossipMessage) error {
 	return nil
 }
 
+// sendSyncMessage sends this node's full membership view to addr, split across as many datagrams as
+// it takes to stay under MaxGossipPacket.
+//
+// Chunking is sound because [GossipProtocol.handleSyncMessage] merges per node rather than replacing
+// the memberlist: each chunk is a complete SyncMessage that means "these members, as I last saw
+// them," and a receiver applying two of them reaches the same state as one applying their union. So a
+// lost or reordered chunk costs the freshness of the members it carried until the next sync, and
+// nothing more. That is already true of gossip generally — this is why the protocol is eventually
+// consistent rather than atomic — and it is what makes chunking preferable to failing the whole sync,
+// which is what a single oversize datagram used to do silently (#277).
 func (gp *GossipProtocol) sendSyncMessage(addr string) error {
-	msg := &GossipMessage{
-		Type:      MessageTypeSync,
-		Timestamp: time.Now(),
-		MessageID: gp.generateMessageID(),
-	}
-
 	// Marshaled under the lock, as performGossip does for its own message and for the same reason.
 	//
 	// This used to take the read lock only to maps.Copy the memberlist and then marshal outside it —
@@ -1150,19 +1207,130 @@ func (gp *GossipProtocol) sendSyncMessage(addr string) error {
 	//
 	// Marshaling under the lock rather than deep-copying, because the alternative is a copy that has
 	// to stay deep as GossipNode grows — it holds two pointers today — and a shallow one is exactly the
-	// bug being fixed. If the memberlist ever gets large enough that holding gp.mu across a marshal
-	// matters, the answer is to bound the sync (#277), not to reintroduce a copy that can be wrong.
+	// bug being fixed.
 	gp.mu.RLock()
-	msg.From = gp.localNode.ID
-	data, marshalErr := json.Marshal(&SyncMessage{Nodes: gp.memberlist})
+	from := gp.localNode.ID
+	chunks, marshalErr := gp.marshalSyncChunksLocked()
 	gp.mu.RUnlock()
 
 	if marshalErr != nil {
 		return fmt.Errorf("marshaling the sync message: %w", marshalErr)
 	}
-	msg.Data = data
 
-	return gp.sendMessage(addr, msg)
+	// Every chunk attempted even if one fails, and the first error returned: a partial sync is worth
+	// more than none, and stopping at the first failure would make the members in later chunks depend
+	// on the ones before them.
+	var firstErr error
+	for _, data := range chunks {
+		err := gp.sendMessage(addr, &GossipMessage{
+			Type:      MessageTypeSync,
+			From:      from,
+			Timestamp: time.Now(),
+			MessageID: gp.generateMessageID(),
+			Data:      data,
+		})
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return firstErr
+}
+
+// marshalSyncChunksLocked marshals gp.memberlist into one or more SyncMessage payloads, each small
+// enough that the datagram carrying it fits MaxGossipPacket. gp.mu must be held.
+//
+// The budget is derived by measuring rather than by estimating the envelope: seal wraps the payload in
+// JSON with a hex MAC, and base64-encodes it as a []byte field, so the ratio between payload and
+// datagram is not a constant anyone should hardcode. Each candidate chunk is therefore grown one
+// member at a time and the whole message sealed to check, which costs an extra marshal per member on a
+// path that runs once per join — not per gossip round.
+func (gp *GossipProtocol) marshalSyncChunksLocked() ([][]byte, error) {
+	ids := slices.Sorted(maps.Keys(gp.memberlist))
+
+	// Sorted so that a chunk boundary is a function of the membership rather than of Go's map
+	// iteration order. Two syncs of an unchanged memberlist then produce identical chunks, which is
+	// what makes a truncation bug reproducible instead of intermittent.
+
+	var (
+		chunks  [][]byte
+		current = map[string]*GossipNode{}
+	)
+
+	flush := func() error {
+		if len(current) == 0 {
+			return nil
+		}
+		data, err := json.Marshal(&SyncMessage{Nodes: current})
+		if err != nil {
+			return err
+		}
+		chunks = append(chunks, data)
+		current = map[string]*GossipNode{}
+		return nil
+	}
+
+	for _, id := range ids {
+		current[id] = gp.memberlist[id]
+
+		fits, err := gp.syncChunkFits(current)
+		if err != nil {
+			return nil, err
+		}
+		if fits {
+			continue
+		}
+
+		// Over budget with this member added. Send what fit without it, then start a chunk with it.
+		if len(current) == 1 {
+			// A single member does not fit, so no chunking can help. Emit it anyway and let
+			// sendMessage refuse it with a message naming the limit — silently dropping a member from
+			// the sync would make it disappear from the cluster's view with nothing logged, which is
+			// strictly worse than a loud failure.
+			slog.Warn("a single member does not fit max_gossip_packet; the sync for it will be refused",
+				"node_id", id, "max_gossip_packet", gp.config.MaxGossipPacket)
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		delete(current, id)
+		if err := flush(); err != nil {
+			return nil, err
+		}
+		current[id] = gp.memberlist[id]
+	}
+
+	if err := flush(); err != nil {
+		return nil, err
+	}
+
+	return chunks, nil
+}
+
+// syncChunkFits reports whether a sync message carrying nodes would fit MaxGossipPacket once sealed.
+func (gp *GossipProtocol) syncChunkFits(nodes map[string]*GossipNode) (bool, error) {
+	payload, err := json.Marshal(&SyncMessage{Nodes: nodes})
+	if err != nil {
+		return false, err
+	}
+
+	// The same message sendMessage would build, so the measurement includes the envelope, the MAC, and
+	// the message ID rather than a guess at their combined size. MessageID is generated here and
+	// discarded: it varies in content but not in length.
+	sealed, err := gp.auth.seal(&GossipMessage{
+		Type:      MessageTypeSync,
+		From:      gp.localNode.ID,
+		Timestamp: time.Now(),
+		MessageID: gp.generateMessageID(),
+		Data:      payload,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return len(sealed) <= gp.config.MaxGossipPacket, nil
 }
 
 func (gp *GossipProtocol) getCurrentIncarnation() uint32 {
@@ -1227,6 +1395,8 @@ func (gp *GossipProtocol) GetStats() *GossipStats {
 		MessagesReplayed:        gp.stats.MessagesReplayed,
 		MessagesWrongVersion:    gp.stats.MessagesWrongVersion,
 		SuspicionRefutations:    gp.stats.SuspicionRefutations,
+		MessagesTruncated:       gp.stats.MessagesTruncated,
+		MessagesOversize:        gp.stats.MessagesOversize,
 	}
 	maps.Copy(stats.MessagesByType, gp.stats.MessagesByType)
 	gp.stats.mu.RUnlock()

@@ -74,7 +74,6 @@ func TestClusterManager_BasicOperations(t *testing.T) {
 		HeartbeatInterval: 500 * time.Millisecond,
 		GossipInterval:    100 * time.Millisecond,
 		GossipFanout:      2,
-		MaxGossipPacket:   1024,
 		CacheReplication:  true,
 		ReplicationFactor: 1,
 		ConsistencyLevel:  "eventual",
@@ -302,13 +301,12 @@ func TestConsensusEngine_LeaderElection(t *testing.T) {
 func TestGossipProtocol_BasicFunctionality(t *testing.T) {
 	// Test basic gossip protocol functionality
 	config := &distributed.ClusterConfig{
-		NodeID:          "gossip-test-1",
-		SecretFile:      writeClusterSecret(t),
-		ListenAddr:      "127.0.0.1:18082",
-		AdvertiseAddr:   "127.0.0.1:18082",
-		GossipInterval:  100 * time.Millisecond,
-		GossipFanout:    2,
-		MaxGossipPacket: 1024,
+		NodeID:         "gossip-test-1",
+		SecretFile:     writeClusterSecret(t),
+		ListenAddr:     "127.0.0.1:18082",
+		AdvertiseAddr:  "127.0.0.1:18082",
+		GossipInterval: 100 * time.Millisecond,
+		GossipFanout:   2,
 	}
 
 	cm, err := distributed.NewClusterManager(config)
@@ -525,13 +523,13 @@ func TestMultiNodeCluster(t *testing.T) {
 			ConsistencyLevel:  "strong",
 			ReplicationFactor: 2,
 
-			// The default is 1024 bytes, and a sync message carries the entire memberlist in one
-			// datagram — three members exceeds it. The receive buffer is sized from this value, so the
-			// datagram is truncated mid-JSON and then fails the authentication envelope parse, which is
-			// what "gossip message failed authentication: unexpected end of JSON input" in this test's
-			// output was. Membership stalled at two nodes as a result. Raised here so this test measures
-			// leader election rather than that; the default itself is [#277].
-			MaxGossipPacket: 65507,
+			// MaxGossipPacket is deliberately left at its default. It used to be set to 65507 here, to
+			// work around a 1024-byte default that could not carry a three-member sync: the datagram was
+			// truncated by the receive buffer and the truncated JSON then failed the authentication
+			// envelope parse, so membership stalled at two nodes and reported it as a wrong cluster
+			// secret. Both halves are fixed (#277) — the default holds ~19 members and larger memberlists
+			// are chunked — and leaving it unset is what makes this test cover that, since a test that
+			// overrides the default cannot notice the default regressing.
 		}
 
 		cm, err := distributed.NewClusterManager(config)

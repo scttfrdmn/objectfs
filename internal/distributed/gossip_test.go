@@ -2,6 +2,9 @@ package distributed
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -892,6 +895,201 @@ func TestGossipProtocol_PerformGossipResolvesAddressesUnderTheLock(t *testing.T)
 	}
 	if peer.State != StateAlive {
 		t.Errorf("addr-race-peer state = %v, want %v", peer.State, StateAlive)
+	}
+}
+
+// ── Datagram size limits (#277) ───────────────────────────────────────────────
+//
+// The defect these pin was not that the limit existed but that exceeding it was silent and then
+// misattributed: an oversize sync was sent, truncated by the receive buffer, failed the envelope
+// parse, and was counted as an authentication failure — whose documented meaning is a wrong cluster
+// secret. So each of these asserts on what an operator is told, not only on whether the datagram
+// arrived.
+
+// fillMemberlist adds n peers with realistic identifiers and returns the resulting member count.
+//
+// Realistic lengths matter: a hostname is most of a member's serialized size, so a helper using "a"
+// and "b" would make a chunking test pass at almost any limit.
+func fillMemberlist(gp *GossipProtocol, n int) int {
+	gp.mu.Lock()
+	defer gp.mu.Unlock()
+
+	for i := range n {
+		id := fmt.Sprintf("objectfs-node-%03d.cluster.example.edu", i)
+		gp.memberlist[id] = &GossipNode{
+			Info: &NodeInfo{
+				ID: id, Address: fmt.Sprintf("10.20.30.%d:8080", i%250+1),
+				Status: NodeStatusAlive, LastSeen: time.Now(), Version: "0.11.0",
+				Metadata: map[string]string{},
+			},
+			Incarnation: 1, State: StateAlive, StateChange: time.Now(),
+		}
+	}
+
+	return len(gp.memberlist)
+}
+
+// TestSendSyncMessage_ChunksAMemberlistThatDoesNotFit verifies that a membership too large for one
+// datagram is split rather than sent oversize, and that every chunk actually fits once sealed.
+//
+// Asserting on the sealed size of each chunk rather than on the chunk count is deliberate: the count
+// depends on the limit and on how large a NodeInfo happens to be, and pinning it would make this test
+// fail on an unrelated field addition. What must hold is that nothing this function emits can be
+// truncated at the far end.
+func TestSendSyncMessage_ChunksAMemberlistThatDoesNotFit(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t, "chunk-host")
+	cfg.MaxGossipPacket = 2048 // holds ~4 members, so 20 needs several datagrams
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	gp := cm.gossip
+
+	members := fillMemberlist(gp, 20)
+
+	gp.mu.RLock()
+	chunks, err := gp.marshalSyncChunksLocked()
+	gp.mu.RUnlock()
+	if err != nil {
+		t.Fatalf("marshalSyncChunksLocked: %v", err)
+	}
+
+	if len(chunks) < 2 {
+		t.Fatalf("a %d-member sync produced %d chunk(s) at a %d-byte limit, want several: it would be "+
+			"truncated on receipt", members, len(chunks), cfg.MaxGossipPacket)
+	}
+
+	// Every chunk fits, measured the way sendMessage measures it.
+	seen := 0
+	for i, data := range chunks {
+		sealed, err := gp.auth.seal(&GossipMessage{
+			Type: MessageTypeSync, From: "chunk-host", Timestamp: time.Now(),
+			MessageID: gp.generateMessageID(), Data: data,
+		})
+		if err != nil {
+			t.Fatalf("seal chunk %d: %v", i, err)
+		}
+		if len(sealed) > cfg.MaxGossipPacket {
+			t.Errorf("chunk %d is %d bytes sealed, over the %d-byte limit", i, len(sealed), cfg.MaxGossipPacket)
+		}
+
+		var sm SyncMessage
+		if err := json.Unmarshal(data, &sm); err != nil {
+			t.Errorf("chunk %d is not a complete SyncMessage: %v", i, err)
+			continue
+		}
+		seen += len(sm.Nodes)
+	}
+
+	// And no member is dropped or duplicated: handleSyncMessage merges per node, so the union of the
+	// chunks has to be the whole memberlist for a receiver to converge.
+	if seen != members {
+		t.Errorf("chunks carry %d members in total, want %d: chunking must not lose or repeat one", seen, members)
+	}
+}
+
+// TestSendMessage_RefusesAnOversizeDatagram verifies that a message too large for the configured limit
+// is refused with an error naming the limit, rather than sent to be truncated in silence.
+func TestSendMessage_RefusesAnOversizeDatagram(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t, "oversize-host")
+	cfg.MaxGossipPacket = 512
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	gp := cm.gossip
+
+	err = gp.sendMessage("127.0.0.1:1", &GossipMessage{
+		Type:      MessageTypeSync,
+		From:      "oversize-host",
+		Timestamp: time.Now(),
+		MessageID: gp.generateMessageID(),
+		Data:      []byte(`"` + strings.Repeat("x", 1024) + `"`),
+	})
+
+	if err == nil {
+		t.Fatal("sendMessage accepted a datagram over max_gossip_packet; it would be truncated on receipt")
+	}
+	// The limit's configuration key, so the error says which knob to turn.
+	if !strings.Contains(err.Error(), "max_gossip_packet") {
+		t.Errorf("error does not name the setting to change: %v", err)
+	}
+
+	stats := gp.GetStats()
+	if stats.MessagesOversize != 1 {
+		t.Errorf("MessagesOversize = %d, want 1", stats.MessagesOversize)
+	}
+	if stats.MessagesSent != 0 {
+		t.Errorf("MessagesSent = %d, want 0: the datagram must not reach the socket", stats.MessagesSent)
+	}
+}
+
+// TestReceiveMessages_CountsATruncatedDatagramAsTruncated is the operator-facing half of #277: a
+// datagram larger than the receive buffer must not be reported as an authentication failure.
+//
+// It sends a real oversize UDP datagram to a running gossip listener and asserts on which counter
+// moves. MessagesUnauthenticated is documented as meaning "a peer with a different cluster secret",
+// so counting a size problem there sent the operator to verify a secret that was correct — which is
+// the specific cost this pins.
+func TestReceiveMessages_CountsATruncatedDatagramAsTruncated(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t, "trunc-host")
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.MaxGossipPacket = 1024
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	gp := cm.gossip
+
+	if err := gp.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = gp.Stop() }()
+
+	// The kernel-assigned port, since ListenAddr asked for an ephemeral one.
+	local, ok := gp.conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("LocalAddr is %T, want *net.UDPAddr", gp.conn.LocalAddr())
+	}
+
+	conn, err := net.DialUDP("udp", nil, local)
+	if err != nil {
+		t.Fatalf("dialing the listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Valid JSON, and oversize. Valid so that a failure to detect truncation would be a *parse* failure
+	// on the prefix rather than on the payload — i.e. so the test distinguishes the two causes.
+	oversize := []byte(`{"v":1,"mac":"00","payload":"` + strings.Repeat("y", 2048) + `"}`)
+	if _, err := conn.Write(oversize); err != nil {
+		t.Fatalf("sending the oversize datagram: %v", err)
+	}
+
+	// Poll rather than sleep a fixed interval: the receive loop has a 100ms read deadline, so the
+	// datagram is picked up within one cycle and there is no reason to wait longer than it takes.
+	deadline := time.Now().Add(3 * time.Second)
+	var stats *GossipStats
+	for time.Now().Before(deadline) {
+		stats = gp.GetStats()
+		if stats.MessagesTruncated > 0 || stats.MessagesRejected > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if stats.MessagesTruncated != 1 {
+		t.Errorf("MessagesTruncated = %d, want 1", stats.MessagesTruncated)
+	}
+	if stats.MessagesUnauthenticated != 0 {
+		t.Errorf("MessagesUnauthenticated = %d, want 0: a datagram over max_gossip_packet is a size "+
+			"problem, and counting it here tells the operator to check a cluster secret that is correct",
+			stats.MessagesUnauthenticated)
+	}
+	if stats.MessagesRejected != 0 {
+		t.Errorf("MessagesRejected = %d, want 0", stats.MessagesRejected)
 	}
 }
 

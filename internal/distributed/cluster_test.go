@@ -134,6 +134,52 @@ func TestNewClusterManager_ConfigDefaults(t *testing.T) {
 	}
 }
 
+// TestNewClusterManager_DefaultMaxGossipPacketHoldsAThreeNodeSync asserts the default against the
+// thing it has to be big enough for, rather than against its own value.
+//
+// A test comparing MaxGossipPacket to 8192 would pass on the 1024 that could not form a three-node
+// cluster, if someone had written it when 1024 was the constant — it would only ever say that the
+// constant equals itself. So this builds the sync message a three-node cluster actually sends and
+// asserts it fits, which is the property #277 was about. It is also the property that would break
+// silently if NodeInfo grew a field.
+func TestNewClusterManager_DefaultMaxGossipPacketHoldsAThreeNodeSync(t *testing.T) {
+	t.Parallel()
+	cm, err := NewClusterManager(&ClusterConfig{NodeID: "fit-host", SecretFile: writeTestSecret(t)})
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	gp := cm.gossip
+
+	gp.mu.Lock()
+	for i := range 2 {
+		// Realistic identifiers, not "a" and "b": a hostname is the length that decides whether this
+		// fits, and a test using two-character IDs would pass at almost any limit.
+		id := fmt.Sprintf("objectfs-node-%02d.cluster.example.edu", i)
+		gp.memberlist[id] = &GossipNode{
+			Info: &NodeInfo{
+				ID: id, Address: fmt.Sprintf("10.20.30.%d:8080", i+1),
+				Status: NodeStatusAlive, LastSeen: time.Now(), Version: "0.11.0",
+				Metadata: map[string]string{},
+			},
+			Incarnation: 1, State: StateAlive, StateChange: time.Now(),
+		}
+	}
+	members := len(gp.memberlist)
+	chunks, err := gp.marshalSyncChunksLocked()
+	gp.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("marshalSyncChunksLocked: %v", err)
+	}
+	if members != 3 {
+		t.Fatalf("memberlist has %d members, want 3 (self plus two peers)", members)
+	}
+	if len(chunks) != 1 {
+		t.Errorf("a three-member sync took %d datagrams at the %d-byte default, want 1: the default "+
+			"cannot carry the smallest cluster that needs a quorum", len(chunks), defaultMaxGossipPacket)
+	}
+}
+
 // TestClusterManager_InitialState verifies the state of a newly created manager
 // before Start is called.
 func TestClusterManager_InitialState(t *testing.T) {
