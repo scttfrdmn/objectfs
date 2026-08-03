@@ -298,8 +298,13 @@ features:
 
 # Multi-node coordination. Experimental and incomplete — the Raft log is not applied and
 # "strong" consistency fans the same PUT to N nodes rather than ordering operations. Do not
-# depend on this for correctness. The Redis block is the one usable part, and it is reached only
-# through cache.NewFromConfig, which currently has no caller.
+# depend on this for correctness.
+#
+# The redis: block is the one part of this section that a mount reaches. Setting both `enabled`
+# here and `redis.enabled` below replaces the in-process cache with a shared Redis one for the
+# whole mount; everything else under cluster: is read only by the experimental coordinator.
+# A Redis that cannot be reached at startup fails the mount rather than falling back, so two
+# nodes cannot both come up believing they share a cache when they do not.
 cluster:
   enabled: false
   node_id: ""                         # empty = derived at startup

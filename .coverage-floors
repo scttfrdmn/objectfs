@@ -44,7 +44,11 @@
 internal/analytics       96
 internal/archive         90
 internal/awsname         100
-internal/cache/redis     87
+# internal/cache/redis goes 87 → 88 with the shared conformance suite (#178). The gain is small and
+# what it bought is not: the suite is the test that found Get answering a ten-byte request with two
+# bytes, which ten implementation-specific tests had missed because none of them asked for a range
+# longer than the value stored.
+internal/cache/redis     88
 internal/circuit         96
 # internal/compression goes from 87 to 88 with the decoder-table tests #230 added: a matrix over
 # every writable algorithm read back by every algorithm and by a disabled compressor.
@@ -163,7 +167,11 @@ internal/fuse            59
 # `EnablePrefetch: false`, so the prefetcher's queue, workers, rate limiter, and shutdown path had no
 # coverage at all, and three defects lived there — a panic on close racing a read, a token bucket that
 # never refilled, and a Close nothing called. Switching prefetch on in tests is what found them.
-internal/cache           82
+#
+# 82 → 85 with #178: the four in-process implementations are now enrolled in the shared conformance
+# suite in internal/cache/cachetest, and NewFromConfig has a caller and therefore tests that assert
+# which implementation a configuration selects rather than only that one was returned.
+internal/cache           85
 
 pkg/api                  73
 pkg/errors               48

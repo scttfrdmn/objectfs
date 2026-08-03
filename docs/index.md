@@ -85,7 +85,6 @@ them**. Verified by import graph, not by reading the code:
 | REST API | `pkg/api` | no importer outside itself |
 | Detailed per-file performance metrics | `internal/metrics` detailed collector | constructor has no non-test caller |
 | ML tier prediction driving cache promotion | `internal/analytics` | imported by `internal/cache`, but the `Predictor` field is never set on the mount path, so the size heuristic always runs |
-| Redis-backed distributed cache | `internal/cache/redis` | `cache.NewFromConfig` selects it, but nothing calls `NewFromConfig` — the adapter constructs `NewMultiLevelCache` directly |
 | Multi-node coordination | `internal/distributed` | imported only by tests |
 
 They are listed here rather than deleted from the docs because the code exists and may be wired up;

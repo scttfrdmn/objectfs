@@ -23,7 +23,7 @@ func newTestCacheAndInvalidator(t *testing.T, mr *miniredis.Miniredis, nodeID st
 		TTL:        5 * time.Minute,
 		MaxRetries: 1,
 	}
-	c, err := redis.NewCache(cfg)
+	c, err := redis.NewCache(context.Background(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
