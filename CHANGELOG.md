@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a hand-written probe had found two. The load-bearing storage test writes a real file, calls
   `downloadObject` against it, and asserts the file's contents are unchanged.
 
+  `src/index.test.ts` covers the entry point, which nothing checked: it asserts that every class
+  `src/errors.ts` declares is re-exported — as a loop, so a class added later is covered by existing
+  code — that the re-exported binding is *the same* binding, since a re-export that diverged would
+  silently break `instanceof` in a caller's `catch`, and that `LICENSE`/`VERSION` match
+  `package.json`. The names are looked up dynamically rather than written as `index.CacheError`
+  because a missing export is a TS2339 that fails the whole suite's compile, which would report a
+  type error instead of the missing name and take every other assertion in the file down with it.
+
 - **Tests for the Python SDK's storage, configuration and client layers** (`tests/test_storage.py`,
   `tests/test_config.py`, `tests/test_client.py`; 71 tests and 25 subtests, up from a single metrics
   suite). Same three shapes as the JavaScript tests, for the same reasons: a loop over every preset
@@ -191,6 +199,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"@typescript-eslint/recommended"` without the required `plugin:` prefix, so eslint exited with
   "couldn't find the config to extend from" before reading a line of source. Zero errors once it
   could run, with 23 pre-existing `no-explicit-any` warnings left standing.
+
+- **The JavaScript SDK's entry point exports the error its own client throws, and reports the right
+  license** ([#325]). Two defects found by carrying the Python fixes back across:
+
+  - `src/index.ts` re-exported 7 of the 11 classes `src/errors.ts` declares. `CacheError` was one of
+    the four missing, and `clearCache`/`warmCache` throw it — so a caller could not name it in a
+    `catch` and had no way to distinguish that failure from any other. All eleven are exported now.
+  - `export const LICENSE = 'MIT'` — ObjectFS is Apache-2.0, as `package.json`'s own `license` field,
+    the repository `LICENSE`, and every source header say. A consumer reading that constant to build
+    an attribution list got a wrong answer from the SDK's public API. `src/index.test.ts` now asserts
+    `LICENSE` and `VERSION` against `package.json`, so the two cannot drift apart again.
 
 - **The Python SDK's `cluster` preset passes its own validation, and six of its exceptions can be
   imported** ([#325]). Two defects, both found the same way as their JavaScript counterparts:
