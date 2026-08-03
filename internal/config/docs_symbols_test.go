@@ -72,15 +72,24 @@ const modulePath = "github.com/scttfrdmn/objectfs"
 // its flag variables are unexported — there is nothing to import, which is the same reason
 // version_test.go reads the version with a regexp. TestCLIFlagsMatchTheBinary below keeps this list
 // honest, so the duplication cannot drift silently.
+//
+// One flat set across every subcommand, which over-accepts: `objectfs unmount --cache-size 8GB` is
+// not a runnable command and this would not say so. Per-subcommand scoping is what the binary
+// actually has, since each subcommand builds its own FlagSet — but the failure it would catch is a
+// documented flag on the wrong subcommand, and the failure this catches is a documented flag that
+// exists nowhere. The second is the one that shipped four times.
 var cliFlags = map[string]bool{
 	"version":         true,
 	"help":            true,
+	"h":               true,
 	"debug":           true,
 	"config":          true,
 	"log-level":       true,
 	"dry-run":         true,
 	"cache-size":      true,
 	"max-concurrency": true,
+	"foreground":      true,
+	"mount-point":     true,
 }
 
 // cliFlagsTakingAValue are the non-boolean flags, whose following argument is a value and not a
@@ -90,6 +99,122 @@ var cliFlagsTakingAValue = map[string]bool{
 	"log-level":       true,
 	"cache-size":      true,
 	"max-concurrency": true,
+	"mount-point":     true,
+}
+
+// subcommands is every first word cmd/objectfs/main.go dispatches on.
+//
+// Hand-maintained for the same reason as cliFlags — package main exports nothing — and checked
+// against the binary by TestSubcommandsMatchTheBinary.
+var subcommands = map[string]bool{
+	"mount":   true,
+	"unmount": true,
+	"umount":  true,
+	"version": true,
+	"help":    true,
+}
+
+// TestSubcommandsMatchTheBinary keeps the subcommands list from drifting from run()'s switch.
+//
+// Before #134 the binary had none, and this file asserted that flatly: any bare first word in
+// documentation was an error. The four commands then added make that assertion wrong for `objectfs
+// mount` and still right for `objectfs status`, which is exactly the case a hardcoded list gets
+// wrong six months later. So the list is compared against the case arms in main.go.
+func TestSubcommandsMatchTheBinary(t *testing.T) {
+	t.Parallel()
+
+	//nolint:gosec // a path built from the module root this test located itself
+	mainGo, err := os.ReadFile(filepath.Join(repoRoot(t), "cmd", "objectfs", "main.go"))
+	if err != nil {
+		t.Fatalf("reading cmd/objectfs/main.go, which dispatches the subcommands: %v", err)
+	}
+
+	dispatched := dispatchedSubcommands(t, string(mainGo))
+
+	for name := range dispatched {
+		if !subcommands[name] {
+			t.Errorf("the binary dispatches %q and subcommands does not list it, so documentation "+
+				"using that command would be reported as broken when it is correct", name)
+		}
+	}
+
+	for name := range subcommands {
+		if !dispatched[name] {
+			t.Errorf("subcommands lists %q and the binary no longer dispatches it, so this gate would "+
+				"approve a command that exits 2 — and documentation may still be using it", name)
+		}
+	}
+}
+
+// dispatchedSubcommands returns the bare words run's dispatch switch matches on args[0].
+//
+// Parsed with go/parser rather than grepped for `case "x":`, because a regexp over the file would
+// also collect the case arms of every other switch in it — the flag-parsing switch on len(fs.Args())
+// has integer cases and would be skipped, but the next string switch anyone adds would not be. This
+// finds the switch whose tag is `args[0]` and reads only its arms.
+func dispatchedSubcommands(t *testing.T, src string) map[string]bool {
+	t.Helper()
+
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing cmd/objectfs/main.go: %v", err)
+	}
+
+	found := make(map[string]bool)
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok || !isArgsZero(sw.Tag) {
+			return true
+		}
+
+		for _, stmt := range sw.Body.List {
+			clause, ok := stmt.(*ast.CaseClause)
+			if !ok {
+				continue
+			}
+
+			for _, expr := range clause.List {
+				lit, ok := expr.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+
+				// A flag spelling of a subcommand — "--version", "-h" — is matched here too, and is a
+				// flag for documentation's purposes rather than a command. cliFlags covers those.
+				if name := strings.Trim(lit.Value, `"`); !strings.HasPrefix(name, "-") {
+					found[name] = true
+				}
+			}
+		}
+
+		return true
+	})
+
+	if len(found) == 0 {
+		t.Fatal("found no switch on args[0] in cmd/objectfs/main.go. If dispatch moved or changed " +
+			"shape, point this test at it — without the comparison, subcommands above is an " +
+			"unverified copy, which is the defect this test exists to prevent")
+	}
+
+	return found
+}
+
+// isArgsZero reports whether an expression is `args[0]`, the tag of run's dispatch switch.
+func isArgsZero(expr ast.Expr) bool {
+	index, ok := expr.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+
+	ident, ok := index.X.(*ast.Ident)
+	if !ok || ident.Name != "args" {
+		return false
+	}
+
+	lit, ok := index.Index.(*ast.BasicLit)
+
+	return ok && lit.Kind == token.INT && lit.Value == "0"
 }
 
 // TestDocumentedGoSymbolsExist checks every objectfs symbol named in a ```go block.
@@ -163,15 +288,14 @@ func checkGoBlock(t *testing.T, root, rel string, block fencedBlock) {
 
 // TestDocumentedCLIInvocationsAreRunnable checks every `objectfs` command line in a shell block.
 //
-// The binary takes exactly two positional arguments — storage URI and mount point — and has no
-// subcommands (cmd/objectfs/main.go, the len(args) != 2 check). Documentation nonetheless shipped
-// `objectfs mount`, `objectfs list-mounts`, `objectfs status`, and `objectfs config validate`, all
-// of which exit 1 with an argument error. That is worse than an undocumented feature: a reader
-// types it, it fails, and their conclusion is that the filesystem is broken.
+// Documentation shipped `objectfs mount`, `objectfs list-mounts`, `objectfs status`, and `objectfs
+// config validate` against a binary that had no subcommands at all and took exactly two positional
+// arguments. That is worse than an undocumented feature: a reader types it, it fails, and their
+// conclusion is that the filesystem is broken.
 //
-// #134 proposes adding mount/unmount/version. If it lands, this test starts failing on the very
-// documentation that becomes correct — so the fix at that point is to extract the subcommand list
-// from the binary rather than to delete the check.
+// #134 added mount/unmount/version/help, so `objectfs mount` is now correct and the other three are
+// still not. Both the flag set and the subcommand set are therefore extracted from the binary rather
+// than asserted from a list here — see TestCLIFlagsMatchTheBinary and TestSubcommandsMatchTheBinary.
 func TestDocumentedCLIInvocationsAreRunnable(t *testing.T) {
 	t.Parallel()
 
@@ -212,13 +336,14 @@ func checkShellBlock(t *testing.T, rel string, block fencedBlock) {
 				rel, invocation.line, flag, invocation.text, strings.Join(sortedKeys(cliFlags), ", "))
 		}
 
-		if invocation.subcommand != "" {
-			t.Errorf("%s:%d uses the subcommand %q, and objectfs has no subcommands:\n    %s\n"+
-				"The binary takes exactly two positional arguments, a storage URI and a mount point "+
-				"(cmd/objectfs/main.go). This exits 1 with an argument error, which a reader will "+
-				"read as a broken filesystem rather than as a wrong example. #134 proposes adding "+
-				"mount/unmount/version; until it lands, no subcommand is runnable.",
-				rel, invocation.line, invocation.subcommand, invocation.text)
+		if invocation.subcommand != "" && !subcommands[invocation.subcommand] {
+			t.Errorf("%s:%d uses the subcommand %q, which objectfs does not have:\n    %s\n"+
+				"The set is: %s. An unknown first word exits 2 with a usage error, which a reader will "+
+				"read as a broken filesystem rather than as a wrong example. Documentation shipped "+
+				"`list-mounts`, `status`, and `config validate` this way, none of which was ever a "+
+				"command.",
+				rel, invocation.line, invocation.subcommand, invocation.text,
+				strings.Join(sortedKeys(subcommands), ", "))
 		}
 	}
 }
@@ -227,9 +352,13 @@ func checkShellBlock(t *testing.T, rel string, block fencedBlock) {
 //
 // cliFlags has to be written out because main's flag variables are unexported, and a duplicated
 // list with no check is precisely the mechanism that gave this repository five different version
-// numbers. So the list is compared against the flag.Bool/String/Int calls in main.go: a flag added
-// there and not here would go unchecked in documentation, and one removed there but left here would
-// let this gate bless a command that no longer runs.
+// numbers. So the list is compared against the flag declarations in main.go: a flag added there and
+// not here would go unchecked in documentation, and one removed there but left here would let this
+// gate bless a command that no longer runs.
+//
+// Two flags are in cliFlags and cannot be declared: --version and --help are dispatch cases in run's
+// switch, not flags, since they have to work before any FlagSet is chosen. They are exempted by name
+// rather than by loosening the comparison, so the exemption is visible and stays small.
 func TestCLIFlagsMatchTheBinary(t *testing.T) {
 	t.Parallel()
 
@@ -241,13 +370,19 @@ func TestCLIFlagsMatchTheBinary(t *testing.T) {
 
 	declared := make(map[string]bool)
 	for _, m := range flagDeclaration.FindAllStringSubmatch(string(mainGo), -1) {
-		declared[m[2]] = true
+		declared[m[1]] = true
 	}
 
 	if len(declared) == 0 {
 		t.Fatal("found no flag declarations in cmd/objectfs/main.go. If flag parsing moved to " +
 			"another file or another package, point this test at it — without this comparison " +
 			"cliFlags below is an unverified copy, which is the defect this test exists to prevent")
+	}
+
+	// Spellings that name a subcommand rather than a flag. run() matches these on args[0] before any
+	// FlagSet exists, so they are runnable but never declared.
+	for _, dispatched := range []string{"version", "help", "h"} {
+		declared[dispatched] = true
 	}
 
 	for name := range declared {
@@ -273,9 +408,17 @@ func TestCLIFlagsMatchTheBinary(t *testing.T) {
 	}
 }
 
-// flagDeclaration matches the flag package's constructors in main.go, capturing the flag name.
+// flagDeclaration matches a flag declaration in main.go, capturing the flag name.
+//
+// Both spellings, because #134 changed which one main.go uses: the package-level `flag.String("x",
+// ...)` form, and the `fs.StringVar(&f.x, "x", ...)` methods on a per-subcommand FlagSet. The Var
+// forms are what a subcommand needs — flag.CommandLine cannot parse flags appearing after a
+// positional argument, so a single package-level flag set could not have accepted `objectfs mount
+// --config x` at all. A regexp matching only the old form kept compiling and matched nothing, which
+// is why TestCLIFlagsMatchTheBinary asserts a non-empty result before comparing.
 var flagDeclaration = regexp.MustCompile(
-	`flag\.(Bool|String|Int|Int64|Uint|Uint64|Float64|Duration)\(\s*"([^"]+)"`)
+	`(?:flag\.|\.)(?:Bool|String|Int|Int64|Uint|Uint64|Float64|Duration)(?:Var)?\(` +
+		`(?:\s*&[\w.]+\s*,)?\s*"([^"]+)"`)
 
 // fencedBlock is one fenced code block: its info-string language, the 1-based line its body starts
 // on, and that body.

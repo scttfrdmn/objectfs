@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
-	"strings"
 
+	"github.com/scttfrdmn/objectfs/internal/awsname"
 	"github.com/scttfrdmn/objectfs/internal/cache"
 	"github.com/scttfrdmn/objectfs/internal/config"
 	"github.com/scttfrdmn/objectfs/internal/fuse"
@@ -79,8 +78,14 @@ func (h *healthComponent) GetComponentType() string              { return h.comp
 
 // New creates a new ObjectFS adapter instance
 func New(ctx context.Context, storageURI, mountPoint string, cfg *config.Configuration) (*Adapter, error) {
-	// Validate storage URI
-	if err := validateStorageURI(storageURI); err != nil {
+	// One parse, in the package that owns what a storage URI is. This used to validate the URI with a
+	// local function and then url.Parse it a second time to recover the bucket, which is how the bucket
+	// came to be taken as `strings.TrimPrefix(parsed.Host, "")` — a no-op call whose only effect was to
+	// make an unvalidated field look checked. The validating parse now returns the bucket, so there is
+	// no second reading to disagree with the first. internal/config performs the same check on
+	// `mount.uri` at config load, against this same function (#134).
+	uri, err := awsname.ParseStorageURI(storageURI)
+	if err != nil {
 		return nil, fmt.Errorf("invalid storage URI: %w", err)
 	}
 
@@ -89,22 +94,11 @@ func New(ctx context.Context, storageURI, mountPoint string, cfg *config.Configu
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Parse S3 URI to extract bucket name
-	parsed, err := url.Parse(storageURI)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse storage URI: %w", err)
-	}
-
-	bucketName := strings.TrimPrefix(parsed.Host, "")
-	if bucketName == "" {
-		return nil, fmt.Errorf("bucket name cannot be empty")
-	}
-
 	adapter := &Adapter{
 		storageURI: storageURI,
 		mountPoint: mountPoint,
 		config:     cfg,
-		bucketName: bucketName,
+		bucketName: uri.Bucket,
 	}
 
 	return adapter, nil
@@ -679,21 +673,12 @@ func (a *Adapter) buildWriterOptions() vfs.WriterOptions {
 	}
 }
 
-// validateStorageURI validates the storage URI format
+// validateStorageURI validates the storage URI format.
+//
+// Delegates to [awsname.ValidateStorageURI], which is where the rules live as of #134 so that
+// internal/config can apply the same ones to `mount.uri` without importing this package. Kept as a
+// name because the tests and benchmarks in this package address it, and because the error it wraps
+// says which of the two things a caller got wrong.
 func validateStorageURI(uri string) error {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return fmt.Errorf("failed to parse URI: %w", err)
-	}
-
-	switch parsed.Scheme {
-	case "s3":
-		if parsed.Host == "" {
-			return fmt.Errorf("S3 URI must include bucket name")
-		}
-	default:
-		return fmt.Errorf("unsupported storage scheme: %s (only s3:// supported)", parsed.Scheme)
-	}
-
-	return nil
+	return awsname.ValidateStorageURI(uri)
 }

@@ -6,94 +6,80 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/objectfs/internal/awsname"
 	"github.com/scttfrdmn/objectfs/internal/config"
 	"github.com/scttfrdmn/objectfs/internal/health"
 )
 
-func TestValidateStorageURI(t *testing.T) {
+func TestValidateStorageURIDelegatesToAwsname(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		uri         string
-		wantErr     bool
-		errContains string
-	}{
-		{
-			name:    "valid s3 URI",
-			uri:     "s3://my-bucket",
-			wantErr: false,
-		},
-		{
-			name:    "valid s3 URI with path",
-			uri:     "s3://my-bucket/path/to/prefix",
-			wantErr: false,
-		},
-		{
-			name:        "s3 URI without bucket",
-			uri:         "s3://",
-			wantErr:     true,
-			errContains: "bucket name",
-		},
-		{
-			name:        "unsupported scheme",
-			uri:         "gcs://my-bucket",
-			wantErr:     true,
-			errContains: "unsupported storage scheme",
-		},
-		{
-			name:        "unsupported azure scheme",
-			uri:         "azure://container",
-			wantErr:     true,
-			errContains: "unsupported storage scheme",
-		},
-		{
-			name:        "http scheme not supported",
-			uri:         "http://bucket",
-			wantErr:     true,
-			errContains: "unsupported storage scheme",
-		},
-		{
-			name:        "https scheme not supported",
-			uri:         "https://bucket",
-			wantErr:     true,
-			errContains: "unsupported storage scheme",
-		},
-		{
-			name:        "invalid URI",
-			uri:         "://invalid",
-			wantErr:     true,
-			errContains: "failed to parse URI",
-		},
-		{
-			name:        "empty URI",
-			uri:         "",
-			wantErr:     true,
-			errContains: "unsupported storage scheme",
-		},
-		{
-			name:    "s3 URI with dots in bucket name",
-			uri:     "s3://my.bucket.with.dots",
-			wantErr: false,
-		},
-		{
-			name:    "s3 URI with hyphens",
-			uri:     "s3://my-bucket-name",
-			wantErr: false,
-		},
-	}
+	// Stated as delegation rather than as a table of URIs, for the reason
+	// TestParseOptionalBytesDiffersOnlyOnTheEmptyString in pkg/utils is: a table here would restate
+	// awsname's and would pass just as well if this function grew a second implementation, which is
+	// the exact defect #134 removed. The rules themselves are asserted in
+	// internal/awsname/storageuri_test.go, which is where they live.
+	//
+	// The table this replaced is worth recording, because its case names described a validator that no
+	// longer exists rather than a rule that changed. It asserted the substrings "unsupported storage
+	// scheme", "failed to parse URI" and "S3 URI must include bucket name" — three phrasings from an
+	// error set that was local to this package. Every URI it rejected is still rejected; every URI it
+	// accepted is still accepted, including "s3://my.bucket.with.dots". What changed is that the
+	// messages now name the value and say what to write instead.
+	for _, uri := range []string{
+		"s3://my-bucket", "s3://my-bucket/path/to/prefix", "s3://my.bucket.with.dots",
+		"s3://my-bucket-name", "s3://", "gcs://my-bucket", "azure://container", "http://bucket",
+		"https://bucket", "://invalid", "", "my-bucket", "s3://MyBucket", "s3://b?x=1",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			t.Parallel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateStorageURI(tt.uri)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateStorageURI() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			got := validateStorageURI(uri)
+			want := awsname.ValidateStorageURI(uri)
+
+			if (got != nil) != (want != nil) {
+				t.Fatalf("validateStorageURI(%q) err=%v but awsname.ValidateStorageURI err=%v: the "+
+					"adapter and the config loader would disagree about whether this URI is mountable",
+					uri, got, want)
 			}
-			if tt.wantErr && tt.errContains != "" {
-				if err == nil || !contains(err.Error(), tt.errContains) {
-					t.Errorf("validateStorageURI() error = %v, should contain %q", err, tt.errContains)
-				}
+			if got != nil && got.Error() != want.Error() {
+				t.Errorf("validateStorageURI(%q) = %q, awsname = %q: a second copy of the message is a "+
+					"second copy of the rules", uri, got, want)
+			}
+		})
+	}
+}
+
+// TestNewTakesTheBucketFromTheValidatedParse asserts New's bucket is the one awsname parsed.
+//
+// The two used to be separate readings: validateStorageURI parsed the URI to check it, then New parsed
+// it again to recover the bucket as `strings.TrimPrefix(parsed.Host, "")` — a call that removes an
+// empty prefix, so it did nothing at all and only made the field look processed. A prefix is what
+// makes this worth an assertion rather than a glance: "s3://bucket/prefix" must mount bucket
+// "bucket", and a reading that took the whole URI, or the host with the path attached, would put
+// every object under a bucket name that does not exist.
+func TestNewTakesTheBucketFromTheValidatedParse(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		uri  string
+		want string
+	}{
+		{"s3://research-data", "research-data"},
+		{"s3://research-data/", "research-data"},
+		{"s3://research-data/lab/2026", "research-data"},
+		{"s3://my.bucket.with.dots/x", "my.bucket.with.dots"},
+	} {
+		t.Run(tc.uri, func(t *testing.T) {
+			t.Parallel()
+
+			a, err := New(context.Background(), tc.uri, "/mnt/test", createTestConfig())
+			if err != nil {
+				t.Fatalf("New(%q) = %v", tc.uri, err)
+			}
+			if a.bucketName != tc.want {
+				t.Errorf("New(%q) bucket = %q, want %q: every object key this mount reads or writes "+
+					"is addressed to this bucket", tc.uri, a.bucketName, tc.want)
 			}
 		})
 	}
@@ -221,11 +207,14 @@ func TestNew(t *testing.T) {
 		cfg := createTestConfig()
 		_, err := New(ctx, "s3://", "/mnt/test", cfg)
 		if err == nil {
-			t.Error("New() with empty bucket should return error")
+			t.Fatal("New() with empty bucket should return error")
 		}
-		// Accept either error message since validateStorageURI catches it first
-		if !contains(err.Error(), "bucket name") && !contains(err.Error(), "S3 URI must include bucket name") {
-			t.Errorf("error should contain 'bucket name', got %v", err)
+		// One phrasing, asserted exactly. This used to accept either of two messages, with a comment
+		// explaining that validateStorageURI "catches it first" — an accommodation for two validators
+		// that could each reject the same URI with a different message, which is what #134 removed by
+		// giving the package one.
+		if !contains(err.Error(), "names no bucket") {
+			t.Errorf("error should say the URI names no bucket, got %v", err)
 		}
 	})
 

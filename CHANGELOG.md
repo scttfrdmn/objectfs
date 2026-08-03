@@ -122,7 +122,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache, and there is not one `NotifyContent`, `NotifyEntry`, or `NotifyInvalInode` call in the
   repository — enabling it would convert bounded staleness into permanent staleness.
 
+- **Subcommands: `objectfs mount`, `objectfs unmount`, `objectfs version`, `objectfs help`**
+  ([#134]). `unmount` is spelled both ways, since `umount` is what a decade of muscle memory types.
+
+  `objectfs unmount /mnt/s3` is the one that did not exist before and had to. Unmounting was
+  previously "signal the mount process", which a systemd unit's `ExecStop` cannot do once that
+  process is already gone, so the shipped unit called `fusermount3 -u` directly — a program that is
+  absent on a minimal image and spelled `fusermount` on libfuse 2, and whose failure in either case
+  reaches systemd as a bare exit status. The subcommand tries the libfuse 3 helper, the libfuse 2
+  helper, `umount`, and finally `umount(2)`, and when none works it reports which ran, which were not
+  installed, and the `lsof +D` invocation that names whatever is holding the mount open. None of the
+  candidates unmounts lazily or forcibly, and a test asserts that no candidate ever passes `-z`,
+  `-l`, or `-f`: those detach the name while the filesystem keeps serving open files, so they report
+  a finished unmount with writes in flight — and adding one would make every other unmount test pass,
+  which is why the prohibition is a test rather than a comment.
+
+  **The form without a subcommand still works and is not deprecated.** It is what every invocation
+  written before this release looks like, including the ones in scripts nobody will revisit. A first
+  argument carrying a URI scheme or a leading dash routes to `mount`; a bare word that is not a
+  command is a usage error naming itself, so `objectfs moutn s3://b /mnt` does not become an attempt
+  to mount a bucket called `moutn`.
+
+  Flags now come before positionals, because Go's `flag` package stops parsing at the first non-flag
+  argument — `objectfs mount s3://b /mnt --foreground` left `--foreground` as a third positional and
+  silently did not apply it. Each subcommand gets its own `FlagSet` for the same reason:
+  `flag.CommandLine` cannot parse a flag that appears after a positional at all.
+
+  New: `--mount-point`, so a mount point can come from a flag instead of a positional, and
+  `--foreground`, which names what already happens — ObjectFS does not fork, and the flag exists
+  because init systems and scripts pass it and refusing it would break invocations that are correct
+  about the behaviour. Exit codes are now defined: `0` succeeded, `1` the command was right and the
+  operation failed, `2` the command line was wrong and nothing was attempted.
+
+  `main()` is three lines around `run(args, stdout, stderr) int`, which is what makes any of this
+  testable: it previously called `log.Fatalf` directly, and `log.Fatalf` calls `os.Exit`, which takes
+  the test binary with it. `cmd/objectfs` therefore has a coverage floor for the first time (77%),
+  replacing a note in `.coverage-floors` that recorded the package as untestable.
+
+- **The systemd template unit mounts and unmounts the way the binary actually works** ([#135]).
+  `configs/systemd/objectfs@.service` now runs
+  `objectfs mount --config /etc/objectfs/%i.yaml --mount-point /mnt/objectfs/%i --foreground` and
+  stops with `objectfs unmount /mnt/objectfs/%i`. What it replaces was valid systemd and wrong in
+  four ways: `ExecStart=... s3://%i /mnt/objectfs/%i` made the instance name and the bucket name one
+  string, which fails for a prefix, for two mounts of one bucket, or for a bucket whose name is not a
+  legal unit instance; `ExecStop=/bin/fusermount3 -u` is the single-helper call described above;
+  `Restart=always` remounted a filesystem after a clean `systemctl stop`; and `RequiresMountsFor` on
+  the unit's own mount point asked systemd to wait for the mount this unit creates. `TimeoutStopSec`
+  is now stated rather than inherited, because that is the flush window — SIGTERM makes the mount
+  process unmount, which writes buffered ranges to S3, and too short a value there is a SIGKILL
+  through buffered data.
+
+  Two gates, checking different things. `TestSystemdUnit*` in `internal/config` parses the unit's
+  `Exec*` lines through the same parser the documentation gate uses and checks every subcommand and
+  flag against the sets scraped from `cmd/objectfs/main.go` — so a flag renamed in the binary breaks
+  the unit's test, and no list is maintained by hand. A `systemd-unit` CI job additionally runs
+  `systemd-analyze verify` on `objectfs@example.service` for the half a Go test cannot check. Neither
+  alone would have caught the old unit: `systemd-analyze` passes it, and a Go test cannot tell whether
+  `RequiresMountsFor` means what its author thought.
+
+  Found while writing the Go half: joining `\` continuations is load-bearing. A loop over raw lines
+  stops at `ExecStart=... \` and skips everything after it, so `--mount-point` and `--foreground` went
+  unchecked — verified by mutation, changing `--mount-point` to `--mountpoint` left the test passing.
+
 ### Fixed
+
+- **A bucket name one character long reported "is 1 characters".** `s3://b` is what someone types
+  while testing, so the singular arm is a message operators read, and a grammatical error in an error
+  message reads as a message nobody has looked at. The test now asserts both arms of the sentence
+  rather than the substring after them.
 
 - **The read-ahead trim is covered by tests rather than by luck.** `inflightFetches.unclaimedStart`
   and the arm of `performPrefetch` that drops a prefetch whose whole range is already in flight had no
@@ -585,6 +652,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [scttfrdmn/cargoship#352]: https://github.com/scttfrdmn/cargoship/issues/352
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
+[#134]: https://github.com/scttfrdmn/objectfs/issues/134
+[#135]: https://github.com/scttfrdmn/objectfs/issues/135
 [#159]: https://github.com/scttfrdmn/objectfs/issues/159
 [#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
@@ -860,7 +929,7 @@ the far side of a seam agrees with its caller by construction. `internal/testaws
 - **The differential-oracle fuzz job no longer OOM-kills its own workers and blames an innocent input.** `go test -fuzz` runs one worker *process* per CPU, and each is a separate Go runtime that sizes its heap against the whole machine, because none of them knows the other three exist. `FuzzOperationSequence` allocates hard — every iteration is a real read-modify-write over a real HTTP endpoint — so four workers reached 6 GB of RSS within four seconds and the cgroup killed one. What `go test` reported was **"fuzzing process hung or terminated unexpectedly while minimizing: EOF"**, naming whichever input the dead worker happened to be holding and writing it to `testdata/fuzz/`, which is what makes this failure mode so misleading: the recorded inputs all replay green, because none of them was ever the problem. Two consecutive CI runs failed this way and the first was written off as runner preemption — the giveaway was 24 seconds of `execs: 1443 (0/sec)` with all four workers producing nothing, then recovery, which is page thrash rather than a hang. `GOMEMLIMIT=768MiB` per worker fixes it, and the memory was garbage the collector had no pressure signal to reclaim rather than live data, so capping it costs nothing and gives back the time that was going into thrash: **24,679 execs and 48 new interesting inputs in 60 s, against 1443 execs and 3 in the run that died.** Peak 3.2 GB against the runner's 16 GB
 - **The health endpoint no longer binds a fixed port during tests, and its handler is tested at all.** Eight tests in `internal/health` started a `Monitor` whose default `Config` enables the HTTP endpoint on port **8081**, so each `Start` raced its siblings for one port: the first won and the rest took `startHTTPServer`'s bind-error arm. How many did was a matter of goroutine scheduling, which made the package's measured coverage a function of machine load — 45.0% idle, 44.7% under CI's — so a per-package floor set from the luckier run failed CI while passing locally, over two statements nothing had deliberately tested. Meanwhile the endpoint an operator, a Kubernetes liveness probe, or a load balancer actually reads had **never served a request in a test**: its only coverage came from tests *failing* to reach it. The bind is now separated from the serving so a test can supply a listener on port 0; tests not about the endpoint no longer open one; and the handler is pinned on the property a probe depends on — 200 with a passing check, 503 with a failing one, the failing check named in the body — along with the port actually being released on `Stop` and the bind failure staying non-fatal, because a health endpoint is observability and taking a mount down over a diagnostic port inverts the priority. Coverage is now 48.5% at every `-cpu` value from 1 to 8
 - **`internal/network`'s Linux congestion-control code is testable without writing to package state.** The procfs paths were package-level variables so a test could redirect them, which meant every case that did so was un-parallelizable — a subtest would have raced the variable its sibling had just assigned — and being un-parallelizable is a lint failure under this repo's own test conventions. They are constants again and the readers take the path as a parameter, so all six tests are parallel. This surfaced the more general trap it came from: **`golangci-lint` on macOS never compiled the file at all**, since it is `//go:build linux`, so a local run reporting `0 issues.` had inspected none of it and CI reported eleven. Linting the other platform is `GOOS=linux golangci-lint run`, and it reproduces CI exactly
-- **The Prometheus endpoint is now actually served.** `monitoring.metrics.enabled: true` and `global.metrics_port: 8080` were both honoured as far as constructing the counters, and the collector's `Start` — the method that binds the listener — was never called. So every operation was recorded into a registry nothing could read: a scrape got connection refused, while the mount logged nothing amiss. Both SDKs' metrics calls, every documented Prometheus and Grafana example, and the whole of `docs/monitoring` were describing an endpoint that did not exist. A collector with no listener gathers identically to one with a listener — the field is non-nil either way and only an HTTP request distinguishes them, which is why this survived a release and why deleting the call had left the adapter's tests green. The binding moved into an `Adapter.startMetrics` method for that reason and not for tidiness: `Start`'s remaining steps need a bucket, a mountable directory and a FUSE-capable kernel, so no test that went through `Start` could reach step 1 at all
+- **The Prometheus endpoint is now actually served.** `monitoring.metrics.enabled: true` and `global.metrics_port: 8080` were both honored as far as constructing the counters, and the collector's `Start` — the method that binds the listener — was never called. So every operation was recorded into a registry nothing could read: a scrape got connection refused, while the mount logged nothing amiss. Both SDKs' metrics calls, every documented Prometheus and Grafana example, and the whole of `docs/monitoring` were describing an endpoint that did not exist. A collector with no listener gathers identically to one with a listener — the field is non-nil either way and only an HTTP request distinguishes them, which is why this survived a release and why deleting the call had left the adapter's tests green. The binding moved into an `Adapter.startMetrics` method for that reason and not for tidiness: `Start`'s remaining steps need a bucket, a mountable directory and a FUSE-capable kernel, so no test that went through `Start` could reach step 1 at all
 - **The custom labels an operator configures are attached to the exported series.** `monitoring.metrics.custom_labels` was carried from YAML through `config.MetricsConfig`, mapped into `metrics.Config.Labels` — and then `initMetrics` never read the field, so a Prometheus scraping several nodes received series identical in every label and had no way to tell them apart. Along with it, `Namespace` defaulted to empty where the docs, the SDKs and every dashboard expect `objectfs`: the exported name was `operations_total`, not `objectfs_operations_total`. A label whose name collides with one of a metric's own dimensions (`operation`, `status`, `type`, `level`) is now rejected at collector construction, naming the offender, rather than failing later inside a registration error
 - **Both SDKs can parse a scrape.** The Python and TypeScript metrics parsers split each exposition line on its first space and used the left half as the metric name — which for any real ObjectFS series yields `objectfs_cache_requests_total{service="objectfs",type="hit"}`, name and label block fused into one string that no lookup could match. Independently, the extractors above them looked up `cache_hits`, `objectfs_cache_hits_total`, `objectfs_io_read_operations_total`, `objectfs_network_requests_total`, `objectfs_storage_operations_total` and `objectfs_cluster_nodes`, none of which any version of ObjectFS has ever exported. Two bugs, each masking the other: fixing the parser alone still finds nothing, and fixing the names alone has nothing to look them up in. Both parsers are now label-aware — label values are escaped strings, so they are scanned character by character rather than split on `,`, and the closing brace is found from the right, since a comma, a quote or a `}` inside an error message in a label value is data. A parsed scrape is a **list** of samples rather than a map keyed by name, because a name identifies a family and not a series: `hit` and `miss` are two samples of one name and a map silently keeps whichever came last
 - **A cache hit rate of zero is reported, and an unmeasured one is not.** The derivation was guarded by `if (hits && misses)`, false whenever hits is 0 — precisely the case an operator most needs the number for, a cache being asked and never answering, which was v0.10.0's actual live state since `RecordCacheHit` had no caller. It is now guarded on the request count, and omitted entirely when there have been no requests: an idle mount having served none is a different fact from a hit rate of zero, and reporting `0.0` for it reads as a cache that never hits

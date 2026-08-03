@@ -22,12 +22,10 @@
 #   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
 #                                      work
 #
-# Floors are deliberately absent for four packages with no test files at all. A floor of 0% reads
+# Floors are deliberately absent for three packages with no test files at all. A floor of 0% reads
 # as a target rather than as an absence, and the gate names unlisted packages in every run so the
 # omission stays visible instead of looking like a decision:
 #
-#   cmd/objectfs        no tests — argument parsing and signal handling, currently untestable
-#                       because main() calls log.Fatalf directly
 #   internal/testhttp   no tests, deliberately: it is test support, and every statement in it runs
 #                       under the suites that use it. A test for FreeAddr would assert that an
 #                       address is free by binding it, which is what the function does — a
@@ -44,6 +42,22 @@
 internal/analytics       96
 internal/archive         90
 internal/awsname         100
+
+# cmd/objectfs enters this file at 77, from no entry at all — the note above it used to say "no
+# tests, currently untestable because main() calls log.Fatalf directly", which was true and was the
+# whole defect. log.Fatalf calls os.Exit, so it takes the test binary with it; no test could reach a
+# single argument-handling decision, in the one package whose entire job is to read an operator's
+# command line. main() is now three lines around `run(args, stdout, stderr) int`, and the subcommand
+# dispatch, the flag parsing, the config-file-versus-command-line precedence, and the dry-run path are
+# all callable.
+#
+# 77 rather than higher because what remains uncovered is the mount lifecycle itself: mountAndWait
+# builds an adapter, starts a FUSE server, and blocks on a signal. That needs a mount, which is what
+# the fuse_mount build tag and `make test-fuse-mount` are for. Everything reachable without one is
+# covered, including the three cases that were regressions waiting to happen — a flag after the
+# positional arguments being silently ignored, --dry-run approving a URI nothing in this build can
+# mount, and --mount-point disagreeing with the positional argument.
+cmd/objectfs             77
 # internal/cache/redis goes 87 → 88 with the shared conformance suite (#178). The gain is small and
 # what it bought is not: the suite is the test that found Get answering a ten-byte request with two
 # bytes, which ten implementation-specific tests had missed because none of them asked for a range

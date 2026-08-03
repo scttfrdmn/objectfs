@@ -2,36 +2,64 @@
 # Usage: systemctl start objectfs@<instance-name>.service
 # Example: systemctl start objectfs@research-data.service
 #
-# Configuration should be at: /etc/objectfs/<instance-name>.yaml
+# Configuration must be at /etc/objectfs/<instance-name>.yaml, and must set mount.uri — the bucket
+# cannot come from this file. `systemctl start objectfs@research-data` gives the unit only its
+# instance name, and one unit file serves every instance, so the per-instance config the instance
+# name selects is the only place the bucket can be named.
 
 [Unit]
 Description=ObjectFS FUSE filesystem for %I
 Documentation=https://github.com/scttfrdmn/objectfs
 After=network-online.target
 Wants=network-online.target
-RequiresMountsFor=/mnt/objectfs/%i
+
+# RequiresMountsFor is deliberately absent. It orders this unit after the mount units for the
+# directory's *parents* — but /mnt/objectfs/%i is the mount this unit creates, and asking systemd to
+# require a mount for it is asking it to wait for the thing that is about to be started here.
+# ExecStartPre creating the directory is what actually has to happen first.
 
 [Service]
 Type=simple
 User=root
 Group=root
 
-# Environment
 Environment="OBJECTFS_CONFIG=/etc/objectfs/%i.yaml"
 
-# Pre-flight checks
+# Pre-flight checks. `objectfs version` first because it fails if the binary is absent or unrunnable,
+# with a message, before any directory is created.
 ExecStartPre=/usr/bin/objectfs version
 ExecStartPre=/bin/mkdir -p /mnt/objectfs/%i
 ExecStartPre=/bin/mkdir -p /var/cache/objectfs/%i
 ExecStartPre=/bin/mkdir -p /var/log/objectfs
 
-# Start ObjectFS
-ExecStart=/usr/bin/objectfs mount --config ${OBJECTFS_CONFIG} --foreground
+# --mount-point is what makes this template work: the config file names the bucket and this names
+# where the instance mounts, so the two halves of a mount come from the two places that know them.
+# --foreground names what already happens — ObjectFS does not fork — and is passed because Type=simple
+# requires it to be true.
+ExecStart=/usr/bin/objectfs mount --config ${OBJECTFS_CONFIG} \
+    --mount-point /mnt/objectfs/%i --foreground
 
-# Unmount on stop
-ExecStop=/bin/fusermount3 -u /mnt/objectfs/%i
+# `objectfs unmount`, not `fusermount3 -u`. fusermount3 is the first thing ObjectFS itself tries, but
+# it is one of several candidates: it is absent on a minimal image, its libfuse-2 spelling is
+# `fusermount` on older systems, and where none is installed a root caller needs umount(2) directly.
+# Calling it here gives systemd a bare exit status for all of those; `objectfs unmount` reports which
+# methods were tried, which were not installed, and — when something is holding the mount open — the
+# lsof invocation that names it. That output lands in the journal next to the failure.
+ExecStop=/usr/bin/objectfs unmount /mnt/objectfs/%i
 
-# Restart policy
+# 60s to start, because startup builds an S3 client and mounts; the default 90s is fine but explicit
+# is better next to a handler that depends on it. The SIGTERM systemd sends on that timeout is caught:
+# the signal handler is registered before the mount starts, so a timeout during startup tears down a
+# half-established mount instead of leaving one behind.
+TimeoutStartSec=60
+
+# 90s to stop. This is the flush window: SIGTERM makes ObjectFS unmount, which flushes buffered
+# writes to S3, and its exit code says whether that flush completed. Too short a timeout here is a
+# SIGKILL through buffered data, which is the one failure this project treats as unacceptable.
+TimeoutStopSec=90
+
+# on-failure, not always: `always` restarts after a clean `systemctl stop`, remounting a filesystem an
+# operator just took down.
 Restart=on-failure
 RestartSec=10s
 
@@ -39,8 +67,8 @@ RestartSec=10s
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 
-# Security hardening
-# Note: ObjectFS needs privileged access for FUSE operations
+# Security hardening. ObjectFS needs /dev/fuse and the mount namespace, so this is as tight as a FUSE
+# mount goes rather than as tight as systemd goes.
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes

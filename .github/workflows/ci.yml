@@ -337,6 +337,55 @@ jobs:
             -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'
 
   # ---------------------------------------------------------------------------------------------
+  # systemd-unit — configs/systemd/objectfs@.service, which operators are told to install.
+  #
+  # Two halves, and they check different things. `go test` checks that every objectfs command line
+  # in the unit uses a subcommand the binary dispatches and flags it parses, with both sets scraped
+  # from cmd/objectfs/main.go — that runs on every platform and needs no systemd.
+  # `systemd-analyze verify` checks the other half, that the file is well-formed systemd, and it
+  # needs a Linux runner with systemd installed, which is what this job is for.
+  #
+  # Neither half alone is enough, and the unit that shipped before v0.11.0 is the demonstration:
+  # `ExecStart=/usr/local/bin/objectfs s3://%i /mnt/objectfs/%i` and
+  # `ExecStop=/bin/fusermount3 -u /mnt/objectfs/%i` are both perfectly valid systemd — analyze
+  # passes them — while the first makes the instance name and the bucket name one string and the
+  # second calls a program that is absent on a minimal image, where its failure becomes a SIGKILL
+  # through buffered writes after TimeoutStopSec.
+  #
+  # Verified as objectfs@example.service rather than as the template, because the unit is a template
+  # and %i has no value until one is named — checking the uninstantiated form would check a file
+  # whose ExecStart, ExecStop, and ReadWritePaths all still contain an unexpanded specifier.
+  # ---------------------------------------------------------------------------------------------
+  systemd-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: The unit calls the binary the binary actually is
+        run: go test ./internal/config/ -v -run 'TestSystemdUnit'
+
+      - name: The unit is well-formed systemd
+        run: |
+          # ExecStart's binary does not exist on the runner and ExecStartPre's directories are not
+          # creatable, so analyze reports those as warnings on stderr. Its exit code covers syntax
+          # and directive validity, which is the half being checked here; a stub binary at the
+          # unit's own path silences the executable-not-found line so a real error stands out.
+          sudo install -d /usr/bin
+          sudo tee /usr/bin/objectfs >/dev/null <<'STUB'
+          #!/bin/sh
+          exit 0
+          STUB
+          sudo chmod +x /usr/bin/objectfs
+
+          sudo cp configs/systemd/objectfs@.service /etc/systemd/system/
+          systemd-analyze verify /etc/systemd/system/objectfs@example.service
+
+  # ---------------------------------------------------------------------------------------------
   # labels — .github/labels.yml against the labels the repository actually has, both directions.
   #
   # Its own job because it is the one gate here that needs the GitHub API, and because a failure
