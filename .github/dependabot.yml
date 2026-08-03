@@ -151,6 +151,18 @@ updates:
 
   # JavaScript SDK. No alerts today, but ci.yml runs `npm install && npm test` in this directory
   # (ci.yml:289), so its dependencies are executed on every PR and belong under the same watch.
+  #
+  # The groups below exist because two of these packages cannot move alone. `npm install` enforces
+  # peer ranges, so bumping half of a coupled pair fails at install time, not at test time:
+  #
+  #   #298  typescript 5.9.3 -> 7.0.2, alone:
+  #         peer typescript@">=4.3 <7" from ts-jest@29.4.12 -> ERESOLVE, sdk-metrics fails
+  #   #297  @typescript-eslint/eslint-plugin 5.62.0 -> 8.65.0, alone:
+  #         peer @typescript-eslint/parser@"^8.66.0" from the plugin, while parser is still ^5.59.0
+  #
+  # Both are correct bumps proposed in an order that cannot install. Grouping makes Dependabot move
+  # each set in one PR, which is the only form that resolves. Note this does not make the majors
+  # automatic — they are still majors, so dependabot-automerge.yml comments and waits for a human.
 - package-ecosystem: npm
   directory: /sdks/javascript
   schedule:
@@ -167,3 +179,14 @@ updates:
   - dependencies
   - javascript
   - automerge
+  groups:
+    typescript-toolchain:
+      patterns:
+      - typescript
+      - ts-jest
+      - '@types/jest'
+      - jest
+    typescript-eslint:
+      patterns:
+      - '@typescript-eslint/*'
+      - eslint
