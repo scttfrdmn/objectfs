@@ -34,6 +34,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -42,6 +43,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -177,7 +179,7 @@ func dependabotLabelRefs(t *testing.T) []struct {
 
 // TestDependabotLabelsAreDefined is the offline half, and the one with a proven failure behind it.
 //
-// dependabot.yml labelled every PR `automerge`; that label did not exist; Dependabot drops unknown
+// dependabot.yml labeled every PR `automerge`; that label did not exist; Dependabot drops unknown
 // labels without reporting it; and dependabot-automerge.yml gated every approve and merge step on
 // `contains(labels.*.name, 'automerge')`. 46 PRs opened, 0 merged, no error anywhere. The comment at
 // the top of dependabot.yml records the rule — "do not reference a label from dependabot.yml that is
@@ -291,6 +293,11 @@ type ghLabel struct {
 // `gh` rather than a raw API call, for the same reason internal/awsrates's integration test shells
 // out to the AWS CLI: the credential handling is already solved there and reimplementing it here
 // would be a second thing to get wrong. In CI `gh` authenticates from GITHUB_TOKEN.
+//
+// The context carries a timeout because the alternative is worse than a failure: `gh` reaching a
+// hung endpoint would block until `go test`'s own 20-minute deadline, which kills the *whole
+// package* and reports it as a panic rather than as one network call that did not answer. Thirty
+// seconds is far more than the 0.3–0.5 s this takes when the API is reachable.
 func labelsFromGitHub(t *testing.T) []ghLabel {
 	t.Helper()
 
@@ -299,8 +306,11 @@ func labelsFromGitHub(t *testing.T) []ghLabel {
 			"The structural half (TestDependabotLabelsAreDefined) still ran.")
 	}
 
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
 	//nolint:gosec // fixed arguments, no interpolation
-	out, err := exec.Command("gh", "label", "list",
+	out, err := exec.CommandContext(ctx, "gh", "label", "list",
 		"--repo", "scttfrdmn/objectfs",
 		"--limit", "300",
 		"--json", "name,description,color",
