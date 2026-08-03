@@ -50,6 +50,14 @@ jobs:
       - name: Test
         run: go test -race -timeout 20m ./...
 
+      # The fuse_mount tag carries the tests that need a real kernel mount — whether the kernel
+      # re-reads under direct I/O, whether it keeps pages across open(2). They cannot run here:
+      # ubuntu-latest runners have no /dev/fuse. They are compiled anyway, because a build tag
+      # nothing compiles is exactly how four other tags in this repo came to carry code that does
+      # not build (#240). This catches that in one step; #240 generalizes it to the rest.
+      - name: Compile the fuse_mount tag
+        run: go vet -tags=fuse_mount ./internal/fuse/
+
   # ---------------------------------------------------------------------------------------------
   # coverage — a floor per package, ratcheting toward 80%.
   #

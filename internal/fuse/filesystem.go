@@ -158,11 +158,14 @@ func (f *inflightFetch) slice(off, length int64) ([]byte, bool) {
 // true: this struct carried AllowOther, DirectIO, KeepCache, BigWrites, MaxRead, MaxWrite, ReadAhead,
 // WriteBuffer, and Concurrency, and not one of them was read by anything. Each carried a yaml tag,
 // which is what made them look plumbed — but no decoder targets this type. Configuration is decoded
-// into [config.Configuration], whose ten top-level keys include no FUSE section, so the tags never
-// bound to anything a user could set.
+// into [config.Configuration], which as of v0.11.0 does have a `fuse` section — and it reaches this
+// struct through internal/adapter and [CreatePlatformMountManager], not by being decoded into it.
 //
-// See [MountOptions] for the same note about the mount-time options, and #180 for the four that
-// name real go-fuse capabilities and are worth having for real.
+// DirectIO and KeepCache below are two of the four #180 nominated, restored with the plumbing and the
+// tests they lacked the first time. They are on this type rather than only on [MountOptions] because
+// [FileNode.Open] is what returns them to the kernel, and Open reads this config.
+//
+// See [MountOptions] for the mount-time options and for why splice is not among them.
 type Config struct {
 	// Mount options
 	MountPoint string `yaml:"mount_point"`
@@ -188,6 +191,21 @@ type Config struct {
 
 	// CacheTTL is how long the kernel may cache an attribute set, as returned by Getattr and Setattr.
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+
+	// DirectIO returns FOPEN_DIRECT_IO from every [FileNode.Open], so the kernel does not cache this
+	// mount's file data and every read(2) becomes a READ reaching [FileHandle.Read].
+	//
+	// KeepCache returns FOPEN_KEEP_CACHE, asking the kernel to keep cached pages across open(2).
+	//
+	// DirectIO wins when both are set. The two ask for opposite things, and sending both leaves the
+	// decision to a kernel version rather than to this configuration; go-fuse's bridge makes the same
+	// choice in the passthrough case, clearing FOPEN_KEEP_CACHE when it sets FOPEN_PASSTHROUGH
+	// (fs/bridge.go:805).
+	//
+	// No yaml tags for the reason given at ReadAhead below. The operator-facing names are
+	// config.FUSEConfig's `direct_io` and `keep_cache`.
+	DirectIO  bool
+	KeepCache bool
 
 	// ReadAhead configures the sequential-read prefetcher; nil takes [DefaultReadAheadConfig].
 	//
@@ -889,7 +907,30 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 		fs:     f.fs,
 		handle: handle,
 		file:   openFile,
-	}, 0, 0
+	}, f.fs.openFlags(), 0
+}
+
+// openFlags is the FOPEN_* set every open on this mount returns to the kernel.
+//
+// This return value was the literal 0 through v0.10.0 while [Config] carried DirectIO and KeepCache
+// fields — the two flags that belong here — so both were settable and neither reached the kernel.
+// #180 removed them for that reason; this is them coming back with the one line that makes them mean
+// something.
+//
+// DirectIO takes precedence over KeepCache rather than the two being OR'd. FOPEN_DIRECT_IO tells the
+// kernel not to use the page cache for this file and FOPEN_KEEP_CACHE tells it to hold what the page
+// cache already has; sending both asks for opposite things and leaves which one applies to a kernel
+// version. See [Config.DirectIO].
+func (fs *FileSystem) openFlags() uint32 {
+	if fs.config.DirectIO {
+		return fuse.FOPEN_DIRECT_IO
+	}
+
+	if fs.config.KeepCache {
+		return fuse.FOPEN_KEEP_CACHE
+	}
+
+	return 0
 }
 
 // FileHandle represents an open file handle

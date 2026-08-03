@@ -77,6 +77,11 @@ func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeB
 	if o := config.Options; o != nil {
 		fuseConfig.ReadOnly = o.ReadOnly
 
+		// The two open-time flags. Copied rather than defaulted, because false is the meaningful
+		// "off" for both — see FileSystem.openFlags, which is the one place they are read.
+		fuseConfig.DirectIO = o.DirectIO
+		fuseConfig.KeepCache = o.KeepCache
+
 		// The attribute timeout the nodes report and the one in fs.Options must be the same duration.
 		// buildFUSEOptions passes Options.AttrTimeout to go-fuse as the bridge's default; if Getattr
 		// reported a different one the kernel would cache for a period no configuration named.

@@ -341,3 +341,34 @@ cluster:
     key_prefix: objectfs
     ttl: 5m
     max_retries: 3
+
+# How the kernel caches and dispatches to this mount.
+#
+# This is the first FUSE section any loader has read. Nine settings with names matching real FUSE
+# capabilities — direct_io, keep_cache, big_writes, max_read, async_read, writeback_cache, and three
+# splice flags — existed as struct fields with yaml tags for a whole release and were decoded by
+# nothing, because the schema had no `fuse` key at all (#180). Three of them are here, and each
+# changes what the kernel does.
+#
+# Every default is off, and off is the kernel's own behavior in each case. There is nothing to set
+# here for an ordinary mount.
+fuse:
+  # Ask the kernel not to cache this mount's file data: every read(2) becomes a request ObjectFS
+  # serves, even for bytes read a moment ago. Costs the page cache; buys coherence with a bucket
+  # other clients write, and reads that arrive at the offset and length the application asked for
+  # rather than page-aligned and rounded up.
+  direct_io: false
+
+  # Ask the kernel to keep a file's cached pages across open(2) instead of dropping them.
+  #
+  # Only safe when nothing else writes the bucket. A page the kernel keeps is a page ObjectFS cannot
+  # invalidate — there is no notification path yet — so a stale read is not bounded by cache.ttl the
+  # way an attribute is. Ignored when direct_io is true, which asks for the opposite.
+  keep_cache: false
+
+  # Make the kernel keep at most one read outstanding per file.
+  #
+  # Named for the capability that exists rather than for async_read, its negation, so that `false`
+  # is the ordinary value. Turning it on disables kernel readahead and costs sequential read
+  # throughput; it is here for a backend that cannot serve concurrent reads of one file. S3 can.
+  sync_read: false
