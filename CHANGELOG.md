@@ -161,7 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both are the right target version proposed in an order that cannot resolve. `groups:` on the
   `/sdks/javascript` npm entry now moves each set in one PR, which is the only form that installs. It
   does not make them automatic — they are still majors, so `dependabot-automerge.yml` comments and
-  waits for a human, which is right for a TypeScript 5 → 7 jump.
+  waits for a human, which is right for a jump of this size. (The TypeScript half of it turned out to
+  need a third package and a lower target; see the `typedoc` entry below.)
 
   The `gomod` entry has had groups all along; neither npm entry did, which is why this surfaced only on
   the JavaScript side — and only now, since before [#288] the whole config was ignored and these were
@@ -174,6 +175,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#306]: https://github.com/scttfrdmn/objectfs/issues/306
 [#214]: https://github.com/scttfrdmn/objectfs/issues/214
+
+- **`typedoc` joins the `typescript-toolchain` Dependabot group; it constrains the TypeScript version
+  as tightly as `ts-jest` and was missed** ([#314]). The regrouped PR from [#306] still failed
+  `npm install`, which is the useful part: a group is only as good as its membership, and `typedoc`
+  gates the same range without being an obvious member of a "TypeScript toolchain."
+
+  Two things fell out of measuring the actual peer ranges rather than assuming them. `typedoc@0.24`
+  peers `typescript@"4.6.x || … || 5.1.x"`, so `typescript: ^5.0.0` in `package.json` has been
+  resolving to **5.1.6** — three minors behind what the range reads as, and a 2023 compiler. And
+  **TypeScript 7 is not reachable at any grouping**: `ts-jest`'s latest release peers `<7` and has
+  nothing above it, so the ceiling is TypeScript 6, which `typedoc@0.28` permits. Verified by
+  installing the four-package set, not by reading the manifests.
+
+  [#314] records what this was hiding, which is larger than the grouping: `npm run build` in
+  `sdks/javascript` fails with **48 `tsc` errors**, and nothing in CI or the Makefile runs `tsc` at
+  all. Two of the 48 name identifiers that do not exist — `Configuration` in `types.ts:308` and a
+  `StorageAdapter` re-export in `index.ts:32` where `storage.ts` exports `S3StorageAdapter` — both
+  dating to the commit that added the SDK in 2025-08. `sdk-metrics` passes because `ts-jest`
+  typechecks only the one test file and its imports, so the rest of the SDK is checked by nothing.
+
+[#314]: https://github.com/scttfrdmn/objectfs/issues/314
+
+- **Dependabot's `gomod` and `maven` queues were saturated, so outdated dependencies were silent
+  rather than current.** `open-pull-requests-limit` caps discovery, not just display: once the slots
+  are full Dependabot stops proposing, and there is nothing in the PR list to distinguish "nothing to
+  update" from "no room to say so." This is the same condition that hid three outdated GitHub Actions
+  majors behind [#254]-[#258] until #304 bumped them by hand.
+
+  Measured rather than assumed: `go list -u -m all` reported **twelve** outdated direct modules
+  against five slots, with `prometheus/client_golang`, `redis/go-redis`, `substrate` and
+  `golang.org/x/sys` absent from every open PR — not current, just unproposed. `sdks/java/pom.xml`
+  declares nine artifacts across seven version properties against three slots, and the three in
+  flight left `slf4j`, `junit`, `mockito` and `maven-compiler-plugin` with no way to be raised.
+
+  `gomod` goes 5 → 8 and `maven` 3 → 6, with the reasoning recorded in the config so a future
+  reduction is a deliberate choice. Both npm limits are left at 3 on purpose: those queues are full
+  of majors correctly waiting for a human, which is the limit doing its job rather than hiding work.
+
+- **Three cache TTL tests were flaky in a way that reported as a cache defect.** They configured a
+  100 ms TTL and then asserted that an entry exists "immediately after `Put`". But `Put` stamps
+  `Timestamp: now` on entry (`internal/cache/persistent.go:305`) and *then* gzip-encodes and writes to
+  disk, so the entry's clock starts before its bytes land. Any delay between `Put` returning and the
+  following `Get` — GC, scheduler contention on a shared runner, a slow temp filesystem — spends the
+  same 100 ms the assertion depends on.
+
+  `TestPersistentCache_TTLExpiration` failed on CI for a pull request that changed nothing but
+  `.github/dependabot.yml`, which is the tell. Reproduced deliberately by sleeping 120 ms after the
+  `Put`: the entry is gone before it is ever read. `TestPersistentCache_Optimize` was the more
+  fragile of the two — it asserts a final count of 1, so it needed a fourth `Put` *and* a full index
+  sweep to finish inside the window, and losing that race looks like `Optimize` evicting a fresh
+  entry. `TestLRUCache_TTLExpiration` has the same shape; being in-memory it is far less likely to
+  miss, which makes it the one that would have outlived the other two.
+
+  The tests are what changed, not the caches. TTL measured from the start of the write is the
+  defensible semantic — an entry is as old as its data — so the fix is a 2 s budget wide enough that
+  scheduling noise cannot reach it, plus an `expiryWait` helper that keeps runtime tied to the TTL
+  rather than to a second hardcoded sleep. Each of the three was confirmed to fail against a
+  `isExpired() { return false }` mutant before being called fixed.
 
 - **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
   unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
