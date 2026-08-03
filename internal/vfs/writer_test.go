@@ -2077,3 +2077,252 @@ func TestSetAttrRejectsModeBitsOutsideThePermissionMask(t *testing.T) {
 			"escalation this filesystem cannot perform.", err)
 	}
 }
+
+// TestFlushPrefixMatchesOnAPathBoundary is the prefix rule a directory rename rests on.
+//
+// A bare strings.HasPrefix makes "dir" match "dir2/file", and the consequence is not a cosmetic
+// over-match: the caller flushes what the match returned and then *moves* it, so an unrelated sibling
+// tree ends up under the renamed directory. It is the same defect the cache's keyMatches had, found in
+// the same audit, which is why it is asserted here rather than trusted to read correctly.
+//
+// The three near misses are each a different way to be wrong. "dir2/c.txt" shares the prefix and
+// diverges at the boundary; "dirty.txt" shares it and continues into a longer name; "dir" itself is
+// the marker key, which must match, because a directory's own marker object is one of the things a
+// rename has to move.
+func TestFlushPrefixMatchesOnAPathBoundary(t *testing.T) {
+	t.Parallel()
+
+	w, backend := newWriter(t)
+	ctx := context.Background()
+
+	under := []string{"dir/", "dir/a.txt", "dir/sub/b.txt"}
+	beside := []string{"dir2/c.txt", "dirty.txt", "other.txt"}
+
+	for _, key := range append(append([]string{}, under...), beside...) {
+		if err := w.Write(key, 0, []byte("pending")); err != nil {
+			t.Fatalf("Write(%q): %v", key, err)
+		}
+	}
+
+	flushed, err := w.FlushPrefix(ctx, "dir")
+	if err != nil {
+		t.Fatalf("FlushPrefix: %v", err)
+	}
+
+	if flushed != len(under) {
+		t.Errorf("FlushPrefix(%q) flushed %d keys, want %d. A bare string prefix match also takes %v, "+
+			"which a directory rename would then move under the new name",
+			"dir", flushed, len(under), beside)
+	}
+
+	for _, key := range under {
+		if _, ok := backend.Object(key); !ok {
+			t.Errorf("%q is under the flushed prefix and has no object, so a copy issued now would "+
+				"miss it and the rename would lose the file", key)
+		}
+		if w.Dirty(key) {
+			t.Errorf("%q is still dirty after being flushed; the pending range would be PUT back to "+
+				"the source name after the rename deleted it", key)
+		}
+	}
+
+	for _, key := range beside {
+		if _, ok := backend.Object(key); ok {
+			t.Errorf("%q was flushed by FlushPrefix(%q); its name merely starts with the same "+
+				"characters", key, "dir")
+		}
+		if !w.Dirty(key) {
+			t.Errorf("%q is no longer dirty, so FlushPrefix touched it", key)
+		}
+	}
+}
+
+// TestFlushPrefixStopsAtTheFirstFailure covers the half a mount cannot easily reach: what happens
+// when one key under the prefix will not flush.
+//
+// Stopping is the answer, and it is the opposite of FlushAll's. FlushAll runs at unmount, where a key
+// not attempted is data lost for good, so it presses on and reports at the end. Here the caller is
+// about to copy these keys and then *delete* them, so continuing would hand it a namespace it believes
+// is fully durable when one file is not — and the delete would then destroy the only copy of the
+// pending bytes.
+//
+// The error has to name the key, because a mount log is all an operator has: "rename failed" for a
+// directory of ten thousand objects is not a diagnosis.
+func TestFlushPrefixStopsAtTheFirstFailure(t *testing.T) {
+	t.Parallel()
+
+	w, backend := newWriter(t)
+
+	for _, key := range []string{"tree/a.txt", "tree/b.txt"} {
+		if err := w.Write(key, 0, []byte("pending")); err != nil {
+			t.Fatalf("Write(%q): %v", key, err)
+		}
+	}
+
+	backend.putErr = errors.New("AccessDenied: not authorized to perform s3:PutObject")
+
+	flushed, err := w.FlushPrefix(context.Background(), "tree")
+	if err == nil {
+		t.Fatal("FlushPrefix reported success while a key under the prefix could not be stored. The " +
+			"caller copies and then deletes these keys, so this answer destroys the pending bytes.")
+	}
+
+	if !strings.Contains(err.Error(), "tree/a.txt") {
+		t.Errorf("error %q names no key. FlushPrefix visits keys in sorted order precisely so the "+
+			"report is reproducible; without the name an operator cannot find the file", err)
+	}
+	if !strings.Contains(err.Error(), "AccessDenied") {
+		t.Errorf("error %q does not carry the backend's reason, so the operator learns that a rename "+
+			"failed but not that their credentials are the problem", err)
+	}
+
+	if flushed != 0 {
+		t.Errorf("FlushPrefix reported %d flushed keys after failing on the first one", flushed)
+	}
+
+	if !w.Dirty("tree/a.txt") {
+		t.Error("the key that failed to flush is clean, so its pending write would be evicted as " +
+			"though it had been stored")
+	}
+}
+
+// TestDiscardPrefixMatchesOnAPathBoundary is the same boundary rule for the delete side.
+//
+// The stakes are higher here than in FlushPrefix. DiscardPrefix destroys data on purpose, so an
+// over-broad match does not merely move the wrong file — it drops writes the caller never asked to
+// drop, with no error anywhere and no way to notice until someone reads the file back.
+func TestDiscardPrefixMatchesOnAPathBoundary(t *testing.T) {
+	t.Parallel()
+
+	w, _ := newWriter(t)
+
+	under := []string{"keep/", "keep/a.txt", "keep/deep/b.txt"}
+	beside := []string{"keeper.txt", "keep2/c.txt"}
+
+	for _, key := range append(append([]string{}, under...), beside...) {
+		if err := w.Write(key, 0, []byte("pending")); err != nil {
+			t.Fatalf("Write(%q): %v", key, err)
+		}
+	}
+
+	w.DiscardPrefix("keep")
+
+	for _, key := range under {
+		if w.Dirty(key) {
+			t.Errorf("DiscardPrefix left %q dirty. A pending range outliving the delete is PUT back by "+
+				"the next flush, resurrecting the file at the name it was moved away from", key)
+		}
+	}
+
+	for _, key := range beside {
+		if !w.Dirty(key) {
+			t.Errorf("DiscardPrefix(%q) destroyed the pending writes for %q, whose name merely starts "+
+				"with the same characters. Those bytes are gone with no error anywhere", "keep", key)
+		}
+	}
+}
+
+// TestPrefixOperationsOnAnEmptyPrefixTakeEverything pins the root case.
+//
+// An empty prefix matching every key is what a rename of the mount root would need, and no caller asks
+// for it today. It is asserted because the alternative reading — an empty prefix matching nothing — is
+// equally defensible from the code and silently wrong in the direction that loses data: a root-level
+// operation would flush nothing, copy nothing, and delete everything.
+func TestPrefixOperationsOnAnEmptyPrefixTakeEverything(t *testing.T) {
+	t.Parallel()
+
+	w, backend := newWriter(t)
+
+	keys := []string{"a.txt", "b/c.txt", "d/e/f.txt"}
+	for _, key := range keys {
+		if err := w.Write(key, 0, []byte("pending")); err != nil {
+			t.Fatalf("Write(%q): %v", key, err)
+		}
+	}
+
+	flushed, err := w.FlushPrefix(context.Background(), "")
+	if err != nil {
+		t.Fatalf("FlushPrefix(%q): %v", "", err)
+	}
+	if flushed != len(keys) {
+		t.Errorf("FlushPrefix(%q) flushed %d of %d keys", "", flushed, len(keys))
+	}
+	for _, key := range keys {
+		if _, ok := backend.Object(key); !ok {
+			t.Errorf("%q was not stored by a flush of the empty prefix", key)
+		}
+	}
+
+	for _, key := range keys {
+		if err := w.Write(key, 0, []byte("pending again")); err != nil {
+			t.Fatalf("Write(%q): %v", key, err)
+		}
+	}
+
+	w.DiscardPrefix("")
+
+	for _, key := range keys {
+		if w.Dirty(key) {
+			t.Errorf("DiscardPrefix(%q) left %q dirty", "", key)
+		}
+	}
+}
+
+// TestPrefixOperationsOnAnExactKeyTakeThatKey covers the case a file rename actually uses, and it is
+// the one the boundary tests above cannot reach.
+//
+// Renaming a single file passes that file's own key where these methods take a prefix — "a.txt", with
+// no trailing slash and nothing beneath it. So the key-equals-prefix arm is not an edge case, it is the
+// common path: every `mv f g` goes through it.
+//
+// It needs its own test because a key under a directory prefix satisfies *both* rules — "dir/a.txt"
+// matches "dir" on the boundary rule as well — so a directory test passes whether or not the equality
+// arm works. Deleting that arm leaves every directory rename correct and breaks every file rename: the
+// flush stores nothing, so the copy reads a key that is not there, and the discard drops nothing, so
+// the pending bytes are PUT back to the name the rename just deleted.
+func TestPrefixOperationsOnAnExactKeyTakeThatKey(t *testing.T) {
+	t.Parallel()
+
+	t.Run("flush", func(t *testing.T) {
+		t.Parallel()
+
+		w, backend := newWriter(t)
+
+		if err := w.Write("a.txt", 0, []byte("pending")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+
+		flushed, err := w.FlushPrefix(context.Background(), "a.txt")
+		if err != nil {
+			t.Fatalf("FlushPrefix: %v", err)
+		}
+
+		if flushed != 1 {
+			t.Errorf("FlushPrefix(%q) flushed %d keys, want 1. This is the path every single-file "+
+				"rename takes, and flushing nothing means the server-side copy that follows reads a key "+
+				"the write path has not stored yet", "a.txt", flushed)
+		}
+		if _, ok := backend.Object("a.txt"); !ok {
+			t.Error("the file was not stored, so a copy issued now would fail and the rename would " +
+				"report ENOENT for a file the user can see")
+		}
+	})
+
+	t.Run("discard", func(t *testing.T) {
+		t.Parallel()
+
+		w, _ := newWriter(t)
+
+		if err := w.Write("a.txt", 0, []byte("pending")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+
+		w.DiscardPrefix("a.txt")
+
+		if w.Dirty("a.txt") {
+			t.Error("DiscardPrefix left the exact key dirty. A rename deletes the source after copying " +
+				"it, so a surviving pending range is PUT back to the old name by the next flush — the " +
+				"file returning from the dead at the name it was moved away from, with no error anywhere")
+		}
+	})
+}

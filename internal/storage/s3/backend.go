@@ -1285,9 +1285,15 @@ func (b *Backend) copyObjectMultipart(
 
 	parts := make([]s3types.CompletedPart, 0, (size+partSize-1)/partSize)
 
+	// Counted as an int32 rather than derived from len(parts), which would be an int→int32 conversion
+	// on every iteration. The conversion cannot overflow — S3 refuses the upload above 10,000 parts long
+	// before int32 runs out — but "cannot overflow" is an argument a reader has to reconstruct and a
+	// scanner cannot check, so the type that S3's PartNumber actually is carries the count instead.
+	var partNum int32
+
 	for offset := int64(0); offset < size; offset += partSize {
 		end := min(offset+partSize, size) - 1
-		partNum := int32(len(parts) + 1) //nolint:gosec // bounded by size/partSize, far below int32
+		partNum++
 
 		out, copyErr := client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
 			Bucket:          aws.String(b.bucket),

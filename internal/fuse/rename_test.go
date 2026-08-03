@@ -845,78 +845,14 @@ func TestRenameToAForeignParentReportsEXDEV(t *testing.T) {
 	}
 }
 
-// TestFlushPrefixMatchesOnAPathBoundary is the unit-level guard for the prefix rule the directory
-// rename depends on.
+// The path-boundary rule that FlushPrefix and DiscardPrefix enforce is tested in internal/vfs, not
+// here. It moved there when a coverage gate made the split visible: the functions live in that package,
+// so a test in this one leaves them reading 0% covered no matter how thoroughly it exercises them —
+// coverage is per-package and the profile follows the code, not the consequence.
 //
-// It lives here rather than in internal/vfs because the consequence is a rename's: a bare
-// strings.HasPrefix makes "dir" match "dir2/file", so renaming dir flushes — and then the caller moves —
-// an unrelated sibling tree. It is the same defect the cache's keyMatches had, found in the same audit.
-func TestFlushPrefixMatchesOnAPathBoundary(t *testing.T) {
-	t.Parallel()
-
-	f := newRenameFixture(t)
-	ctx := context.Background()
-
-	writes := []string{"dir/a.txt", "dir/sub/b.txt", "dir2/c.txt", "dirty.txt"}
-	for _, key := range writes {
-		if err := f.fs.buffer.Write(key, 0, []byte("pending")); err != nil {
-			t.Fatalf("buffered write to %q: %v", key, err)
-		}
-	}
-
-	flushed, err := f.fs.buffer.FlushPrefix(ctx, "dir")
-	if err != nil {
-		t.Fatalf("FlushPrefix: %v", err)
-	}
-
-	if flushed != 2 {
-		t.Errorf("FlushPrefix(%q) flushed %d keys, want 2 (dir/a.txt and dir/sub/b.txt). A bare string "+
-			"prefix match also takes dir2/c.txt and dirty.txt, which a directory rename would then move",
-			"dir", flushed)
-	}
-
-	for _, key := range []string{"dir/a.txt", "dir/sub/b.txt"} {
-		if !f.exists(t, key) {
-			t.Errorf("%q is under the flushed prefix but has no object", key)
-		}
-	}
-
-	for _, key := range []string{"dir2/c.txt", "dirty.txt"} {
-		if f.exists(t, key) {
-			t.Errorf("%q was flushed by FlushPrefix(%q); its name merely starts with the same "+
-				"characters", key, "dir")
-		}
-		if !f.fs.buffer.Dirty(key) {
-			t.Errorf("%q is no longer dirty, so FlushPrefix touched it", key)
-		}
-	}
-}
-
-// TestDiscardPrefixMatchesOnAPathBoundary is the same guard for the delete side.
-//
-// DiscardPrefix destroys data on purpose, so an over-broad match here does not merely move the wrong
-// file — it drops writes the caller never asked to drop, with no error.
-func TestDiscardPrefixMatchesOnAPathBoundary(t *testing.T) {
-	t.Parallel()
-
-	f := newRenameFixture(t)
-
-	for _, key := range []string{"keep/a.txt", "keeper.txt", "keep2/b.txt"} {
-		if err := f.fs.buffer.Write(key, 0, []byte("pending")); err != nil {
-			t.Fatalf("buffered write to %q: %v", key, err)
-		}
-	}
-
-	f.fs.buffer.DiscardPrefix("keep")
-
-	if f.fs.buffer.Dirty("keep/a.txt") {
-		t.Error("DiscardPrefix left a key under the prefix dirty")
-	}
-
-	for _, key := range []string{"keeper.txt", "keep2/b.txt"} {
-		if !f.fs.buffer.Dirty(key) {
-			t.Errorf("DiscardPrefix(%q) destroyed the pending writes for %q, whose name merely starts "+
-				"with the same characters. Those bytes are gone with no error anywhere", "keep", key)
-		}
-	}
-}
+// The move also bought two cases this fixture could not reach. Failing a flush needs a backend that
+// rejects a PUT, and asserting that a rename must *not* proceed past that is the whole point of
+// stopping at the first failure. And renaming a single file passes the file's own key where those
+// methods take a prefix, so the key-equals-prefix arm is the common path rather than an edge case —
+// invisible from a directory test, because a key beneath a directory satisfies the boundary rule too.
+// See TestPrefixOperationsOnAnExactKeyTakeThatKey.
