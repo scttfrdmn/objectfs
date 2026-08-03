@@ -180,9 +180,11 @@ func TestParallelReadThresholdDrivesFanOut(t *testing.T) {
 				cfg.ReadChunkSize = chunkSize
 				cfg.ParallelReadConcurrency = 4
 
-				// Compression gates the parallel path off entirely — the whole-object decompress
-				// cannot be assembled from independent ranges — so it must be off for this test to
-				// be about the threshold.
+				// Off so this test is about the threshold and nothing else. It no longer has to be:
+				// the fan-out decision is keyed on the object rather than on this flag as of #228,
+				// and TestFanOutIsDecidedByTheObjectNotTheConfig asserts exactly that by running
+				// the same read with the flag both ways. Kept off here to hold the variables down
+				// to the one under test.
 				cfg.Compression.Enabled = false
 			})
 
