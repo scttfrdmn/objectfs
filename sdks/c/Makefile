@@ -19,7 +19,6 @@ else
     LIB_PATH := LD_LIBRARY_PATH=$(CURDIR)
 endif
 
-GOENV   := GONOSUMDB="github.com/scttfrdmn/*" GOPRIVATE="github.com/scttfrdmn/*"
 GOFLAGS := -buildmode=c-shared
 
 CC      ?= cc
@@ -48,5 +47,10 @@ test-python: $(LIB)
 	$(LIB_PATH) python3 tests/test_smoke.py
 
 ## clean — remove build artefacts
+#
+# libobjectfs.h is deliberately not removed. The shared library is gitignored (.gitignore:5-6)
+# but the cgo-generated header is checked in, because README.md lists it as the reference copy
+# of the declarations for a reader who has not built anything. Deleting it here left `make clean`
+# reporting a deleted tracked file in `git status`.
 clean:
-	rm -f $(LIB) libobjectfs.h tests/test_basic
+	rm -f $(LIB) tests/test_basic
