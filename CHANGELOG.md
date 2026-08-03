@@ -89,6 +89,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
+  unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
+  requires a string: *"The property '#/updates/0/schedule/time' of type integer did not match the
+  following type: string"*, once for each of the six ecosystem entries. An invalid configuration is not
+  partially applied — it is ignored — so every `labels:`, `groups:`, `reviewers:` and `ignore:` block in
+  the file was dead and Dependabot ran on its defaults. True since 2025-10-15, when the key was
+  introduced unquoted.
+
+  This is also why the earlier `automerge` fix never took effect. That label was added to
+  `.github/labels.yml` and to the repository because Dependabot silently drops labels it cannot find
+  and every approve/merge step in `dependabot-automerge.yml` is gated on it — and still no Dependabot
+  PR carried it, because `labels:` sat inside a file being discarded wholesale. Two independent causes
+  for one symptom, and fixing the visible one left the other invisible. Confirmed on the open PRs:
+  #210, #249, #254 and #258 all arrived with `dependencies` plus an ecosystem label and no `automerge`.
+
+  Guarded by `TestDependabotScheduleTimesAreQuoted`, which checks the **file text** rather than the
+  decoded value. That is deliberate and was arrived at by mutation: `gopkg.in/yaml.v2` and
+  `gopkg.in/yaml.v3` both decode `09:00`, `9:00`, `10:30` and `05:00` as Go `string`, because Go's YAML
+  1.2 core schema has no sexagesimal integer type. So a decode-based assertion passes on exactly the
+  input that breaks the file, and the first version of this test did.
+
+[#288]: https://github.com/scttfrdmn/objectfs/issues/288
+
 - **`min_sequential` now means what it says: read-ahead had two thresholds over the same counter, and
   only one was configurable** ([#247]). The prefetch gate required `sequentialHits >= MinSequential`
   *and* `confidence > 0.5`, where confidence was assigned `sequentialHits / 10.0` a few lines above — so
