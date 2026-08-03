@@ -288,6 +288,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and is not — `buildMetadata` puts it in user metadata. Until that lands, ObjectFS gives up CargoShip's
   throughput for exactly the objects that compressed.
 
+- **Two gosec findings the security check reported but `lint` did not.** There are two gosec runs in
+  CI reading different suppression directives: golangci-lint's honors `//nolint:gosec`, while the
+  standalone gosec whose SARIF becomes GitHub code scanning honors only `#nosec`. Both sites already
+  carried a reasoned `//nolint`, so `lint` passed at 0 issues and the `gosec` check failed with two new
+  alerts. Neither finding is real — the generator writes committed Go source holding published list
+  prices, and the unmount helper spawns no shell, takes its program from a fixed platform table, and
+  passes the mount point as one argv element — so both now carry `#nosec` alongside, with a note that
+  the duplication is about two tools rather than two risks. Verified by installing the same gosec the
+  workflow uses, reproducing both findings, and confirming an unsuppressed `0o644` write in the same
+  function is still reported, so the suppression is line-scoped rather than file-wide. Six other sites
+  have the same gap and are open code-scanning alerts today; filed as [#264] rather than swept, since
+  each needs its own judgment about whether the finding is real.
+
 - **`pricing.region` selected nothing, so every cost figure was us-east-1's, labeled with whatever
   region the operator configured** ([#161]). The rates lived in a map built at package init, and package
   init cannot see a configuration. `PricingConfig.Region` was read at exactly one line in
@@ -816,6 +829,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [scttfrdmn/cargoship#353]: https://github.com/scttfrdmn/cargoship/issues/353
 [#153]: https://github.com/scttfrdmn/objectfs/issues/153
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
+[#264]: https://github.com/scttfrdmn/objectfs/issues/264
 [#134]: https://github.com/scttfrdmn/objectfs/issues/134
 [#135]: https://github.com/scttfrdmn/objectfs/issues/135
 [#195]: https://github.com/scttfrdmn/objectfs/issues/195
