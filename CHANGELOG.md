@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-08-02
+
+Part 4 of the v0.10.0 audit: say only what the code does, and bill accurately. The audit found that
+documentation, cost figures, and repository metadata each asserted things no mechanism checked, so
+most of what follows is a correction paired with the gate that fails if it recurs — five of them,
+now running on every PR.
+
+This release exists because of a numbering defect worth stating plainly, since it is the second
+instance of the same one. `v0.10.2` was tagged when the first of this milestone's twelve issues
+closed, and the remaining eleven landed after it — so the tag published under that number holds the
+packaging fix and none of the work below, exactly as `v0.10.1` was tagged two hours before the
+module-path fix it was cut for. A tag is not a promise that can be revised: it is already in the
+GitHub releases list and cached by the Go module proxy, which resolves a version to one tree
+forever. So the fix is a new number rather than a moved tag, and the rule that prevents a third
+instance is to cut the tag from the merge commit that closes the milestone, not from the one that
+opens it.
+
 ### Added
 - **A gate that fails when documentation names a Go symbol or a CLI flag that does not exist.** `internal/config/docs_symbols_test.go` extracts `pkg.Symbol` references from fenced Go blocks — checked against the packages that same block imports, parsed with `go/ast` — and `objectfs` command lines from shell blocks, checked against the flags `cmd/objectfs/main.go` actually declares. This is the mechanism #182 asked for, and the point is that it fires at authoring time: correcting the nineteen files that issue cataloged only resets the clock, since a fenced code block is a string as far as the compiler, vet, and lint are concerned. It found eleven defects on its first run, listed under Fixed below, and a companion test compares the flag list against `main.go` so the two cannot drift apart silently. The admission rule — *which* references get checked — was chosen by measuring three candidates rather than guessed: checking every `lowercase.Uppercase` in every Go block gives 93 findings of which 3 are real (`s3.Client` is the AWS SDK, `errors.Is` is the standard library), file-scoped imports give 5 of which 3 are real, and block-scoped gives 3 of 3 with no false positives. Its one known blind spot is stated in the test rather than left to be discovered: a continuation block that uses a package imported by the block above it is not checked
 - **A gate that fails when documentation links at a page that does not exist.** `internal/config/docs_links_test.go` extracts every relative markdown link from every tracked markdown file and resolves it on disk — relative paths against the linking file's directory, root-absolute paths in `docs-platform/` against VitePress's routing rule, where `/guide/installation` is served from `guide/installation.md` and `/api/` from `api/index.md`. This is #208's mechanism, and it is a Go test rather than the link checker in CI that issue proposed for three reasons recorded in the file: it needs no network and no new tool, so pre-commit and CI check at identical fidelity; it sits with the gates a contributor already satisfies; and an exemption can carry its reason in code, the way `docsExemptFromConfigSchema` does. **It found 45 dead links, not the 24 the issue catalogued** — because #208 was written by walking `docs/`, and two whole classes live outside it: 13 links into SDK `examples/` directories that have never existed, and 8 root-absolute VitePress routes. That gap is the finding, and it is the same shape as `docs_test.go`'s `nestedSectionNames`: scoping a gate to where the defects were already known is how the next cluster stays invisible. A link target is a path, not a symbol, which is why the symbol gate above cannot see it — a link written as `[tuning]` followed by `(./perf.md)` is prose to the compiler, to vet, and to lint, and stays prose after the file is renamed. A third test asserts the walk's *reach* rather than its findings, and it earns its place: a mutation that made the link regexp match nothing left the resolving test passing on zero links and green, and only the reach test caught it
