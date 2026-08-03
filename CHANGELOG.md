@@ -20,6 +20,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependency resolution — they use `MockWebServer` — so there is nothing here for a flake to come
   from, and `continue-on-error` is deliberately absent.
 
+- **A `make test` step for the C SDK, closing the last of the four** ([#325]). This SDK differs from
+  the JavaScript and Java ones in that it *did* build: `sdks/c` is a package of the main module, so
+  `go build ./...` compiled its cgo Go side all along. What no job did was link a C program against the
+  shared library and run it — so `objectfs.h`, `objectfs_types.h` and the assertions in
+  `tests/test_basic.c` were unverified, and a header could declare a prototype the library does not
+  export, or a struct field too narrow for the value written into it, with every job staying green.
+  Which is what had happened; see the two `Fixed` entries below. Both suites skip their integration
+  halves without `OBJECTFS_TEST_BUCKET`, so the step needs no credentials and reaches no network.
+
+- **Go tests for the C SDK's Go side** (`sdks/c/main_test.go`), which had none — only
+  `tests/test_basic.c` and `tests/test_smoke.py`, both of which reach the library through the C ABI and
+  therefore cannot see a helper that never crosses it. `bytesToCacheString` was such a helper and was
+  discarding up to half the requested cache size. The file cannot use cgo — `go test` rejects
+  `import "C"` in a test file — so the return codes are pinned by parsing `objectfs_types.h` and
+  comparing it against constants written out independently, which is strictly stronger than comparing
+  `C.OBJECTFS_OK` to itself: it catches the header and the library disagreeing about what a code means,
+  which nothing previously could, since the C test binary uses the macros on both sides of its own
+  assertions. Field widths are checked the same way, against the longest value each field can receive.
+
+  Two assertions live in `tests/test_basic.c` instead, because they are only observable from C: that a
+  1024-byte key round-trips through `objectfs_head` and `objectfs_list` byte-for-byte, and that
+  `objectfs_last_error` returns the same pointer on repeated calls. The first is in the
+  credentials-gated section; the second is not, since a never-issued handle reaches the arm that
+  leaked. Each fix was confirmed by reverting it and watching the specific assertions fail — the
+  key-width revert reported `char[1024] ... holds 1023 bytes ... but must hold 1024`, and the leak
+  revert failed exactly the two pointer-identity checks.
+
 - **Tests for the JavaScript SDK's configuration and storage layers** (`src/config.test.ts`,
   `src/storage.test.ts`; 61 tests across three suites, up from one). The configuration assertions come
   in pairs — the override applied *and* its siblings survived — because a one-level spread passes any
@@ -230,6 +257,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build warning asked for on every run: compiling on a newer JDK with `-source`/`-target` accepts
   calls to APIs that did not exist in 17, producing a jar that compiles clean and throws
   `NoSuchMethodError` on the version it claims to target.
+
+- **A maximum-length S3 key came back from the C SDK one byte short** ([#325]). `objectfs_info_t.key`
+  was `char[1024]` and an S3 key may be 1024 bytes when UTF-8 encoded, so the array could hold 1023 of
+  them plus the terminator and `fillInfo` truncated the rest without returning an error. It is now
+  `char[1025]`.
+
+  The consequence is worst in `objectfs_list`, where the key is the *result* rather than something the
+  caller passed in and so cannot be compared against anything: a truncated key names a different
+  object or none at all, and handing it back to `objectfs_get` or `objectfs_delete` acts on the wrong
+  key. Reachable with an ordinary long key, not only a hostile one.
+
+  `fillInfo`'s capacity arguments were the literals `1024`/`128`/`128`; they now derive from the arrays
+  themselves with `unsafe.Sizeof`, because widening the declaration alone would have left the one
+  function that writes to it still truncating at 1023 — a declaration and its only writer silently
+  disagreeing, which is the shape of the original bug.
+
+- **`objectfs_last_error` leaked memory on every call for a freed handle** ([#325]). `objectfs.h`
+  documents the returned pointer as *"valid until the next call on the same handle. Do NOT free it"*,
+  which makes it the library's allocation — but the freed-or-never-issued arm returned
+  `C.CString("invalid or freed handle")`, a fresh `malloc` each time. The caller must not free it and
+  the library never did, so every call leaked. Verified by calling it three times and printing the
+  pointers: three distinct addresses, now one. Error reporting is the path a program takes when it is
+  already going wrong, frequently inside a retry loop.
+
+- **The C SDK's `cache_bytes` argument silently lost up to half of the requested size** ([#325]).
+  `objectfs.h` documents it as "memory cache size in bytes", and `bytesToCacheString` rendered it by
+  integer-dividing by 1 GiB or 1 MiB and formatting the quotient — so 1.5 GiB became `"1GB"` and
+  2047 MiB became `"1GB"`, losing 1023 MiB. It now emits a bare byte count, which `utils.ParseBytes`
+  multiplies by 1 and therefore round-trips exactly. Invisible from C: nothing echoes the size back,
+  and a cache half the requested size still works, just with a worse hit rate than was provisioned.
 
 - **The JavaScript SDK's entry point exports the error its own client throws, and reports the right
   license** ([#325]). Two defects found by carrying the Python fixes back across:

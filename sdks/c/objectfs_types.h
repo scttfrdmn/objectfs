@@ -26,7 +26,19 @@ typedef void *objectfs_client_t;
 
 /* Object metadata — filled by objectfs_head() and objectfs_list(). */
 typedef struct objectfs_info {
-    char    key[1024];         /* NUL-terminated object key (path) */
+    /*
+     * NUL-terminated object key (path).
+     *
+     * 1025, not 1024: an S3 key may be up to 1024 bytes when UTF-8 encoded, and a 1024-byte array
+     * holding a NUL-terminated string can only carry 1023 of them. So the previous size could not
+     * hold a legal maximum-length key, and fillCStr truncated it to 1023 bytes without saying so.
+     *
+     * That matters most in objectfs_list, where the key is the *result* rather than something the
+     * caller passed in: a truncated key names a different object, or none, and the caller has no way
+     * to tell. Passing it back to objectfs_get or objectfs_delete would act on the wrong key.
+     * Reachable with an ordinary long key, not only a hostile one.
+     */
+    char    key[1025];
     int64_t size;              /* object size in bytes */
     int64_t mtime_sec;         /* last-modified, Unix seconds */
     char    etag[128];         /* S3 ETag, NUL-terminated */

@@ -357,6 +357,30 @@ jobs:
         working-directory: sdks/java
         run: mvn -B test
 
+      # C, the fourth SDK and the last one nothing in CI touched. Unlike the JavaScript and Java
+      # cases, it does build — `go build ./...` compiles the cgo Go side because sdks/c is a package
+      # of the main module. What no job did was link a C program against the shared library and run
+      # it, so objectfs.h, objectfs_types.h and the 21 assertions in tests/test_basic.c were
+      # unverified: the header could declare a prototype the library does not export, or a struct
+      # field too narrow for the value written into it, and every job would stay green.
+      #
+      # Which is what had happened. objectfs_info_t.key was char[1024] against an S3 key limit of
+      # 1024 bytes — one byte short of holding a legal maximum-length key with its terminator — and
+      # objectfs_last_error's freed-handle arm returned a fresh malloc under a header that promises
+      # the caller must not free it.
+      #
+      # `make test` builds the library, compiles tests/test_basic.c against the public header, and
+      # runs both that binary and the Python ctypes smoke test. The integration halves of both skip
+      # themselves without OBJECTFS_TEST_BUCKET, so this needs no credentials and reaches no network.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: C SDK build and test
+        working-directory: sdks/c
+        run: make test
+
   # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must
   # load against the schema and must actually change something.
