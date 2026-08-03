@@ -11,9 +11,20 @@ go 1.26.0
 // library advisories** against those builds, among them crypto/tls fixed in 1.26.5, crypto/x509 in
 // 1.26.4, and net/http in 1.26.3. None was a defect in this code; all were shipped by it.
 //
-// setup-go prefers `toolchain` over `go` when both are present, so this is the line that decides
-// what CI installs. Bump it when a patch release carries a fix worth having, which for a filesystem
-// handling other people's data is most of them.
+// `toolchain` is therefore the line that decides what CI compiles with. Bump it when a patch
+// release carries a fix worth having, which for a filesystem handling other people's data is most
+// of them.
+//
+// How it gets honoured changed with setup-go v7, and the mechanism is worth knowing because the
+// two paths fail differently. v5 installed the `go` line (1.26.0) and Go's own toolchain switching
+// then downloaded go1.26.5 on the first build — correct result, but reached at build time, over the
+// network, per job, and visibly: the `tar: ... gotoolchain_local.txt: Cannot open: File exists`
+// noise in every v5 job log is that download racing the module cache restore. v7 parses `toolchain`
+// directly and exports `GOTOOLCHAIN=local`, so 1.26.5 is installed up front and nothing switches.
+//
+// The consequence to remember: under `GOTOOLCHAIN=local` there is no longer a safety net. If this
+// line names a version setup-go cannot install, the build fails outright rather than quietly
+// switching to something that works.
 toolchain go1.26.5
 
 require (
@@ -23,6 +34,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.32
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.3
 	github.com/aws/smithy-go v1.27.5
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/klauspost/compress v1.19.1
 	github.com/pierrec/lz4/v4 v4.1.27
@@ -55,7 +67,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect

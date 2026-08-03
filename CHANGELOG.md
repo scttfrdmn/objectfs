@@ -89,6 +89,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dependabot auto-merge, cause five: GitHub Actions cannot approve pull requests** ([#305]). Fixing
+  [#288] made `.github/dependabot.yml` valid, Dependabot re-evaluated it within minutes, and the
+  `automerge` label arrived on all 14 PRs it then opened — the label plumbing works. And still nothing
+  merged, because the step finally *ran* and failed: *"GitHub Actions is not permitted to approve pull
+  requests"* (`can_approve_pull_request_reviews` is false at the repository level). The step body was
+  `gh pr review --approve` followed by `gh pr merge --auto --squash`, under `bash -e` — so the failing
+  first line aborted before the line that does the work.
+
+  The approval was never needed. Branch protection on `main` requires status checks and has
+  `required_pull_request_reviews: null`, so nothing waits on a review. The line is deleted rather than
+  the permission enabled: allowing Actions to approve would let *every* workflow in the repository
+  satisfy a review requirement, to buy something no rule asks for.
+
+  That makes five independent causes for one symptom — 46 PRs opened, 0 merged — and the shape of it is
+  the part worth keeping. Causes 1 and 4 both left the `if:` condition false, so the step was *skipped*
+  and cause 5 could not produce a symptom at all; it became visible minutes after the config fix
+  landed. All five are now enumerated in the workflow header, in the order they were found, with why
+  each hid the next. A fix that should have worked and didn't usually means another cause, not a wrong
+  diagnosis.
+
+[#305]: https://github.com/scttfrdmn/objectfs/issues/305
+
 - **Two JavaScript SDK dev-dependency bumps could not install, because Dependabot proposed half of a
   peer-coupled pair** ([#306]). `npm` enforces peer ranges, so these fail at `npm install` rather than
   at test time — the `sdk-metrics` job's `ERESOLVE`, not a test failure:
@@ -476,6 +498,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **Every GitHub Action is on its current major, and CI no longer downloads a Go toolchain mid-build.**
+  Eight actions moved: `setup-go` 5 → 7, `setup-node` 4 → 7, `setup-python` 5 → 7,
+  `docker/metadata-action` 5 → 6, `docker/setup-buildx-action` 3 → 4, `docker/build-push-action`
+  5 → 7, `docker/login-action` 3 → 4, `dependabot/fetch-metadata` 2 → 3. Five of these Dependabot had
+  proposed and five is also `open-pull-requests-limit`, so the other three were never proposed at all —
+  the queue was saturated, which is a thing to watch for rather than a thing to trust.
+
+  The `setup-go` bump changes real behavior, so it was traced rather than assumed. v5 read the `go`
+  line and installed go1.26.0; Go's own toolchain switching then fetched go1.26.5 on the first build,
+  because `toolchain go1.26.5` says to. The right compiler was used, but it arrived at build time,
+  over the network, once per job — the `tar: ... gotoolchain_local.txt: Cannot open: File exists`
+  warnings in every job log were that download racing the module-cache restore. v6 reads the
+  `toolchain` directive directly and exports `GOTOOLCHAIN=local`, so 1.26.5 is installed up front and
+  nothing switches. Same compiler, one fewer moving part, and the log noise is gone. The tradeoff is
+  recorded next to the directive in `go.mod`: under `GOTOOLCHAIN=local` a version setup-go cannot
+  install now fails the build instead of silently falling back.
+
+  Checked for each of the others rather than taken on the release notes: the deprecated `config`,
+  `config-inline` and `install` inputs that buildx v4 removed are not used here; neither are the
+  `DOCKER_BUILD_NO_SUMMARY`/`DOCKER_BUILD_EXPORT_RETENTION_DAYS` envs dropped by build-push-action v7
+  or the `pip-install` input dropped by setup-python v7; and the setup-node v6 change limiting
+  automatic caching to npm cannot apply, because no `cache:` input is set on the Node or Python steps.
+  All eight now require Actions runner ≥ v2.327.1 for their Node 24 runtime, which `ubuntu-latest`
+  satisfies.
+
+  Node itself went 20 → 22 in the `sdk-metrics` job while it was open: 20 reached end of life in
+  April 2026, and `sdks/javascript` declares `node >=16`, so nothing was holding the pin down except
+  never having revisited it. ([#254], [#255], [#256], [#257], [#258])
+
+[#254]: https://github.com/scttfrdmn/objectfs/pull/254
+[#255]: https://github.com/scttfrdmn/objectfs/pull/255
+[#256]: https://github.com/scttfrdmn/objectfs/pull/256
+[#257]: https://github.com/scttfrdmn/objectfs/pull/257
+[#258]: https://github.com/scttfrdmn/objectfs/pull/258
 
 - Updated five direct dependencies: `aws-sdk-go-v2` 1.41.5 → 1.43.2, `aws-sdk-go-v2/config`
   1.31.12 → 1.32.33, `klauspost/compress` 1.18.7 → 1.19.1, `pierrec/lz4/v4` 4.1.22 → 4.1.27, and

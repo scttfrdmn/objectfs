@@ -3,7 +3,8 @@ name: Dependabot Auto-Merge
 # Enable GitHub's native auto-merge on minor/patch dependency PRs; comment on majors.
 #
 # This workflow previously merged nothing at all — 46 Dependabot PRs were opened and none were ever
-# merged — for three independent reasons, each of which would have been enough on its own:
+# merged — for FIVE independent reasons, each of which would have been enough on its own. They were
+# found one at a time, in this order, because each one hid the next:
 #
 #   1. Every approve/merge step was gated on `contains(labels.*.name, 'automerge')`, and the
 #      `automerge` label did not exist in the repository. Dependabot drops labels it cannot find
@@ -15,6 +16,17 @@ name: Dependabot Auto-Merge
 #      anchored at the start, so it matched `test` and `lint` and ignored `coverage`,
 #      `config-examples`, `cross-build`, `sdk-metrics`, `fuzz-smoke` and `Security Scan` — six of
 #      the eight jobs, including every cross-platform build.
+#   4. `.github/dependabot.yml` was INVALID, so `labels:` never applied even after (1) was fixed.
+#      `time: 09:00` unquoted parses as a sexagesimal integer where Dependabot's schema wants a
+#      string, and an invalid config is not partially applied — it is ignored entirely. So the
+#      label fix in (1) was inert for a second, independent reason. See #288.
+#   5. `gh pr review --approve` failed with "GitHub Actions is not permitted to approve pull
+#      requests," and because the step runs under `bash -e` that aborted it before the merge
+#      command. This only became visible once (1) and (4) were fixed and the step started
+#      executing at all instead of being skipped. See the note on the step below.
+#
+# The pattern is the lesson: a fix that "should have worked" and didn't usually means a second cause,
+# not a wrong diagnosis. Four of these five were confirmed only by watching a real Dependabot PR.
 #
 # The wait step is gone rather than fixed. Which checks must pass now lives in branch protection on
 # `main`, which is the one place that also governs human PRs and cannot be bypassed by a workflow
@@ -41,17 +53,29 @@ jobs:
     steps:
     - name: Dependabot metadata
       id: metadata
-      uses: dependabot/fetch-metadata@v2
+      uses: dependabot/fetch-metadata@v3
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Approve and enable auto-merge for minor and patch updates
+    # No `gh pr review --approve` here, and that is not an omission.
+    #
+    # It used to be the first line of this step, and it failed every time: "GitHub Actions is not
+    # permitted to approve pull requests" (GraphQL addPullRequestReview), because
+    # `can_approve_pull_request_reviews` is false at the repository level. The step runs under
+    # `bash -e`, so that failure aborted before `gh pr merge --auto` was reached — cause 5 of the
+    # 46-PR problem, and the one that only became visible after causes 1 and 4 were fixed and the
+    # step finally started executing instead of being skipped.
+    #
+    # The approval was never needed. Branch protection on `main` requires status checks and
+    # `required_pull_request_reviews` is null, so nothing is waiting on a review. Dropping the line
+    # is the fix; enabling Actions-can-approve would grant every workflow in the repository the
+    # ability to satisfy a review requirement, to buy something not being asked for.
+    - name: Enable auto-merge for minor and patch updates
       if: |
         contains(github.event.pull_request.labels.*.name, 'automerge') &&
         (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
          steps.metadata.outputs.update-type == 'version-update:semver-minor')
       run: |
-        gh pr review --approve "$PR_URL"
         gh pr merge --auto --squash "$PR_URL"
       env:
         PR_URL: ${{ github.event.pull_request.html_url }}
