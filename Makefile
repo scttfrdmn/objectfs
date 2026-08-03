@@ -41,7 +41,7 @@ COLOR_RED = \033[31m
 .PHONY: docker docker-build docker-push package release
 .PHONY: coverage coverage-html coverage-report
 .PHONY: setup-hooks pre-commit-run pre-commit-all
-.PHONY: test-integration test-aws test-release-check
+.PHONY: test-race test-integration test-aws test-release-check
 .PHONY: help version
 
 # Default target - now includes hook setup
@@ -182,15 +182,18 @@ build-darwin: | $(BUILD_DIR)/.mkdir
 	@CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
 		go build $(LDFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/objectfs
 
-# Run tests
+# Run tests, with the race detector — the same flags CI uses, so a green `make test`
+# means something. It previously omitted -race while CLAUDE.md and CONTRIBUTING.md both
+# said every test runs with it, which made the local gate weaker than the one it stood in
+# for: sixteen concurrency bugs were filed in this repository after a document declared it
+# race-free, and the detector is what found most of them.
 test:
-	@echo "$(COLOR_BLUE)Running tests...$(COLOR_RESET)"
-	@go test -v ./...
-
-# Run tests with race detection
-test-race:
 	@echo "$(COLOR_BLUE)Running tests with race detection...$(COLOR_RESET)"
-	@go test -race -v ./...
+	@go test -race -timeout 20m ./...
+
+# Kept as an alias: scripts and muscle memory refer to it, and it now describes what
+# `test` already does rather than a stricter mode.
+test-race: test
 
 # Run benchmarks
 bench:

@@ -24,7 +24,10 @@ authority in-tree is the `version` constant in `cmd/objectfs/main.go`
 
 ## Executive Summary
 
-ObjectFS is positioned as the **enterprise-grade, cost-intelligent S3 filesystem** that bridges the gap between Amazon File Cache's premium performance and basic S3 filesystem tools. This roadmap outlines our path from the current release to a comprehensive **multi-protocol enterprise data platform** integrated with CargoShip for complete data lifecycle management.
+ObjectFS is positioned as the **enterprise-grade, cost-intelligent S3 filesystem** that bridges the
+gap between Amazon File Cache's premium performance and basic S3 filesystem tools. This roadmap
+outlines our path from the current release to a comprehensive **multi-protocol enterprise data
+platform** integrated with CargoShip for complete data lifecycle management.
 
 ### Strategic Vision
 
@@ -195,7 +198,7 @@ Oct 2025   Q1 2026    Q2 2026    Q3 2026    Q4 2026    Q1 2027    Q2 2027
   - Cost-optimized storage tier selection
 
 - **BBR/CUBIC network optimization** [3 weeks]
-  - Integrate CargoShip's proven 4.6x improvement
+  - Integrate CargoShip's congestion control and part scheduling
   - Adaptive congestion control
   - Network condition monitoring
 
@@ -249,7 +252,7 @@ Oct 2025   Q1 2026    Q2 2026    Q3 2026    Q4 2026    Q1 2027    Q2 2027
 
 ### Success Metrics
 
-- 4.6x+ throughput improvement with BBR
+- Measured throughput improvement with BBR, from a benchmark in `benchmarks/` naming bucket, region, and object size
 - <10ms read latency for cached data
 - 50%+ storage cost reduction with compression
 - Successful archive access in production
@@ -720,7 +723,7 @@ Oct 2025   Q1 2026    Q2 2026    Q3 2026    Q4 2026    Q1 2027    Q2 2027
 
 ### v0.5.0 Metrics
 
-- [ ] 4.6x+ throughput improvement
+- [ ] Measured throughput improvement over the v0.4.0 baseline, from `benchmarks/`
 - [ ] 50+ production deployments
 - [ ] Successful archive access in production
 - [ ] 30%+ cost reduction vs. v0.4.0

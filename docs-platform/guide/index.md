@@ -1,111 +1,150 @@
 # Introduction to ObjectFS
 
-ObjectFS is a high-performance POSIX filesystem that provides seamless access to AWS S3.
-It bridges the gap between traditional filesystems and S3 object storage, offering the best
-of both worlds with deep S3 optimizations.
+ObjectFS presents a POSIX *interface* over AWS S3 using FUSE, so ordinary tools can read and write
+objects as files. It is **not** a POSIX-compliant filesystem — roughly 10 of ~40 VFS operations are
+implemented, and the gap is structural rather than incidental: S3 has no rename, no hard links, and
+no partial write. The
+[supported-operations table](https://github.com/scttfrdmn/objectfs/blob/main/README.md) is the
+authority for what works, what fails by design, and which tools are known not to work. Check it
+before pointing a workload here.
 
 ## What is ObjectFS?
 
-ObjectFS uses FUSE (Filesystem in Userspace) to mount S3 buckets as local directories. This means you can:
+ObjectFS uses FUSE (Filesystem in Userspace) to mount S3 buckets as local directories. This means
+you can:
 
-- **Use standard file operations** (`ls`, `cat`, `cp`, `mv`, etc.) on S3
-- **Run existing applications** without modification  
-- **Access massive datasets** stored in S3 as if they were local files
-- **Benefit from advanced caching** and performance optimizations
+- **Use standard file operations** — `ls`, `cat`, `cp`, and redirection. Not `mv`: there is no
+  `rename`, and it returns `ENOTSUP`
+- **Access datasets stored in S3** as if they were local files, without downloading them first
+- **Run applications that read and write whole files.** Applications needing rename, hard links,
+  extended attributes, or byte-range locking will not work — `git`, `sqlite3`, and `tar -x` are
+  known not to
 
 ## Key Features
 
-### 🚀 High Performance
+### 🚀 Performance
 
-- **Multi-level caching** with L1 memory and L2 persistent caches
-- **Predictive prefetching** using machine learning models
-- **Intelligent eviction** strategies for optimal cache utilization
-- **Parallel I/O operations** for maximum throughput
+- **Multi-level caching** with an L1 memory cache and an L2 persistent cache
+- **Predictive prefetching**, which uses a pattern detector and a size heuristic. The ML predictor
+  it can take is not set on the mount path
+- **Parallel ranged reads** above a configurable object-size threshold
 
-### 🔧 Easy Integration
+No throughput figure is quoted here. Anything of that kind would need to cite a benchmark under
+[`benchmarks/`](https://github.com/scttfrdmn/objectfs/tree/main/benchmarks) and the parameters it
+ran with — see the rule in `CONTRIBUTING.md`. This page previously claimed POSIX compliance, hot
+configuration reloading, RBAC, and load balancing; each is corrected or removed below, and none
+was true when written.
 
-- **Drop-in replacement** for traditional filesystems
-- **POSIX compliance** ensures compatibility with existing tools
+### 🔧 Integration
+
 - **Multiple mounting options** for different use cases
-- **Hot configuration reloading** without unmounting
+- **YAML or environment configuration**, validated at load with strict decoding, so a misspelled
+  key is an error rather than a silently ignored line
 
-### 🚀 S3 Deep Integration
+Configuration is read once at startup. There is no hot reload: `main.go` registers `SIGHUP`
+alongside `SIGINT` and `SIGTERM` and treats any of the three as shutdown, so sending `SIGHUP` to a
+mount **unmounts it**. That was documented as "hot configuration reloading without unmounting",
+which is the trap stated as a feature.
 
-- **AWS S3 storage classes** with intelligent tiering support
-- **S3 Transfer Acceleration** for faster uploads/downloads
-- **S3 lifecycle management** integration
-- **Cost optimization** with automatic S3 tiering and storage class transitions
+### 🚀 S3 Integration
 
-### 🏗️ Enterprise Ready
+- **AWS S3 storage classes**, including Intelligent-Tiering, selectable per mount
+- **S3 Transfer Acceleration**, with fallback to the standard endpoint on error
+- **Server-side encryption** — SSE-S3 or SSE-KMS, with bucket keys — on every write
 
-- **Distributed clusters** for high availability
-- **Load balancing** across multiple nodes
-- **Health monitoring** and metrics collection
-- **Authentication and authorization** with RBAC
+ObjectFS does not call the S3 lifecycle API, so it does not manage lifecycle policies; set those on
+the bucket. Cost tracking and tier transitions have code but no path from a mount that reaches
+them — see the [Not yet wired up](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md)
+table.
+
+### 🏗️ Operational
+
+- **Health monitoring** with a circuit breaker and retry, and a Prometheus metrics endpoint
+
+**There is no authentication or authorization layer, and no RBAC.** Access control is IAM's:
+whoever can read the credentials the mount runs with has exactly that access. Multi-node
+coordination and load balancing exist in `internal/distributed` and are **experimental** — nothing
+outside that package imports it, so neither is reachable from a mount today.
 
 ## Architecture Overview
 
 ```mermaid
 graph TB
-    A[Application] --> B[FUSE Interface]
-    B --> C[ObjectFS Core]
-    C --> D[Cache Layer]
-    C --> E[Storage Adapters]
-    D --> F[L1 Memory Cache]
-    D --> G[L2 Persistent Cache]
-    E --> H[AWS S3]
-    C --> K[Distributed Coordinator]
-    K --> L[Cluster Nodes]
+    A[Application] --> B[Kernel VFS]
+    B --> C["FUSE (go-fuse)"]
+    C --> D["internal/fuse"]
+    D --> E["internal/vfs"]
+    E --> F["Adapter"]
+    F --> G[Cache Layer]
+    F --> H["S3 Backend"]
+    G --> I[L1 Memory Cache]
+    G --> J[L2 Persistent Cache]
+    H --> K[AWS S3]
+    L["internal/distributed<br/>(experimental, no caller)"] -.-> F
 ```
 
 ### Core Components
 
-1. **FUSE Interface**: Translates POSIX filesystem calls to ObjectFS operations
-2. **Cache Layer**: Multi-level caching system with intelligent prefetching
-3. **S3 Adapter**: Optimized interface exclusively for AWS S3 with intelligent tiering
-4. **Distributed Coordinator**: Manages cluster membership and data consistency
+1. **`internal/fuse`**: the go-fuse binding — kernel types in, `vfs` calls out, error mapping.
+   Constrained to `linux || darwin`; Windows is unsupported
+2. **`internal/vfs`**: POSIX semantics — attributes, the handle table, dirty byte ranges, and
+   read-modify-write on flush. Depends on nothing FUSE, so it is testable without a mount
+3. **Cache Layer**: L1 memory and L2 persistent, with prefetching
+4. **S3 Backend**: AWS S3 only, with parallel ranged reads, multipart upload, and retry behind a
+   circuit breaker
+
+The distributed coordinator is drawn with a dashed line because that is what it is: nothing outside
+`internal/distributed` imports it, so cluster membership and consistency are not part of the path a
+mount takes. It was previously drawn as a solid component of the architecture.
 
 ## Use Cases
 
+The target is research computing and institutional deployments: read-mostly access to large
+datasets that already live in S3, by tools that work in whole files.
+
 ### Data Science & Machine Learning
 
-- Access training datasets stored in S3
-- Stream large models and data files efficiently
-- Collaborative data sharing across teams
-- Cost-effective storage for experimental data
+- Read training datasets stored in S3 without staging them to local disk first
+- Stream large model and data files
+- Share a read-only dataset across a team, since every reader sees the same objects
 
-### Container Storage
-
-- Persistent volumes for Kubernetes workloads
-- Shared storage across container instances
-- Configuration and secret management
-- CI/CD artifact storage
+Note the write-side constraint: there is no cross-host locking, so two mounts writing the same key
+is last-writer-wins with no error. `flock` is host-local — it succeeds and means nothing to another
+mount of the same bucket.
 
 ### Media & Content Processing
 
-- Video transcoding from S3 storage
-- Image processing pipelines with S3 integration
-- Content distribution workflows using S3
-- Digital asset management with S3 lifecycle policies
+- Transcoding and image-processing pipelines that read whole files and write whole files
+- Content workflows over data already in S3
 
 ### Backup & Archive
 
-- Long-term data retention
-- Automated lifecycle management
-- Disaster recovery solutions
-- Compliance and governance
+- Long-term retention on the Glacier storage classes
+- Reading archived data without a separate restore-and-download step
+
+Lifecycle transitions are the bucket's job, configured in S3 rather than in ObjectFS.
+
+Two use cases previously listed here have been removed. **Container storage** claimed Kubernetes
+persistent volumes; there is no CSI driver, no Helm chart, and no manifest in this repository.
+**Compliance and governance** claimed a capability that needs an audit log, and ObjectFS writes
+none.
 
 ## Getting Started
 
-Ready to get started? Head over to our [Installation Guide](/guide/installation) to set up
-ObjectFS, or try our [Quick Start](/guide/getting-started) tutorial.
+The [Quick Start](/guide/getting-started) covers building and mounting. There is no separate
+installation guide — that link pointed at a page that was never written, and installation is two
+commands, so it lives in the Quick Start rather than in a page of its own.
 
 ## Community & Support
 
 - **GitHub**: [Source code and issues](https://github.com/scttfrdmn/objectfs)
-- **Community Forum**: [Ask questions and share experiences](https://community.objectfs.io)
-- **Documentation**: [Complete guides and API reference](https://docs.objectfs.io)
-- **Commercial Support**: [Enterprise support](mailto:support@objectfs.io)
+- **Discussions**: [Ask questions](https://github.com/scttfrdmn/objectfs/discussions)
+- **Documentation**: the `docs/` and `docs-platform/` trees in the repository
+
+GitHub is the only support channel. This section previously listed a community forum at
+`community.objectfs.io`, a documentation site at `docs.objectfs.io`, and commercial support at
+`support@objectfs.io` — none of the three resolves or is monitored, so a reader with a problem was
+sent to three dead ends before finding the issue tracker.
 
 ## License
 

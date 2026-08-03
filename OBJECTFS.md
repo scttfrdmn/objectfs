@@ -16,8 +16,10 @@
 >   `security.kms_key` are not keys the loader has; with strict decoding a config file using them
 >   fails to start. `internal/config/docs_test.go` exempts this file from the schema check for
 >   exactly this reason.
-> - **"POSIX-compliant" is wrong.** ObjectFS presents a POSIX interface over object storage. There is
->   no rename, no links, no locking. See the README's supported-operations table.
+> - **"POSIX-compliant" was wrong** and is corrected in the body rather than only noted here — a
+>   banner a reader may skip is weaker than a sentence that no longer makes the claim. ObjectFS
+>   presents a POSIX interface over object storage. There is no rename, no links, no locking. See the
+>   README's supported-operations table.
 > - **The performance and coverage figures are aspirations**, including a "95%" coverage badge and a
 >   "10-100x" speedup, neither of which was measured.
 >
@@ -38,14 +40,19 @@
 5. [Installation & Deployment](#installation--deployment)
 6. [Configuration Management](#configuration-management)
 7. [Performance Engineering](#performance-engineering)
-8. [Product Family & Roadmap](#product-family--roadmap)
-9. [Monitoring & Observability](#monitoring--observability)
-10. [Security & Compliance](#security--compliance)
-11. [Operations & Maintenance](#operations--maintenance)
-12. [Development Guide](#development-guide)
-13. [API Documentation](#api-documentation)
-14. [Troubleshooting & Support](#troubleshooting--support)
-15. [Appendices](#appendices)
+8. [Advanced Features](#advanced-features)
+
+Eight further entries used to appear here — Product Family & Roadmap, Monitoring &
+Observability, Security & Compliance, Operations & Maintenance, Development Guide, API
+Documentation, Troubleshooting & Support, and Appendices. **None of those sections was ever
+written.** The document ends at Advanced Features, which the list in turn omitted, so every one
+of the eight was a link to nothing and the one real section was unreachable from the table of
+contents. See [issue 208](https://github.com/scttfrdmn/objectfs/issues/208) for the rest of the
+broken-link sweep.
+
+For what those sections would have covered, the material that does exist is: `internal/metrics`'s
+package documentation for monitoring, `README.md`'s supported-operations table,
+`docs/architecture/overview.md`, and `CONTRIBUTING.md`.
 
 ---
 
@@ -53,12 +60,12 @@
 
 ### Project Vision
 
-ObjectFS transforms AWS S3 into a high-performance, POSIX-compliant filesystem, enabling seamless integration of cloud storage with traditional applications and workflows. This enterprise-grade solution addresses the growing need for scalable, cost-effective storage that maintains compatibility with existing tools and processes.
+ObjectFS transforms AWS S3 into a high-performance filesystem presenting a POSIX interface, enabling seamless integration of cloud storage with traditional applications and workflows. This enterprise-grade solution addresses the growing need for scalable, cost-effective storage that maintains compatibility with existing tools and processes.
 
 ### Key Value Propositions
 
 - **Performance**: 10-100x faster than traditional S3 tools through intelligent caching and prefetching
-- **Compatibility**: Full POSIX compliance enabling drop-in replacement for traditional filesystems
+- **Compatibility**: a POSIX interface covering the operations most tools need — not full POSIX compliance, which S3 cannot support (see the README's supported-operations table)
 - **Scalability**: Handles petabytes of data with linear performance scaling
 - **Cost Efficiency**: Reduces S3 API costs by 80-90% through intelligent batching and caching
 - **Multi-Client**: Thread-safe design supporting thousands of concurrent users
@@ -176,7 +183,7 @@ ObjectFS is built on modern Go architecture utilizing:
 1. **Performance First**: Every component optimized for maximum throughput and minimum latency
 2. **Scalability**: Linear scaling with resources and concurrent users
 3. **Reliability**: Fault-tolerant design with graceful degradation
-4. **Compatibility**: Full POSIX compliance for seamless application integration
+4. **Compatibility**: a POSIX interface broad enough for seamless application integration, without claiming full compliance
 5. **Observability**: Comprehensive metrics and monitoring capabilities
 6. **Security**: Enterprise-grade security with AWS IAM integration
 
@@ -257,12 +264,14 @@ graph TB
 #### Component Details
 
 **Interface Layer**:
+
 - **File Operations**: read(), write(), open(), close(), seek(), truncate()
 - **Directory Operations**: opendir(), readdir(), mkdir(), rmdir()
 - **Metadata Operations**: stat(), chmod(), chown(), utime(), link(), symlink()
 - **Extended Attributes**: getxattr(), setxattr(), listxattr(), removexattr()
 
 **Performance Layer**:
+
 - **Connection Pool**: 4-16 HTTP/2 connections to S3 endpoints
 - **LRU Cache**: Multi-level cache with configurable sizes (1GB-100GB)
 - **Write Buffer**: Intelligent buffering with compression and batching
@@ -270,12 +279,14 @@ graph TB
 - **Batch Processor**: Operation aggregation for improved efficiency
 
 **Storage Layer**:
+
 - **Metadata Manager**: Efficient POSIX metadata storage and retrieval
 - **Content Compressor**: Transparent compression for suitable content types
 - **Small File Aggregator**: Pack multiple small files into single S3 objects
 - **Access Pattern Analyzer**: Learn and predict data access patterns
 
 **Reliability Layer**:
+
 - **Health Monitor**: Continuous monitoring of S3 connectivity and performance
 - **Circuit Breaker**: Automatic failure detection and recovery
 - **Retry Manager**: Intelligent retry logic with exponential backoff
@@ -508,6 +519,7 @@ objectfs --version
 #### Package Manager Installation
 
 **Ubuntu/Debian**:
+
 ```bash
 # Add repository
 curl -fsSL https://apt.your-org.com/gpg | sudo apt-key add -
@@ -519,6 +531,7 @@ sudo apt install objectfs
 ```
 
 **CentOS/RHEL**:
+
 ```bash
 # Add repository
 sudo tee /etc/yum.repos.d/objectfs.repo << EOF
@@ -535,6 +548,7 @@ sudo yum install objectfs
 ```
 
 **Container Deployment**:
+
 ```bash
 # Docker
 docker run -it --privileged \
@@ -609,6 +623,7 @@ build-profile:
 #### AWS Configuration
 
 **Method 1: AWS CLI**
+
 ```bash
 # Install AWS CLI
 pip install awscli
@@ -622,6 +637,7 @@ aws configure
 ```
 
 **Method 2: Environment Variables**
+
 ```bash
 export AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"
 export AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
@@ -630,6 +646,7 @@ export AWS_SESSION_TOKEN="token"  # If using temporary credentials
 ```
 
 **Method 3: IAM Roles (Recommended)**
+
 ```json
 {
   "Version": "2012-10-17",
@@ -659,6 +676,7 @@ export AWS_SESSION_TOKEN="token"  # If using temporary credentials
 #### System Configuration
 
 **FUSE Configuration**:
+
 ```bash
 # Enable FUSE module
 sudo modprobe fuse
@@ -671,6 +689,7 @@ sudo usermod -a -G fuse $USER
 ```
 
 **Systemd Service**:
+
 ```ini
 # /etc/systemd/system/objectfs@.service
 [Unit]
@@ -1018,6 +1037,7 @@ export OBJECTFS_BATCH_OPERATIONS="true"
 ### Performance Profiles
 
 #### Low Latency Profile
+
 ```yaml
 # Optimized for same-region, high-bandwidth connections
 performance_profiles:
@@ -1033,6 +1053,7 @@ performance_profiles:
 ```
 
 #### Medium Latency Profile
+
 ```yaml
 # Optimized for cross-region or moderate latency
 performance_profiles:
@@ -1048,6 +1069,7 @@ performance_profiles:
 ```
 
 #### High Latency Profile
+
 ```yaml
 # Optimized for high-latency connections (satellite, remote)
 performance_profiles:
@@ -1065,6 +1087,7 @@ performance_profiles:
 ```
 
 #### Satellite Profile
+
 ```yaml
 # Optimized for extreme latency (>2s RTT)
 performance_profiles:
@@ -1085,24 +1108,30 @@ performance_profiles:
 
 ### Configuration Validation
 
-```bash
-# Validate configuration
-objectfs config validate
+Of the four commands proposed here, **one exists**. `objectfs config validate`, `config diff`, and
+`config generate` were three subcommands of a CLI that was never built — the binary has no
+subcommands at all, so each exits 1 with an argument error. They are shown struck through rather than
+deleted because a config-diff and a config-generate are still reasonable things to want, and this
+document's job is to record what was proposed.
 
-# Test configuration with dry run
+```bash
+# Validate a configuration and exit without mounting. This one is real: --dry-run
+# loads the file, runs every validation rule, and never touches the mount point.
 objectfs --config /etc/objectfs/config.yaml \
   --dry-run s3://my-bucket /mnt/data
-
-# Configuration diff
-objectfs config diff \
-  --current /etc/objectfs/config.yaml \
-  --new /tmp/new-config.yaml
-
-# Generate sample configuration
-objectfs config generate \
-  --profile high_latency \
-  --output /etc/objectfs/config.yaml
 ```
+
+Proposed and not implemented:
+
+- ~~`objectfs config validate`~~ — subsumed by `--dry-run` above, which needs a URI and mount point
+  it does not use. A validate-only mode that takes just a file would be a genuine improvement.
+- ~~`objectfs config diff --current X --new Y`~~ — nothing compares two configurations.
+- ~~`objectfs config generate --profile high_latency --output F`~~ — no profile generator exists, and
+  `high_latency` is not a profile name the loader knows. `configs/` holds hand-written examples
+  instead.
+
+Subcommands generally are proposed in [#134](https://github.com/scttfrdmn/objectfs/issues/134),
+which covers `mount`, `unmount`, and `version` — not these.
 
 ---
 
@@ -1136,6 +1165,7 @@ objectfs config generate \
 #### Cache Implementation Details
 
 **LRU Cache with Weighted Eviction**:
+
 ```go
 type WeightedLRUCache struct {
     mu          sync.RWMutex
@@ -1171,21 +1201,25 @@ func (c *WeightedLRUCache) calculateWeight(item *CacheItem) float64 {
 #### Cache Strategies by Data Type
 
 **Small Files** (<4KB):
+
 - **Strategy**: Cache entire file on first access
 - **TTL**: 1 hour
 - **Eviction**: Least frequently used
 
 **Medium Files** (4KB-64MB):
+
 - **Strategy**: Cache accessed ranges with read-ahead
 - **TTL**: 30 minutes
 - **Eviction**: Weighted LRU (frequency + recency)
 
 **Large Files** (>64MB):
+
 - **Strategy**: Cache ranges only, no full file caching
 - **TTL**: 15 minutes
 - **Eviction**: Size-based (largest first)
 
 **Metadata**:
+
 - **Strategy**: Cache all metadata operations
 - **TTL**: 5 minutes
 - **Eviction**: Time-based expiration

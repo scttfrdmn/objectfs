@@ -531,4 +531,6 @@ When reviewing concurrent code, check:
 
 - [Memory Monitoring and Leak Detection](./memory-monitoring.md)
 - [Error Handling and Recovery](./error-handling-recovery.md)
-- [Testing Guide](./testing.md)
+- [Testing](https://github.com/scttfrdmn/objectfs/blob/main/CONTRIBUTING.md#-testing) — `./testing.md`
+  was linked here and never written; what a contributor needs is in `CONTRIBUTING.md`, including why
+  `internal/testaws` is preferred to a mock

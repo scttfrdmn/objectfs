@@ -139,7 +139,8 @@ feature integrates seamlessly:
 
 **Upload Priority:**
 
-1. CargoShip optimization (primary) - 4.6x performance improvement
+1. CargoShip optimization (primary) — used for uploads when enabled and the encryption mode
+   is one CargoShip can express
 2. S3 Transfer Acceleration (fallback) - Uses acceleration if CargoShip fails
 3. Standard S3 endpoint (final fallback)
 
@@ -430,10 +431,16 @@ fallback := metricsCollector.GetFallbackRate()     // % of accelerated that fail
 
 ## Related Documentation
 
-- [S3 Backend Configuration](./storage-backends.md#s3)
-- [Performance Tuning](./performance-tuning.md)
-- [Monitoring and Metrics](./monitoring.md)
-- [CargoShip Optimization](./cargoship.md)
+- [Configuration reference](./index.md) — every key the loader accepts, including the S3 block
+- [Multipart uploads](./features/multipart-uploads.md) — the other half of the large-object path
+- [Benchmarks](https://github.com/scttfrdmn/objectfs/tree/main/benchmarks) — runnable, which is
+  what a tuning page would have to cite
+
+`storage-backends.md`, `performance-tuning.md`, `monitoring.md`, and `cargoship.md` were linked
+here and none exists. `performance-tuning.md` in particular was linked from four different pages
+without ever being written — see [issue 208](https://github.com/scttfrdmn/objectfs/issues/208),
+where the decision recorded is that if it is written it must cite measurements, since a tuning page
+inventing numbers is the defect #182 was about.
 
 ## Additional Resources
 

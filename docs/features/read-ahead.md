@@ -360,21 +360,26 @@ For ML strategy effectiveness:
 
 ### Accessing Predictive Stats
 
-```go
-import "github.com/scttfrdmn/objectfs/internal/cache"
+**The statistics of the predictive cache a mount builds are not reachable.** This section documented
+a `cache.GetPredictiveCache()` accessor, which does not exist under that or any other name.
 
-// Get predictive cache stats
-predictiveCache := cache.GetPredictiveCache()
-stats := predictiveCache.GetPredictiveStats()
+`MultiLevelCache.initializeLevels` wraps the L1 cache in a `PredictiveCache` whenever prefetch is
+enabled — which the adapter does unconditionally — and stores it as an opaque `types.Cache` in a
+level. `types.Cache` has six methods about bytes and no predictive statistics on it, and there is no
+exported accessor that reaches past it. `MultiLevelCache.GetLevelStats("L1")` returns a
+`types.CacheStats`: hits, misses, size. None of the fields below.
 
-fmt.Printf("Prediction Accuracy: %.2f%%\n", stats.PredictionAccuracy)
-fmt.Printf("Prefetch Efficiency: %.2f%%\n", stats.PrefetchEfficiency)
-fmt.Printf("Cache Hit Improvement: %.2f%%\n", stats.CacheHitImprovement)
-```
+So the accuracy, efficiency, and improvement figures this page describes are computed by a running
+mount and then have nowhere to go. Tracked in [#223](https://github.com/scttfrdmn/objectfs/issues/223).
 
 ### Custom Pattern Detection
 
+`GetPredictiveStats` is real, on a `PredictiveCache` you construct yourself — which is what the
+package's own tests do, and the only way to observe these numbers today:
+
 ```go
+import "github.com/scttfrdmn/objectfs/internal/cache"
+
 // Configure custom pattern detection
 config := &cache.PredictiveCacheConfig{
     EnablePrediction:    true,
@@ -389,7 +394,16 @@ predictiveCache, err := cache.NewPredictiveCache(config)
 if err != nil {
     log.Fatal(err)
 }
+defer predictiveCache.Close() // retires the prefetch workers; nothing else will
+
+stats := predictiveCache.GetPredictiveStats()
+fmt.Printf("Prediction Accuracy: %.2f%%\n", stats.PredictionAccuracy)
+fmt.Printf("Prefetch Efficiency: %.2f%%\n", stats.PrefetchEfficiency)
+fmt.Printf("Cache Hit Improvement: %.2f%%\n", stats.CacheHitImprovement)
 ```
+
+Note that this is a *second* predictive cache, independent of the one the mount uses. It observes
+the accesses you make through it and nothing the filesystem does.
 
 ## Troubleshooting
 
@@ -447,10 +461,14 @@ if err != nil {
 
 ## Related Documentation
 
-- [Cache Configuration](../configuration/cache.md)
-- [Performance Tuning Guide](./performance.md)
+- [Configuration reference](../index.md) — every cache key the loader accepts, and the
+  **Not yet wired up** table, which is where the ML predictor is
 - [Multipart Upload Optimization](./multipart-uploads.md)
-- [ML Model Training Guide](./ml-training.md)
+
+`../configuration/cache.md`, `./performance.md`, and `./ml-training.md` were linked here and none
+was written. The last of the three is the most misleading: there is no model to train — the
+`Predictor` interface `internal/cache` can take is never set on the mount path, so the size
+heuristic is what runs.
 
 ## Implementation Details
 

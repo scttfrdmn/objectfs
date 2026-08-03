@@ -2,7 +2,13 @@
 
 ## Mission Statement
 
-**ObjectFS transforms S3-compatible object storage into high-performance, POSIX-compliant filesystems optimized for research computing and data-intensive applications.**
+**ObjectFS presents S3-compatible object storage behind a high-performance POSIX interface, optimized for research computing and data-intensive applications.**
+
+This is a vision document: it describes what ObjectFS is *for*, not what it currently does. Where the
+two differ, the [README's supported-operations table](../README.md#supported-operations) is the
+authority. In particular, "POSIX-compliant" appeared three times below and is gone from all three:
+ObjectFS implements roughly ten of forty VFS operations, has no rename and no links, and full
+compliance is not reachable over an object store rather than merely unfinished.
 
 We exist to eliminate the friction between cloud object storage and traditional filesystem-based workflows, enabling researchers and engineers to access petabytes of data as naturally as local files.
 
@@ -37,7 +43,7 @@ ObjectFS provides a **transparent bridge** between S3 and POSIX:
 ObjectFS should be **invisible** to applications. If it requires code changes, we've failed.
 
 - Mount S3 buckets like any filesystem
-- Full POSIX compliance for maximum compatibility
+- A POSIX interface wide enough that common tools work unmodified, and a loud failure where it is not
 - Seamless integration with existing tools (rsync, git, tar, etc.)
 - No proprietary APIs or SDKs required
 
@@ -46,7 +52,7 @@ ObjectFS should be **invisible** to applications. If it requires code changes, w
 Research computing demands **near-native performance**:
 
 - Multi-tier caching (LRU, persistent, predictive)
-- BBR network optimization (4.6x throughput improvement)
+- TCP congestion control selection (BBR on Linux ≥ 4.9, per socket)
 - Parallel I/O and intelligent prefetching
 - Write buffering with atomic uploads
 
@@ -117,8 +123,15 @@ ObjectFS is **open source** and community-driven:
 - Production hardening phase 2
 - Multi-tenancy and access control
 - Advanced monitoring and observability
-- Compliance (HIPAA, FISMA, SOC 2)
 - Enterprise support options
+
+"Compliance (HIPAA, FISMA, SOC 2)" was a bullet here. It is removed rather than reworded: ObjectFS
+holds no certification under any of the three, adds no authorization layer of its own, and writes no
+audit log. The heading says these are aspirations, and that is a real defence — but a procurement
+reviewer scanning bullets does not read headings, and the same claim was removed from the
+documentation platform's landing page in v0.10.1 for that reason. What ObjectFS can honestly say
+about controls is in [SECURITY.md](../SECURITY.md): the trust boundary is the mounting host, access
+control is IAM's, and server-side encryption is SSE-S3 or SSE-KMS.
 
 **Target**: 100+ research institutions deploying ObjectFS
 
@@ -348,7 +361,7 @@ Never optimize without data:
 
 ## Conclusion
 
-ObjectFS will be the **definitive solution** for mounting S3-compatible storage as high-performance, POSIX-compliant filesystems in research computing environments.
+ObjectFS will be the **definitive solution** for mounting S3-compatible storage behind a high-performance POSIX interface in research computing environments.
 
 We achieve this through:
 

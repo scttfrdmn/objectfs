@@ -1,5 +1,24 @@
 # ObjectFS Architecture Evolution: FUSE Client → Multi-Protocol Server
 
+> **This is a design sketch, not a description of the code.** Nothing on the multi-protocol path is
+> implemented: there is no SMB server, no NFS server, and no `internal/protocols` directory. Read it
+> as one proposal for how a second protocol *could* be added.
+>
+> Two things in it are also out of date, and are left in place rather than quietly rewritten because
+> the divergence is the useful part:
+>
+> - The Phase 1 file layout proposes `internal/filesystem` + `internal/protocols/fuse`. The refactor
+>   that actually happened produced **`internal/vfs`** (POSIX semantics, no FUSE dependency) with
+>   `internal/fuse` as a thin go-fuse shim over it. That is the same idea arriving under a different
+>   name, and it is the layer a second protocol would bind to.
+> - `internal/filesystem/interface.go` exists and declares a fuller surface than `internal/vfs`
+>   implements, but its only implementation is a mock. It is a contract, not a component.
+>
+> Multi-protocol work is tracked in
+> [#181](https://github.com/scttfrdmn/objectfs/issues/181) (SMB, then NFS) and
+> [#188](https://github.com/scttfrdmn/objectfs/issues/188) (NFS loopback on macOS). The phase-to-version
+> mapping below (v0.3.0, v0.4.0, v0.5.0) is from 2025 and was not followed.
+
 ## Current Architecture
 
 ```
@@ -25,7 +44,7 @@
 │                ObjectFS Core Engine                            │
 ├─────────────────────┬───────────────────────────────────────────┤
 │   S3 Backend        │  Cost Optimizer  │  Pricing Manager      │
-│   ├─ CargoShip 4.6x │  ├─ Tier Analysis │  ├─ Enterprise       │
+│   ├─ CargoShip xport│  ├─ Tier Analysis │  ├─ Enterprise       │
 │   ├─ Tier Management│  ├─ Access Patterns│  │   Discounts       │
 │   └─ Multi-region   │  └─ Optimization  │  └─ Volume Pricing   │
 ├─────────────────────┼───────────────────┼───────────────────────┤
@@ -85,7 +104,7 @@
 │                     ObjectFS Core Engine (UNCHANGED)                           │
 ├─────────────────────┬───────────────────┬───────────────────────────────────────┤
 │   S3 Backend        │  Cost Optimizer   │  Pricing Manager                      │
-│   ├─ CargoShip 4.6x │  ├─ Tier Analysis │  ├─ Enterprise Discounts             │
+│   ├─ CargoShip xport│  ├─ Tier Analysis │  ├─ Enterprise Discounts             │
 │   ├─ Tier Management│  ├─ Access Pattern │  ├─ Institutional Config             │
 │   ├─ Multi-region   │  │   Monitoring    │  ├─ Volume Pricing Tiers            │
 │   └─ All S3 tiers   │  └─ Optimization   │  └─ Cost Calculations               │
@@ -107,6 +126,7 @@
 ## Key Architectural Principles
 
 ### 1. **Zero Backend Disruption**
+
 ```go
 // Current ObjectFS core remains 100% unchanged
 type Backend struct {
@@ -125,6 +145,7 @@ func (b *Backend) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo,
 ```
 
 ### 2. **Protocol Abstraction Interface**
+
 ```go
 // New abstraction layer - protocols implement this
 type FilesystemInterface interface {
@@ -134,20 +155,20 @@ type FilesystemInterface interface {
     Write(ctx context.Context, fh FileHandle, offset int64, data []byte) error
     Close(ctx context.Context, fh FileHandle) error
     Flush(ctx context.Context, fh FileHandle) error
-    
+
     // Directory operations
     ReadDir(ctx context.Context, path string) ([]DirEntry, error)
     Mkdir(ctx context.Context, path string, mode os.FileMode) error
     Rmdir(ctx context.Context, path string) error
     Remove(ctx context.Context, path string) error
     Rename(ctx context.Context, oldPath, newPath string) error
-    
+
     // Metadata operations
     Stat(ctx context.Context, path string) (FileInfo, error)
     Chmod(ctx context.Context, path string, mode os.FileMode) error
     Chown(ctx context.Context, path string, uid, gid int) error
     Utimes(ctx context.Context, path string, atime, mtime time.Time) error
-    
+
     // Extended operations
     Truncate(ctx context.Context, path string, size int64) error
     Link(ctx context.Context, oldPath, newPath string) error
@@ -167,6 +188,7 @@ func (fb *FilesystemBackend) Open(ctx context.Context, path string, flags int) (
 ```
 
 ### 3. **Protocol Handler Pattern**
+
 ```go
 type ProtocolHandler interface {
     Name() string
@@ -202,12 +224,13 @@ type NFSHandler struct {
 ```
 
 ### 4. **Configuration Evolution**
+
 ```yaml
 # Current configuration - remains unchanged
 backends:
   s3:
     bucket: "research-data"
-    region: "us-west-2" 
+    region: "us-west-2"
     storage_tier: "STANDARD_IA"
     pricing_config:
       discount_config_file: "institutional-discounts.yaml"
@@ -221,20 +244,20 @@ protocols:
     enabled: true
     mount_point: "/mnt/s3-data"
     # All current FUSE config moves here
-    
+
   smb:
     enabled: true
     listen_addr: ":445"
     server_name: "RESEARCH-DATA"
     workgroup: "UNIVERSITY"
-    
+
     # Authentication
     auth_mode: "ldap"
     ldap_config:
       server: "ldap://directory.university.edu:389"
       bind_dn: "cn=objectfs,ou=services,dc=university,dc=edu"
       user_base: "ou=users,dc=university,dc=edu"
-      
+
     # Shares mapping to S3 prefixes
     shares:
       - name: "genomics"
@@ -242,18 +265,18 @@ protocols:
         description: "Genomics Research Data"
         allowed_groups: ["bio-researchers", "lab-admins"]
         read_only: false
-        
+
       - name: "reference"
         path: "/reference/"
         description: "Reference Genomes (Read-Only)"
         guest_access: true
         read_only: true
-        
+
     # SMB protocol settings
     smb_versions: ["2.1", "3.0", "3.1.1"]
     encryption: true
     signing: true
-    
+
   nfs:
     enabled: false  # Future implementation
     # NFS config here
@@ -262,16 +285,19 @@ protocols:
 ## Implementation Strategy
 
 ### Phase 1: Refactoring (v0.3.0)
+
 **Goal**: Prepare architecture without breaking existing functionality
 
-#### Changes Required:
+#### Changes Required
+
 1. **Extract Common Interface**: Create `FilesystemInterface`
 2. **Wrap Existing Backend**: Create `FilesystemBackend` adapter  
 3. **Refactor FUSE Code**: Make it use the common interface
 4. **Update Configuration**: Support protocol-specific config sections
 5. **Comprehensive Testing**: Ensure zero regression
 
-#### File Structure Changes:
+#### File Structure Changes
+
 ```
 internal/
 ├── filesystem/           # New: Common interface
@@ -291,18 +317,22 @@ internal/
 ```
 
 ### Phase 2: SMB Implementation (v0.4.0)
+
 **Goal**: Add basic SMB support with local authentication
 
-#### Key Components:
+#### Key Components
+
 1. **SMB Protocol Library Integration**
 2. **Basic Authentication** (local users)
-3. **Share Management** 
+3. **Share Management**
 4. **Windows Client Testing**
 
 ### Phase 3: Enterprise SMB (v0.5.0)  
+
 **Goal**: Production-ready with enterprise authentication
 
-#### Key Features:
+#### Key Features
+
 1. **LDAP/Active Directory Integration**
 2. **Advanced ACLs and Permissions**
 3. **SMB 3.x Encryption**
@@ -311,18 +341,21 @@ internal/
 ## Benefits Analysis
 
 ### Technical Benefits
+
 - **Backend Compatibility**: Zero disruption to existing S3/cost optimization
 - **Code Reuse**: All caching, pricing, optimization shared across protocols
 - **Unified Configuration**: Single config file manages all protocols
 - **Consistent Behavior**: Same S3 tier logic applies to all protocols
 
 ### Market Benefits
+
 - **Windows Market**: Access to Windows-heavy enterprises
 - **NAS Replacement**: Position as S3-backed enterprise file server
 - **Protocol Flexibility**: Customers choose best protocol for their needs
 - **Competitive Moat**: Only multi-protocol S3 filesystem with cost intelligence
 
 ### Operational Benefits
+
 - **Single Deployment**: One ObjectFS instance serves multiple protocols
 - **Unified Monitoring**: Single metrics/logging system for all protocols
 - **Simplified Management**: IT teams manage one system, not multiple tools
@@ -331,12 +364,14 @@ internal/
 ## Risk Mitigation
 
 ### Technical Risks
+
 - **Complexity**: Mitigate with careful phased approach and extensive testing
 - **Performance**: Ensure common interface doesn't introduce overhead
 - **Protocol Compatibility**: Invest in comprehensive client testing
 - **Security**: Implement enterprise-grade authentication and encryption
 
 ### Business Risks
+
 - **Market Timing**: Validate enterprise SMB demand before heavy investment
 - **Competition**: Monitor for competitive responses and differentiate aggressively
 - **Resource Requirements**: Significant engineering investment required
@@ -345,18 +380,21 @@ internal/
 ## Success Criteria
 
 ### Phase 1 (v0.3.0)
+
 - [ ] Zero performance regression for existing FUSE functionality
 - [ ] Clean architectural separation between protocols and backend
 - [ ] All existing tests pass unchanged
 - [ ] Configuration migration path documented
 
 ### Phase 2 (v0.4.0)  
+
 - [ ] Windows clients can connect via SMB
 - [ ] Basic file operations work (read, write, directory listing)
 - [ ] Performance within 80% of direct S3 access
 - [ ] Local authentication system functional
 
 ### Phase 3 (v0.5.0)
+
 - [ ] LDAP/AD authentication working
 - [ ] Multiple shares with different permissions
 - [ ] SMB 3.x encryption and security features

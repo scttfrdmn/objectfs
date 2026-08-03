@@ -692,12 +692,16 @@ See [ARCHITECTURE_EVOLUTION.md](../ARCHITECTURE_EVOLUTION.md) for details.
 
 ## Related Documentation
 
-- [Data Flow Deep Dive](data-flow.md) - Detailed data path analysis
-- [Caching Deep Dive](caching-deep-dive.md) - Cache implementation details
-- [S3 Backend Deep Dive](s3-backend-deep-dive.md) - S3 integration details
-- [Performance Architecture](performance.md) - Performance design and tuning
-- [Architecture Evolution](../ARCHITECTURE_EVOLUTION.md) - Future multi-protocol
-  design
+- [Architecture Evolution](../ARCHITECTURE_EVOLUTION.md) — a 2025 design sketch, bannered with
+  where the code diverged from it
+- [Index](../index.md) — the configuration reference and the **Not yet wired up** table
+- [Concurrency patterns](../concurrency-patterns.md) — the locking model this document's component
+  boundaries imply
+
+Four links here pointed at `data-flow.md`, `caching-deep-dive.md`, `s3-backend-deep-dive.md`, and
+`performance.md`. None was written. For the data path, the package documentation is the accurate
+source and is kept current with the code: `go doc ./internal/vfs`, `./internal/cache`, and
+`./internal/storage/s3`.
 
 ---
 

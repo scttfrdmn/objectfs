@@ -272,6 +272,32 @@ Complete example of metrics integration:
 		return nil
 	}
 
+# DetailedPerformanceMetrics is not wired up
+
+detailed.go holds a second, richer collector — per-operation latency, per-file access counts, a
+cache-source breakdown, network utilization, and per-operation cost. NewDetailedPerformanceMetrics
+has no caller outside this package's own tests, so nothing a mount does reaches any of it. It is
+here because it may be wired up, not because it runs.
+
+Two things in it do not work as their field names suggest, and are stated here rather than left for
+whoever wires it up to discover. Both are tracked in issue 222:
+
+  - DetailedOperationMetrics.P50Latency, P95Latency, and P99Latency are declared and never assigned.
+    They are always zero. Anything serializing this struct — the JSON tags are p50_latency and
+    friends — publishes zeros as percentiles, which reads as a fast filesystem rather than as an
+    unimplemented field.
+  - LatencyHistogram is indexed by int(latency.Milliseconds()) % 100, so 1 ms and 101 ms and 201 ms
+    all land in bucket 1. It is a modulo, not a bucketing, and the percentiles above could not be
+    computed from it even if something tried.
+
+A 618-line docs/performance-metrics.md described this subsystem, with a zero-argument constructor,
+a NewDetailedPerformanceMetricsWithOptions that never existed, three getters that do not exist,
+OpMkdir/OpRmdir/OpStatfs against the real OpMkDir/OpRmDir/OpStatFS, a CacheSourceNone that is not
+declared, a four-argument RecordNetworkOperation, and the percentile and bucketing behavior above
+described as working. It was deleted rather than corrected: nine defects in one document about one
+file is what a description maintained separately from the thing it describes converges to. This
+section is short so that it can stay true.
+
 # See Also
 
 - internal/health: Health monitoring and alerting

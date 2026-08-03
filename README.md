@@ -117,19 +117,19 @@ These fail, and the failure is the correct answer rather than a missing feature.
 | `unlink` / `rm` | **`EROFS`** — fails loudly rather than reporting a delete that did not happen | [#163](https://github.com/scttfrdmn/objectfs/issues/163) |
 | `rmdir` | **`EROFS`**, same reason | [#163](https://github.com/scttfrdmn/objectfs/issues/163) |
 | `chmod` / `chown` on a **directory** | **`ENOTSUP`** — the marker object could carry the metadata, but `Getattr` does not read it back, so accepting the call would report a mode the next `stat` contradicts | [#165](https://github.com/scttfrdmn/objectfs/issues/165) |
-| `rename` / `mv` | not implemented | S3 has no rename; it must be implemented as copy-then-delete, which is neither atomic nor free |
-| Symlinks (`symlink`, `readlink`) | not implemented | |
-| Extended attributes (`getxattr`, `setxattr`, `listxattr`) | not implemented | |
-| `mknod` (devices, FIFOs, sockets) | not implemented | |
-| `fallocate` | not implemented | |
-| Locking (`flock`, POSIX record locks) | not implemented | No cross-node coordination exists to make a lock mean anything |
+| `rename` / `mv` | **`ENOTSUP`** — go-fuse's default for an absent `NodeRenamer` | S3 has no rename; it must be implemented as copy-then-delete, which is neither atomic nor free |
+| Symlinks (`symlink`, `readlink`) | **`ENOTSUP`** | Same: no `NodeSymlinker`/`NodeReadlinker` |
+| Extended attributes (`getxattr`, `setxattr`, `listxattr`) | **`ENODATA`** on Linux / **`ENOATTR`** on macOS for get and remove; `listxattr` returns an empty list | go-fuse's defaults. An empty list is the accurate answer — there are no xattrs — but note that `setxattr` reports "no such attribute" rather than "unsupported" |
+| `mknod` (devices, FIFOs, sockets) | **`ENOTSUP`** | |
+| `fallocate` | **`ENOTSUP`** | |
+| Locking (`flock`, POSIX record locks) | not forwarded to ObjectFS at all | The mount does not set go-fuse's `EnableLocks`, so the kernel never asks the filesystem to arbitrate a lock; it falls back to tracking locks locally on the mounting host. A lock therefore does not fail — it just means nothing to any other host, and no cross-node coordination exists that could make it mean anything |
 
 ### Tools known not to work
 
 Not because of a bug, but because of the semantics above. Verified, not assumed:
 
-- **`rm`, `rm -rf`, and anything that unlinks** — `EROFS` until [#163](https://github.com/scttfrdmn/objectfs/issues/163). This includes `mv` within the mount, `git checkout` of a branch that deletes files, and any build system that cleans.
-- **SQLite, and anything using POSIX record locks** — no locking. A single writer with no concurrent readers may work; do not rely on it.
+- **`rm`, `rm -rf`, and anything that unlinks** — `EROFS` until [#163](https://github.com/scttfrdmn/objectfs/issues/163). This includes `git checkout` of a branch that deletes files, and any build system that cleans. `mv` within the mount fails earlier, with `ENOTSUP`, because there is no rename.
+- **SQLite, and anything using POSIX record locks** — locks are not forwarded to the filesystem, so they are host-local and invisible to any other mount of the same bucket. Two hosts will both believe they hold the same exclusive lock. A single writer with no concurrent readers may work; do not rely on it.
 - **`git` on a repository inside the mount** — needs rename, unlink, and locking.
 - **`tar -x` and `rsync --delete`** — both unlink.
 - **Anything expecting `mmap` writeback to be atomic or ordered.**

@@ -224,7 +224,7 @@ storage:
 ObjectFS's own tests do not use a container for this. `internal/testaws` runs a
 [substrate](https://github.com/scttfrdmn/substrate) endpoint in-process over real HTTP — no
 network, no credentials, no AWS account — which is both faster and closer to the real thing than a
-mock. See `docs/development/testing.md`.
+mock. See the Testing section of `CONTRIBUTING.md`.
 
 ## Performance Considerations
 
@@ -252,7 +252,9 @@ ObjectFS automatically respects these limits with intelligent chunking.
    - 1 Gbps: 8-16 concurrent uploads
    - 10 Gbps: 16-32 concurrent uploads
 
-2. **Enable CargoShip optimization**: Provides 4.6x average performance improvement
+2. **Consider CargoShip optimization**: routes uploads through CargoShip's chunking and part
+   scheduling instead of this package's. Whether it is faster for your object sizes and network is a
+   question for `benchmarks/`, not a figure this document can supply
 
 3. **Monitor metrics**: Use the metrics API to identify bottlenecks
 
@@ -404,10 +406,12 @@ Planned improvements for multipart uploads:
 
 ## Related Documentation
 
-- [S3 Backend Configuration](../configuration/s3.md)
-- [CargoShip Optimization](./cargoship.md)
-- [Performance Tuning Guide](./performance.md)
+- [Configuration reference](../index.md) — every key the loader accepts, including the S3 block
+- [S3 Transfer Acceleration](../s3-acceleration.md) — the other half of the large-object path
 - [AWS S3 Multipart Upload Documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html)
+
+`../configuration/s3.md`, `./cargoship.md`, and `./performance.md` were linked here and none was
+written; `docs/configuration/` does not exist as a directory.
 
 ## See Also
 

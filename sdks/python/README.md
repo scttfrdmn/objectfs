@@ -15,21 +15,20 @@ Python API support.
 
 ## Installation
 
-```bash
-pip install objectfs
-```
-
-For development:
-
-```bash
-pip install objectfs[dev]
-```
-
-For monitoring features:
+> **`pip install objectfs` installs someone else's package.** This SDK has never been published to
+> PyPI — no workflow in this repository publishes it — and the name `objectfs` is already taken
+> there by an unrelated "Simple Python VFS module" from 2015 by a different author. So the three
+> `pip install objectfs...` commands documented here did not fail; they succeeded and installed
+> different software, which is the worse outcome. Install from this repository instead.
 
 ```bash
-pip install objectfs[monitoring]
+git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs/sdks/python
+pip install -e .
 ```
+
+For development and monitoring extras, `pip install -e '.[dev]'` and `pip install -e '.[monitoring]'`
+from that same directory.
 
 ## Quick Start
 
@@ -312,14 +311,18 @@ except ConfigurationError as e:
 
 ## Examples
 
-See the [examples](examples/) directory for more detailed usage examples:
+There is no `examples/` directory. This section listed six files in one, and none of them was ever
+written — the runnable examples are the inline ones above:
 
-- [Basic mounting](examples/basic_mount.py)
-- [Async operations](examples/async_example.py)  
-- [Configuration management](examples/config_example.py)
-- [Storage operations](examples/storage_example.py)
-- [Distributed clusters](examples/cluster_example.py)
-- [Monitoring and metrics](examples/monitoring_example.py)
+- [Basic mounting](#basic-usage)
+- [Async operations](#async-usage)
+- [Configuration management](#configuration)
+- [Storage operations](#storage-operations)
+- [Distributed clusters](#distributed-clusters) — note that multi-node coordination is
+  experimental and not reachable from a mount today
+- Monitoring and metrics: `internal/metrics/doc.go` documents the Prometheus endpoint. The SDK
+  method that reported cache statistics returned a hardcoded `hit_rate`, so there is nothing here
+  to point at yet
 
 ## Development
 
@@ -375,5 +378,5 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution guidelines.
 ## Support
 
 - GitHub Issues: <https://github.com/scttfrdmn/objectfs/issues>
-- Documentation: <https://docs.objectfs.io/python>
-- Community: <https://community.objectfs.io>
+- Documentation: the `docs/` tree in this repository
+- Discussions: <https://github.com/scttfrdmn/objectfs/discussions>
