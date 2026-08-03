@@ -69,8 +69,21 @@ func TestRatesMatchThePublishedPerThousandPrices(t *testing.T) {
 		{awsname.StorageClassOneZoneIA, "GET", 0.01, 10_000, "$0.01 per 10,000 GET and all other requests to One Zone-Infrequent Access"},
 		{awsname.StorageClassGlacierIR, "PUT", 0.02, 1_000, "$0.02 per 1,000 PUT, COPY, POST or LIST requests to Glacier Instant Retrieval"},
 		{awsname.StorageClassGlacierIR, "GET", 0.1, 10_000, "$0.1 per 10,000 GET and all other requests to Glacier Instant Retrieval"},
-		{awsname.StorageClassGlacier, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle requests to Glacier Deep Archive"},
-		{awsname.StorageClassDeepArchive, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle requests to Glacier Deep Archive"},
+		// GLACIER's PUT is $0.03/1,000, and this line asserted $0.05 until the generated table
+		// disagreed with it. Both were reading the same wrong SKU: Requests-Tier3, which is
+		// RestoreObject — the price of *thawing* an object, 67% above the write. It passed because
+		// the table it checked had been built by the same query.
+		//
+		// Worth keeping as a comment because the description column is what makes these lines
+		// checkable by eye, and this one's description was Deep Archive's, on a Glacier row. A
+		// mismatched description is the visible symptom of a rate read from the wrong product, and
+		// it sat here through review.
+		{awsname.StorageClassGlacier, "PUT", 0.03, 1_000, "$0.03 per 1,000 PUT requests to Glacier Flexible Retrieval"},
+
+		// Deep Archive genuinely is the lifecycle rate: AWS publishes no PUT usagetype for it at
+		// all, so a direct write is priced at the transition. See the DEEP_ARCHIVE entry in
+		// internal/awsrates/offerfile.
+		{awsname.StorageClassDeepArchive, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle Transition requests into Glacier Deep Archive"},
 		{awsname.StorageClassIntelligent, "PUT", 0.005, 1_000, "$0.005 per 1,000 PUT, COPY, POST, or LIST requests to Intelligent-Tiering"},
 		{awsname.StorageClassIntelligent, "GET", 0.004, 10_000, "$0.004 per 10,000 GET and all other requests to Intelligent-Tiering"},
 	}
@@ -275,4 +288,213 @@ func TestRateOrderingIsEconomicallySane(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRegionsIsEveryRegionInTheGeneratedTable pins the accessor internal/storage/s3 warns from.
+//
+// The list is generated, so the value worth asserting is not its length but its shape: sorted, no
+// duplicates, us-east-1 present, and every entry also resolvable through the other two accessors. A
+// region in Regions() that HasRegion denies would make PricingManager warn about a region it then
+// priced correctly, which is the kind of inconsistency operators learn to distrust the whole log over.
+func TestRegionsIsEveryRegionInTheGeneratedTable(t *testing.T) {
+	t.Parallel()
+
+	regions := awsrates.Regions()
+
+	if len(regions) == 0 {
+		t.Fatal("Regions() is empty; the generated table holds no regions, so every lookup falls " +
+			"back to us-east-1 and reports false")
+	}
+
+	seen := make(map[string]bool, len(regions))
+
+	for i, r := range regions {
+		if seen[r] {
+			t.Errorf("Regions() lists %q twice", r)
+		}
+
+		seen[r] = true
+
+		if i > 0 && regions[i-1] > r {
+			t.Errorf("Regions() is not sorted: %q precedes %q. It is rendered into warnings and "+
+				"docs, and an unsorted list makes a diff of it unreadable", regions[i-1], r)
+		}
+
+		if !awsrates.HasRegion(r) {
+			t.Errorf("Regions() lists %q but HasRegion says it is unknown; the two read the same "+
+				"map, so this means one of them stopped doing that", r)
+		}
+
+		if _, ok := awsrates.AllForRegion(r); !ok {
+			t.Errorf("Regions() lists %q but AllForRegion reports it as a fallback", r)
+		}
+	}
+
+	if !seen[awsrates.DefaultRegion] {
+		t.Errorf("Regions() does not include %s, which is the fallback every unknown region resolves "+
+			"to; the fallback resolving to a region that is not in the table is a silent zero table",
+			awsrates.DefaultRegion)
+	}
+}
+
+// TestHasRegionRejectsWhatIsNotARegion covers the false arm, which is the one with a consequence.
+//
+// The true arm is exercised by every region in the test above. This one pins that a plausible-looking
+// string is rejected: "us-east" and "US-EAST-1" are the two shapes a hand-edited config produces, and
+// accepting either would price a deployment from a table nobody chose.
+func TestHasRegionRejectsWhatIsNotARegion(t *testing.T) {
+	t.Parallel()
+
+	for _, r := range []string{
+		"",
+		"mars-1",
+		"us-east",            // truncated
+		"US-EAST-1",          // wrong case; AWS region codes are lowercase
+		"us-east-1 ",         // trailing space, as a YAML quoting accident produces
+		"aws-other",          // a real entry in AWS's offer index that is not a region
+		"eu-central-1-ath-1", // a local zone; it has an offer file but no S3 rates
+	} {
+		if awsrates.HasRegion(r) {
+			t.Errorf("HasRegion(%q) is true; that region has no table, so a caller that trusts this "+
+				"skips the warning and reports us-east-1 prices labeled as %q", r, r)
+		}
+	}
+}
+
+// TestForRegionFallsBackWithoutLying is the property every caller of it depends on.
+//
+// Three cases, and the bool is the whole point of each: an unknown region must return us-east-1's
+// numbers *and* false, an unknown class must return Standard's numbers *and* false, and a known pair
+// must return that pair's numbers and true. Returning a zero Rate instead would be worse — a $0 cost
+// reads as free storage rather than as a lookup that missed — and returning true alongside a fallback
+// would make the fallback undetectable.
+func TestForRegionFallsBackWithoutLying(t *testing.T) {
+	t.Parallel()
+
+	defaultStandard, ok := awsrates.ForRegion(awsrates.DefaultRegion, awsname.StorageClassStandard)
+	if !ok {
+		t.Fatalf("ForRegion(%s, STANDARD) reports false; the default region and the default class "+
+			"are the one pair that must always be known", awsrates.DefaultRegion)
+	}
+
+	t.Run("unknown region yields the default region's rate and false", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := awsrates.ForRegion("mars-1", awsname.StorageClassStandard)
+		if ok {
+			t.Error("ForRegion reports true for an unknown region; the caller cannot tell it is " +
+				"being handed another region's prices")
+		}
+
+		if got != defaultStandard {
+			t.Errorf("ForRegion(mars-1, STANDARD) = %+v, want %s's %+v; a zero Rate here reads as "+
+				"free storage rather than as a missing region",
+				got, awsrates.DefaultRegion, defaultStandard)
+		}
+	})
+
+	t.Run("unknown class yields Standard's rate and false", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := awsrates.ForRegion("sa-east-1", "GLACIER_FLEXIBLE")
+		if ok {
+			t.Error("ForRegion reports true for a storage class that does not exist")
+		}
+
+		saStandard, _ := awsrates.ForRegion("sa-east-1", awsname.StorageClassStandard)
+		if got != saStandard {
+			t.Errorf("ForRegion(sa-east-1, GLACIER_FLEXIBLE) = %+v, want sa-east-1's Standard %+v. "+
+				"Note it must be *that region's* Standard, not us-east-1's: falling back on the "+
+				"class must not also silently fall back on the region.", got, saStandard)
+		}
+	})
+
+	t.Run("both unknown yields the default pair and false", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := awsrates.ForRegion("mars-1", "GLACIER_FLEXIBLE")
+		if ok {
+			t.Error("ForRegion reports true when neither the region nor the class is known")
+		}
+
+		if got != defaultStandard {
+			t.Errorf("ForRegion(mars-1, GLACIER_FLEXIBLE) = %+v, want %+v", got, defaultStandard)
+		}
+	})
+
+	t.Run("a known pair is not a fallback", func(t *testing.T) {
+		t.Parallel()
+
+		// sa-east-1 storage is 76% above us-east-1, so this fails loudly if the region is ignored —
+		// which is the defect #161 exists to close, one layer up.
+		got, ok := awsrates.ForRegion("sa-east-1", awsname.StorageClassStandard)
+		if !ok {
+			t.Fatal("ForRegion(sa-east-1, STANDARD) reports false for a region in Regions()")
+		}
+
+		if got.StoragePerGBMonth == defaultStandard.StoragePerGBMonth {
+			t.Errorf("sa-east-1 and %s both price Standard at %v. They do not: sa-east-1 is the "+
+				"most expensive region AWS publishes. Equal values here mean the region argument "+
+				"selected nothing.", awsrates.DefaultRegion, got.StoragePerGBMonth)
+		}
+	})
+}
+
+// TestAllForRegionReturnsACopyOfTheRightRegion covers both of its contracts at once.
+//
+// The copy matters because the returned map is the shared generated table otherwise, and a caller that
+// mutated it would change what every other package in the process believes an object costs — with no
+// error and no way to trace it back. TestAllReturnsACopy covers the us-east-1 wrapper; this covers the
+// regional form and the unknown-region arm, which is where the bool comes from.
+func TestAllForRegionReturnsACopyOfTheRightRegion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mutating the result does not affect the table", func(t *testing.T) {
+		t.Parallel()
+
+		first, ok := awsrates.AllForRegion("sa-east-1")
+		if !ok {
+			t.Fatal("AllForRegion(sa-east-1) reports it as unknown")
+		}
+
+		want := first[awsname.StorageClassStandard]
+
+		delete(first, awsname.StorageClassStandard)
+		first[awsname.StorageClassGlacier] = awsrates.Rate{}
+
+		second, _ := awsrates.AllForRegion("sa-east-1")
+
+		if got, ok := second[awsname.StorageClassStandard]; !ok || got != want {
+			t.Errorf("after deleting STANDARD from one AllForRegion result, a second call returns "+
+				"%+v (present=%v), want %+v; the map is shared, so any caller can silently reprice "+
+				"the whole process", got, ok, want)
+		}
+
+		if second[awsname.StorageClassGlacier].StoragePerGBMonth == 0 {
+			t.Error("a zeroed Rate written into one AllForRegion result reached the shared table; " +
+				"Glacier now prices at $0/GB-month process-wide")
+		}
+	})
+
+	t.Run("unknown region yields the default table and false", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := awsrates.AllForRegion("mars-1")
+		if ok {
+			t.Error("AllForRegion reports true for an unknown region")
+		}
+
+		want, _ := awsrates.AllForRegion(awsrates.DefaultRegion)
+
+		if len(got) != len(want) {
+			t.Fatalf("AllForRegion(mars-1) has %d classes, want %s's %d; an empty map here prices "+
+				"every tier at zero", len(got), awsrates.DefaultRegion, len(want))
+		}
+
+		for class, r := range want {
+			if got[class] != r {
+				t.Errorf("AllForRegion(mars-1)[%s] = %+v, want %+v", class, got[class], r)
+			}
+		}
+	})
 }

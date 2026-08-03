@@ -1,4 +1,5 @@
-// Package awsrates holds the S3 list prices ObjectFS quotes, in one place.
+// Package awsrates holds the S3 list prices ObjectFS quotes, in one place, for every region AWS
+// publishes them in.
 //
 // It exists for the same reason as internal/awsname, and is a leaf for the same reason: the rate for
 // a tier is needed by internal/cost (per-operation accounting), internal/storage/s3 (tier
@@ -9,18 +10,31 @@
 // Not hypothetically: the PUT rate in internal/storage/s3 was a tenth of the PUT rate in
 // internal/cost, so what a write cost depended on which package the caller happened to reach for.
 //
-// # Every number here was read from the AWS Pricing API
+// # Every number here is generated from AWS's published price list
 //
-// Not from the pricing web pages, and not carried over from the tables this package replaces. The
-// query for each rate is recorded in rates_aws_test.go, which re-runs them against the live API
-// under -tags=integration and fails on any drift. That test is the reason to trust these values, and
-// running it is how you find out AWS has changed them.
+// rates_generated.go is produced by internal/awsrates/offerfile from the public per-region offer
+// files, and it covers 36 regions × 8 storage classes × 6 rates. It is not hand-maintained, and it is
+// not the Pricing API: the offer files need no credentials, so `go generate ./internal/awsrates/...`
+// refreshes every number in one command that anyone can run.
 //
-// The region is us-east-1, and that is a real limitation rather than a placeholder: these are the
-// only rates in the repository, so a deployment elsewhere gets us-east-1 numbers. It is exported as
-// [Region] so a caller can report which region a figure describes instead of implying it matches
-// theirs. Making rates region-aware is the Pricing API work in #183; this package is the single site
-// that work has to change, which is most of why it exists.
+// Regenerating is the only supported way to change a rate. The rules that turn AWS's JSON into these
+// numbers are documented in the offerfile package, and three of them exist because the obvious query
+// returns a plausible number from the wrong SKU — a *restore* price where a PUT was meant, a
+// *staging* charge 21× the real Deep Archive rate, and whichever volume band Go's map iteration
+// happened to reach first. Editing a value by hand loses that.
+//
+// # Regions
+//
+// [ForRegion] is the real accessor. [For] is the us-east-1 form, kept because most callers are
+// comparing tiers rather than pricing a specific deployment and because it is what every existing
+// caller passed no region to.
+//
+// A region ObjectFS has no table for falls back to us-east-1 and says so, via [ForRegion]'s second
+// return value. Falling back rather than returning zero is deliberate: a zero rate does not read as
+// "unknown", it reads as free storage, which is a plausible enough answer to survive review. What the
+// caller must not do is report a us-east-1 figure labeled with the operator's region — regional
+// variation is not a rounding error. Standard storage ranges from $0.0225 in ap-east-2 to $0.0405 in
+// sa-east-1, which is 76% above us-east-1, and GovCloud egress is 72% above it.
 //
 // # What these rates are for
 //
@@ -30,6 +44,8 @@
 // once versioning or replication is on. Do not reconcile a bill against them.
 package awsrates
 
+//go:generate go run ./offerfile/cmd/genrates -o rates_generated.go
+
 import (
 	"maps"
 	"slices"
@@ -37,12 +53,14 @@ import (
 	"github.com/scttfrdmn/objectfs/internal/awsname"
 )
 
-// Region is the AWS region these rates were read from.
+// DefaultRegion is the region [For] reports, and the one an unknown region falls back to.
 //
-// Exported because a caller that reports a cost should be able to say which region's prices produced
-// it. A summary labeled with the operator's configured region while carrying us-east-1 numbers is
-// worse than one that names us-east-1, because it looks correct.
-const Region = "us-east-1"
+// us-east-1 rather than the cheapest or the most common: it is the region AWS's own pricing pages
+// default to, so a figure from it is the one an operator can check against what they have already
+// read. It is also below most other regions, which means a fallback understates rather than
+// overstates — recorded here because the opposite choice would have been defensible and someone will
+// wonder.
+const DefaultRegion = "us-east-1"
 
 // Rate holds the per-tier list prices for one storage class, in USD.
 //
@@ -77,108 +95,83 @@ type Rate struct {
 	// Bulk differ, and modeling that needs a retrieval-speed concept the cost code does not have.
 	RetrievalPerGB float64
 
-	// EgressPerGB is the cost of transferring one GB out to the internet. It is not a property of
-	// the storage class — the same rate applies to all of them, and it is zero when traffic stays
-	// inside the region, which is the case for the deployments ObjectFS targets. It is here so a
-	// caller that does egress can price it without a sixth table.
+	// EgressPerGB is the cost of transferring one GB out to the internet from this region. It is
+	// not a property of the storage class — the same rate applies to all of them — and it is zero
+	// when traffic stays inside the region, which is the case for the deployments ObjectFS targets.
+	// It is here so a caller that does egress can price it without a second table.
+	//
+	// It comes from a different AWS offer file than everything else in this struct. S3's own
+	// DataTransfer-Out-Bytes usagetype is the Multi-Region Access Point routing charge, not internet
+	// egress; see the offerfile package.
 	EgressPerGB float64
 }
 
-// rates is the canonical table.
-//
-// Ordered warmest-first, matching awsname.StorageClasses, because that is the order someone
-// choosing a tier reads them in.
-var rates = map[string]Rate{
-	awsname.StorageClassStandard: {
-		StoragePerGBMonth: 0.023,     // TimedStorage-ByteHrs, first 50 TB band
-		PutRequest:        0.000005,  // Requests-Tier1: $0.005 / 1,000
-		GetRequest:        0.0000004, // Requests-Tier2: $0.004 / 10,000
-		ListRequest:       0.000005,  // Tier1, same group as PUT
-		RetrievalPerGB:    0.0,       // no retrieval fee
-		EgressPerGB:       0.09,      // DataTransfer-Out, first 10 TB band
-	},
-	awsname.StorageClassIntelligent: {
-		StoragePerGBMonth: 0.023,     // TimedStorage-INT-FA-ByteHrs, frequent-access band
-		PutRequest:        0.000005,  // Requests-INT-Tier1
-		GetRequest:        0.0000004, // Requests-INT-Tier2
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.0, // no retrieval fee in any access tier
-		EgressPerGB:       0.09,
-	},
-	awsname.StorageClassStandardIA: {
-		StoragePerGBMonth: 0.0125,   // TimedStorage-SIA-ByteHrs
-		PutRequest:        0.00001,  // Requests-SIA-Tier1: $0.01 / 1,000
-		GetRequest:        0.000001, // Requests-SIA-Tier2: $0.01 / 10,000
-		ListRequest:       0.00001,
-		RetrievalPerGB:    0.01, // Retrieval-SIA
-		EgressPerGB:       0.09,
-	},
-	awsname.StorageClassOneZoneIA: {
-		StoragePerGBMonth: 0.01,     // TimedStorage-ZIA-ByteHrs
-		PutRequest:        0.00001,  // Requests-ZIA-Tier1
-		GetRequest:        0.000001, // Requests-ZIA-Tier2
-		ListRequest:       0.00001,
-		RetrievalPerGB:    0.01, // Retrieval-ZIA
-		EgressPerGB:       0.09,
-	},
-	awsname.StorageClassGlacierIR: {
-		StoragePerGBMonth: 0.004,   // TimedStorage-GIR-ByteHrs
-		PutRequest:        0.00002, // Requests-GIR-Tier1: $0.02 / 1,000
-		GetRequest:        0.00001, // Requests-GIR-Tier2: $0.1 / 10,000
-		ListRequest:       0.00002,
-		RetrievalPerGB:    0.03, // Retrieval-GIR
-		EgressPerGB:       0.09,
-	},
-	awsname.StorageClassGlacier: {
-		StoragePerGBMonth: 0.0036,    // TimedStorage-GlacierByteHrs
-		PutRequest:        0.00005,   // Requests-Tier3: $0.05 / 1,000 lifecycle requests
-		GetRequest:        0.0000004, // Tier2 for the request itself; the bytes cost RetrievalPerGB
-		ListRequest:       0.000005,  // LIST is billed at the Standard Tier1 rate
-		RetrievalPerGB:    0.01,      // Standard-Retrieval-Bytes; Expedited 0.03, Bulk 0.0
-		EgressPerGB:       0.09,
-	},
-	awsname.StorageClassDeepArchive: {
-		StoragePerGBMonth: 0.00099, // TimedStorage-GDA-ByteHrs
-		PutRequest:        0.00005, // Requests-Tier3
-		GetRequest:        0.0000004,
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.02, // Standard retrieval; Bulk is 0.0025
-		EgressPerGB:       0.09,
-	},
-	awsname.StorageClassReducedRedundancy: {
-		// Deprecated by AWS and priced above Standard, which is why nothing should choose it. The
-		// entry exists because awsname admits the class, and a tier with no rate would silently
-		// cost zero — see TestEveryStorageClassHasARate.
-		StoragePerGBMonth: 0.024,    // TimedStorage-RRS-ByteHrs, first band
-		PutRequest:        0.000005, // RRS has no distinct request usagetype; billed as Tier1
-		GetRequest:        0.0000004,
-		ListRequest:       0.000005,
-		RetrievalPerGB:    0.0,
-		EgressPerGB:       0.09,
-	},
+// Regions returns the region codes with a rate table, sorted.
+func Regions() []string {
+	return slices.Sorted(maps.Keys(regionalRates))
 }
 
-// For returns the rate for a storage class and whether it was found.
+// HasRegion reports whether a region has its own rates.
 //
-// An unknown class yields the Standard rate with false. Returning the zero Rate would make every
-// cost for it come out to zero, which reads as "free" rather than "unknown" — and a caller that
-// ignores the bool would then report a confident zero. Standard is the most expensive commonly-used
-// tier, so guessing it errs toward overstating a cost.
-func For(storageClass string) (Rate, bool) {
-	r, ok := rates[storageClass]
-	if !ok {
-		return rates[awsname.StorageClassStandard], false
+// For deciding whether to warn once at startup rather than on every lookup, which is what
+// internal/storage/s3 does with it: a cost figure is produced per object access, and a warning on
+// each one would be the loudest thing in the log.
+func HasRegion(region string) bool {
+	_, ok := regionalRates[region]
+
+	return ok
+}
+
+// ForRegion returns the rate for a storage class in a region, and whether both were known.
+//
+// The bool is false if the region is unknown, if the class is unknown, or both — a caller that only
+// wants to know "is this number about the region I asked for" gets that from one check. Which of the
+// two was missing is available from [HasRegion] and [StorageClasses] when it matters.
+//
+// An unknown region yields us-east-1's rate for the class. An unknown class yields Standard's rate.
+// Both are wrong answers reported as such rather than zeros reported as certainties; Standard is the
+// most expensive commonly-used tier, so guessing it errs toward overstating a cost.
+func ForRegion(region, storageClass string) (Rate, bool) {
+	table, regionKnown := regionalRates[region]
+	if !regionKnown {
+		table = regionalRates[DefaultRegion]
 	}
 
-	return r, true
+	r, classKnown := table[storageClass]
+	if !classKnown {
+		r = table[awsname.StorageClassStandard]
+	}
+
+	return r, regionKnown && classKnown
 }
 
-// All returns a copy of the whole table, keyed by storage class.
+// For returns the us-east-1 rate for a storage class and whether the class was found.
+//
+// Equivalent to ForRegion(DefaultRegion, storageClass). It is the right call for a comparison
+// between tiers, where only the ratio matters and every region agrees on the ordering; it is the
+// wrong call for telling an operator what their bucket costs.
+func For(storageClass string) (Rate, bool) {
+	return ForRegion(DefaultRegion, storageClass)
+}
+
+// AllForRegion returns a copy of one region's whole table, keyed by storage class.
 //
 // A copy, because a caller that mutated the shared map would change what every other package
-// believes an object costs.
+// believes an object costs. An unknown region yields us-east-1's table and false.
+func AllForRegion(region string) (map[string]Rate, bool) {
+	table, ok := regionalRates[region]
+	if !ok {
+		table = regionalRates[DefaultRegion]
+	}
+
+	return maps.Clone(table), ok
+}
+
+// All returns a copy of the us-east-1 table, keyed by storage class.
 func All() map[string]Rate {
-	return maps.Clone(rates)
+	table, _ := AllForRegion(DefaultRegion)
+
+	return table
 }
 
 // StorageClasses returns the classes that have a rate, warmest-first.

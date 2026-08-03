@@ -1,6 +1,8 @@
 package cost
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,6 +28,13 @@ import (
 // two copies of the same variable are equal. What is worth checking instead is that they still *do*
 // read from it — that nobody reintroduces a local rate — and that is what these tests do, by
 // comparing each table to awsrates and to each other for every class the config loader accepts.
+//
+// One side of that comparison has since changed shape. internal/storage/s3 no longer carries a rate on
+// StorageTierInfo at all; it resolves one through a PricingManager for a configured region, because a
+// rate on a package-level struct cannot know which region it is for (#161). So the assertion below
+// names us-east-1 explicitly. That is not a weakening: the region-by-region agreement between the two
+// packages is what TestPricingRegionSelectsTheRates in internal/storage/s3 covers, and this test's job
+// is the single-source-of-truth shape, which is region-independent.
 
 // TestBothRateTablesReadFromAwsrates fails the moment either package grows its own copy of a rate
 // again.
@@ -56,11 +65,22 @@ func TestBothRateTablesReadFromAwsrates(t *testing.T) {
 				"internal/cost reports a different storage rate for %s than internal/awsrates; "+
 					"DefaultPrices should be awsrates.All(), not a literal", class)
 
-			tier, ok := s3.StorageTiers[class]
+			_, ok = s3.StorageTiers[class]
 			assert.True(t, ok, "internal/storage/s3 StorageTiers is missing %s", class)
-			assert.InDelta(t, canonical.StoragePerGBMonth, tier.CostPerGBMonth, 0,
-				"internal/storage/s3 reports a different storage rate for %s than internal/awsrates; "+
-					"CostPerGBMonth should be filled in by withRates, not written in the literal", class)
+
+			// This used to read tier.CostPerGBMonth off StorageTiers. That field is gone: it was
+			// filled at package init, and package init cannot see a configured region, so every
+			// cost internal/storage/s3 reported was us-east-1's regardless of where the bucket was
+			// (#161). The rate now comes from a PricingManager, which is the caller's path, so the
+			// region has to be named — us-east-1 here, because that is the region awsrates.For
+			// returns and the comparison is only meaningful between the same region's numbers.
+			pm := s3.NewPricingManager(s3.PricingConfig{Region: awsrates.DefaultRegion},
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+			assert.InDelta(t, canonical.StoragePerGBMonth, pm.StorageRate(class), 0,
+				"internal/storage/s3 reports a different us-east-1 storage rate for %s than "+
+					"internal/awsrates; the manager should resolve its rates through awsrates."+
+					"ForRegion, not from a literal", class)
 		})
 	}
 }

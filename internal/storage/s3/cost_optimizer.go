@@ -350,7 +350,7 @@ func (co *CostOptimizer) calculateObjectCost(objectSize int64, tier string) floa
 		archiveBytes, standardBytes := ArchiveOverhead(tier)
 
 		tierPricing = TierPricing{
-			StorageCostPerGBMonth:     tierInfo.CostPerGBMonth,
+			StorageCostPerGBMonth:     co.backend.pricingManager.StorageRate(tier),
 			MinimumBillableSize:       tierInfo.MinObjectSize,
 			PerObjectOverheadBytes:    archiveBytes + standardBytes,
 			OverheadStandardRateBytes: standardBytes,
@@ -373,11 +373,13 @@ func (co *CostOptimizer) calculateObjectCost(objectSize int64, tier string) floa
 	// Volume discounts apply to the tier's own storage, so they are computed on that portion alone.
 	cost := co.backend.pricingManager.CalculateVolumeDiscount(tier, billableGB, baseCost)
 
+	// The 8 KB of per-object overhead S3 bills at the Standard rate rather than the archive rate, in
+	// the same region as everything else here. Asked of the pricing manager rather than of awsrates
+	// directly, which is what made this line region-blind: it read us-east-1's Standard rate while the
+	// tier's own rate beside it came from a manager that had been configured with a region.
 	if overheadAtStandardRate > 0 {
-		standardRate, ok := awsrates.For(TierStandard)
-		if ok {
-			cost += awsrates.GBFromBytes(overheadAtStandardRate) * standardRate.StoragePerGBMonth
-		}
+		cost += awsrates.GBFromBytes(overheadAtStandardRate) *
+			co.backend.pricingManager.StorageRate(TierStandard)
 	}
 
 	return cost

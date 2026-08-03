@@ -22,7 +22,7 @@
 #   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
 #                                      work
 #
-# Floors are deliberately absent for three packages with no test files at all. A floor of 0% reads
+# Floors are deliberately absent for four packages with no test files at all. A floor of 0% reads
 # as a target rather than as an absence, and the gate names unlisted packages in every run so the
 # omission stays visible instead of looking like a decision:
 #
@@ -37,11 +37,44 @@
 #                       exercised from internal/compression, which is at 88.6%. SupportedAlgorithms
 #                       is load-bearing there since #230 — the decoder table is derived from it, so
 #                       adding an algorithm to that list makes it readable with no second edit
+#   internal/awsrates/offerfile/offertest
+#                       no tests, deliberately, and for the same reason as internal/testhttp: it builds
+#                       the offer-file fixtures three suites run against, so every statement in it
+#                       executes on every run. A test of its own would assert that a fixture it just
+#                       built contains what it put in — the self-consistency failure the Glacier PUT
+#                       defect had. Its real check is that the suites using it fail when a rule changes
 #   sdks/c              no tests — cgo shim, not reachable from `go test`
 
 internal/analytics       96
 internal/archive         90
 internal/awsname         100
+
+# internal/awsrates went 76.2 → 100 when #161 made the region reachable. The 24 points were not new
+# tests over old code: Regions, HasRegion, and both regional accessors existed with no non-integration
+# test at all, because the drift test that covered this package needed AWS credentials and skipped
+# without them. Seven mutations against the fallback logic are all caught, including the one that
+# matters — ForRegion ignoring its region argument, which is the shape of the defect #161 closes.
+internal/awsrates        100
+
+# internal/awsrates/offerfile enters at 89, from `[no test files]`. The 10 points missing are
+# genrates' error paths and two HTTP failure arms; the extraction rules themselves are at 100.
+#
+# Measured under a full-repo `go test ./...` run, not an isolated one. That distinction has bitten this
+# file three times: a package measured alone can score higher, because tests in sibling packages are
+# not competing for the same -race budget and timing-dependent branches land differently. A floor set
+# from the luckier measurement goes red on a commit that touches nothing.
+internal/awsrates/offerfile 89
+
+# cmd/genrates enters at 74, from `[no test files]`. run() itself is at 90.6; the gap is main(), which
+# calls os.Exit and so cannot be covered by a test in the same binary.
+#
+# It became testable by taking its fetcher as a parameter instead of calling offerfile.NewFetcher()
+# inline — one line, and the reason it had no tests. Worth recording as the pattern rather than the
+# incident: this command writes the file every price ObjectFS quotes comes from, and its failure modes
+# all produce a *plausible file* rather than an error. A wrong skip rule drops a region silently; an
+# empty table compiles and prices every tier at $0, over the top of the file that was correct. Four
+# mutations covering exactly those are caught.
+internal/awsrates/offerfile/cmd/genrates 74
 
 # cmd/objectfs enters this file at 77, from no entry at all — the note above it used to say "no
 # tests, currently untestable because main() calls log.Fatalf directly", which was true and was the

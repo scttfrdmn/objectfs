@@ -23,24 +23,60 @@ const (
 // PricingManager resolves S3 tier pricing from a built-in static rate table,
 // applying operator-supplied overrides and discounts.
 //
-// Rates are us-east-1 list prices read from [awsrates], the one table in this repo checked against
-// the live AWS Pricing API. They suit comparing tiers, not billing reconciliation: they are first
-// volume band, they assume Standard retrieval speed on the Glacier classes, and PricingConfig.Region
-// does not select them. Set PricingConfig.CustomPricing for exact, negotiated, or non-us-east-1
-// rates.
+// Rates are list prices read from [awsrates], generated from AWS's published price list, for the
+// region in PricingConfig.Region. They suit comparing tiers, not billing reconciliation: they are
+// first volume band and they assume Standard retrieval speed on the Glacier classes. Set
+// PricingConfig.CustomPricing for exact or negotiated rates.
+//
+// # region
+//
+// Resolved once, in [NewPricingManager], and stored separately from config.Region — which stays as the
+// operator wrote it so [PricingManager.GetPricingSummary] can report both what was asked for and what
+// was used. That distinction is the whole point of the field: a summary labeled with the operator's
+// region while carrying another region's numbers is worse than one that names the region it used,
+// because it looks correct.
+//
+// Resolved once rather than per lookup because GetTierPricing is reachable from GetObject via
+// RecordAccess, so it runs on the read path. A warning emitted there would be the loudest line in the
+// log; a map lookup that misses on every call would be a silent cost.
 type PricingManager struct {
-	config      PricingConfig
+	config PricingConfig
+
+	// region is the region rates are read for: config.Region if awsrates has a table for it,
+	// otherwise awsrates.DefaultRegion. Never empty.
+	region string
+
 	logger      *slog.Logger
 	lastUpdated time.Time
 }
 
-// NewPricingManager creates a new pricing manager
+// NewPricingManager creates a new pricing manager.
+//
+// An unset PricingConfig.Region means [awsrates.DefaultRegion], quietly — that is the documented
+// default rather than a mistake. A region that is set but has no published rates gets a warning
+// naming both it and the region actually used, because that case is an operator asking for something
+// specific and not getting it. #161's acceptance criterion is exactly this: "an unknown region falls
+// back to us-east-1 with a warning rather than returning zero".
 func NewPricingManager(config PricingConfig, logger *slog.Logger) *PricingManager {
 	if config.Currency == "" {
 		config.Currency = DefaultCurrency
 	}
-	if config.Region == "" {
-		config.Region = "us-east-1" // Default pricing region
+
+	region := config.Region
+
+	switch {
+	case region == "":
+		region = awsrates.DefaultRegion
+	case !awsrates.HasRegion(region):
+		logger.Warn("no published S3 rates for the configured pricing region; "+
+			"every cost this mount reports will be another region's list prices",
+			"pricing_config.region", region,
+			"using", awsrates.DefaultRegion,
+			"known_regions", len(awsrates.Regions()),
+			"hint", "if AWS has added the region since this build, regenerate the rate table with "+
+				"`go generate ./internal/awsrates/...`; otherwise set pricing_config.custom_pricing")
+
+		region = awsrates.DefaultRegion
 	}
 
 	if config.UsePricingAPI {
@@ -64,8 +100,28 @@ func NewPricingManager(config PricingConfig, logger *slog.Logger) *PricingManage
 
 	return &PricingManager{
 		config: config,
+		region: region,
 		logger: logger,
 	}
+}
+
+// Region returns the region rates are read for, which is not always PricingConfig.Region.
+//
+// It is [awsrates.DefaultRegion] when the configured region is unset or has no published rates. A
+// caller rendering a cost figure should label it with this rather than with the configured value.
+func (pm *PricingManager) Region() string { return pm.region }
+
+// StorageRate returns the list storage rate for a tier in this manager's region, before discounts.
+//
+// For callers that need the storage rate alone and would otherwise reach for a package-level table.
+// It exists because that is what the removed StorageTierInfo.CostPerGBMonth field was doing: a
+// map built at package init cannot see a region, so every reader of it got us-east-1's price no
+// matter what the configuration said. Use [PricingManager.GetTierPricing] for anything that should
+// include discounts and overrides.
+func (pm *PricingManager) StorageRate(tier string) float64 {
+	rate, _ := awsrates.ForRegion(pm.region, tier)
+
+	return rate.StoragePerGBMonth
 }
 
 // GetTierPricing returns pricing for a specific tier with discounts applied
@@ -80,12 +136,11 @@ func (pm *PricingManager) GetTierPricing(tier string) (TierPricing, error) {
 	return pm.applyDiscounts(tier, pm.getDefaultPricing(tier)), nil
 }
 
-// getDefaultPricing returns the built-in rate table for a tier.
+// getDefaultPricing returns the built-in rate table for a tier, in this manager's region.
 //
-// Every rate comes from [awsrates], which is verified against the live AWS Pricing API. They are
-// us-east-1 list prices for the first volume band, intended for relative cost comparison between
-// tiers rather than for billing reconciliation — an operator with negotiated rates, or outside
-// us-east-1, should set CustomPricing.
+// Every rate comes from [awsrates], generated from AWS's published price list. They are list prices
+// for the first volume band, intended for relative cost comparison between tiers rather than for
+// billing reconciliation — an operator with negotiated rates should set CustomPricing.
 //
 // This function used to hold its own copies of the request and retrieval rates, in per-1,000 units
 // that it divided down at return. That is where #209's defect lived: Standard PUT was written as
@@ -101,10 +156,13 @@ func (pm *PricingManager) getDefaultPricing(tier string) TierPricing {
 		tierInfo = StorageTiers[TierStandard]
 	}
 
-	rate, known := awsrates.For(tier)
+	// pm.region is already resolved to a region awsrates knows, so a false here is about the tier
+	// alone — which is worth a warning, since the number returned is then Standard's.
+	rate, known := awsrates.ForRegion(pm.region, tier)
 	if !known {
 		pm.logger.Warn("no rate for storage tier; reporting Standard's prices for it",
 			"tier", tier,
+			"region", pm.region,
 			"fallback", TierStandard)
 	}
 
@@ -228,11 +286,16 @@ func (pm *PricingManager) RefreshPricing(_ context.Context) error {
 	return nil
 }
 
-// GetPricingSummary returns a summary of current pricing configuration
+// GetPricingSummary returns a summary of current pricing configuration.
+//
+// Region is the region the rates in it are from, which is what a reader needs in order to know what
+// the numbers mean. ConfiguredRegion is what the operator asked for, and the two differ exactly when
+// the configured region has no published rates — see [NewPricingManager].
 func (pm *PricingManager) GetPricingSummary() PricingSummary {
 	summary := PricingSummary{
 		UsePricingAPI:      pm.config.UsePricingAPI,
-		Region:             pm.config.Region,
+		Region:             pm.region,
+		ConfiguredRegion:   pm.config.Region,
 		Currency:           pm.config.Currency,
 		LastUpdated:        pm.lastUpdated,
 		EnterpriseDiscount: pm.config.DiscountConfig.EnterpriseDiscount,
@@ -258,8 +321,22 @@ func (pm *PricingManager) GetPricingSummary() PricingSummary {
 
 // PricingSummary provides a summary of pricing configuration
 type PricingSummary struct {
-	UsePricingAPI      bool                          `json:"use_pricing_api"`
-	Region             string                        `json:"region"`
+	UsePricingAPI bool `json:"use_pricing_api"`
+
+	// Region is the region the rates in TierPricing come from.
+	//
+	// Read this, not ConfiguredRegion, when labeling a figure. The field used to hold the
+	// configured value while the rates were unconditionally us-east-1's, which made this summary the
+	// one place in the repo that actively asserted something false: `region: us-west-2` above
+	// us-east-1 numbers.
+	Region string `json:"region"`
+
+	// ConfiguredRegion is pricing_config.region as the operator set it, empty if unset.
+	//
+	// Differs from Region only when the configured region has no published rates. Carried so that
+	// case is visible in a report rather than only in a startup warning someone may not have kept.
+	ConfiguredRegion string `json:"configured_region,omitempty"`
+
 	Currency           string                        `json:"currency"`
 	LastUpdated        time.Time                     `json:"last_updated"`
 	EnterpriseDiscount float64                       `json:"enterprise_discount"`

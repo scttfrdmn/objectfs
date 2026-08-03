@@ -184,6 +184,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops at `ExecStart=... \` and skips everything after it, so `--mount-point` and `--foreground` went
   unchecked — verified by mutation, changing `--mount-point` to `--mountpoint` left the test passing.
 
+- **Region-aware S3 pricing, generated from AWS's published price list rather than typed in** ([#161]).
+  `internal/awsrates` now holds 36 regions × 8 storage classes × 6 rates, produced by
+  `go generate ./internal/awsrates/...` from the public per-region offer files. Those files need **no
+  credentials**, so anyone can refresh every number in one command, and the accessors are
+  `ForRegion(region, class)` and `AllForRegion(region)` — with the us-east-1 forms kept for callers
+  comparing tiers, where only the ratio matters.
+
+  Nothing on the mount path fetches anything: the table is compiled in, so pricing a tier needs no
+  network and cannot fail a filesystem operation. That constraint is what makes the whole approach
+  usable, and a test clears every AWS credential environment variable and asserts it holds.
+
+  The offer file, not the Pricing API, is the source. The API needs credentials and would pull
+  `aws-sdk-go-v2/service/pricing` into the module, whose transitive requirement moves `smithy-go`
+  under the S3 client that serves every read and write — dependency risk on the data path in order to
+  price a tier. The offer files also avoid three traps the API presents, each verified against live
+  data rather than assumed: `productFamily` is absent from 315 of us-east-1's 381 S3 products, so
+  filtering on it silently drops SKUs; filtering Deep Archive storage by `volumeType` returns a
+  **staging SKU at 21× the real rate**; and `us-west-2` is not a pricing endpoint, but the SDK's
+  resolver templates any well-formed region into an opaque DNS failure rather than saying so.
+
+- **`internal/awsrates/offerfile`, the extraction rules as ordinary tested Go rather than a script
+  someone ran once.** Every rule in it exists because the obvious version returns a plausible number
+  from the wrong SKU, and each has a test named for the case that forced it:
+  - **The region's usagetype prefix is derived, never assumed.** `USE1`, `USW2`, `APS8` are not region
+    codes and have no published mapping, so the prefix is recovered structurally from the Standard
+    storage product. us-east-1's prefix is the **empty string**, which is a case in its own right: a
+    derivation bug returning `""` everywhere looks correct there, and us-east-1 is the default region
+    and the fallback for every unknown one.
+  - **Suffixes match exactly, never with `strings.HasSuffix`.** `Tables-`, `Annotation-`, `Files-` and
+    `Vectors-TimedStorage-ByteHrs` all end in the Standard storage usagetype and all cost more. Found
+    by mutation: swapping the exact comparison for a suffix match survived the entire suite, because
+    the Standard query is shielded by its own `volumeType` clause. A probe of all 27 lookups found the
+    single query where the exact match is load-bearing — Intelligent-Tiering storage, where
+    `Tables-TimedStorage-INT-FA-ByteHrs` sits at $0.0265 against the correct $0.023 — and that is now
+    the case the test asserts.
+  - **An ambiguous query is an error, not a coin flip.** Where two SKUs on one query publish different
+    prices at the same band, extraction fails and names both SKUs, rather than returning whichever the
+    map iteration reached.
+  - **Egress comes from the `AWSDataTransfer` file, keyed on `fromLocation`.** S3's own
+    `DataTransfer-Out-Bytes` usagetype is the Multi-Region Access Point routing charge, not internet
+    egress, and the transfer file publishes a $0.00 free-tier SKU on the same four attributes as the
+    real one — so taking the lowest match prices every byte leaving the region as free.
+
+  The package went from no tests to 89.9%, `internal/awsrates` from 76.2% to 100%, and the generator
+  from no tests to 74.4%. `internal/awsrates/offerfile/offertest` builds the fixtures all three suites
+  share, so a rule is stated once rather than transcribed per suite.
+
 ### Changed
 
 - **The release security scan is a gate** ([#196]). `security-scan` in `release.yml` already scanned
@@ -221,6 +268,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   baseline was clean before switching that gate on, which is the check being described.
 
 ### Fixed
+
+- **`pricing.region` selected nothing, so every cost figure was us-east-1's, labelled with whatever
+  region the operator configured** ([#161]). The rates lived in a map built at package init, and package
+  init cannot see a configuration. `PricingConfig.Region` was read at exactly one line in
+  `internal/storage/s3` — a summary field — while every number came from the region-blind map, and the
+  assertion covering it compared a rate to itself, so it passed for eleven releases.
+
+  That is worse than an unlabelled figure. `region: sa-east-1` above us-east-1 prices reads as correct,
+  and sa-east-1 storage is **76% more expensive** than us-east-1's — an operator sizing a deployment
+  there was reading a number 43% below what they would be billed. The spread across the fleet is
+  material in both directions: Standard runs $0.0225/GB-month in ap-east-2, $0.023 in us-east-1 and
+  us-west-2, $0.0245 in eu-central-1, and $0.0405 in sa-east-1.
+
+  Rates are now generated for **36 regions × 8 storage classes × 6 fields** from AWS's public price
+  list offer files, and `PricingManager` resolves each lookup through the configured region. A region
+  with no published table falls back to us-east-1 and *says so* — one warning at construction naming
+  the configured region, the region actually used, and what to do about it, rather than one per object
+  access. `PricingSummary` now carries both, so a cost report cannot label us-east-1's numbers with a
+  region that produced none of them.
+
+  `StorageTierInfo.CostPerGBMonth` is gone rather than corrected; see **Removed**.
+
+- **Glacier's PUT price was the price of thawing an object, 67% too high.** `Requests-Tier3` at
+  $0.00005 is `RestoreObject`; a Glacier PUT is `Requests-GLACIER-Tier1` with `operation: PutObject` at
+  $0.00003. The cause is worth recording because it is not arithmetic: **`usagetype` is not a unique
+  key for an AWS rate.** `Requests-Tier3` carries three SKUs at two prices, `Standard-Retrieval-Bytes`
+  two at two, and `Requests-GLACIER-Tier1` fifteen at two, separated only by the `operation` attribute.
+  A query that omits it returns whichever price Go's map iteration reached first — a wrong number that
+  changes between runs.
+
+  The integration test that existed to catch exactly this agreed with the defect, because it spelled
+  the same query a second time by hand. Two transcriptions of one intent check each other, not the
+  intent. It now drives its queries from the single place that defines them and compares the whole
+  committed table against a fresh extraction, field by field.
 
 - **A bucket name one character long reported "is 1 characters".** `s3://b` is what someone types
   while testing, so the singular arm is a message operators read, and a grammatical error in an error
@@ -686,6 +767,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same technique that found the `INTELLIGENT_TIERING` default in v0.10.1, and the reason the seam test
   exists at all.
 
+- **The live pricing drift test needs no AWS credentials and no longer names its own queries** ([#161]).
+  It fetched from the Pricing API by shelling out to `aws pricing get-products`, so it skipped for
+  anyone without a configured profile — including CI. A drift check that skips is not a drift check. It
+  now fetches the same public offer files the generator reads, over plain HTTPS, and compares the whole
+  committed table against a fresh extraction across five regions spanning every price band AWS
+  publishes. `internal/cost`'s drift guard moves onto `PricingManager.StorageRate` for the same reason:
+  the field it read no longer exists, and the manager is the path a caller actually takes.
+
+### Removed
+
+- **`StorageTierInfo.CostPerGBMonth`** ([#161]). A rate on a package-level struct cannot know which
+  region it is for, and this field was the mechanism by which every cost `internal/storage/s3` reported
+  was us-east-1's. Callers use `PricingManager.StorageRate(tier)` for the list rate in the manager's
+  region, or `GetTierPricing` where discounts and overrides should apply.
+
+  Removed rather than corrected, deliberately. Leaving the field and filling it from the configured
+  region would put a region-specific number on a value shared process-wide by every manager, which is
+  the same defect with an extra step. The compiler now finds the callers.
+
+- **`awsrates.Region`** ([#161]). A constant alias for `awsrates.DefaultRegion`, added in the same
+  change that made rates region-aware and kept so that callers wanting only to *label* a figure would
+  keep compiling. There were no such callers: a grep across every `.go` file in the repository found
+  zero uses. `awsrates` is an internal package, so nothing outside the module can reference it either,
+  and a deprecation notice nobody can read is not a compatibility measure. Use `DefaultRegion`, or pass
+  a region to `ForRegion`.
+
 [scttfrdmn/cargoship#352]: https://github.com/scttfrdmn/cargoship/issues/352
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
 [#134]: https://github.com/scttfrdmn/objectfs/issues/134
@@ -695,6 +802,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#159]: https://github.com/scttfrdmn/objectfs/issues/159
 [#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
+[#161]: https://github.com/scttfrdmn/objectfs/issues/161
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
