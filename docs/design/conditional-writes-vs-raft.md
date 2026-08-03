@@ -1,6 +1,9 @@
 # S3 Conditional Writes as a Coordination Primitive
 
-**Status:** evaluation complete, recommendation below is not yet implemented
+**Status:** **adopted 2026-08-03.** The recommendation below is the project's direction. The Raft
+build-out is closed ([#128], [#130], [#133], [#151]) and the CAS work is filed ([#282], [#283],
+[#284], [#285]) — see [§5, Consequences](#5-consequences), which records two corrections found while
+acting on it.
 **Issue:** [#169](https://github.com/scttfrdmn/objectfs/issues/169)
 
 ## Recommendation, first
@@ -272,7 +275,30 @@ one a feature-flag approach would never notice.
 
 ## 5. Consequences
 
-### If adopted
+### Adopted — what actually happened
+
+This section was written as "if adopted." It was adopted on 2026-08-03, and acting on it surfaced two
+corrections to what is below. Both are recorded here rather than silently edited into the lists,
+because a plan that turns out to have been slightly wrong is more useful with the correction visible
+than with the seam smoothed over.
+
+1. **The closure list of four below is incomplete — it should have named
+   [#150](https://github.com/scttfrdmn/objectfs/issues/150)** (`BboltPersistentState` /
+   `BboltConsensusLog`). That issue's own premise is *"the `ConsensusLog` and `PersistentState`
+   interfaces were defined in A1-1 and A1-3"* — i.e. #128 and #130, both closed here — so nothing
+   remains for it to implement. It would also have added `go.etcd.io/bbolt` and a
+   `/var/lib/objectfs` data path for durable Raft storage, neither of which CAS needs, since
+   coordination state lives in S3 objects guarded by `If-Match`. It is **still open**, flagged rather
+   than closed, because it was outside the approved set.
+2. **The `doc.go` correction below was already done** before adoption. Grep for `Linearizable`
+   returns nothing.
+
+One finding worth carrying into item 3 of the "Opened" list: **`ConsistencySession` and
+`ConsistencyEventual` are now nearly the same function.** Both execute on `targetNodes[0]` and then
+`replicateAsync` the remainder; session's only distinguishing feature is a comment promising it will
+"try to use the same node for related operations," and no session state exists to make that true. So
+the taxonomy is not merely three levels differing in PUT count — it is three names for two
+behaviours, one of which is mislabeled.
 
 **Closed as not-the-direction** (the Raft build-out, ~4 issues):
 
@@ -296,36 +322,55 @@ one a feature-flag approach would never notice.
 - [#206](https://github.com/scttfrdmn/objectfs/issues/206) — gossip message authentication. A real
   security defect either way.
 
-**Opened:**
+Also note [#131](https://github.com/scttfrdmn/objectfs/issues/131) has since landed, so
+`selectConsistentHash` is a real rendezvous/HRW ring and no longer `nodes[:count]`.
 
-1. `Backend.PutObjectIf` plus the two sentinel errors and the S3 implementation, with the
-   capability probe. The unit of work §3 sketches.
-2. A lease type built on it — acquire, renew, release, and the rule that **every guarded action
-   re-asserts the CAS** rather than trusting a prior check. The ceiling's item 2 is the whole reason
-   this is its own issue and not a footnote on the first.
-3. Replace `executeStrongConsistency`'s N-redundant-PUT fan-out with a single conditional write, and
-   delete the `ConsistencyStrong` / `ConsistencySession` / `ConsistencyEventual` taxonomy or redefine
-   it against what the code does. It currently offers three levels that differ in how many identical
-   PUTs are issued.
-4. Verify conditional-write semantics against a real MinIO and a real Wasabi endpoint, since §4 rests
-   on a source read for one and nothing for the other.
+**Opened** — filed as [#282], [#283], [#284], [#285] respectively:
 
-### Correcting `doc.go` regardless
+1. [#282] — `Backend.PutObjectIf` plus the two sentinel errors and the S3 implementation, with the
+   capability probe. The unit of work §3 sketches. Blocks the other three.
+2. [#283] — A lease type built on it — acquire, renew, release, and the rule that **every guarded
+   action re-asserts the CAS** rather than trusting a prior check. The ceiling's item 2 is the whole
+   reason this is its own issue and not a footnote on the first.
+3. [#284] — Replace `executeStrongConsistency`'s N-redundant-PUT fan-out with a single conditional
+   write, and delete the `ConsistencyStrong` / `ConsistencySession` / `ConsistencyEventual` taxonomy
+   or redefine it against what the code does. It currently offers three levels that differ in how
+   many identical PUTs are issued. Coordinates with
+   [#129](https://github.com/scttfrdmn/objectfs/issues/129), which proposes promoting that taxonomy
+   into `pkg/types`, and [#144](https://github.com/scttfrdmn/objectfs/issues/144), which is defined
+   entirely in terms of it.
+4. [#285] — Verify conditional-write semantics against a real MinIO and a real Wasabi endpoint, since
+   §4 rests on a source read for one and nothing for the other.
 
-`internal/distributed/doc.go:64` claims "Linearizable operations across cluster" under Strong
-Consistency. That is inaccurate on today's code whichever direction is chosen — N identical PUTs to
-one key, accepted on a majority, is a reachability signal. This is fixed as part of adopting the
-recommendation, but it is not contingent on it.
+[#128]: https://github.com/scttfrdmn/objectfs/issues/128
+[#130]: https://github.com/scttfrdmn/objectfs/issues/130
+[#133]: https://github.com/scttfrdmn/objectfs/issues/133
+[#151]: https://github.com/scttfrdmn/objectfs/issues/151
+[#282]: https://github.com/scttfrdmn/objectfs/issues/282
+[#283]: https://github.com/scttfrdmn/objectfs/issues/283
+[#284]: https://github.com/scttfrdmn/objectfs/issues/284
+[#285]: https://github.com/scttfrdmn/objectfs/issues/285
 
-### If not adopted
+### `doc.go` — done before adoption
+
+`internal/distributed/doc.go:64` claimed "Linearizable operations across cluster" under Strong
+Consistency. That was inaccurate on today's code whichever direction was chosen — N identical PUTs to
+one key, accepted on a majority, is a reachability signal — so it was fixed without waiting for the
+decision. Grep for `Linearizable` returns nothing.
+
+### The road not taken
+
+Kept as written, because the case against a decision is worth preserving next to the decision — and
+because if CAS hits the ceiling in §2, this is where the alternative is already costed. This describes
+what *would* have followed from declining; it did not happen.
 
 The Raft direction is coherent and the issues are well-specified; nothing here says it *cannot* be
-built. The cost is roughly: a persistent log with fsync-before-ack ([#130](https://github.com/scttfrdmn/objectfs/issues/130)),
-a real state machine with apply semantics, real proposal broadcast, and the test infrastructure to
-show that a partitioned or restarted node cannot elect a second leader in one term — against a
-problem whose state already lives in a service with 11 nines of durability that every node can reach.
+built. The cost is roughly: a persistent log with fsync-before-ack ([#130]), a real state machine with
+apply semantics, real proposal broadcast, and the test infrastructure to show that a partitioned or
+restarted node cannot elect a second leader in one term — against a problem whose state already lives
+in a service with 11 nines of durability that every node can reach.
 
-The reason to decide now rather than later is that the decision gets more expensive with every issue
-in the [#128](https://github.com/scttfrdmn/objectfs/issues/128)–[#133](https://github.com/scttfrdmn/objectfs/issues/133)
-series that lands. Today the sunk cost is ~6,000 lines that, per §1, elects leaders and replicates
-nothing.
+The reason to decide now rather than later was that the decision gets more expensive with every issue
+in the [#128]–[#133] series that lands. At the time of the decision the sunk cost was ~6,000 lines
+that, per §1, elects leaders and replicates nothing. That code is still there: closing the issues
+stopped the build-out, it did not remove what exists. [#284] is where the first of it comes out.

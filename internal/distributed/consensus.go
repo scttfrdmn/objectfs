@@ -12,7 +12,17 @@ import (
 	"time"
 )
 
-// ConsensusEngine implements a Raft-like consensus algorithm for leader election
+// ConsensusEngine elects a leader using Raft's election mechanics — terms, votes, and a randomized
+// election timeout — over gossip. It is not a consensus engine in the sense the name implies: the log
+// below holds one bootstrap noop plus one entry per election win, applyLogEntry has three empty arms,
+// and nothing appends an operation entry. Leader election works and is tested (#279); replication
+// does not exist.
+//
+// It is not going to. #169 concluded that Raft has nothing to replicate here — nodes hold no
+// authoritative state, the bucket does — and the CAS direction was adopted on 2026-08-03, closing
+// #128 (the log interface), #130 (persistent state), #133 (proposal broadcast) and #151 (compaction).
+// The log, commitIndex, lastApplied, nextIndex and matchIndex fields serve the election only; #284 is
+// where the unused machinery comes out.
 type ConsensusEngine struct {
 	mu          sync.RWMutex
 	cluster     *ClusterManager

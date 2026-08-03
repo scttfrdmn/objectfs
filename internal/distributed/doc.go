@@ -12,9 +12,18 @@ the coordination mechanisms needed for multi-node deployments.
 Read [#Consistency Levels] before relying on anything here. The short version is that the consensus
 engine elects leaders and replicates nothing — applyLogEntry has three empty arms and no caller
 appends an operation entry — and that the coordinator's data path calls the backend directly without
-consulting the log, the commit index, the term, or leadership. Whether that gets built out as Raft or
-replaced by per-key conditional writes is the open question in
-docs/design/conditional-writes-vs-raft.md (#169).
+consulting the log, the commit index, the term, or leadership.
+
+That is not going to be built out. As of 2026-08-03 the direction is per-key S3 compare-and-swap:
+docs/design/conditional-writes-vs-raft.md (#169) was adopted, on the grounds that Raft replicates a
+log so N nodes can agree on state they each hold a copy of, and these nodes hold no such state — the
+bucket does. The Raft issues are closed (#128, #130, #133, #151) and the replacement is filed as #282
+(Backend.PutObjectIf), #283 (a lease over it), #284 (removing the fan-out and this taxonomy) and #285
+(verifying non-AWS backends).
+
+So what is below describes code that exists and will shrink, not a design being completed. The
+consistency levels in particular are on their way out via #284; gossip-based membership and leader
+election stay.
 
 Architecture
 
@@ -308,11 +317,18 @@ the first value ever received, so anything reading them was reading a snapshot o
 
 Leader Election:
 
-	// Automatic leader election using Raft-inspired consensus
-	// Leader handles:
+	// Automatic leader election over gossip, with terms and votes.
+	// A leader is elected and is used for:
 	// - Cluster-wide operations
-	// - Configuration changes
-	// - Quorum decisions
+	//
+	// Configuration changes and quorum decisions were listed here and are not implemented:
+	// broadcastProposal never sent a proposal (it slept and accepted its own), and #133 was
+	// closed rather than fixed because proposals are a consensus concept and consensus is not
+	// the direction (#169).
+	//
+	// Leadership is a hint, not a guard. A leader that loses its network still believes it
+	// leads, so an action that matters must re-assert its own precondition at the backend
+	// rather than trusting IsLeader() — that is what #283's lease is for.
 
 A cluster of one elects itself, within one election timeout of [ClusterManager.Start] and without any
 message being sent. That is worth stating because until v0.11.0 it did not: the majority comparison
@@ -430,10 +446,12 @@ and optimization planned for post-v0.2.0.
 
 Planned for future releases:
 - SWIM-based gossip protocol
-- Multi-Raft for better scalability
 - Cross-datacenter replication
 - Dynamic sharding
-- Consistent snapshots
+
+"Multi-Raft for better scalability" and "consistent snapshots" were listed here and have been
+removed rather than reworded: both presuppose the replicated log that #169 concluded there is nothing
+to put in. Coordination is per-key compare-and-swap against the bucket (#282, #283).
 
 Example: Complete Cluster Setup
 
