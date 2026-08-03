@@ -40,6 +40,7 @@ const (
 // Configuration represents the complete application configuration
 type Configuration struct {
 	Global      GlobalConfig      `yaml:"global"`
+	Mount       MountConfig       `yaml:"mount"`
 	Storage     StorageConfig     `yaml:"storage"`
 	Performance PerformanceConfig `yaml:"performance"`
 	Cache       CacheConfig       `yaml:"cache"`
@@ -159,6 +160,36 @@ type FUSEConfig struct {
 type GlobalConfig struct {
 	LogLevel string `yaml:"log_level"`
 	LogFile  string `yaml:"log_file"`
+}
+
+// MountConfig names what to mount and where, for an invocation that cannot pass them as arguments.
+//
+// New in v0.11.0, and it exists because of a shape a command line cannot express. A systemd template
+// unit is instantiated per bucket — `systemctl start objectfs@research-data` — and the only thing the
+// unit file knows about the instance is `%i`. `configs/systemd/objectfs@.service` therefore ran
+//
+//	ExecStart=/usr/bin/objectfs mount --config ${OBJECTFS_CONFIG} --foreground
+//
+// with no URI and no mount point anywhere on the line (#134, #135). There was no `mount` subcommand
+// either, so the unit failed at exec; but adding one would not have been enough, because a unit that
+// serves every instance from one template has nowhere to put a per-instance bucket except the
+// per-instance config file that `%i` already selects.
+//
+// Both keys stay optional and the command line wins. `objectfs mount s3://bucket /mnt` needs no config
+// file at all, and a file that names a bucket can still be pointed at a different one for a one-off
+// without editing it. What is refused is silence: a mount with neither a URI on the line nor one in the
+// file fails naming both places, rather than defaulting to something.
+type MountConfig struct {
+	// URI is the object storage URI to mount, in the same form the command line takes: `s3://bucket`
+	// or `s3://bucket/prefix`. Validated by the same code that validates the argument, so a scheme
+	// this build cannot mount is rejected at config load rather than at mount.
+	URI string `yaml:"uri"`
+
+	// MountPoint is the directory to mount on. Empty means it must come from the command line.
+	//
+	// It is not defaulted to anything. A wrong mount point is not a mount that fails — it is a mount
+	// that succeeds somewhere the operator is not looking, over whatever was already there.
+	MountPoint string `yaml:"mount_point"`
 }
 
 // PerformanceConfig represents performance-related settings.
@@ -1242,6 +1273,53 @@ func (c *Configuration) Validate() error {
 
 	if err := validateEncryptionConfig(c.Security.Encryption); err != nil {
 		return err
+	}
+
+	if err := validateMountConfig(c.Mount); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateMountConfig checks what the mount block names, when it names anything.
+//
+// Both keys are optional — the command line supplies them for an interactive mount — so an empty block
+// is valid and says only "these come from the argument list". What is checked is a value that is
+// present and unusable, and the point of checking it here is *when*: a systemd template unit reads this
+// file to learn which bucket the instance mounts (#134), so a typo in `mount.uri` would otherwise be
+// discovered by whichever S3 call ran first, after the mount point already existed, with a message that
+// names neither the file nor the key.
+func validateMountConfig(cfg MountConfig) error {
+	if cfg.URI != "" {
+		if err := awsname.ValidateStorageURI(cfg.URI); err != nil {
+			return fmt.Errorf("mount.uri is invalid: %w", err)
+		}
+	}
+
+	if cfg.MountPoint == "" {
+		return nil
+	}
+
+	// Only the shape is checked, not the directory. Whether the path exists, is a directory, and is
+	// empty is `objectfs mount`'s question and is asked there — those answers change between config load
+	// and mount, and a systemd unit's ExecStartPre creates the directory after the config is read.
+	if !filepath.IsAbs(cfg.MountPoint) {
+		return fmt.Errorf("mount.mount_point is %q, which is relative; a mount point read from a "+
+			"config file has no reliable working directory to be relative to — a systemd unit's is "+
+			"whatever WorkingDirectory happens to be — so it must be absolute", cfg.MountPoint)
+	}
+
+	if cfg.MountPoint != filepath.Clean(cfg.MountPoint) {
+		return fmt.Errorf("mount.mount_point is %q; write it as %q. A path containing \"..\" or a "+
+			"doubled separator is the one shape worth refusing rather than cleaning, because the "+
+			"cleaned form is what gets mounted over and the operator would be reading the other one",
+			cfg.MountPoint, filepath.Clean(cfg.MountPoint))
+	}
+
+	if cfg.MountPoint == "/" {
+		return fmt.Errorf("mount.mount_point is \"/\"; mounting over the root filesystem is not " +
+			"something ObjectFS will do")
 	}
 
 	return nil

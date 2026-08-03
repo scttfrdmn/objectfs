@@ -13,6 +13,7 @@ import (
 	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 
 	"github.com/scttfrdmn/objectfs/internal/awsname"
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
 )
 
 func TestStorageTiers(t *testing.T) {
@@ -77,8 +78,18 @@ func TestStorageTiers(t *testing.T) {
 				t.Errorf("Expected embargo %v, got %v", tt.expectedEmbargo, tierInfo.DeletionEmbargo)
 			}
 
-			if tierInfo.CostPerGBMonth != tt.expectedCost {
-				t.Errorf("Expected cost %f, got %f", tt.expectedCost, tierInfo.CostPerGBMonth)
+			// The rate is asked of a pricing manager rather than read off tierInfo, which no longer
+			// carries one. That is the #161 change in one line: a rate on a package-level struct
+			// cannot know which region it is for, and this assertion passed for eleven releases
+			// while pricing_config.region selected nothing.
+			//
+			// us-east-1 explicitly, so the expected values above stay checkable against AWS's
+			// pricing page. The regional table is exercised by TestPricingRegionSelectsTheRates.
+			pm := NewPricingManager(PricingConfig{Region: "us-east-1"},
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+			if got := pm.StorageRate(tt.tier); got != tt.expectedCost {
+				t.Errorf("Expected us-east-1 cost %f, got %f", tt.expectedCost, got)
 			}
 		})
 	}
@@ -267,7 +278,7 @@ func TestTierValidator(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	t.Run("Standard Tier Validation", func(t *testing.T) {
-		validator := NewTierValidator(TierStandard, TierConstraints{}, logger)
+		validator := NewTierValidator(awsrates.DefaultRegion, TierStandard, TierConstraints{}, logger)
 
 		// Should allow any size object
 		err := validator.ValidateWrite("test.txt", 1)
@@ -283,7 +294,7 @@ func TestTierValidator(t *testing.T) {
 	})
 
 	t.Run("Standard-IA Tier Validation", func(t *testing.T) {
-		validator := NewTierValidator(TierStandardIA, TierConstraints{}, logger)
+		validator := NewTierValidator(awsrates.DefaultRegion, TierStandardIA, TierConstraints{}, logger)
 
 		// Allowed, and this assertion is the reverse of what it used to be. AWS's 128 KiB minimum is a
 		// billing floor, not an API restriction: S3 stores a 1 KiB STANDARD_IA object and bills it as
@@ -320,7 +331,7 @@ func TestTierValidator(t *testing.T) {
 			MinObjectSize:   256 * 1024,          // 256KB custom minimum
 			DeletionEmbargo: 60 * 24 * time.Hour, // 60 days custom embargo
 		}
-		validator := NewTierValidator(TierStandardIA, constraints, logger)
+		validator := NewTierValidator(awsrates.DefaultRegion, TierStandardIA, constraints, logger)
 
 		// Should use custom minimum size
 		err := validator.ValidateWrite("test.txt", 128*1024) // 128KB < 256KB custom minimum
@@ -400,7 +411,7 @@ func TestTierRecommendations(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
 
-				validator := NewTierValidator(tc.tier, TierConstraints{}, logger)
+				validator := NewTierValidator(awsrates.DefaultRegion, tc.tier, TierConstraints{}, logger)
 
 				got := recommendsStandard(validator.GetRecommendations(tc.size, "unknown"))
 				if got != tc.want {
@@ -412,7 +423,7 @@ func TestTierRecommendations(t *testing.T) {
 	})
 
 	t.Run("Access Pattern Recommendations", func(t *testing.T) {
-		validator := NewTierValidator(TierStandard, TierConstraints{}, logger)
+		validator := NewTierValidator(awsrates.DefaultRegion, TierStandard, TierConstraints{}, logger)
 
 		// Infrequent access should recommend IA tiers
 		recommendations := validator.GetRecommendations(1024*1024, "infrequent") // 1MB
@@ -439,13 +450,31 @@ func TestStorageClassConversion(t *testing.T) {
 	}
 }
 
+// TestTierCostCalculation asserts that 100 GB on Standard costs what AWS charges for it.
+//
+// This test used to read a rate off StorageTiers, multiply it by 100, and check that the product
+// equaled 100 × 0.023 — an identity that holds for whatever number the field happens to hold, so it
+// could not fail. It now asks the manager, which is the path a caller takes, and names the region the
+// $0.023 belongs to. #161: the field it read was filled at package init and could not see a region.
 func TestTierCostCalculation(t *testing.T) {
-	// Test cost calculation
-	standardTier := StorageTiers[TierStandard]
-	expectedCost := 100.0 * standardTier.CostPerGBMonth // 100GB
+	t.Parallel()
 
-	if expectedCost != 100.0*0.023 {
-		t.Errorf("Expected cost calculation %f, got %f", 100.0*0.023, expectedCost)
+	pm := NewPricingManager(PricingConfig{Region: "us-east-1"},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	const (
+		sizeGB      = 100.0
+		wantPerGB   = 0.023 // S3 Standard, us-east-1, first 50 TB band
+		wantForSize = sizeGB * wantPerGB
+		tolerance   = 1e-9
+	)
+
+	if got := pm.StorageRate(TierStandard); got != wantPerGB {
+		t.Fatalf("us-east-1 Standard storage rate = %v, want %v per GB-month", got, wantPerGB)
+	}
+
+	if got := sizeGB * pm.StorageRate(TierStandard); got-wantForSize > tolerance || wantForSize-got > tolerance {
+		t.Errorf("%vGB on Standard = $%v/month, want $%v", sizeGB, got, wantForSize)
 	}
 }
 
@@ -482,9 +511,25 @@ func TestStorageTiersCoversEveryStorageClass(t *testing.T) {
 			t.Errorf("StorageTiers[%q] has no Name, so logs and reports identify the tier as \"\"",
 				class)
 		}
-		if info.CostPerGBMonth <= 0 {
-			t.Errorf("StorageTiers[%q] has CostPerGBMonth %v; no S3 class is free, and a zero rate "+
-				"makes every cost estimate for this tier read as $0", class, info.CostPerGBMonth)
+		// The rate no longer lives on StorageTiers — see the type's comment — so the same "no S3
+		// class is free" property is asserted where the rate does live. awsrates is keyed by region
+		// as well as class, so a class missing there is missing for every region; checking the
+		// default one is enough to catch it, and the value has to be positive in all of them for the
+		// generated table to be usable at all.
+		//
+		// The !ok arm below is unreachable while the init assertion in tiers.go stands — that panics
+		// on the same condition before any test runs, and mutation-testing it confirms the panic
+		// wins the race. It is kept as the arm a reader lands on if that assertion is ever relaxed to
+		// a warning, since a panic in init is the kind of thing someone softens under deadline.
+		rate, ok := awsrates.For(class)
+		if !ok {
+			t.Errorf("awsname admits storage class %q and StorageTiers has an entry for it, but "+
+				"internal/awsrates has no rate, so every cost reported for this tier is "+
+				"Standard's price", class)
+		} else if rate.StoragePerGBMonth <= 0 {
+			t.Errorf("awsrates rate for %q has StoragePerGBMonth %v; no S3 class is free, and a "+
+				"zero rate makes every cost estimate for this tier read as $0",
+				class, rate.StoragePerGBMonth)
 		}
 		if info.RecommendedUseCase == "" {
 			t.Errorf("StorageTiers[%q] has no RecommendedUseCase, which is what GetRecommendations "+
@@ -597,7 +642,7 @@ func TestNewTierValidatorFallsBackToStandard(t *testing.T) {
 
 	// The digit-one typo. awsname.ValidateStorageClass rejects it at config load; anything that
 	// bypasses the loader lands here.
-	validator := NewTierValidator("STANDARD_1A", TierConstraints{}, logger)
+	validator := NewTierValidator(awsrates.DefaultRegion, "STANDARD_1A", TierConstraints{}, logger)
 
 	info := validator.GetTierInfo()
 	if info.Name != StorageTiers[TierStandard].Name {

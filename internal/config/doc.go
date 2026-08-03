@@ -230,9 +230,11 @@ settings were and were not reloadable. None of it exists — not the function, n
 the distinction — and the example was not valid Go (it opened with a bare `:=`), which is a good
 sign that nothing had ever compiled it.
 
-Be aware of the related trap this created: SIGHUP does not reload configuration. The binary
-registers it and treats any signal as a shutdown request, so sending SIGHUP to ask for a reload
-unmounts the filesystem instead. See the README.
+Be aware of the related trap this created: SIGHUP does not reload configuration. It used to be worse
+than that — the binary registered SIGHUP alongside SIGINT and SIGTERM and treated any of the three as
+a shutdown request, so sending SIGHUP to ask for a reload unmounted the filesystem. It is no longer
+registered at all, so Go's default disposition applies and the process dies without the unmount path
+running. Either way, there is nothing to reload; see the README.
 
 # Default Configuration
 

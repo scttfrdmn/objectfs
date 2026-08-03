@@ -122,7 +122,223 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache, and there is not one `NotifyContent`, `NotifyEntry`, or `NotifyInvalInode` call in the
   repository — enabling it would convert bounded staleness into permanent staleness.
 
+- **Subcommands: `objectfs mount`, `objectfs unmount`, `objectfs version`, `objectfs help`**
+  ([#134]). `unmount` is spelled both ways, since `umount` is what a decade of muscle memory types.
+
+  `objectfs unmount /mnt/s3` is the one that did not exist before and had to. Unmounting was
+  previously "signal the mount process", which a systemd unit's `ExecStop` cannot do once that
+  process is already gone, so the shipped unit called `fusermount3 -u` directly — a program that is
+  absent on a minimal image and spelled `fusermount` on libfuse 2, and whose failure in either case
+  reaches systemd as a bare exit status. The subcommand tries the libfuse 3 helper, the libfuse 2
+  helper, `umount`, and finally `umount(2)`, and when none works it reports which ran, which were not
+  installed, and the `lsof +D` invocation that names whatever is holding the mount open. None of the
+  candidates unmounts lazily or forcibly, and a test asserts that no candidate ever passes `-z`,
+  `-l`, or `-f`: those detach the name while the filesystem keeps serving open files, so they report
+  a finished unmount with writes in flight — and adding one would make every other unmount test pass,
+  which is why the prohibition is a test rather than a comment.
+
+  **The form without a subcommand still works and is not deprecated.** It is what every invocation
+  written before this release looks like, including the ones in scripts nobody will revisit. A first
+  argument carrying a URI scheme or a leading dash routes to `mount`; a bare word that is not a
+  command is a usage error naming itself, so `objectfs moutn s3://b /mnt` does not become an attempt
+  to mount a bucket called `moutn`.
+
+  Flags now come before positionals, because Go's `flag` package stops parsing at the first non-flag
+  argument — `objectfs mount s3://b /mnt --foreground` left `--foreground` as a third positional and
+  silently did not apply it. Each subcommand gets its own `FlagSet` for the same reason:
+  `flag.CommandLine` cannot parse a flag that appears after a positional at all.
+
+  New: `--mount-point`, so a mount point can come from a flag instead of a positional, and
+  `--foreground`, which names what already happens — ObjectFS does not fork, and the flag exists
+  because init systems and scripts pass it and refusing it would break invocations that are correct
+  about the behaviour. Exit codes are now defined: `0` succeeded, `1` the command was right and the
+  operation failed, `2` the command line was wrong and nothing was attempted.
+
+  `main()` is three lines around `run(args, stdout, stderr) int`, which is what makes any of this
+  testable: it previously called `log.Fatalf` directly, and `log.Fatalf` calls `os.Exit`, which takes
+  the test binary with it. `cmd/objectfs` therefore has a coverage floor for the first time (77%),
+  replacing a note in `.coverage-floors` that recorded the package as untestable.
+
+- **The systemd template unit mounts and unmounts the way the binary actually works** ([#135]).
+  `configs/systemd/objectfs@.service` now runs
+  `objectfs mount --config /etc/objectfs/%i.yaml --mount-point /mnt/objectfs/%i --foreground` and
+  stops with `objectfs unmount /mnt/objectfs/%i`. What it replaces was valid systemd and wrong in
+  four ways: `ExecStart=... s3://%i /mnt/objectfs/%i` made the instance name and the bucket name one
+  string, which fails for a prefix, for two mounts of one bucket, or for a bucket whose name is not a
+  legal unit instance; `ExecStop=/bin/fusermount3 -u` is the single-helper call described above;
+  `Restart=always` remounted a filesystem after a clean `systemctl stop`; and `RequiresMountsFor` on
+  the unit's own mount point asked systemd to wait for the mount this unit creates. `TimeoutStopSec`
+  is now stated rather than inherited, because that is the flush window — SIGTERM makes the mount
+  process unmount, which writes buffered ranges to S3, and too short a value there is a SIGKILL
+  through buffered data.
+
+  Two gates, checking different things. `TestSystemdUnit*` in `internal/config` parses the unit's
+  `Exec*` lines through the same parser the documentation gate uses and checks every subcommand and
+  flag against the sets scraped from `cmd/objectfs/main.go` — so a flag renamed in the binary breaks
+  the unit's test, and no list is maintained by hand. A `systemd-unit` CI job additionally runs
+  `systemd-analyze verify` on `objectfs@example.service` for the half a Go test cannot check. Neither
+  alone would have caught the old unit: `systemd-analyze` passes it, and a Go test cannot tell whether
+  `RequiresMountsFor` means what its author thought.
+
+  Found while writing the Go half: joining `\` continuations is load-bearing. A loop over raw lines
+  stops at `ExecStart=... \` and skips everything after it, so `--mount-point` and `--foreground` went
+  unchecked — verified by mutation, changing `--mount-point` to `--mountpoint` left the test passing.
+
+- **Region-aware S3 pricing, generated from AWS's published price list rather than typed in** ([#161]).
+  `internal/awsrates` now holds 36 regions × 8 storage classes × 6 rates, produced by
+  `go generate ./internal/awsrates/...` from the public per-region offer files. Those files need **no
+  credentials**, so anyone can refresh every number in one command, and the accessors are
+  `ForRegion(region, class)` and `AllForRegion(region)` — with the us-east-1 forms kept for callers
+  comparing tiers, where only the ratio matters.
+
+  Nothing on the mount path fetches anything: the table is compiled in, so pricing a tier needs no
+  network and cannot fail a filesystem operation. That constraint is what makes the whole approach
+  usable, and a test clears every AWS credential environment variable and asserts it holds.
+
+  The offer file, not the Pricing API, is the source. The API needs credentials and would pull
+  `aws-sdk-go-v2/service/pricing` into the module, whose transitive requirement moves `smithy-go`
+  under the S3 client that serves every read and write — dependency risk on the data path in order to
+  price a tier. The offer files also avoid three traps the API presents, each verified against live
+  data rather than assumed: `productFamily` is absent from 315 of us-east-1's 381 S3 products, so
+  filtering on it silently drops SKUs; filtering Deep Archive storage by `volumeType` returns a
+  **staging SKU at 21× the real rate**; and `us-west-2` is not a pricing endpoint, but the SDK's
+  resolver templates any well-formed region into an opaque DNS failure rather than saying so.
+
+- **`internal/awsrates/offerfile`, the extraction rules as ordinary tested Go rather than a script
+  someone ran once.** Every rule in it exists because the obvious version returns a plausible number
+  from the wrong SKU, and each has a test named for the case that forced it:
+  - **The region's usagetype prefix is derived, never assumed.** `USE1`, `USW2`, `APS8` are not region
+    codes and have no published mapping, so the prefix is recovered structurally from the Standard
+    storage product. us-east-1's prefix is the **empty string**, which is a case in its own right: a
+    derivation bug returning `""` everywhere looks correct there, and us-east-1 is the default region
+    and the fallback for every unknown one.
+  - **Suffixes match exactly, never with `strings.HasSuffix`.** `Tables-`, `Annotation-`, `Files-` and
+    `Vectors-TimedStorage-ByteHrs` all end in the Standard storage usagetype and all cost more. Found
+    by mutation: swapping the exact comparison for a suffix match survived the entire suite, because
+    the Standard query is shielded by its own `volumeType` clause. A probe of all 27 lookups found the
+    single query where the exact match is load-bearing — Intelligent-Tiering storage, where
+    `Tables-TimedStorage-INT-FA-ByteHrs` sits at $0.0265 against the correct $0.023 — and that is now
+    the case the test asserts.
+  - **An ambiguous query is an error, not a coin flip.** Where two SKUs on one query publish different
+    prices at the same band, extraction fails and names both SKUs, rather than returning whichever the
+    map iteration reached.
+  - **Egress comes from the `AWSDataTransfer` file, keyed on `fromLocation`.** S3's own
+    `DataTransfer-Out-Bytes` usagetype is the Multi-Region Access Point routing charge, not internet
+    egress, and the transfer file publishes a $0.00 free-tier SKU on the same four attributes as the
+    real one — so taking the lowest match prices every byte leaving the region as free.
+
+  The package went from no tests to 89.9%, `internal/awsrates` from 76.2% to 100%, and the generator
+  from no tests to 74.4%. `internal/awsrates/offerfile/offertest` builds the fixtures all three suites
+  share, so a rule is stated once rather than transcribed per suite.
+
+### Changed
+
+- **The release security scan is a gate** ([#196]). `security-scan` in `release.yml` already scanned
+  the exact binary `publish` attaches, which is the right shape, but it could not fail: trivy-action's
+  `exit-code` has no default, so findings uploaded as SARIF and the step passed. It now exits 1 on
+  `HIGH,CRITICAL`, with `ignore-unfixed: true` and `scanners: vuln`.
+
+  Each of those is a decision rather than a default. MEDIUM and below still upload and stay visible on
+  the security tab without stopping a publish, because MEDIUM in a transitive dependency of a
+  filesystem binary is generally not worth delaying a release for. `ignore-unfixed` because a
+  vulnerability with no released fix cannot be actioned by a release — blocking on one means the
+  project cannot ship until an upstream maintainer acts, which is an availability problem wearing a
+  security posture. And the SARIF upload is now `if: always()`, so the findings that failed the step
+  are the ones that reach the security tab; without it a HIGH stopped the job before the upload and
+  left whoever was cutting the release with an exit code and no way to see the cause.
+
+  It was not a gate before now for a reason worth keeping, because it is the same reason it can be one
+  now: the first real run of this scan found a MODERATE advisory in the pinned `aws-sdk-go-v2` ([#195]),
+  and switching the gate on then would have blocked every release on a scan nobody had triaged. A gate
+  turned on against existing findings is a broken build everyone learns to bypass. That advisory is
+  fixed and the baseline is clean, which is the only state in which turning it on means anything.
+
+  The asymmetry the issue names is resolved toward gating: `govulncheck` in `security.yml` exits
+  non-zero and so has always been a hard gate on `main` and every PR, while the release — the artifact
+  users actually download — was not gated at all. The repository-wide `trivy fs` scan in that file is
+  deliberately still not a gate, and now says so: it reports on the source tree rather than on what
+  ships, including dependencies reached only by tests, so the gates are `govulncheck` and the binary
+  scan. It picks up the same severity floor and `ignore-unfixed` regardless, so a finding in one place
+  means what a finding in the other means.
+
+- **`klauspost/compress` v1.18.0 → v1.18.7**, for GO-2026-5841, an out-of-bounds read in the `s2`
+  package. Not reachable from this code — `govulncheck` reported it under "packages you import" with
+  zero called vulnerabilities — but present in the module the binary is built from, which is what a
+  binary scan sees and what the new release gate above would have failed on. Found while verifying the
+  baseline was clean before switching that gate on, which is the check being described.
+
 ### Fixed
+
+- **The compressed-upload bypass is pinned by a test that asserts the routing, not just its result**
+  ([#153]). The corruption itself was fixed in 0.10.1 — a compressed object no longer goes through the
+  CargoShip transporter, which cannot set `Content-Encoding` — but the test covering it asserted only
+  that the stored object carried the header. That is the property users need and it is one step removed
+  from the mechanism: it would also pass if the transporter had acquired header support, and it would
+  keep passing if the bypass were replaced by anything else that happened to produce a correct object.
+
+  The new test asserts which upload path ran, using the `cargoship-created-by` metadata the transporter
+  stamps on everything it uploads. It has a control half that is equally load-bearing: a 1 KiB object,
+  below the compression threshold, **must** carry the stamp. Without that half the test would pass on a
+  build where the transporter never runs at all, silently measuring a disabled feature instead of the
+  bypass. Both halves were verified by mutation — removing the bypass fails the assertion, and disabling
+  CargoShip fails the control.
+
+  Filed upstream as [scttfrdmn/cargoship#353]: `Archive` has no field that maps to `Content-Encoding`,
+  and neither transporter sets the header, still true in v0.20.0. `CompressionType` looks like the field
+  and is not — `buildMetadata` puts it in user metadata. Until that lands, ObjectFS gives up CargoShip's
+  throughput for exactly the objects that compressed.
+
+- **Two gosec findings the security check reported but `lint` did not.** There are two gosec runs in
+  CI reading different suppression directives: golangci-lint's honors `//nolint:gosec`, while the
+  standalone gosec whose SARIF becomes GitHub code scanning honors only `#nosec`. Both sites already
+  carried a reasoned `//nolint`, so `lint` passed at 0 issues and the `gosec` check failed with two new
+  alerts. Neither finding is real — the generator writes committed Go source holding published list
+  prices, and the unmount helper spawns no shell, takes its program from a fixed platform table, and
+  passes the mount point as one argv element — so both now carry `#nosec` alongside, with a note that
+  the duplication is about two tools rather than two risks. Verified by installing the same gosec the
+  workflow uses, reproducing both findings, and confirming an unsuppressed `0o644` write in the same
+  function is still reported, so the suppression is line-scoped rather than file-wide. Six other sites
+  have the same gap and are open code-scanning alerts today; filed as [#264] rather than swept, since
+  each needs its own judgment about whether the finding is real.
+
+- **`pricing.region` selected nothing, so every cost figure was us-east-1's, labeled with whatever
+  region the operator configured** ([#161]). The rates lived in a map built at package init, and package
+  init cannot see a configuration. `PricingConfig.Region` was read at exactly one line in
+  `internal/storage/s3` — a summary field — while every number came from the region-blind map, and the
+  assertion covering it compared a rate to itself, so it passed for eleven releases.
+
+  That is worse than an unlabelled figure. `region: sa-east-1` above us-east-1 prices reads as correct,
+  and sa-east-1 storage is **76% more expensive** than us-east-1's — an operator sizing a deployment
+  there was reading a number 43% below what they would be billed. The spread across the fleet is
+  material in both directions: Standard runs $0.0225/GB-month in ap-east-2, $0.023 in us-east-1 and
+  us-west-2, $0.0245 in eu-central-1, and $0.0405 in sa-east-1.
+
+  Rates are now generated for **36 regions × 8 storage classes × 6 fields** from AWS's public price
+  list offer files, and `PricingManager` resolves each lookup through the configured region. A region
+  with no published table falls back to us-east-1 and *says so* — one warning at construction naming
+  the configured region, the region actually used, and what to do about it, rather than one per object
+  access. `PricingSummary` now carries both, so a cost report cannot label us-east-1's numbers with a
+  region that produced none of them.
+
+  `StorageTierInfo.CostPerGBMonth` is gone rather than corrected; see **Removed**.
+
+- **Glacier's PUT price was the price of thawing an object, 67% too high.** `Requests-Tier3` at
+  $0.00005 is `RestoreObject`; a Glacier PUT is `Requests-GLACIER-Tier1` with `operation: PutObject` at
+  $0.00003. The cause is worth recording because it is not arithmetic: **`usagetype` is not a unique
+  key for an AWS rate.** `Requests-Tier3` carries three SKUs at two prices, `Standard-Retrieval-Bytes`
+  two at two, and `Requests-GLACIER-Tier1` fifteen at two, separated only by the `operation` attribute.
+  A query that omits it returns whichever price Go's map iteration reached first — a wrong number that
+  changes between runs.
+
+  The integration test that existed to catch exactly this agreed with the defect, because it spelled
+  the same query a second time by hand. Two transcriptions of one intent check each other, not the
+  intent. It now drives its queries from the single place that defines them and compares the whole
+  committed table against a fresh extraction, field by field.
+
+- **A bucket name one character long reported "is 1 characters".** `s3://b` is what someone types
+  while testing, so the singular arm is a message operators read, and a grammatical error in an error
+  message reads as a message nobody has looked at. The test now asserts both arms of the sentence
+  rather than the substring after them.
 
 - **The read-ahead trim is covered by tests rather than by luck.** `inflightFetches.unclaimedStart`
   and the arm of `performPrefetch` that drops a prefetch whose whole range is already in flight had no
@@ -583,11 +799,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same technique that found the `INTELLIGENT_TIERING` default in v0.10.1, and the reason the seam test
   exists at all.
 
+- **The live pricing drift test needs no AWS credentials and no longer names its own queries** ([#161]).
+  It fetched from the Pricing API by shelling out to `aws pricing get-products`, so it skipped for
+  anyone without a configured profile — including CI. A drift check that skips is not a drift check. It
+  now fetches the same public offer files the generator reads, over plain HTTPS, and compares the whole
+  committed table against a fresh extraction across five regions spanning every price band AWS
+  publishes. `internal/cost`'s drift guard moves onto `PricingManager.StorageRate` for the same reason:
+  the field it read no longer exists, and the manager is the path a caller actually takes.
+
+### Removed
+
+- **`StorageTierInfo.CostPerGBMonth`** ([#161]). A rate on a package-level struct cannot know which
+  region it is for, and this field was the mechanism by which every cost `internal/storage/s3` reported
+  was us-east-1's. Callers use `PricingManager.StorageRate(tier)` for the list rate in the manager's
+  region, or `GetTierPricing` where discounts and overrides should apply.
+
+  Removed rather than corrected, deliberately. Leaving the field and filling it from the configured
+  region would put a region-specific number on a value shared process-wide by every manager, which is
+  the same defect with an extra step. The compiler now finds the callers.
+
+- **`awsrates.Region`** ([#161]). A constant alias for `awsrates.DefaultRegion`, added in the same
+  change that made rates region-aware and kept so that callers wanting only to *label* a figure would
+  keep compiling. There were no such callers: a grep across every `.go` file in the repository found
+  zero uses. `awsrates` is an internal package, so nothing outside the module can reference it either,
+  and a deprecation notice nobody can read is not a compatibility measure. Use `DefaultRegion`, or pass
+  a region to `ForRegion`.
+
 [scttfrdmn/cargoship#352]: https://github.com/scttfrdmn/cargoship/issues/352
+[scttfrdmn/cargoship#353]: https://github.com/scttfrdmn/cargoship/issues/353
+[#153]: https://github.com/scttfrdmn/objectfs/issues/153
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
+[#264]: https://github.com/scttfrdmn/objectfs/issues/264
+[#134]: https://github.com/scttfrdmn/objectfs/issues/134
+[#135]: https://github.com/scttfrdmn/objectfs/issues/135
+[#195]: https://github.com/scttfrdmn/objectfs/issues/195
+[#196]: https://github.com/scttfrdmn/objectfs/issues/196
 [#159]: https://github.com/scttfrdmn/objectfs/issues/159
 [#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
+[#161]: https://github.com/scttfrdmn/objectfs/issues/161
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
@@ -860,7 +1110,7 @@ the far side of a seam agrees with its caller by construction. `internal/testaws
 - **The differential-oracle fuzz job no longer OOM-kills its own workers and blames an innocent input.** `go test -fuzz` runs one worker *process* per CPU, and each is a separate Go runtime that sizes its heap against the whole machine, because none of them knows the other three exist. `FuzzOperationSequence` allocates hard — every iteration is a real read-modify-write over a real HTTP endpoint — so four workers reached 6 GB of RSS within four seconds and the cgroup killed one. What `go test` reported was **"fuzzing process hung or terminated unexpectedly while minimizing: EOF"**, naming whichever input the dead worker happened to be holding and writing it to `testdata/fuzz/`, which is what makes this failure mode so misleading: the recorded inputs all replay green, because none of them was ever the problem. Two consecutive CI runs failed this way and the first was written off as runner preemption — the giveaway was 24 seconds of `execs: 1443 (0/sec)` with all four workers producing nothing, then recovery, which is page thrash rather than a hang. `GOMEMLIMIT=768MiB` per worker fixes it, and the memory was garbage the collector had no pressure signal to reclaim rather than live data, so capping it costs nothing and gives back the time that was going into thrash: **24,679 execs and 48 new interesting inputs in 60 s, against 1443 execs and 3 in the run that died.** Peak 3.2 GB against the runner's 16 GB
 - **The health endpoint no longer binds a fixed port during tests, and its handler is tested at all.** Eight tests in `internal/health` started a `Monitor` whose default `Config` enables the HTTP endpoint on port **8081**, so each `Start` raced its siblings for one port: the first won and the rest took `startHTTPServer`'s bind-error arm. How many did was a matter of goroutine scheduling, which made the package's measured coverage a function of machine load — 45.0% idle, 44.7% under CI's — so a per-package floor set from the luckier run failed CI while passing locally, over two statements nothing had deliberately tested. Meanwhile the endpoint an operator, a Kubernetes liveness probe, or a load balancer actually reads had **never served a request in a test**: its only coverage came from tests *failing* to reach it. The bind is now separated from the serving so a test can supply a listener on port 0; tests not about the endpoint no longer open one; and the handler is pinned on the property a probe depends on — 200 with a passing check, 503 with a failing one, the failing check named in the body — along with the port actually being released on `Stop` and the bind failure staying non-fatal, because a health endpoint is observability and taking a mount down over a diagnostic port inverts the priority. Coverage is now 48.5% at every `-cpu` value from 1 to 8
 - **`internal/network`'s Linux congestion-control code is testable without writing to package state.** The procfs paths were package-level variables so a test could redirect them, which meant every case that did so was un-parallelizable — a subtest would have raced the variable its sibling had just assigned — and being un-parallelizable is a lint failure under this repo's own test conventions. They are constants again and the readers take the path as a parameter, so all six tests are parallel. This surfaced the more general trap it came from: **`golangci-lint` on macOS never compiled the file at all**, since it is `//go:build linux`, so a local run reporting `0 issues.` had inspected none of it and CI reported eleven. Linting the other platform is `GOOS=linux golangci-lint run`, and it reproduces CI exactly
-- **The Prometheus endpoint is now actually served.** `monitoring.metrics.enabled: true` and `global.metrics_port: 8080` were both honoured as far as constructing the counters, and the collector's `Start` — the method that binds the listener — was never called. So every operation was recorded into a registry nothing could read: a scrape got connection refused, while the mount logged nothing amiss. Both SDKs' metrics calls, every documented Prometheus and Grafana example, and the whole of `docs/monitoring` were describing an endpoint that did not exist. A collector with no listener gathers identically to one with a listener — the field is non-nil either way and only an HTTP request distinguishes them, which is why this survived a release and why deleting the call had left the adapter's tests green. The binding moved into an `Adapter.startMetrics` method for that reason and not for tidiness: `Start`'s remaining steps need a bucket, a mountable directory and a FUSE-capable kernel, so no test that went through `Start` could reach step 1 at all
+- **The Prometheus endpoint is now actually served.** `monitoring.metrics.enabled: true` and `global.metrics_port: 8080` were both honored as far as constructing the counters, and the collector's `Start` — the method that binds the listener — was never called. So every operation was recorded into a registry nothing could read: a scrape got connection refused, while the mount logged nothing amiss. Both SDKs' metrics calls, every documented Prometheus and Grafana example, and the whole of `docs/monitoring` were describing an endpoint that did not exist. A collector with no listener gathers identically to one with a listener — the field is non-nil either way and only an HTTP request distinguishes them, which is why this survived a release and why deleting the call had left the adapter's tests green. The binding moved into an `Adapter.startMetrics` method for that reason and not for tidiness: `Start`'s remaining steps need a bucket, a mountable directory and a FUSE-capable kernel, so no test that went through `Start` could reach step 1 at all
 - **The custom labels an operator configures are attached to the exported series.** `monitoring.metrics.custom_labels` was carried from YAML through `config.MetricsConfig`, mapped into `metrics.Config.Labels` — and then `initMetrics` never read the field, so a Prometheus scraping several nodes received series identical in every label and had no way to tell them apart. Along with it, `Namespace` defaulted to empty where the docs, the SDKs and every dashboard expect `objectfs`: the exported name was `operations_total`, not `objectfs_operations_total`. A label whose name collides with one of a metric's own dimensions (`operation`, `status`, `type`, `level`) is now rejected at collector construction, naming the offender, rather than failing later inside a registration error
 - **Both SDKs can parse a scrape.** The Python and TypeScript metrics parsers split each exposition line on its first space and used the left half as the metric name — which for any real ObjectFS series yields `objectfs_cache_requests_total{service="objectfs",type="hit"}`, name and label block fused into one string that no lookup could match. Independently, the extractors above them looked up `cache_hits`, `objectfs_cache_hits_total`, `objectfs_io_read_operations_total`, `objectfs_network_requests_total`, `objectfs_storage_operations_total` and `objectfs_cluster_nodes`, none of which any version of ObjectFS has ever exported. Two bugs, each masking the other: fixing the parser alone still finds nothing, and fixing the names alone has nothing to look them up in. Both parsers are now label-aware — label values are escaped strings, so they are scanned character by character rather than split on `,`, and the closing brace is found from the right, since a comma, a quote or a `}` inside an error message in a label value is data. A parsed scrape is a **list** of samples rather than a map keyed by name, because a name identifies a family and not a series: `hit` and `miss` are two samples of one name and a map silently keeps whichever came last
 - **A cache hit rate of zero is reported, and an unmeasured one is not.** The derivation was guarded by `if (hits && misses)`, false whenever hits is 0 — precisely the case an operator most needs the number for, a cache being asked and never answering, which was v0.10.0's actual live state since `RecordCacheHit` had no caller. It is now guarded on the request count, and omitted entirely when there have been no requests: an idle mount having served none is a different fact from a hit rate of zero, and reporting `0.0` for it reads as a cache that never hits

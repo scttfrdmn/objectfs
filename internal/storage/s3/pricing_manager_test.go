@@ -63,8 +63,12 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 			t.Fatalf("Failed to get tier pricing: %v", err)
 		}
 
-		// Should use default pricing with enterprise discount
-		defaultCost := StorageTiers[TierStandardIA].CostPerGBMonth
+		// Should use default pricing with enterprise discount.
+		//
+		// The undiscounted rate is asked of the same manager, in its own region. It used to be read
+		// off StorageTiers, which held a rate filled at package init — so this comparison was
+		// always against us-east-1 no matter what region the manager resolved.
+		defaultCost := manager.StorageRate(TierStandardIA)
 		expectedCost := defaultCost * 0.9 // 10% discount
 		if pricing.StorageCostPerGBMonth != expectedCost {
 			t.Errorf("Expected storage cost %f, got %f", expectedCost, pricing.StorageCostPerGBMonth)
@@ -221,8 +225,8 @@ func TestPricingManager_DefaultPricing(t *testing.T) {
 			t.Fatalf("Failed to get tier pricing: %v", err)
 		}
 
-		// Should match default storage tier info
-		expectedCost := StorageTiers[TierStandard].CostPerGBMonth
+		// Should match the manager's own storage rate for the tier, with no discounts configured.
+		expectedCost := manager.StorageRate(TierStandard)
 		if pricing.StorageCostPerGBMonth != expectedCost {
 			t.Errorf("Expected storage cost %f, got %f", expectedCost, pricing.StorageCostPerGBMonth)
 		}
@@ -467,8 +471,13 @@ func TestDefaultPricingHoldsThePublishedRequestPrices(t *testing.T) {
 		{TierOneZoneIA, "PUT", 0.01, 1_000, "$0.01 per 1,000 PUT to One Zone-Infrequent Access"},
 		{TierGlacierIR, "PUT", 0.02, 1_000, "$0.02 per 1,000 PUT to Glacier Instant Retrieval"},
 		{TierGlacierIR, "GET", 0.1, 10_000, "$0.1 per 10,000 GET from Glacier Instant Retrieval"},
-		{TierGlacier, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle requests to Glacier"},
-		{TierDeepArchive, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle requests to Deep Archive"},
+		// $0.03, not the $0.05 this line asserted until the generated rate table disagreed with
+		// it. Both were reading Requests-Tier3 operation=RestoreObject — a *thaw*, 67% above the
+		// write — and this test passed because it checked a table built from the same query.
+		{TierGlacier, "PUT", 0.03, 1_000, "$0.03 per 1,000 PUT requests to Glacier Flexible Retrieval"},
+
+		// Deep Archive genuinely is the lifecycle rate: AWS publishes no PUT usagetype for it.
+		{TierDeepArchive, "PUT", 0.05, 1_000, "$0.05 per 1,000 Lifecycle Transition requests into Deep Archive"},
 		{TierIntelligent, "PUT", 0.005, 1_000, "$0.005 per 1,000 PUT to Intelligent-Tiering"},
 	}
 

@@ -90,9 +90,18 @@ type StorageTierInfo struct {
 	MinimumStorageDays int           `json:"minimum_storage_days"`
 	RecommendedUseCase string        `json:"recommended_use_case"`
 
-	// CostPerGBMonth is the us-east-1 list price in USD, filled in from [awsrates] rather than
-	// written in the literal below. See withRates.
-	CostPerGBMonth float64 `json:"cost_per_gb_month"`
+	// There is deliberately no rate field here. This struct describes what a tier *does* — its
+	// billing floor, its per-object overhead, how long a restore takes — and every one of those is
+	// the same in every AWS region. A price is not, and a price on a struct that names no region is
+	// how region came to be decorative in this package.
+	//
+	// It did carry CostPerGBMonth, filled at package init by a withRates helper from
+	// [awsrates.For]. Package init cannot see a configuration, so the rate was us-east-1's by
+	// construction and every caller reading it got a us-east-1 figure no matter what
+	// PricingConfig.Region said — including GetTierCostEstimate, the tier-configured log line, and
+	// GetRecommendations' Standard baseline. Removing the field is what makes the region reach
+	// them; see [PricingManager.GetTierPricing] and [PricingManager.StorageRate], which take the
+	// region from the manager's own config. #161.
 }
 
 // Sizes AWS states in KB, spelled in binary KiB.
@@ -144,15 +153,18 @@ func ArchiveOverhead(tier string) (archiveBytes, standardBytes int64) {
 	return archiveOverheadGlacierKB, archiveOverheadStandardKB
 }
 
-// StorageTiers holds the per-tier constraints and list price for every S3 storage class.
+// StorageTiers holds the per-tier constraints for every S3 storage class.
 //
-// The literal carries the tier *constraints* — minimum size, embargo, retrieval latency — which are
-// S3 behavior and belong here. It deliberately does not carry CostPerGBMonth: rates are the one
-// thing this table used to state for itself, and stating them here made it the third of five copies
-// of the S3 rate card in this repo. Two of the five disagreed by a factor of ten, so what a write
-// cost depended on which package the caller reached for. withRates reads each rate from
-// [awsrates] instead, which is the only table checked against the live AWS Pricing API.
-var StorageTiers = withRates(map[string]StorageTierInfo{
+// Constraints only — minimum size, embargo, retrieval latency — which are S3 behavior and are the
+// same everywhere AWS runs. It carries no rate, for two reasons that arrived a release apart. Rates
+// were the one thing this table used to state for itself, and stating them made it the third of five
+// copies of the S3 rate card in this repo; two of the five disagreed by a factor of ten, so what a
+// write cost depended on which package the caller reached for. Then, once the rates were read from
+// [awsrates] by a withRates helper, the remaining problem was that a package-level map is built
+// before any configuration exists — so the rate in it was always us-east-1's. Both are the same
+// mistake at different scopes: a price stored where nothing can say which region or which discount
+// schedule produced it. Ask [PricingManager] for money; ask this for behavior.
+var StorageTiers = map[string]StorageTierInfo{
 	TierStandard: {
 		Name:               "Standard",
 		MinObjectSize:      0,
@@ -236,44 +248,50 @@ var StorageTiers = withRates(map[string]StorageTierInfo{
 		MinimumStorageDays:         0,
 		RecommendedUseCase:         "Automatic cost optimization for changing access patterns",
 	},
-})
+}
 
-// withRates fills in CostPerGBMonth for every tier from [awsrates], and panics if any tier has no
-// rate there.
+// init asserts that every tier in StorageTiers has a rate in [awsrates].
 //
-// The panic is deliberate and it is at init time, which is the only point where this can be a build
-// failure rather than a wrong number in a cost report. The alternative — leaving the field zero —
-// prices that tier at $0/GB-month, and a cost estimate of zero does not look like a missing entry.
-// It looks like free storage, which is a plausible-enough answer to survive review. awsrates covers
-// every class in awsname.StorageClasses and TestStorageTiersCoversEveryStorageClass pins this map to
-// the same set, so reaching the panic means one of those two invariants has just been broken by the
-// change being compiled.
-func withRates(tiers map[string]StorageTierInfo) map[string]StorageTierInfo {
-	for class, info := range tiers {
-		rate, ok := awsrates.For(class)
-		if !ok {
+// The panic is deliberate and it is at init time, which is the only point where this can be a startup
+// failure rather than a wrong number in a cost report. A tier with no rate prices at whatever
+// awsrates' fallback returns, and a cost estimate that is quietly another tier's price does not look
+// like a missing entry — it looks like an answer. awsrates covers every class in
+// awsname.StorageClasses and TestStorageTiersCoversEveryStorageClass pins this map to the same set,
+// so reaching this panic means one of those two invariants has just been broken by the change being
+// compiled.
+//
+// It used to be a withRates helper that both checked this and copied each rate into a
+// CostPerGBMonth field. The field is gone — see [StorageTierInfo] — and the check is not, because the
+// check was never the part that needed a field to live in.
+func init() {
+	for class := range StorageTiers {
+		if _, ok := awsrates.For(class); !ok {
 			panic(fmt.Sprintf("s3: StorageTiers has an entry for %q but internal/awsrates has no rate "+
 				"for it; add one there rather than writing a literal here, or every cost reported for "+
-				"this tier is $0", class))
+				"this tier is another tier's price", class))
 		}
-
-		info.CostPerGBMonth = rate.StoragePerGBMonth
-		tiers[class] = info
 	}
-
-	return tiers
 }
 
 // TierValidator validates operations against storage tier constraints
 type TierValidator struct {
 	tier        string
+	region      string
 	constraints TierConstraints
 	tierInfo    StorageTierInfo
 	logger      *slog.Logger
 }
 
-// NewTierValidator creates a new tier validator
-func NewTierValidator(tier string, constraints TierConstraints, logger *slog.Logger) *TierValidator {
+// NewTierValidator creates a new tier validator for a tier in a pricing region.
+//
+// region is the pricing region — PricingConfig.Region, not necessarily the bucket's region — and it is
+// only read by [TierValidator.GetRecommendations], which compares this tier's storage rate against
+// Standard's. An empty region, or one AWS publishes no rates for, falls back to
+// [awsrates.DefaultRegion] with a warning: the crossover size at which STANDARD becomes cheaper than
+// a tier's billing minimum moves with the ratio of the two rates, and that ratio is not the same
+// everywhere. It is 0.543 in us-east-1 and 0.309 in sa-east-1 for STANDARD_IA, so a recommendation
+// computed against the wrong region's rates changes at the wrong size.
+func NewTierValidator(region, tier string, constraints TierConstraints, logger *slog.Logger) *TierValidator {
 	tierInfo, exists := StorageTiers[tier]
 	if !exists {
 		// Default to Standard tier if unknown
@@ -281,8 +299,22 @@ func NewTierValidator(tier string, constraints TierConstraints, logger *slog.Log
 		tier = TierStandard
 	}
 
+	if region == "" {
+		region = awsrates.DefaultRegion
+	} else if !awsrates.HasRegion(region) {
+		logger.Warn("no published S3 rates for this pricing region; tier recommendations will use "+
+			"another region's prices",
+			"region", region,
+			"using", awsrates.DefaultRegion,
+			"hint", "regenerate the rate table with `go generate ./internal/awsrates/...` if AWS has "+
+				"added the region, or set pricing_config.custom_pricing")
+
+		region = awsrates.DefaultRegion
+	}
+
 	return &TierValidator{
 		tier:        tier,
+		region:      region,
 		constraints: constraints,
 		tierInfo:    tierInfo,
 		logger:      logger,
@@ -429,19 +461,29 @@ func (tv *TierValidator) GetTierInfo() StorageTierInfo {
 // crossover is at minBillable × rateTier / rateStandard. Advice nobody can act on wrongly is still
 // advice someone will act on.
 //
-// This is the recommendation form, so it compares list rates from StorageTierInfo.CostPerGBMonth
-// rather than the discounted prices a deployment pays — the CostOptimizer holds the discounts and the
-// validator does not have one. That makes it slightly conservative where an operator has a negotiated
-// rate, which is the safe direction for a suggestion.
+// This is the recommendation form, so it compares list rates from [awsrates] for the validator's
+// pricing region rather than the discounted prices a deployment pays — the CostOptimizer holds the
+// discounts and the validator does not have one. That makes it slightly conservative where an operator
+// has a negotiated rate, which is the safe direction for a suggestion.
+//
+// Both rates come from the same region, which is the property that matters here. The comparison is a
+// ratio, so mixing regions would be worse than using the wrong one consistently: the crossover size
+// would then be computed from a numerator and denominator that no operator anywhere pays.
 func (tv *TierValidator) GetRecommendations(objectSize int64, accessFrequency string) []string {
 	recommendations := make([]string, 0, 3)
 
 	// Size-based recommendation: only when this tier has a billing floor, the object is under it, and
 	// STANDARD is genuinely cheaper at list rates.
 	if minBillable := tv.tierInfo.MinObjectSize; minBillable > 0 && objectSize < minBillable {
-		standardRate := StorageTiers[TierStandard].CostPerGBMonth
+		// The bools are discarded because both keys are already known good: NewTierValidator
+		// resolved the region and substituted a known tier, and TierStandard is a constant this
+		// package pins to awsname.
+		tierRate, _ := awsrates.ForRegion(tv.region, tv.tier)
+		stdRate, _ := awsrates.ForRegion(tv.region, TierStandard)
 
-		billedOnTier := float64(minBillable) * tv.tierInfo.CostPerGBMonth
+		standardRate := stdRate.StoragePerGBMonth
+
+		billedOnTier := float64(minBillable) * tierRate.StoragePerGBMonth
 		billedOnStandard := float64(objectSize) * standardRate
 
 		if billedOnStandard < billedOnTier {

@@ -35,12 +35,30 @@ const (
 // the field documentation, including which retrieval speed and volume band each figure represents.
 type Price = awsrates.Rate
 
-// DefaultPrices is the built-in rate table, read from [awsrates].
+// DefaultPrices is the built-in rate table for [awsrates.DefaultRegion], read from [awsrates].
 //
 // It is a function of the canonical table rather than a literal, so it cannot drift from it. The
 // previous literal claimed in its own comment to "match the values in internal/storage/s3/tiers.go
 // and pricing_manager.go" and did not — which is the argument against comments that assert
 // agreement between two tables instead of removing one of them.
+//
+// # It is us-east-1's table, and that is a decision rather than an oversight
+//
+// #161 made rates region-aware and plumbed the region through internal/storage/s3, which is on the
+// mount path. This package was left region-blind, for two reasons that should be checked rather than
+// assumed if either changes:
+//
+//   - Nothing imports it. `grep` for this package's import path across every non-test .go file in the
+//     repository returns no hits, so no cost figure it produces reaches an operator today. Plumbing a
+//     region through an unreachable package would be untested by construction — the region argument
+//     would have no caller to be wrong for.
+//   - The region belongs in a constructor, not here. A package-level var cannot take one, which is
+//     exactly the shape of the defect #161 closed: [PriceTable] is the type that should carry a region
+//     when this package acquires a caller, and this var is the us-east-1 default it starts from.
+//
+// So the honest statement is that these are us-east-1 list prices, named as such. A caller pricing a
+// deployment elsewhere wants [awsrates.AllForRegion]; internal/storage/s3's PricingManager is the shape
+// to copy, including the warn-once-on-fallback behavior.
 var DefaultPrices = awsrates.All()
 
 // PriceTable is an immutable pricing lookup with optional per-tier overrides.

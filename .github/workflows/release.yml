@@ -196,13 +196,39 @@ jobs:
   # so could only ever scan something users could already download. Now it scans the same artifact
   # `publish` will attach.
   #
-  # `exit-code` is deliberately left unset, which is trivy-action's default and means a finding
-  # annotates the release rather than blocking it. That is the honest setting for now: the first real
-  # run of this scan found GHSA-xmrv-pmrh-hhx2 (MODERATE) in the pinned aws-sdk-go-v2, which needs a
-  # dependency bump this release does not carry, and a gate that fails on it would make every release
-  # from here on contingent on a scan nobody had yet seen the output of. The findings go to the
-  # security tab via SARIF. Turning this into a gate — `exit-code: 1` with an explicit severity floor
-  # — is worth doing once the current findings are triaged, not before.
+  # This is a gate: `exit-code: 1` on HIGH or CRITICAL blocks the publish (#196).
+  #
+  # It was not one until now, and the reason it was not is worth keeping because it is the reason it
+  # can be one now. The first real run of this scan found GHSA-xmrv-pmrh-hhx2 (MODERATE) in the pinned
+  # aws-sdk-go-v2, and making every release contingent on a scan whose output nobody had yet triaged
+  # would have blocked v0.10.1 on a dependency bump it did not carry. That finding is fixed;
+  # `govulncheck` reports no called vulnerabilities and the binary scan is clean. A gate is only worth
+  # having from a known-clean baseline — switched on against existing findings it is just a broken
+  # build everyone learns to bypass.
+  #
+  # Three settings, each a decision:
+  #
+  # `severity: HIGH,CRITICAL` rather than trivy's default of everything down to UNKNOWN. MEDIUM and
+  # below still upload as SARIF and are visible on the security tab; they do not stop a publish. The
+  # line is where an advisory is worth delaying a release for, and MEDIUM in a transitive dependency
+  # of a filesystem binary generally is not.
+  #
+  # `ignore-unfixed: true`. A vulnerability with no released fix cannot be actioned by a release, so
+  # blocking on one means this project cannot ship until an upstream maintainer acts. That is not a
+  # security posture, it is an availability problem wearing one.
+  #
+  # `scanners: vuln`. Secret and misconfiguration scanning on an unpacked Go binary reports on the
+  # contents of a static executable, which is not what this job is asking about.
+  #
+  # The trade this accepts: a scan is a moving target even when the code is frozen, so a newly
+  # published HIGH in a transitive dependency can block a release that has nothing to do with it, at
+  # the least convenient moment. The severity floor and ignore-unfixed keep that to the cases where
+  # there is something to actually do — and security.yml scans `main` weekly, so a new advisory should
+  # surface on its own schedule rather than being discovered by someone trying to cut a release.
+  #
+  # Deliberately the same posture as `govulncheck` in security.yml, which exits non-zero and so has
+  # always been a hard gate on `main` and every PR. That asymmetry — hard gate on every commit, no
+  # gate on the release — was accidental, and this resolves it toward gating rather than away.
   security-scan:
     name: Security Scan Release
     runs-on: ubuntu-latest
@@ -234,8 +260,16 @@ jobs:
         scan-ref: scan/objectfs-linux-amd64
         format: sarif
         output: trivy-binary.sarif
+        scanners: vuln
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        exit-code: 1
 
+    # if: always(), so the findings that failed the step above are the ones that reach the security
+    # tab. Without it a HIGH stops the job at the scan and uploads nothing, which leaves whoever is
+    # cutting the release with an exit code and no way to see what caused it.
     - name: Upload Trivy scan results
+      if: always()
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: trivy-binary.sarif

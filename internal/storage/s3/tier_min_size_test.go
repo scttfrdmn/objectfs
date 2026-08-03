@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
 )
 
 // logRecord is one slog line, decoded far enough to read the fields the warning promises.
@@ -41,7 +43,7 @@ func captureValidator(t *testing.T, tier string, constraints TierConstraints) (*
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	return NewTierValidator(tier, constraints, logger), func() []logRecord {
+	return NewTierValidator(awsrates.DefaultRegion, tier, constraints, logger), func() []logRecord {
 		t.Helper()
 
 		var out []logRecord

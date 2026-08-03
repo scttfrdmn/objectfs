@@ -242,26 +242,58 @@ go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 
 ## Usage
 
-ObjectFS takes exactly two positional arguments — the bucket URI and the mount point. There are no
-subcommands.
-
 ```bash
 # Mount, using the built-in defaults
-objectfs s3://my-bucket /mnt/s3
+objectfs mount s3://my-bucket /mnt/s3
 
 # With a configuration file
-objectfs --config /etc/objectfs/config.yaml s3://my-bucket /mnt/s3
+objectfs mount --config /etc/objectfs/config.yaml s3://my-bucket /mnt/s3
 
 # Validate the configuration and exit without mounting
-objectfs --dry-run --config /etc/objectfs/config.yaml s3://my-bucket /mnt/s3
+objectfs mount --dry-run --config /etc/objectfs/config.yaml s3://my-bucket /mnt/s3
+
+# Unmount, from any process — an operator's shell, or a systemd unit's ExecStop
+objectfs unmount /mnt/s3
 ```
+
+The commands are `mount`, `unmount` (also spelled `umount`), `version`, and `help`. Flags come
+before the positional arguments: Go's flag package stops parsing at the first non-flag argument, so
+`objectfs mount s3://b /mnt --debug` would leave `--debug` unparsed — the command reports that
+rather than ignoring it.
+
+The form without a subcommand still works and is not deprecated, because it is what every invocation
+written before v0.11.0 looks like:
+
+```bash
+objectfs s3://my-bucket /mnt/s3
+```
+
+A first argument carrying a URI scheme or a leading dash routes to `mount`; a bare word that is not
+a command is a usage error naming itself, so `objectfs moutn s3://b /mnt` does not become an attempt
+to mount a bucket called `moutn`.
+
+Both arguments to `mount` are optional when the configuration file supplies them, as `mount.uri` and
+`mount.mount_point`. That is the form a systemd template unit needs — see
+[`configs/systemd/objectfs@.service`](configs/systemd/objectfs@.service), which passes
+`--mount-point /mnt/objectfs/%i --foreground` and names the bucket in the per-instance config file,
+since `systemctl start objectfs@research-data` gives the unit only its instance name.
+
+Exit codes: `0` succeeded, `1` the command was right and the operation failed, `2` the command line
+was wrong and nothing was attempted.
 
 Credentials do not go in the config file. ObjectFS uses the standard AWS credential chain:
 `AWS_PROFILE`, the environment variables, the shared credentials file, or an instance role.
 
-To unmount, send `SIGINT` or `SIGTERM` (`Ctrl-C`), or run `fusermount -u /mnt/s3` on Linux or
-`umount /mnt/s3` on macOS. **`SIGHUP` also unmounts** — it is not a configuration reload. There is
-no configuration reload; changing the file requires a remount.
+To unmount, run `objectfs unmount /mnt/s3`, or send `SIGINT` or `SIGTERM` (`Ctrl-C`) to the mount
+process. `objectfs unmount` is what a script or a unit file should use: it tries the FUSE helper, its
+libfuse-2 spelling, `umount`, and finally `umount(2)`, and if none works it says which ran, which
+were not installed, and the `lsof` invocation that names whatever is holding the mount open. None of
+them unmounts lazily or forcibly — `fusermount3 -z` and `umount -l` detach the name while the
+filesystem keeps serving open files, which reports a finished unmount with writes still in flight.
+
+`SIGHUP` is **not** handled and is not a configuration reload. It used to be treated as a shutdown
+request, so `kill -HUP` unmounted the filesystem of anyone who read the "zero-downtime reload" claim
+this README used to make. There is no configuration reload; changing the file requires a remount.
 
 ---
 

@@ -100,6 +100,17 @@ jobs:
       with:
         sarif_file: gosec.sarif
 
+    # Not a gate, and this is the one place that asymmetry is deliberate rather than accidental (#196).
+    #
+    # `scan-type: fs` over the whole repository reports on the source tree, not on what is shipped:
+    # dependencies reached only by tests, files that go into no artifact, and every finding in the SDK
+    # subdirectories. The gate on what is distributed is `govulncheck` below and the binary scan in
+    # release.yml, both of which exit non-zero. This one uploads so the findings are visible on the
+    # security tab and reviewable on their own schedule.
+    #
+    # Same severity floor and ignore-unfixed as the release gate, so a finding here and a finding
+    # there mean the same thing — a report that includes UNKNOWN-severity noise about unfixable
+    # advisories in test-only dependencies is a report nobody reads twice.
     - name: Run Trivy vulnerability scanner (repo)
       # v-prefixed: `@0.28.0` does not resolve. See the note in release.yml.
       uses: aquasecurity/trivy-action@v0.36.0
@@ -108,12 +119,29 @@ jobs:
         scan-ref: .
         format: sarif
         output: trivy-repo.sarif
+        scanners: vuln
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
 
     - name: Upload Trivy repo scan results
+      if: always()
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: trivy-repo.sarif
 
+    # A hard gate, and has always been one: govulncheck exits non-zero on a finding, so this has
+    # gated `main` and every PR since the workflow was re-enabled. Until #196 that meant every commit
+    # was gated and the release was not, which was accidental; the release now gates too.
+    #
+    # ./... rather than ./cmd/objectfs, unlike the license check below, and the difference is what the
+    # two tools answer. govulncheck reports whether a vulnerable function is *reachable*, so a finding
+    # in a test-only dependency says a test can reach it — worth knowing, and cheap to act on. The
+    # license check has no such notion and had to be scoped to the artifact instead.
+    #
+    # It is also why `klauspost/compress` was bumped to v1.18.7 for this release: GO-2026-5841, an
+    # out-of-bounds read in the s2 package, unreachable from this code but present in the module the
+    # binary is built from — which is what the binary scan in release.yml sees, and what its new gate
+    # would have failed on.
     - name: Check for vulnerable dependencies
       run: |
         go install golang.org/x/vuln/cmd/govulncheck@latest

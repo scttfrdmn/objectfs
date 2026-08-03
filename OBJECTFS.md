@@ -693,26 +693,21 @@ echo "fuse" | sudo tee -a /etc/modules
 sudo usermod -a -G fuse $USER
 ```
 
-**Systemd Service**:
+**Systemd Service**: install
+[`configs/systemd/objectfs@.service`](configs/systemd/objectfs@.service) rather than the unit that
+used to be transcribed here. That one could not start a mount at all — `ExecStart=/usr/local/bin/objectfs
+%i /mnt/objectfs/%i` passes the bare instance name where a storage URI belongs, so it has no scheme
+and is rejected before anything is attempted. Its `ExecStop=/bin/fusermount -u` and `Restart=always`
+were wrong in the ways [#135](https://github.com/scttfrdmn/objectfs/issues/135) describes. The
+shipped unit is checked against the binary's own subcommand and flag sets on every PR, which is the
+only reason to trust one copy of a command line over another:
 
-```ini
-# /etc/systemd/system/objectfs@.service
-[Unit]
-Description=ObjectFS for %i
-After=network.target
-
-[Service]
-Type=simple
-User=objectfs
-Group=objectfs
-ExecStart=/usr/local/bin/objectfs %i /mnt/objectfs/%i
-ExecStop=/bin/fusermount -u /mnt/objectfs/%i
-Restart=always
-RestartSec=5
-Environment=AWS_DEFAULT_REGION=us-west-2
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo cp configs/systemd/objectfs@.service /etc/systemd/system/
+# the bucket comes from the per-instance config, not the unit
+sudo install -d /etc/objectfs && sudo cp configs/example.yaml /etc/objectfs/research-data.yaml
+sudo systemctl daemon-reload
+sudo systemctl start objectfs@research-data
 ```
 
 ### Deployment Patterns

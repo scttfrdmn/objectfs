@@ -193,8 +193,14 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	metricsCollector := NewMetricsCollector()
 	metricsCollector.SetAccelerationEnabled(cfg.UseAccelerate)
 
+	// The pricing manager is built first because it owns the pricing region: it resolves
+	// PricingConfig.Region against the regions awsrates has rates for, warns once if there is no
+	// match, and everything downstream that prices anything asks it rather than resolving the region
+	// again. The tier validator needs that resolved value for its recommendations.
+	pricingManager := NewPricingManager(cfg.PricingConfig, logger)
+
 	// Initialize tier validator
-	tierValidator := NewTierValidator(cfg.StorageTier, cfg.TierConstraints, logger)
+	tierValidator := NewTierValidator(pricingManager.Region(), cfg.StorageTier, cfg.TierConstraints, logger)
 	tierInfo := tierValidator.GetTierInfo()
 
 	backend := &Backend{
@@ -210,8 +216,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 		copyPartSize:        defaultCopyPartSize,
 	}
 
-	// Initialize pricing manager
-	backend.pricingManager = NewPricingManager(cfg.PricingConfig, logger)
+	backend.pricingManager = pricingManager
 
 	// Initialize cost optimizer
 	backend.costOptimizer = NewCostOptimizer(backend, cfg.CostOptimization, logger)
@@ -303,14 +308,17 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 		}
 	})
 
-	// Log tier configuration
+	// Log tier configuration. cost_per_gb_month is accompanied by the region it is from — it was a
+	// bare number next to a tier name for eleven releases, and it was always us-east-1's whatever
+	// pricing_config.region said.
 	logger.Info("S3 storage tier configured",
 		"tier", cfg.StorageTier,
 		"tier_name", tierInfo.Name,
 		"min_object_size", tierInfo.MinObjectSize,
 		"deletion_embargo", tierInfo.DeletionEmbargo,
 		"retrieval_cost", tierInfo.RetrievalCost,
-		"cost_per_gb_month", tierInfo.CostPerGBMonth)
+		"pricing_region", pricingManager.Region(),
+		"cost_per_gb_month", pricingManager.StorageRate(cfg.StorageTier))
 
 	// Test connection
 	if err := backend.HealthCheck(ctx); err != nil {
@@ -2556,7 +2564,7 @@ func (b *Backend) SetStorageTier(tier string, constraints TierConstraints) error
 	}
 
 	// Update tier validator
-	b.tierValidator = NewTierValidator(tier, constraints, b.logger)
+	b.tierValidator = NewTierValidator(b.pricingManager.Region(), tier, constraints, b.logger)
 
 	// Update backend state
 	b.currentTier = tier
@@ -2569,7 +2577,8 @@ func (b *Backend) SetStorageTier(tier string, constraints TierConstraints) error
 		"tier_name", tierInfo.Name,
 		"min_object_size", tierInfo.MinObjectSize,
 		"deletion_embargo", tierInfo.DeletionEmbargo,
-		"cost_per_gb_month", tierInfo.CostPerGBMonth)
+		"pricing_region", b.pricingManager.Region(),
+		"cost_per_gb_month", b.pricingManager.StorageRate(tier))
 
 	return nil
 }
@@ -2584,9 +2593,14 @@ func (b *Backend) GetTierConstraints() TierConstraints {
 	return b.config.TierConstraints
 }
 
-// GetTierCostEstimate estimates monthly storage cost for given data size
+// GetTierCostEstimate estimates the monthly storage cost of sizeGB on the current tier, in the
+// configured pricing region.
+//
+// List price for the first volume band, with no discounts applied — [Backend.CalculateCostWithVolume]
+// is the form that applies them. sizeGB is decimal GB, matching what AWS bills in; see
+// [awsrates.GBFromBytes] for converting a byte count.
 func (b *Backend) GetTierCostEstimate(sizeGB float64) float64 {
-	return sizeGB * b.tierInfo.CostPerGBMonth
+	return sizeGB * b.pricingManager.StorageRate(b.currentTier)
 }
 
 // GetCostOptimizationReport generates a cost optimization analysis report

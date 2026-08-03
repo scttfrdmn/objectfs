@@ -115,6 +115,15 @@ linters:
     misspell:
       locale: US
 
+      ignore-rules:
+        # The name of the rate-table generator command, internal/awsrates/offerfile/cmd/genrates.
+        # misspell reads it as "generates" with a missing "e", which is 12 findings across the
+        # command's own doc comment, its progress output, the //go:generate directive that invokes
+        # it, and every doc comment that names the path. It is an identifier, not prose. Listed here
+        # rather than suppressed per line because the alternative — renaming a command so a spell
+        # checker stops recognising it — is contorting the code to suit the tool.
+        - genrates
+
     nolintlint:
       require-explanation: true
       require-specific: true
