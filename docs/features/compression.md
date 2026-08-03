@@ -97,17 +97,22 @@ BAM, mmap'd data, an HDF5 file read by chunk, a Zarr store — it is disqualifyi
 [#185](https://github.com/scttfrdmn/objectfs/issues/185) tracks seekable zstd framing, which would fix
 this. Until it lands: **do not enable compression on objects you read randomly.**
 
-### 3. Enabling compression turns off parallel range reads for the whole bucket
+### 3. Compressed objects give up parallel range reads
 
 Parallel reads fan a large read out into concurrent range GETs above
-`performance.parallel_read.threshold`. The gate that selects that path is closed whenever a compression
-codec is configured — not whenever the object being read is compressed. So on a mount with compression
-enabled, a large read of an object that was never compressed loses the fan-out too.
+`performance.parallel_read.threshold`. A compressed object cannot use that path — the frame has to be
+decoded from its start, so there is no set of independent ranges to assemble — so a large read of a
+compressed object is one whole-object GET. This is cost #2 measured in requests rather than in bytes.
 
-For compressed objects this is correct: there is nothing to fan out across, since the whole frame is
-needed. For the rest of the bucket it is a straightforward loss, and it is the residue of audit finding
-C4 — the whole-object-versus-ranged decision was moved onto the object, and this gate one line above it
-was not. Tracked as [#228](https://github.com/scttfrdmn/objectfs/issues/228).
+Only compressed objects pay it. Through v0.10.0 the whole bucket did: the gate asked whether a codec
+was *configured* rather than whether the object was *encoded*, so on a mount with compression enabled
+a large read of an object that had never been compressed lost the fan-out too — which meant the
+objects that gain nothing from compression were the same ones losing parallel reads because of it.
+Fixed in [#228](https://github.com/scttfrdmn/objectfs/issues/228), which decides from the object and
+is pinned by `TestFanOutIsDecidedByTheObjectNotTheConfig` running the same read with
+`compression.enabled` both ways. That gate was the residue of audit finding C4: the
+whole-object-versus-ranged decision had been moved onto the object and this one, a line above it,
+had not.
 
 ### 4. On some tiers, compression can save nothing at all
 
@@ -296,7 +301,8 @@ measurement with its parameters stated. Nothing here is estimated.
   in CI without touching AWS, against the in-process
   [substrate](https://github.com/scttfrdmn/substrate) endpoint: see
   `TestSmallReadOfLargeObjectDoesNotFetchTheWholeThing` and
-  `TestSmallReadOfCompressedObjectStaysCorrect` in `internal/storage/s3/read_amplification_test.go`.
+  `TestSmallReadOfCompressedObjectStaysCorrect` in `internal/storage/s3/read_amplification_test.go`,
+  and `internal/storage/s3/parallel_read_encoding_test.go` for cost 3's request counts.
 
 ---
 
@@ -305,5 +311,4 @@ measurement with its parameters stated. Nothing here is estimated.
 - [Read-ahead & Predictive Caching](read-ahead.md) — what is served without an S3 request at all
 - [Multipart Uploads](multipart-uploads.md) — the other decision that depends on object size
 - [#184](https://github.com/scttfrdmn/objectfs/issues/184) — skip data that is already compressed
-- [#185](https://github.com/scttfrdmn/objectfs/issues/185) — seekable framing, which removes cost 2
-- [#228](https://github.com/scttfrdmn/objectfs/issues/228) — the parallel-read gate in cost 3
+- [#185](https://github.com/scttfrdmn/objectfs/issues/185) — seekable framing, which removes costs 2 and 3

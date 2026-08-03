@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -324,19 +325,46 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	}
 
 	// Parallel range GET fast-path: fan out large reads into concurrent chunks.
-	// Skipped when transparent compression is active (whole-object decompress
-	// path must remain intact) or when the threshold is disabled.
+	//
+	// Declining the fan-out is right for a *compressed* object — a zstd or gzip frame is not
+	// seekable, so there is nothing to fan out across; the whole body is needed to decode any of it.
+	// But whether that applies is a property of the object, and this gate used to ask
+	// b.compressor.Enabled(), which reports the local *write* configuration and says nothing about
+	// the object named by key. So configuring compression switched fan-out off for every object in
+	// the bucket, including ones never compressed, ones below MinSize, ones where compression did not
+	// help, and ones written by other tools entirely.
+	//
+	// That is audit finding C4 one line above C4's own fix, and it survived because it fails quietly:
+	// C4 moved bytes that did not need moving, which a byte-count assertion catches, while this
+	// merely declined an optimization — nothing failed and nothing was logged. It compounds with the
+	// fact that most research data does not compress at all, so the objects that gain nothing from
+	// compression were the same ones losing parallel reads because of it (#228).
 	threshold := b.config.ParallelReadThreshold
-	if threshold > 0 && (b.compressor == nil || !b.compressor.Enabled()) {
-		readSize := size
+	if threshold > 0 {
+		readSize, encoded := size, false
 		if readSize <= 0 {
-			// Need the object size to calculate chunk count — one HEAD call.
+			// The object size is needed for the chunk arithmetic, and the HEAD that answers it also
+			// answers whether the object is stored encoded. So for this case the object-keyed
+			// decision costs nothing beyond the request that was already being made.
 			if info, headErr := b.HeadObject(ctx, key); headErr == nil {
 				readSize = info.Size - offset
+				encoded = isCompressed(info.Metadata)
 			}
 		}
-		if readSize > threshold {
-			return b.parallelGetObject(ctx, key, offset, readSize)
+
+		if !encoded && readSize > threshold {
+			// When the caller supplied a size there has been no HEAD, so the fan-out is attempted and
+			// abandoned if the object turns out to be encoded. That keeps the cost on compressed
+			// objects instead of adding a HEAD to every large read, and the cost is small: the
+			// abandoned chunks transferred at most the stored body, which the whole-object re-fetch
+			// below has to transfer anyway, plus some refusals for the ranges past its end.
+			data, parallelErr := b.parallelGetObject(ctx, key, offset, readSize)
+			if !stderr.Is(parallelErr, errFanOutOnEncodedObject) {
+				return data, parallelErr
+			}
+
+			b.logger.Debug("Abandoned the parallel read: the object is stored encoded",
+				"key", key, "offset", offset, "size", size)
 		}
 	}
 
@@ -1386,6 +1414,11 @@ func (b *Backend) Close() error {
 
 // parallelGetObject fans out a large read into concurrent range GETs and assembles them in order.
 //
+// It returns [errFanOutOnEncodedObject] when the object turns out to be stored encoded, which means
+// the fan-out was the wrong path rather than that the read failed — the caller re-reads whole. The
+// check is here rather than in the caller because the caller cannot know without a HEAD, and only
+// compressed objects would benefit from paying for one on every large read (#228).
+//
 // # Why this is not just a loop with goroutines
 //
 // It was, and that made the largest reads the least protected ones in the backend. The serial path
@@ -1490,6 +1523,21 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 		}
 	}
 
+	// Two flags rather than two more findings, because both describe the read as a whole rather than
+	// the chunk that noticed, and both have to outrank whatever any individual chunk recorded.
+	//
+	// encoded says a response carried a Content-Encoding, which means this object cannot be assembled
+	// from independent ranges at all — every short chunk and every refused range after it is a
+	// consequence of that and not evidence of corruption. So it wins over any finding, and it is a
+	// signal to the caller rather than an error: GetObject falls back to the whole-object path.
+	//
+	// unsatisfiable says some chunk's range could not be served, in either of its forms. On its own
+	// that is a shrinking object, which is what the finding reports. But it is also what a compressed
+	// object looks like when the read starts past the end of its stored body — offset beyond the
+	// compressed length, so no chunk ever sees a response header to learn the encoding from. That
+	// ambiguity is resolved once after the fan-out, with one HEAD, rather than per chunk.
+	var encoded, unsatisfiable atomic.Bool
+
 	chunks := make([][]byte, numChunks)
 	etags := make([]string, numChunks)
 
@@ -1516,6 +1564,10 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 			// the serial path it usually is one, and only here is it known to mean the object shrank.
 			if err != nil {
 				if isInvalidRange(err) {
+					// Flagged before it is reclassified, because the reclassification is only right for
+					// an object that shrank. See the unsatisfiable declaration.
+					unsatisfiable.Store(true)
+
 					err = shrunkMidRead(key, b.bucket, start, want, err)
 				}
 
@@ -1530,12 +1582,25 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 				return err
 			}
 
+			// A Content-Encoding on any chunk settles it: nothing about this object can be assembled
+			// from ranges. Reported through the flag and by abandoning the siblings, and deliberately
+			// *not* as a finding — this is not a failure of the read, it is the wrong path for the
+			// object, and the caller has a correct path to take instead.
+			if read.contentEncoding != "" {
+				encoded.Store(true)
+				abandonSiblings(errReadAbandoned)
+
+				return errFanOutOnEncodedObject
+			}
+
 			// S3 clamps a range that runs past the end of the object rather than refusing it, so a
 			// short answer here means the object is shorter than the read was told it was — an
 			// overwrite between the HEAD and this GET, or a size the caller supplied that never
 			// matched. Either way the assembled buffer would be short, and a short buffer is
 			// indistinguishable from a file that ends there.
 			if int64(len(read.data)) != want {
+				unsatisfiable.Store(true)
+
 				short := shrunkMidRead(key, b.bucket, start, want, nil).
 					WithDetail("returned_bytes", len(read.data))
 
@@ -1553,6 +1618,25 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 	}
 
 	if err := group.Wait(); err != nil {
+		// An encoded object outranks every finding. A chunk that saw the Content-Encoding knows the
+		// fan-out was the wrong path, and each sibling's short read or refused range is a consequence
+		// of the object being one indivisible frame — reporting any of those as corruption would turn
+		// a readable compressed object into a read error.
+		if encoded.Load() {
+			return nil, errFanOutOnEncodedObject
+		}
+
+		// A refused or short range with no encoding seen is ambiguous, and the two readings are far
+		// apart: an object that shrank mid-read, which is the finding, or a compressed object whose
+		// stored body ends before this read's offset — so no chunk ever got a response header to
+		// learn the encoding from. One HEAD distinguishes them, on a path that has already failed, and
+		// only for reads that hit the ambiguity.
+		if unsatisfiable.Load() {
+			if info, headErr := b.HeadObject(ctx, key); headErr == nil && isCompressed(info.Metadata) {
+				return nil, errFanOutOnEncodedObject
+			}
+		}
+
 		// The recorded finding wins when there is one. It is the diagnosis; errgroup's value may be a
 		// sibling's abandonment, which is only the consequence of that diagnosis. When no chunk
 		// recorded anything, the failure came from the caller's own context and errgroup's value is
@@ -1606,6 +1690,21 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 // code the health tracker heals on rather than degrades.
 var errReadAbandoned = fmt.Errorf("parallel read chunk abandoned after a sibling chunk failed: %w",
 	context.Canceled)
+
+// errFanOutOnEncodedObject reports that a parallel read was attempted on an object whose stored bytes
+// are encoded, so it must be read whole instead.
+//
+// It is a routing signal, not a failure, and nothing outside this package should ever see it: GetObject
+// checks for it and takes the whole-object path. That is why it is a bare sentinel rather than an
+// [errors.ObjectFSError] — the typed errors carry a code the health tracker acts on, and "this read
+// used the wrong path and the right one is one line below" is not a service condition. It also must not
+// reach [Backend.translateError], which would classify an unrecognized error as a service failure and
+// degrade s3-reads on a read that is about to succeed.
+//
+// The fan-out is attempted rather than prevented because preventing it needs a HEAD on every large
+// read, and only compressed objects benefit. See the gate in [Backend.GetObject].
+var errFanOutOnEncodedObject = stderr.New(
+	"parallel read abandoned: the object is stored encoded and cannot be assembled from ranges")
 
 // shrunkMidRead is the error for a chunk of a parallel read whose range the object could not
 // satisfy, in either of the two forms that takes: fewer bytes than requested, or a refusal.
