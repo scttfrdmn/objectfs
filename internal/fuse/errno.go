@@ -63,6 +63,12 @@ func toErrno(err error) syscall.Errno {
 		return syscall.ENOTSUP
 	case errors.Is(err, vfs.ErrInvalid):
 		return syscall.EINVAL
+	case errors.Is(err, vfs.ErrNoSpace):
+		// ENOSPC, which is about the write buffer rather than the bucket — S3 has no capacity to
+		// exhaust. It is the errno every program that writes files already handles, and the honest one:
+		// the filesystem cannot accept more data right now. EDQUOT would suggest a per-user quota that
+		// does not exist, and ENOMEM is not a documented write(2) error, so callers do not check it.
+		return syscall.ENOSPC
 	}
 
 	// Coded backend failures. This runs before ErrBackend because ErrBackend wraps these.

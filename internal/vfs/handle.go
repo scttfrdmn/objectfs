@@ -107,6 +107,12 @@ type Node struct {
 // Most callers get nodes from [HandleTable.Open], which is the path a mount takes: a node with no
 // handle open on it cannot be found by the invalidation or shutdown paths. This constructor is for
 // owners that track nodes themselves, [Writer] being the one — its keys are not open descriptors.
+//
+// Unlike [HandleTable.Open] it returns no error, so it cannot reject a negative storedSize. A node
+// built with one fails closed instead: [Node.ReadInto] and [Node.FlushPlan] return ErrInvalid and
+// [Node.Dirty] reports true, so the node is neither read from, flushed, nor evicted. That is the
+// direction to fail in, but it is a property of those methods rather than of this constructor —
+// callers should get storedSize from [Flusher.StoredAttr], which rejects a negative size at the HEAD.
 func NewNode(path string, attr Attr, storedSize int64) *Node {
 	return &Node{Path: path, attr: attr, storedSize: storedSize}
 }
@@ -185,8 +191,10 @@ func (n *Node) DirtyAttr() bool {
 func (n *Node) dirtyContentLocked() bool {
 	p, err := n.pending.Plan(n.storedSize)
 	if err != nil {
-		// Plan only fails on a negative stored size, which this type never assigns. Treat the
-		// impossible as dirty: a spurious flush is recoverable, a skipped one is data loss.
+		// Plan only fails on a negative stored size, which reaches a node only through [NewNode] —
+		// [HandleTable.Open] rejects it. Report dirty rather than clean: this function's answer decides
+		// whether a flush happens and whether [HandleTable.Release] may evict the node, so a spurious
+		// flush is a wasted PUT and a spurious "clean" drops pending writes on close(2).
 		return true
 	}
 	return !p.Noop

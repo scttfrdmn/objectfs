@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`rm` and `rmdir` work.** `Unlink` and `Rmdir` delete the object rather than returning EROFS
+  ([#163]). The stub they replace was itself a fix — go-fuse defaults an unimplemented
+  `NodeUnlinker` to *success*, so before it `rm` exited 0, the kernel dropped the inode, and the
+  object stayed in the bucket billing with no path that reached it. Three details are load-bearing
+  and are pinned by tests:
+  - Deleting a file discards whatever the write path still holds for it. `echo x > f; rm f` is
+    ordinary and the kernel does not guarantee a flush before the unlink, so a surviving dirty range
+    would be PUT back by the next flush or by the unmount — the file returning from the dead at its
+    written size, with no error anywhere.
+  - `rmdir` refuses a non-empty directory with ENOTEMPTY. S3 has no directories, so removing a
+    prefix's marker object while objects remain under it would succeed at the storage layer and leave
+    every one of them present, billing, and unreachable through the filesystem.
+  - A missing file is ENOENT, not success. The backend's `DeleteObject` no-ops a key that is not
+    there — S3's contract — so absence is checked explicitly, and it is checked against both the
+    bucket and the write path: `Create` records attributes without a PUT, so a just-created file is
+    real and visible to `stat` with no object behind it yet.
+
+### Fixed
+
+- **`write_buffer.max_memory` is enforced.** It was declared in the config schema, defaulted to
+  `"512MB"`, validated as a size string, and read by nothing ([#205]) — so every mount since the key
+  appeared reported a write-buffer ceiling and enforced none, on the one path that holds user data in
+  memory before it is durable. The bound reclaims before it refuses: at the ceiling with flushable
+  data it flushes and accepts, because a limit that turned legal writes into ENOSPC would be worse
+  than the unbounded growth it replaced — with the shipped 512 MB default that would mean failing
+  every workload writing more than 512 MB in total. A single write larger than the entire limit is
+  admitted, since `write(2)`'s ENOSPC means "filesystem full" and a caller retrying it would get the
+  same answer forever. A refusal surfaces as ENOSPC through `vfs.ErrNoSpace`, not as EIO.
+- **A single file can grow past the write buffer's memory bound.** Reclaiming flushes other keys and
+  deliberately skips the one being written, since its pending writes are about to be extended and
+  uploading them now guarantees a second upload moments later. As the only rule that made the bound
+  refuse the most ordinary write there is: a program appending to one file has no other key to flush,
+  so at the shipped 512 MB default, writing any file past 512 MB failed at exactly 512 MB with
+  ENOSPC — sequentially writing a large file being the workload ObjectFS exists for. The target key
+  is now flushed as a last resort, which is what streaming a large file through a bounded buffer
+  looks like; a test writes a file to eight times its limit and asserts both that every write
+  succeeds and that the resulting object is whole, so a lossy reclaim fails rather than passing
+  quietly.
+
+[#163]: https://github.com/scttfrdmn/objectfs/issues/163
+[#205]: https://github.com/scttfrdmn/objectfs/issues/205
+
 ## [0.10.3] - 2026-08-02
 
 Part 4 of the v0.10.0 audit: say only what the code does, and bill accurately. The audit found that

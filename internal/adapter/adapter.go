@@ -22,8 +22,9 @@ import (
 // after having passed Configuration.Validate — see sizeOrDefault. They match internal/config's
 // NewDefault so that the fallback is the documented default rather than a third number.
 const (
-	defaultCacheSize           = 2 << 30  // 2 GiB, matching NewDefault's "2GB"
-	defaultPersistentCacheSize = 10 << 30 // 10 GiB, matching NewDefault's "10GB"
+	defaultCacheSize           = 2 << 30   // 2 GiB, matching NewDefault's "2GB"
+	defaultPersistentCacheSize = 10 << 30  // 10 GiB, matching NewDefault's "10GB"
+	defaultWriteBufferMemory   = 512 << 20 // 512 MiB, matching NewDefault's "512MB"
 )
 
 // Adapter represents the main ObjectFS adapter
@@ -173,7 +174,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	// design — it holds dirty ranges for as long as the mount does — so inheriting a context that
 	// is canceled when Start returns would cancel every flush the moment the mount came up. The
 	// WithoutCancel above is the whole point, and mountCtx is what Stop cancels instead.
-	a.writeBuffer, err = vfs.NewWriter(a.mountCtx, a.backend)
+	a.writeBuffer, err = vfs.NewWriterWithOptions(a.mountCtx, a.backend, a.buildWriterOptions())
 	if err != nil {
 		return fmt.Errorf("failed to initialize write path: %w", err)
 	}
@@ -566,6 +567,28 @@ func (a *Adapter) sizeOrDefault(path, value string, fallback int64) int64 {
 	}
 
 	return n
+}
+
+// buildWriterOptions maps the write_buffer configuration block onto the bounds [vfs.Writer] enforces.
+//
+// This is audit finding #205, and it is the same seam shape as buildS3Config's D12: the values were
+// declared in internal/config, defaulted by NewDefault, and validated by validateSizes — and read by
+// nothing. A grep for MaxMemory outside internal/config returned three hits, all of them the
+// declaration, the default and the validator. So `write_buffer.max_memory: 512MB` described a ceiling
+// the process did not have, on the one path that holds user data in memory before it is durable.
+//
+// Unbounded growth there ends with the OOM killer taking the mount, and every open file's unflushed
+// dirty ranges with it — which makes this a data-loss defect rather than a resource-accounting one.
+//
+// A separate method rather than an inline literal in Start, so the mapping is assertable without a
+// live backend. That is deliberate: the reason D12 survived 32,680 lines of tests is that its mapping
+// was only reachable through a constructor nothing could call in a unit test.
+func (a *Adapter) buildWriterOptions() vfs.WriterOptions {
+	return vfs.WriterOptions{
+		MaxMemory: a.sizeOrDefault("write_buffer.max_memory",
+			a.config.WriteBuffer.MaxMemory, defaultWriteBufferMemory),
+		MaxBuffers: a.config.WriteBuffer.MaxBuffers,
+	}
 }
 
 // validateStorageURI validates the storage URI format

@@ -617,26 +617,153 @@ func (n *DirectoryNode) Create(ctx context.Context, name string, flags uint32, m
 	return node, fh, fuseFlags, 0
 }
 
-// Unlink reports that file removal is not implemented.
+// Unlink removes a file: it deletes the object and discards anything the write path still holds for
+// that path.
 //
-// This is a deliberate interim stub, not the final implementation (tracked in
-// issue #163). go-fuse defaults an unimplemented NodeUnlinker to *success*, so
-// without this method `rm` exits 0 and the kernel drops the inode while the S3
-// object survives — the user believes the file is deleted when it is still
-// present and still billing. Returning EROFS fails loudly instead, which is
-// strictly safer than a silent false success.
+// # Why the write path is dropped first
+//
+// A file being deleted may have dirty ranges buffered — `echo x > f; rm f` is an ordinary sequence, and
+// the kernel does not guarantee a flush before the unlink. Deleting the object while those ranges
+// survive means the next flush, or the unmount, PUTs them back: the file returns from the dead, at the
+// size it had when it was written, with no error anywhere.
+//
+// Discarding is also why this cannot simply call the backend. A delete that bypassed the write path
+// would be correct exactly until someone wrote to a file before removing it.
+//
+// The *ordering* — discard before delete rather than after — is a narrower claim than it looks, and worth
+// stating precisely because a test cannot currently hold it. Both orders discard, so on this sequential
+// path both are correct; what the order buys is the concurrent case, where a background flush landing
+// between the two steps would PUT the object back after the delete had removed it. Moving the discard
+// after the delete does not fail any test in delete_test.go — verified by mutation, not assumed. The
+// order is kept because it is free and closes that window; it is not load-bearing for the assertions
+// below.
+//
+// # Why existence is established here and not left to the backend
+//
+// A missing file must be ENOENT: POSIX requires it, `rm` distinguishes the two, and treating absence
+// as success is the shape of the defect this method replaces — v0.10.0 had no Unlink at all, and
+// go-fuse defaults an unimplemented NodeUnlinker to *success*, so `rm` exited 0, the kernel dropped
+// the inode, and the object stayed in the bucket billing.
+//
+// The backend cannot supply that answer. [types.Backend.DeleteObject] returns nil for a key that is not
+// there, deliberately — that is S3's contract and the Go SDK's documented behavior — so relying on its
+// error to detect absence would report success for every `rm` of a file that never existed.
+//
+// So the check is explicit, and it asks two places. A file can exist in the bucket, or it can exist
+// only as dirty ranges in the write path: [DirectoryNode.Create] records attributes through the write
+// path and PUTs nothing, so a just-created file is real, is visible to stat, and has no object behind
+// it yet. Consulting only the backend would make `touch f && rm f` fail with ENOENT on a file the user
+// can see.
 func (n *DirectoryNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	slog.Warn("unlink is not implemented; refusing to report a delete that did not happen",
-		"path", n.joinPath(name), "issue", 163)
-	return syscall.EROFS
+	if n.fs.config.ReadOnly {
+		return syscall.EROFS
+	}
+
+	childPath := n.joinPath(name)
+
+	// The write path first, because it is authoritative for a file that has not been flushed and needs
+	// no round trip. Only if it holds nothing is the bucket asked.
+	if !n.fs.buffer.Dirty(childPath) {
+		if _, err := n.fs.backend.HeadObject(ctx, childPath); err != nil {
+			if vfs.IsNotFound(err) {
+				return syscall.ENOENT
+			}
+
+			// Not absence — a throttle, a permission failure, a network fault. Reporting ENOENT here is
+			// what let v0.10.0's Lookup invite an overwrite of an intact object; the honest answer is that
+			// we do not know, so the delete does not proceed.
+			n.fs.countError()
+			slog.Error("unlink could not determine whether the file exists", "path", childPath, "error", err)
+
+			return toErrno(err)
+		}
+	}
+
+	// Before the delete, not after. See the doc comment: a surviving dirty range outlives the object and
+	// resurrects it on the next flush.
+	if err := n.fs.buffer.Discard(childPath); err != nil {
+		n.fs.countError()
+		slog.Error("unlink could not discard buffered writes", "path", childPath, "error", err)
+
+		return toErrno(err)
+	}
+
+	if err := n.fs.backend.DeleteObject(ctx, childPath); err != nil {
+		n.fs.countError()
+		slog.Error("unlink failed", "path", childPath, "error", err)
+
+		return toErrno(err)
+	}
+
+	n.fs.invalidate(childPath)
+
+	n.fs.stats.mu.Lock()
+	n.fs.stats.Deletes++
+	n.fs.stats.mu.Unlock()
+
+	return 0
 }
 
-// Rmdir reports that directory removal is not implemented.
-// See Unlink: go-fuse also defaults NodeRmdirer to success.
+// Rmdir removes an empty directory.
+//
+// # Emptiness is checked, and the check is the whole operation
+//
+// S3 has no directories. A directory here is a zero-byte marker object at "<path>/" plus whatever
+// shares that prefix, so "remove the directory" is "remove the marker" — and doing only that would
+// leave every object under the prefix present but unreachable through a `ls` that no longer lists the
+// parent. Worse, it would report success: rmdir on a non-empty directory must fail with ENOTEMPTY, and
+// a filesystem that silently orphans data instead is the failure mode this whole audit was about.
+//
+// So the listing runs first, and it asks for two entries rather than one. The marker object's own key
+// is the prefix, so it appears in its own listing; one entry means "just the marker", and two means
+// there is something else under it. Asking for a single entry could not tell those apart.
 func (n *DirectoryNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	slog.Warn("rmdir is not implemented; refusing to report a delete that did not happen",
-		"path", n.joinPath(name)+"/", "issue", 163)
-	return syscall.EROFS
+	if n.fs.config.ReadOnly {
+		return syscall.EROFS
+	}
+
+	childPath := n.joinPath(name) + "/"
+
+	// Two, for the reason above: the marker is in its own listing, so the count that distinguishes empty
+	// from non-empty is 1 vs more.
+	objects, err := n.fs.backend.ListObjects(ctx, childPath, 2)
+	if err != nil {
+		n.fs.countError()
+		slog.Error("rmdir could not check whether the directory is empty", "path", childPath, "error", err)
+
+		return toErrno(err)
+	}
+
+	for _, obj := range objects {
+		if obj.Key != childPath {
+			// Something other than the marker lives under this prefix. Refusing is required by POSIX and
+			// is also the only safe answer: the alternative leaves those objects in the bucket with no
+			// path that reaches them.
+			return syscall.ENOTEMPTY
+		}
+	}
+
+	// A directory with no marker object at all is one that only ever existed implicitly, as the shared
+	// prefix of objects that have since gone. There is nothing to delete, and reporting ENOENT is
+	// accurate — rmdir of a directory that is not there is an error.
+	if len(objects) == 0 {
+		return syscall.ENOENT
+	}
+
+	if err := n.fs.backend.DeleteObject(ctx, childPath); err != nil {
+		n.fs.countError()
+		slog.Error("rmdir failed", "path", childPath, "error", err)
+
+		return toErrno(err)
+	}
+
+	n.fs.invalidate(childPath)
+
+	n.fs.stats.mu.Lock()
+	n.fs.stats.Deletes++
+	n.fs.stats.mu.Unlock()
+
+	return 0
 }
 
 // FileNode is one regular file: an object in the bucket.

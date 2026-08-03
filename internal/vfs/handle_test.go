@@ -759,6 +759,66 @@ func TestNodeReadIntoRejectsNegativeOffset(t *testing.T) {
 	}
 }
 
+// TestNodeReadIntoRejectsStoredBytesBeforeTheReadOffset pins the other half of ReadInto's contract.
+//
+// storedOffset says where the supplied bytes begin in the object, and it exists because the fetch may
+// legitimately start *after* the read does — the head of the range can be satisfied from memory, so
+// ReadInto needs to know where the fetched bytes land. What it cannot handle is bytes beginning *before*
+// the read: the splice would place them at the wrong position in the caller's buffer, and the caller
+// hands that buffer straight to the kernel as file content. Failing is the only safe answer, since a
+// misplaced splice is silent corruption that looks like a successful read.
+func TestNodeReadIntoRejectsStoredBytesBeforeTheReadOffset(t *testing.T) {
+	t.Parallel()
+
+	tbl := NewHandleTable()
+	h, err := tbl.Open("f", OpenRead, testAttr(100), 100)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Read at offset 50, but the supplied bytes claim to start at 10.
+	_, err = h.Node.ReadInto(make([]byte, 10), 50, 10, []byte("0123456789"))
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("ReadInto(offset=50, storedOffset=10) = %v, want ErrInvalid. Splicing bytes that begin "+
+			"before the read's own offset puts them at the wrong position in a buffer that goes straight "+
+			"to the kernel", err)
+	}
+}
+
+// TestNodeWithANegativeStoredSizeFailsClosed pins what a node built with an impossible stored size
+// does, because NewNode cannot refuse one.
+//
+// HandleTable.Open validates storedSize and returns an error; NewNode has no error return, so the only
+// place the check can live is in the methods that use the value. Every one of them must fail rather
+// than guess: a negative stored size makes the file's length unknowable, and a flush computed against
+// an unknown length would PUT a body of the wrong size — the corruption the whole flush protocol
+// exists to prevent, and indistinguishable afterwards from a backend fault.
+//
+// Dirty is the exception that proves the rule. It reports true, which is the pessimistic answer, and
+// it has to: Release evicts a node it believes clean, so answering false here would drop the pending
+// writes on close(2) and report success. A wasted PUT is the acceptable failure; a discarded write is
+// not.
+func TestNodeWithANegativeStoredSizeFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	n := NewNode("f", testAttr(0), -1)
+
+	if !n.Dirty() {
+		t.Error("Dirty() = false. A node whose length cannot be computed must be treated as dirty, or " +
+			"Release will evict it and any pending writes go with it")
+	}
+
+	if _, _, err := n.FlushPlan(); !errors.Is(err, ErrInvalid) {
+		t.Errorf("FlushPlan() = %v, want ErrInvalid. Planning against a negative stored size would size "+
+			"the upload body wrongly", err)
+	}
+
+	if _, err := n.ReadInto(make([]byte, 4), 0, 0, nil); !errors.Is(err, ErrInvalid) {
+		t.Errorf("ReadInto() = %v, want ErrInvalid. A read that cannot know the file's length would "+
+			"report a valid count it has not filled, and the caller hands that buffer to the kernel", err)
+	}
+}
+
 // An object can be replaced behind our back and come back shorter than its recorded size. Trusting
 // storedSize over what actually arrived would hand the kernel uninitialized buffer as file content.
 func TestNodeReadIntoToleratesShortStoredRead(t *testing.T) {
