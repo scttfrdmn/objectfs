@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // testConfig returns a minimal ClusterConfig suitable for unit tests.
@@ -410,5 +412,174 @@ func TestClusterManager_StartStop(t *testing.T) {
 
 	if err := cm.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+// ── Local node statistics (#132) ──────────────────────────────────────────────
+
+// TestRefreshLocalStats_PopulatesMemoryAndOperations verifies that this node measures its own memory
+// and operation count rather than advertising the zeros it was constructed with.
+//
+// Until v0.11.0 the six resource fields on the local NodeInfo were set at construction and never
+// written again, so every node advertised itself as idle with an empty cache for the life of the
+// process — and a load-aware strategy comparing those numbers was comparing identical zeros.
+func TestRefreshLocalStats_PopulatesMemoryAndOperations(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "stats-refresh")
+
+	cm.stats.mu.Lock()
+	cm.stats.TotalOperations = 42
+	cm.stats.mu.Unlock()
+
+	var got NodeInfo
+	cm.refreshLocalStats(&got)
+
+	// A ratio of live heap to obtained heap, so strictly between 0 and 1 in a running process. Bounds
+	// rather than a value: the exact figure depends on what the test binary has allocated, and an
+	// assertion on it would be a test of the Go allocator.
+	if got.MemoryUsage <= 0 || got.MemoryUsage > 1 {
+		t.Errorf("MemoryUsage = %v, want a fraction in (0, 1]", got.MemoryUsage)
+	}
+	if got.Operations != 42 {
+		t.Errorf("Operations = %d, want 42", got.Operations)
+	}
+}
+
+// TestRefreshLocalStats_ReadsTheInjectedCache verifies that the cache figures come from the cache
+// rather than being left at zero.
+func TestRefreshLocalStats_ReadsTheInjectedCache(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "stats-cache")
+	cm.SetCache(&mockCache{stats: types.CacheStats{Size: 8192, HitRate: 0.75}})
+
+	var got NodeInfo
+	cm.refreshLocalStats(&got)
+
+	if got.CacheSize != 8192 {
+		t.Errorf("CacheSize = %d, want 8192", got.CacheSize)
+	}
+	if got.CacheHitRate != 0.75 {
+		t.Errorf("CacheHitRate = %v, want 0.75", got.CacheHitRate)
+	}
+}
+
+// TestRefreshLocalStats_LeavesCacheFieldsAloneWithNoCache verifies that an absent cache is
+// distinguishable from an empty one.
+//
+// Zero is a meaningful cache size, so writing it for "there is no cache" would make a node with no
+// cache look like the emptiest and therefore most attractive one to a size-aware strategy.
+func TestRefreshLocalStats_LeavesCacheFieldsAloneWithNoCache(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "stats-nocache")
+
+	got := NodeInfo{CacheSize: -1, CacheHitRate: -1}
+	cm.refreshLocalStats(&got)
+
+	if got.CacheSize != -1 || got.CacheHitRate != -1 {
+		t.Errorf("cache fields = (%d, %v), want them untouched at (-1, -1) when no cache is injected",
+			got.CacheSize, got.CacheHitRate)
+	}
+}
+
+// TestRefreshLocalStats_LeavesUnmeasurableFieldsAtZero verifies that CPU, disk, and bandwidth are not
+// filled with a proxy from an unrelated quantity.
+//
+// Each needs a platform-specific source this repository does not have. An obviously-zero CPUUsage
+// prompts someone to implement it; one carrying heap fragmentation looks like a measurement and gets
+// used as one. #132 proposed HeapInuse/HeapSys for CPUUsage, which is the same expression already
+// assigned to MemoryUsage — so this test also pins the two fields apart.
+func TestRefreshLocalStats_LeavesUnmeasurableFieldsAtZero(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "stats-honest")
+
+	var got NodeInfo
+	cm.refreshLocalStats(&got)
+
+	if got.CPUUsage != 0 {
+		t.Errorf("CPUUsage = %v, want 0: no CPU source exists in this repository, and a stand-in "+
+			"reads as a measurement", got.CPUUsage)
+	}
+	if got.DiskUsage != 0 {
+		t.Errorf("DiskUsage = %v, want 0", got.DiskUsage)
+	}
+	if got.NetworkBandwidth != 0 {
+		t.Errorf("NetworkBandwidth = %d, want 0", got.NetworkBandwidth)
+	}
+}
+
+// TestPerformGossipRefreshesTheAdvertisedStats verifies that the figures a peer receives are the
+// current ones, end to end through the gossip round.
+//
+// refreshLocalStats being correct is not enough: it has to be called, and its output has to reach the
+// struct that performGossip marshals. Asserting through gp.localNode covers the assignment the unit
+// tests above cannot see.
+func TestPerformGossipRefreshesTheAdvertisedStats(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "advertise-host")
+	cm.SetCache(&mockCache{stats: types.CacheStats{Size: 4096, HitRate: 0.5}})
+
+	cm.stats.mu.Lock()
+	cm.stats.TotalOperations = 7
+	cm.stats.mu.Unlock()
+
+	gp := cm.gossip
+
+	// A peer is required, or performGossip returns before sending anything.
+	gp.mu.Lock()
+	gp.memberlist["advertise-peer"] = &GossipNode{
+		Info:        &NodeInfo{ID: "advertise-peer", Address: "127.0.0.1:1", Metadata: map[string]string{}},
+		Incarnation: 1,
+		State:       StateAlive,
+	}
+	gp.mu.Unlock()
+
+	gp.performGossip()
+
+	gp.mu.RLock()
+	got := *gp.localNode
+	gp.mu.RUnlock()
+
+	if got.CacheSize != 4096 {
+		t.Errorf("advertised CacheSize = %d, want 4096", got.CacheSize)
+	}
+	if got.CacheHitRate != 0.5 {
+		t.Errorf("advertised CacheHitRate = %v, want 0.5", got.CacheHitRate)
+	}
+	if got.Operations != 7 {
+		t.Errorf("advertised Operations = %d, want 7", got.Operations)
+	}
+	if got.MemoryUsage <= 0 {
+		t.Errorf("advertised MemoryUsage = %v, want > 0", got.MemoryUsage)
+	}
+}
+
+// TestCalculateClusterStats_SumsCacheSizeAcrossAliveNodes verifies that the accumulator discarded
+// with `_ =` until v0.11.0 now reaches a field.
+//
+// Summed, not averaged: the question a total cache size answers is "how much is cached", and an
+// average answers nothing that the per-node figures do not already. The hit rate beside it is averaged
+// for the mirror-image reason, which is why the two are combined differently.
+func TestCalculateClusterStats_SumsCacheSizeAcrossAliveNodes(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "sum-host")
+
+	cm.mu.Lock()
+	cm.nodes["sum-a"] = &NodeInfo{ID: "sum-a", Status: NodeStatusAlive, CacheSize: 1000, CacheHitRate: 0.4, Metadata: map[string]string{}}
+	cm.nodes["sum-b"] = &NodeInfo{ID: "sum-b", Status: NodeStatusAlive, CacheSize: 3000, CacheHitRate: 0.6, Metadata: map[string]string{}}
+	// Dead nodes contribute nothing: their cache is not reachable, so counting it would overstate what
+	// the cluster can serve without going to S3.
+	cm.nodes["sum-dead"] = &NodeInfo{ID: "sum-dead", Status: NodeStatusDead, CacheSize: 9_000_000, Metadata: map[string]string{}}
+	cm.mu.Unlock()
+
+	cm.calculateClusterStats()
+
+	stats := cm.GetStats()
+
+	// 1000 + 3000, plus whatever the self node reports — zero here, since nothing refreshed it.
+	if stats.TotalCacheSize != 4000 {
+		t.Errorf("TotalCacheSize = %d, want 4000 (dead node's 9000000 excluded)", stats.TotalCacheSize)
+	}
+	if stats.CacheHitRate <= 0 {
+		t.Errorf("CacheHitRate = %v, want > 0", stats.CacheHitRate)
 	}
 }

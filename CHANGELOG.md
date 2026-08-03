@@ -169,6 +169,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot see. Nine mutations were checked, each reverting one part of the fix, and each fails a test
   that names the consequence.
 
+- **Every node advertised itself as idle with an empty cache, for the life of the process** ([#132]).
+  The six resource and cache fields on the local `NodeInfo` were set at construction and never written
+  again, so the figures a peer received described a node that had just started and never done anything.
+  Four of them now carry a measurement, taken once per gossip round and travelling with the alive
+  message that immediately follows: heap in use as a fraction of heap obtained, and cache size, hit
+  rate, and operation count from sources this package already had. Once per round rather than on a
+  ticker of its own, because the only consumer is that message — and because `ReadMemStats` stops the
+  world, so its frequency should be bounded by something.
+
+  Three premises in the issue turned out not to hold, and the resulting scope is smaller than it asked
+  for. There is no new message type, because the alive message already carries the full `NodeInfo` —
+  the transport was never missing. `StrategyLeastLoad` was not reading these fields at all; it reads
+  `LoadBalancerStats.NodeLoad`, which is populated, so the strategy was not broken in the way the
+  issue described. And `CPUUsage` cannot be `HeapInuse/HeapSys` as proposed, because that is the same
+  expression assigned to `MemoryUsage` — two fields holding one quantity under different names.
+
+  So `CPUUsage`, `DiskUsage`, and `NetworkBandwidth` are left at zero, with the reason recorded on the
+  fields and pinned by a test. Each needs a platform-specific source that is not in this repository:
+  `/proc/stat` or `host_statistics`, `statfs` against a cache directory this package does not know
+  about, interface counters sampled over an interval. A field filled with a proxy from an unrelated
+  quantity is worse than an empty one — an obviously-zero `CPUUsage` prompts someone to implement it,
+  while one carrying heap fragmentation looks like a measurement and gets used as one.
+
+  Also fixed: `calculateClusterStats` summed a `totalCacheSize` and discarded it with `_ =`. The value
+  was correct and simply never assigned anywhere, so `ClusterStats` reported an average hit rate with no
+  way to say how much was cached. It is now a field, summed across alive nodes only — a dead node's
+  cache is not reachable, so counting it would overstate what the cluster can serve without going to S3.
+
+  This work was only observable because [#272] landed first: with incarnations frozen, a receiving node
+  discarded every stats update after the first, so a live feed and a permanently stale one were
+  indistinguishable from the outside.
+
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
