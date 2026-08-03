@@ -237,8 +237,7 @@ storage:
     region: us-east-1
     use_acceleration: true
     cost_optimization:
-      enabled: true
-      tiering_enabled: true
+      small_objects_on_standard: true
 
 performance:
   cache_size: 8GB
@@ -259,10 +258,16 @@ monitoring:
 
 Every key above is one the loader defines, which is checked by
 `TestDocumentedConfigYAMLMatchesTheSchema` — configuration is decoded strictly, so a key the schema
-does not have fails at startup with the key named. Two of them set a value nothing reads:
-`cost_optimization` is not mapped onto the backend (`internal/adapter/adapter.go` records why: the
-config and backend types are disjoint), and `predictive_caching` reaches the cache but the predictor
-it selects is never installed on the mount path.
+does not have fails at startup with the key named. One of them sets a value nothing reads:
+`predictive_caching` reaches the cache, but the predictor it selects is never installed on the mount
+path.
+
+`cost_optimization` had five other keys until v0.11.0 — `enabled`, `tiering_enabled`,
+`lifecycle_enabled`, `transition_to_ia` and `transition_to_glacier` — and none of them reached the
+backend, which read an entirely different set of field names. They are gone rather than deprecated,
+so a file still carrying one fails at startup naming it. `small_objects_on_standard` is what remains:
+it stores an object on STANDARD where `storage_tier` names a class that would bill it as larger than
+it is *and* STANDARD is genuinely cheaper for it.
 
 <CodeRunner language="bash">
 

@@ -226,29 +226,53 @@ type TierConstraints struct {
 	TransitionDelay    time.Duration `yaml:"transition_delay"`     // Delay before transitioning to this tier
 }
 
-// CostOptimization defines cost optimization settings
+// CostOptimization defines cost optimization settings.
+//
+// Three fields, where there were six. `TransitionRules []TransitionRule`, `LifecycleManagement` and
+// `IntelligentTiering` were removed rather than plumbed: no code read any of the three, and the two
+// bools were additionally misleading — S3 lifecycle rules and Intelligent-Tiering configuration are
+// bucket-level settings applied with PutBucketLifecycleConfiguration and
+// PutBucketIntelligentTieringConfiguration, neither of which this backend calls, so a `true` there
+// described something ObjectFS has no code to do. `TransitionRules` was the reason
+// internal/config.S3CostOptimization could not be mapped onto this type at all: there is no reading
+// of `transition_to_ia: 30` that produces a []TransitionRule without inventing the rest of a rule
+// (#203).
+//
+// What survives is separated by who can reach it, because that turned out to be the whole question:
+// one field is read on the write path of every mount, and two gate an analyzer that only a caller
+// holding a *Backend can invoke.
 type CostOptimization struct {
-	EnableAutoTiering     bool             `yaml:"enable_auto_tiering"`     // Automatically transition objects between tiers
-	TransitionRules       []TransitionRule `yaml:"transition_rules"`        // Rules for automatic tier transitions
-	LifecycleManagement   bool             `yaml:"lifecycle_management"`    // Enable S3 lifecycle management
-	IntelligentTiering    bool             `yaml:"intelligent_tiering"`     // Use S3 Intelligent Tiering
-	CostThreshold         float64          `yaml:"cost_threshold"`          // Cost threshold for optimization decisions ($/GB/month)
-	MonitorAccessPatterns bool             `yaml:"monitor_access_patterns"` // Monitor and optimize based on access patterns
-}
+	// SmallObjectsOnStandard stores an object on STANDARD when the configured tier would bill it as
+	// larger than it is. Read on the PutObject path, and the one field in this struct a mount
+	// configuration maps (`storage.s3.cost_optimization.small_objects_on_standard`).
+	//
+	// It changes the storage class of stored objects, which is why it is its own field and its own
+	// key. This behavior used to be gated by MonitorAccessPatterns — a name that says the process
+	// observes something, attached to a switch that silently rewrote the storage class of every
+	// object under 128 KiB. See [CostOptimizer.HandleStandardTierOverhead] for which tiers it applies
+	// to and why "under 128 KiB" was the wrong test.
+	SmallObjectsOnStandard bool `yaml:"small_objects_on_standard"`
 
-// TransitionRule defines automatic tier transition rules
-type TransitionRule struct {
-	FromTier         string       `yaml:"from_tier"`          // Source tier
-	ToTier           string       `yaml:"to_tier"`            // Destination tier
-	AfterDays        int          `yaml:"after_days"`         // Days after creation to transition
-	AccessPattern    string       `yaml:"access_pattern"`     // "infrequent", "archive", "cold"
-	ObjectSizeFilter ObjectFilter `yaml:"object_size_filter"` // Filter by object size
-}
+	// EnableAutoTiering lets [CostOptimizer.AnalyzeAndOptimize] issue the CopyObject calls that move
+	// objects between tiers. Off by default and deliberately not mapped from a mount configuration:
+	// nothing on the mount path calls AnalyzeAndOptimize, so a YAML key for it would configure a
+	// feature no mount can invoke. It is reachable through [Backend.OptimizeStorageCosts] for callers
+	// using this package as a library.
+	EnableAutoTiering bool `yaml:"enable_auto_tiering"`
 
-// ObjectFilter defines filters for transition rules
-type ObjectFilter struct {
-	MinSize int64 `yaml:"min_size"` // Minimum object size in bytes
-	MaxSize int64 `yaml:"max_size"` // Maximum object size in bytes (-1 for unlimited)
+	// CostThreshold is the monthly saving in dollars below which a suggested transition is not worth
+	// making. Read only by the analyzer above, so it is unmapped for the same reason.
+	CostThreshold float64 `yaml:"cost_threshold"`
+
+	// MonitorAccessPatterns records an access pattern per object key on every read, which is what
+	// gives [Backend.GetCostOptimizationReport] something to report.
+	//
+	// Also unmapped, and this one for a reason that is not just reachability: the map it fills holds
+	// one entry per distinct key read and nothing ever evicts from it, so on a bucket with many
+	// objects it grows for the life of the mount. A key that trades unbounded memory for a report no
+	// mount can display is not a key worth offering. Library callers that want the report accept that
+	// trade knowingly.
+	MonitorAccessPatterns bool `yaml:"monitor_access_patterns"`
 }
 
 // PricingConfig defines custom pricing configuration for S3 costs
@@ -431,11 +455,12 @@ func NewDefaultConfig() *Config {
 			MinSize:   "4KB", // skip compression for tiny objects
 		},
 		CongestionAlgorithm: "auto",
+		// Every cost-optimization setting off. Two of them change what is stored or how much memory
+		// the process holds, so a default that is on would be a decision made for the operator.
 		CostOptimization: CostOptimization{
-			EnableAutoTiering:     false,
-			LifecycleManagement:   false,
-			IntelligentTiering:    false,
-			MonitorAccessPatterns: false,
+			SmallObjectsOnStandard: false,
+			EnableAutoTiering:      false,
+			MonitorAccessPatterns:  false,
 		},
 		PricingConfig: PricingConfig{
 			UsePricingAPI: false,

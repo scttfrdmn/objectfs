@@ -436,6 +436,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not start. This is the third instance of the shape [#156] and [#176] were: a config block whose
   every layer worked except the one that had to call it.
 
+- **`storage.s3.cost_optimization` keeps one key, and it does what it says ([#203]).** The block had
+  six; five are removed and one is new. `small_objects_on_standard` stores an object on STANDARD when
+  the configured `storage_tier` would bill it as larger than it is *and* STANDARD is genuinely cheaper
+  for it. Defaults to `false`, because it changes the storage class objects are written with, and an
+  operator who set `storage_tier` should get that tier until they ask otherwise.
+
+  Removed, not deprecated — configuration is decoded strictly, so a file still carrying one of these
+  fails at startup naming the key rather than silently ignoring it:
+
+  | Removed key | Why |
+  |---|---|
+  | `enabled` | Gated nothing. The backend has no such field |
+  | `tiering_enabled` | Automatic tier transitions exist in the S3 backend; nothing on the mount path invokes them |
+  | `lifecycle_enabled` | Lifecycle rules are a `PutBucketLifecycleConfiguration` call this backend never makes |
+  | `transition_to_ia` | Same: a lifecycle rule, never written |
+  | `transition_to_glacier` | Same |
+
+  This is the fourth instance of the shape [#156], [#176] and the `cluster.redis` item above were, and
+  the most direct: `internal/config.S3CostOptimization` and `internal/storage/s3.CostOptimization`
+  shared **no field name at all**, so the block could not be mapped even in principle. `buildS3Config`
+  carried a comment saying it was not mappable, which was true and is not a fix — the two types had
+  drifted until the only honest options were to plumb a field that did not exist on both sides or to
+  delete what nothing read.
+
+  Two more `s3.CostOptimization` fields survive as Go struct fields with no YAML key, and the
+  distinction is deliberate: `EnableAutoTiering` and `CostThreshold` are read by code an embedder can
+  call directly, while a *mount* has no path to it. `MonitorAccessPatterns` is likewise unmapped, and
+  for a second reason — the map it populates holds one entry per distinct key read and nothing evicts,
+  so on a bucket with many objects it is unbounded growth for a report no mount displays.
+
+- **The small-object rule compares prices instead of one size.** `HandleStandardTierOverhead` tested
+  `objectSize < 128 KiB` with no reference to the configured tier, so it moved objects to STANDARD from
+  tiers that publish no billing minimum at all — including DEEP_ARCHIVE, at ~23× the storage rate —
+  and from the three that do at sizes where they are still much cheaper. Being under a floor does not
+  make STANDARD cheaper: the crossover is at `minBillable × rateTier / rateStandard`, which at list
+  prices is **69.6 KiB** for STANDARD_IA, **55.7 KiB** for ONEZONE_IA and **22.3 KiB** for GLACIER_IR.
+  A 32 KiB object billed as 128 KiB of GLACIER_IR costs about a third of 32 KiB on STANDARD. Three
+  conditions are now required — the tier publishes a minimum, the object is under it, and STANDARD is
+  cheaper for this object at the prices this deployment pays, discounts and `CustomPricing` included.
+
+  This also keeps GLACIER and DEEP_ARCHIVE out on a second ground that is not about money: their
+  objects cannot be read without a restore, so diverting one to STANDARD would change what a read of
+  that object *does*, not only what it costs. A cost heuristic must not decide retrieval semantics.
+
+  `TierValidator.GetRecommendations` had the identical size-only rule and now uses the same three
+  conditions at list rates. It has no mount-path caller — it is exported API — but advice nobody can
+  act on wrongly is still advice someone will act on.
+
+- **The billing-minimum warning names the tier the object is actually stored on.** `ValidateWrite`
+  ran before the small-object diversion and described the configured tier's floor, so an operator who
+  enabled `small_objects_on_standard` *because of* that warning still saw `billed_size=131072` on a
+  16 KiB object that was about to be stored on STANDARD and billed as 16 KiB. The diversion logs at
+  Debug, so at the default level the misleading half was the only half visible. The tier decision now
+  precedes validation and `ValidateWriteToTier` takes the effective tier. `tier_constraints.min_object_size`
+  deliberately does *not* follow it: that is a floor the operator configured for this mount, and an
+  internal cost optimization is not a reason to stop enforcing it.
+
+- **A per-object storage class bypasses the CargoShip transporter.** `Transporter.optimizeStorageClass`
+  returns the transporter's *own* config storage class — fixed at construction from `storage_tier` — for
+  any archive with no `AccessPattern` and no `RetentionDays`, which is every archive ObjectFS builds. It
+  never reads `Archive.StorageClass`, the field whose comment says "Target storage class". So the
+  diverted class was computed correctly and dropped at the boundary: the object stored fine, read back
+  fine, and only the invoice differed. Objects whose class differs from the configured tier now take the
+  direct `PutObject` path, joining the existing bypasses for compression and for encryption modes the
+  transporter cannot express. The common case is unaffected and keeps CargoShip's throughput
+  optimization. Filed upstream as [scttfrdmn/cargoship#352]; `OptimizedTransporter`, a different type
+  ObjectFS does not construct, already honors the field.
+
+  Found by asserting the storage class recorded at the S3 endpoint rather than the value passed in — the
+  same technique that found the `INTELLIGENT_TIERING` default in v0.10.1, and the reason the seam test
+  exists at all.
+
+[scttfrdmn/cargoship#352]: https://github.com/scttfrdmn/cargoship/issues/352
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
 [#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
@@ -447,6 +520,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#192]: https://github.com/scttfrdmn/objectfs/issues/192
 [#202]: https://github.com/scttfrdmn/objectfs/issues/202
+[#203]: https://github.com/scttfrdmn/objectfs/issues/203
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205
 [#211]: https://github.com/scttfrdmn/objectfs/issues/211
 [#212]: https://github.com/scttfrdmn/objectfs/issues/212

@@ -815,23 +815,33 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 			WithDetail("suggestion", "System is in read-only mode. Writes will be available once service recovers.")
 	}
 
-	// Validate write operation against tier constraints
-	if err := b.tierValidator.ValidateWrite(key, int64(len(data))); err != nil {
-		b.metricsCollector.RecordError(err)
-		return fmt.Errorf("tier validation failed: %w", err)
-	}
-
-	// Handle Standard tier overhead for cost optimization
+	// The storage class this object is written with, which is the configured tier unless the operator
+	// asked for small objects to be diverted to STANDARD.
+	//
+	// The gate used to be MonitorAccessPatterns — a setting whose name promises observation, deciding
+	// where objects are stored. That is why the class an object was written with depended on a knob
+	// about reporting, and why turning reporting on quietly changed the bill (#203).
+	//
+	// Decided before validation, not after, because the validator's warnings are about what this write
+	// will cost and the diversion is what determines that. The other order warned about the configured
+	// tier's 128 KiB billing minimum on the very objects the diversion was keeping off it.
 	effectiveTier := b.currentTier
-	if b.config.CostOptimization.MonitorAccessPatterns {
+	if b.config.CostOptimization.SmallObjectsOnStandard {
 		effectiveTier = b.costOptimizer.HandleStandardTierOverhead(key, int64(len(data)))
 		if effectiveTier != b.currentTier {
-			b.logger.Debug("Using Standard tier to avoid IA overhead",
+			b.logger.Debug("storing a small object on Standard to avoid the configured tier's "+
+				"minimum billable size",
 				"object", key,
 				"size", len(data),
 				"configured_tier", b.currentTier,
 				"effective_tier", effectiveTier)
 		}
+	}
+
+	// Validate write operation against tier constraints
+	if err := b.tierValidator.ValidateWriteToTier(key, int64(len(data)), effectiveTier); err != nil {
+		b.metricsCollector.RecordError(err)
+		return fmt.Errorf("tier validation failed: %w", err)
 	}
 
 	// Compute SHA-256 of the uncompressed canonical content before any
@@ -942,6 +952,30 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 				"key", key,
 				"encryption_mode", b.config.Encryption.Mode,
 				"bucket_keys", b.config.Encryption.BucketKeys)
+
+			transporter = nil
+		}
+
+		// Bypassed a third time when this object's class differs from the configured tier, because the
+		// transporter cannot be told a per-object class.
+		//
+		// Archive.StorageClass looks like it can: it is set below and it is the field the name promises.
+		// But Transporter.optimizeStorageClass ignores it — for an archive with no AccessPattern and no
+		// RetentionDays, which is every archive ObjectFS builds, it returns the *transporter's own*
+		// config.StorageClass, fixed at construction from cfg.StorageTier (client.go). So a
+		// small-objects-on-Standard diversion sent through here would be stored on the configured tier
+		// with nothing reporting the difference, which is the seam this whole change is about: the value
+		// is computed correctly and dropped at a boundary.
+		//
+		// Only the diverging case is bypassed. When effectiveTier equals the configured tier the
+		// transporter's own default is the right answer, so the common path keeps CargoShip's throughput
+		// optimization; a mount that diverts small objects gives it up for those objects only, which
+		// are by definition the small ones. Filed upstream as scttfrdmn/cargoship#352.
+		if transporter != nil && effectiveTier != b.currentTier {
+			b.logger.Debug("Bypassing CargoShip: the transporter cannot carry a per-object storage class",
+				"key", key,
+				"configured_tier", b.currentTier,
+				"effective_tier", effectiveTier)
 
 			transporter = nil
 		}

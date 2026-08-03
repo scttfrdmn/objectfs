@@ -45,7 +45,10 @@ which names them rather than leaving them mixed in with the list above.
 
 - **Universal compatibility**: Works with AWS S3, MinIO, Ceph, and all S3-compatible storage
 - **Multi-region support**: Optimize for your region or cross-region workflows
-- **Lifecycle management**: Automatic tiering to IA, Glacier, Deep Archive
+- **Storage class per mount**: `storage_tier` decides the class every object is written with, and
+  `cost_optimization.small_objects_on_standard` diverts an object to STANDARD when the configured tier
+  would bill it as larger than it is *and* STANDARD is actually cheaper for it. Automatic *transitions*
+  between classes are not a feature — see [Not yet wired up](#not-yet-wired-up)
 - **Multipart uploads**: Efficient handling of large files
 - **Retry logic**: Robust error handling with exponential backoff
 
@@ -86,6 +89,7 @@ them**. Verified by import graph, not by reading the code:
 | Detailed per-file performance metrics | `internal/metrics` detailed collector | constructor has no non-test caller |
 | ML tier prediction driving cache promotion | `internal/analytics` | imported by `internal/cache`, but the `Predictor` field is never set on the mount path, so the size heuristic always runs |
 | Multi-node coordination | `internal/distributed` | imported only by tests |
+| Automatic tier transitions and lifecycle rules | `internal/storage/s3` cost optimizer | `AnalyzeAndOptimize` has no caller on the mount path; lifecycle rules are a bucket-level API call this backend never makes. The five config keys that described them were removed in v0.11.0 rather than left accepting values ([#203](https://github.com/scttfrdmn/objectfs/issues/203)) |
 
 They are listed here rather than deleted from the docs because the code exists and may be wired up;
 what they are not is a feature of the shipping product. Each is tracked as its own issue.

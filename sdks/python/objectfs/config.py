@@ -33,13 +33,19 @@ class S3Config:
     max_retries: int = 3
     timeout: int = 30
 
-    # Cost optimization
+    # Cost optimization. One key, matching the Go schema exactly, because ``to_yaml``
+    # writes this dict straight into a document the Go loader decodes strictly: a key
+    # it does not define fails the mount naming the key.
+    #
+    # There were five here -- ``enabled``, ``tiering_enabled``, ``lifecycle_enabled``,
+    # ``transition_to_ia``, ``transition_to_glacier`` -- and they were removed from the
+    # schema in v0.11.0 rather than renamed, having never reached the S3 backend at all.
+    # Three of them also defaulted to True, so this SDK's default configuration wrote a
+    # document asking for automatic tiering and lifecycle management, neither of which
+    # ObjectFS implements. Default False here for the same reason the Go side does: it
+    # changes the storage class objects are written with.
     cost_optimization: Dict[str, Any] = field(default_factory=lambda: {
-        "enabled": True,
-        "tiering_enabled": True,
-        "lifecycle_enabled": True,
-        "transition_to_ia": 30,
-        "transition_to_glacier": 90
+        "small_objects_on_standard": False
     })
 
 
@@ -347,7 +353,6 @@ class Configuration:
         config.performance.max_concurrency = 500
         config.performance.multilevel_caching = True
         config.storage.s3.use_acceleration = True
-        config.storage.s3.cost_optimization["enabled"] = True
         config.monitoring.enabled = True
         return config
 
@@ -365,16 +370,26 @@ class Configuration:
 
     @classmethod
     def _cost_optimized_preset(cls) -> 'Configuration':
-        """Cost optimized preset."""
+        """Cost optimized preset.
+
+        This preset used to set five cost-optimization keys, including a
+        seven-day transition to STANDARD_IA and a thirty-day transition to
+        GLACIER. ObjectFS has never performed either: automatic tier
+        transitions exist in the S3 backend but nothing on the mount path
+        invokes them, and lifecycle rules are a bucket-level configuration it
+        does not write. The keys were removed from the schema in v0.11.0, so
+        setting them now fails the mount.
+
+        What remains is one real saving and it is opt-in for a reason: writing
+        small objects to STANDARD rather than to a tier that would bill them at
+        its 128 KB minimum. Pair it with ``storage_tier`` set to STANDARD_IA or
+        ONEZONE_IA -- on STANDARD it has nothing to do.
+        """
         config = cls()
         config.performance.cache_size = "2GB"
         config.performance.max_concurrency = 100
         config.storage.s3.cost_optimization.update({
-            "enabled": True,
-            "tiering_enabled": True,
-            "lifecycle_enabled": True,
-            "transition_to_ia": 7,
-            "transition_to_glacier": 30
+            "small_objects_on_standard": True
         })
         return config
 

@@ -312,6 +312,24 @@ func NewTierValidator(tier string, constraints TierConstraints, logger *slog.Log
 // were not minimums at all. Those three now have no minimum, and the two archive classes warn about
 // their per-object overhead instead, which is the real cost and points the other way.
 func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
+	return tv.ValidateWriteToTier(key, dataSize, tv.tier)
+}
+
+// ValidateWriteToTier is ValidateWrite for an object that is not going to the configured tier.
+//
+// The cost-optimization setting `small_objects_on_standard` diverts an individual object to STANDARD
+// when the configured tier would bill it as larger than it is, so the class an object is written with
+// is a per-object decision while the validator is constructed once per mount. Validating against the
+// configured tier regardless meant an operator who enabled that setting *because of* the warning
+// below still got the warning: "billed_size 131072" on a 16 KiB object that was about to be stored on
+// STANDARD and billed as 16 KiB. The diversion itself logs at Debug, so at the default level the only
+// thing visible was the part that was wrong.
+//
+// The split between what follows the effective tier and what does not is deliberate. The two billing
+// warnings describe what AWS will charge, so they follow the tier the object is actually stored on.
+// TierConstraints.MinObjectSize does not: it is a floor the operator set for this mount, and an
+// ObjectFS-internal cost diversion is not a reason to stop enforcing a policy someone configured.
+func (tv *TierValidator) ValidateWriteToTier(key string, dataSize int64, tier string) error {
 	// The operator's floor, if there is one: a deliberate policy, still enforced.
 	if minSize := tv.constraints.MinObjectSize; minSize > 0 && dataSize < minSize {
 		return fmt.Errorf("object size %d bytes is below the configured minimum of %d bytes for the "+
@@ -320,11 +338,24 @@ func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
 			dataSize, minSize, tv.tier, minSize)
 	}
 
+	// The tier the object is being stored on, which is the configured one unless a caller named
+	// another. An unknown name falls back to the configured tier's info rather than to a zero value:
+	// zero means "no minimum and no overhead", so an unrecognized tier would silently warn about
+	// nothing at all.
+	tierInfo := tv.tierInfo
+	if tier != tv.tier {
+		if info, known := StorageTiers[tier]; known {
+			tierInfo = info
+		} else {
+			tier = tv.tier
+		}
+	}
+
 	// AWS's billing floor: not a reason to refuse, but worth saying out loud, because the object
 	// costs a multiple of what its size suggests and nothing downstream will mention it again.
-	if minBillable := tv.tierInfo.MinObjectSize; minBillable > 0 && dataSize < minBillable {
+	if minBillable := tierInfo.MinObjectSize; minBillable > 0 && dataSize < minBillable {
 		tv.logger.Warn("object is smaller than this tier's minimum billable size",
-			"tier", tv.tier,
+			"tier", tier,
 			"key", key,
 			"size", dataSize,
 			"billed_size", minBillable,
@@ -336,9 +367,9 @@ func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
 	// The archive classes bill 40 KB of metadata per object regardless of its size, so a small object
 	// costs a multiple of what its bytes suggest. Worth saying at the point of the write, because the
 	// remedy — pack small files into an archive before storing them — is not available afterward.
-	if overhead := tv.tierInfo.PerObjectOverheadBytes; overhead > 0 && dataSize < overhead {
+	if overhead := tierInfo.PerObjectOverheadBytes; overhead > 0 && dataSize < overhead {
 		tv.logger.Warn("object is smaller than the per-object overhead this tier bills",
-			"tier", tv.tier,
+			"tier", tier,
 			"key", key,
 			"size", dataSize,
 			"per_object_overhead", overhead,
@@ -348,9 +379,9 @@ func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
 	}
 
 	// Log tier-specific warnings
-	if tv.tierInfo.RetrievalCost {
+	if tierInfo.RetrievalCost {
 		tv.logger.Debug("Writing to tier with retrieval costs",
-			"tier", tv.tier,
+			"tier", tier,
 			"key", key,
 			"size", dataSize)
 	}
@@ -388,13 +419,37 @@ func (tv *TierValidator) GetTierInfo() StorageTierInfo {
 	return tv.tierInfo
 }
 
-// GetRecommendations returns tier recommendations based on access patterns
+// GetRecommendations returns tier recommendations based on access patterns.
+//
+// The size-based recommendation is the same judgement [CostOptimizer.HandleStandardTierOverhead]
+// makes on the write path, and it used to be wrong in the same way: `objectSize < 128 KiB` with no
+// reference to the configured tier, so it advised moving to STANDARD from tiers that have no billing
+// minimum at all, and from GLACIER_IR at sizes where GLACIER_IR billed at 128 KiB is nearly 3× cheaper
+// than STANDARD at the object's own size. Being below a floor does not make STANDARD cheaper; the
+// crossover is at minBillable × rateTier / rateStandard. Advice nobody can act on wrongly is still
+// advice someone will act on.
+//
+// This is the recommendation form, so it compares list rates from StorageTierInfo.CostPerGBMonth
+// rather than the discounted prices a deployment pays — the CostOptimizer holds the discounts and the
+// validator does not have one. That makes it slightly conservative where an operator has a negotiated
+// rate, which is the safe direction for a suggestion.
 func (tv *TierValidator) GetRecommendations(objectSize int64, accessFrequency string) []string {
 	recommendations := make([]string, 0, 3)
 
-	// Size-based recommendations
-	if objectSize < minBillableSize128KB {
-		recommendations = append(recommendations, "Consider Standard tier for small objects to avoid IA minimum charges")
+	// Size-based recommendation: only when this tier has a billing floor, the object is under it, and
+	// STANDARD is genuinely cheaper at list rates.
+	if minBillable := tv.tierInfo.MinObjectSize; minBillable > 0 && objectSize < minBillable {
+		standardRate := StorageTiers[TierStandard].CostPerGBMonth
+
+		billedOnTier := float64(minBillable) * tv.tierInfo.CostPerGBMonth
+		billedOnStandard := float64(objectSize) * standardRate
+
+		if billedOnStandard < billedOnTier {
+			recommendations = append(recommendations, fmt.Sprintf(
+				"Consider Standard for this object: %s bills a %d-byte object as %d bytes, which costs "+
+					"more than %d bytes on Standard",
+				tv.tier, objectSize, minBillable, objectSize))
+		}
 	}
 
 	// Access pattern recommendations

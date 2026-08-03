@@ -73,12 +73,32 @@ storage:
       algorithm: zstd                 # none, zstd, lz4, gzip
       level: 3                        # zstd 0-22, gzip 0-9; 0 = codec default
 
-    cost_optimization:                # not yet wired — none of this block reaches the backend
-      enabled: false
-      tiering_enabled: false
-      lifecycle_enabled: false
-      transition_to_ia: 30
-      transition_to_glacier: 90
+    # Cost optimization. One key, and it changes where objects are stored.
+    #
+    # Five keys — `enabled`, `tiering_enabled`, `lifecycle_enabled`, `transition_to_ia`,
+    # `transition_to_glacier` — were removed in v0.11.0, not renamed. None of them ever reached the
+    # backend: it read a different set of field names entirely, and one of them was a list of
+    # transition rules that no YAML here could produce. A file still carrying any of the five now
+    # fails at startup naming the key, which is the only way the setting's absence gets noticed
+    # (#203). Automatic tier transitions and S3 lifecycle rules are not implemented at all — the
+    # backend has the analysis code but nothing on the mount path calls it, and lifecycle rules are a
+    # bucket-level setting ObjectFS never writes.
+    cost_optimization:
+      # Store an object on STANDARD when `storage_tier` above names a class that would bill it as
+      # larger than it is. STANDARD_IA, ONEZONE_IA and GLACIER_IR bill a 128 KB minimum per object.
+      #
+      # The threshold is not 128 KB. STANDARD being cheaper depends on the rate difference as well as
+      # the floor: at list prices the crossover is about 70 KB for STANDARD_IA, 56 KB for ONEZONE_IA
+      # and 22 KB for GLACIER_IR, because a 32 KB object billed as 128 KB of GLACIER_IR still costs a
+      # third of 32 KB of STANDARD. Below the crossover the object moves; between the crossover and
+      # the floor it stays, since moving it would cost more. Custom or discounted rates under
+      # `pricing_config` shift the crossover, and are used in the comparison.
+      #
+      # GLACIER, DEEP_ARCHIVE and INTELLIGENT_TIERING are never affected: AWS publishes no minimum
+      # billable size for any of the three. The archive classes are excluded on a second ground too —
+      # their objects cannot be read without a restore, so quietly storing one on STANDARD would
+      # change what a read of it does and not only what it costs.
+      small_objects_on_standard: false
 
 # Performance tuning.
 performance:
