@@ -243,6 +243,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   succeeds and that the resulting object is whole, so a lossy reclaim fails rather than passing
   quietly.
 
+- **A cache that answered a ten-byte request with two bytes now reports a miss ([#178]).** The
+  `types.Cache` contract is that a partial hit is a miss, and it is a contract about data integrity
+  rather than about return values: `internal/fuse` passes a non-nil hit to the kernel verbatim as file
+  content, so a short answer is a truncated read reported as a successful one, and the caller cannot
+  distinguish a short cache entry from a short file. The Redis implementation used `GETRANGE`, which
+  clamps to the stored value's length and returns what it can — `GETRANGE k 8 17` over a ten-byte value
+  answers with two bytes and no indication that eight are missing. It had ten tests of its own, all
+  passing, none of which asked for a range longer than what was stored.
+
+  What found it is the durable part: **`internal/cache/cachetest` is a shared conformance suite that
+  every `types.Cache` implementation is now run against.** There were five implementations, one
+  contract, and no test in common — each was checked against the questions its own author thought to
+  ask, which is why four of them satisfied a rule the fifth violated in the most consequential
+  direction. Ten cases, each stating in its failure message what a caller would observe: exact-range
+  hits, straddling and past-the-end reads as misses, a request longer than the entry as a miss, the
+  open-ended `size <= 0` form, the returned slice not aliasing the cache's own storage, a newer `Put`
+  winning where it overlaps, and `Delete` removing the key it names and nothing that merely shares a
+  prefix with it. A sixth implementation is one enrollment away from being held to the same contract.
+
 ### Changed
 
 - **Each listener's address is one setting, beside the `enabled` flag that governs it
@@ -395,12 +414,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior at the default configuration, which wants a measurement rather than a number nudged in
   passing, so it is filed as [#247] and documented where the setting is.
 
+- **The `cluster.redis` block selects the cache a mount uses, and the `cache` block reaches it
+  ([#178]).** `cache.NewFromConfig` — the only reader of `cluster.redis.*` anywhere — had no caller.
+  The adapter built a `MultiLevelConfig` literal of its own instead, so seven `cluster` keys plus a
+  seven-key `redis` sub-block were decoded, defaulted, validated and documented while no mount
+  consulted any of them: a deployment that configured a shared Redis cache got a private in-process
+  one, with no error and no warning, and looked correct until two nodes disagreed about a file.
+
+  Both halves of that mistake are fixed together, because they are the same mistake. `NewFromConfig`'s
+  other arm passed a literal `nil` to `NewMultiLevelCache`, discarding the L1/L2 sizing, the TTL, the
+  persistent-cache directory and the eviction policy its argument carried — so even with a caller, most
+  of the `cache` block would still have been ignored. The mapping now lives in `internal/cache` beside
+  the selection rather than in the adapter, since a second copy of it is how the two came to disagree
+  in the first place, and `Adapter.cache` is typed as `types.Cache`: naming the concrete
+  `*cache.MultiLevelCache` there is what made the function uncallable, as the field could not hold what
+  it returns.
+
+  **An unreachable Redis now fails the mount** rather than falling back to an in-process cache. Falling
+  back is this same defect one layer out — both nodes come up, both believe the cache is shared, and
+  nothing in either log explains the disagreement — so the error names `cluster.redis` and the mount
+  does not start. This is the third instance of the shape [#156] and [#176] were: a config block whose
+  every layer worked except the one that had to call it.
+
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
+[#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
 [#176]: https://github.com/scttfrdmn/objectfs/issues/176
+[#178]: https://github.com/scttfrdmn/objectfs/issues/178
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#192]: https://github.com/scttfrdmn/objectfs/issues/192
 [#202]: https://github.com/scttfrdmn/objectfs/issues/202

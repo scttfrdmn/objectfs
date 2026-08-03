@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -15,17 +16,17 @@ import (
 	"github.com/scttfrdmn/objectfs/internal/storage/s3"
 	"github.com/scttfrdmn/objectfs/internal/vfs"
 	"github.com/scttfrdmn/objectfs/pkg/retry"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
-// Fallback sizes for the two cache capacities, used only if a configured value fails to parse here
-// after having passed Configuration.Validate — see sizeOrDefault. They match internal/config's
-// NewDefault so that the fallback is the documented default rather than a third number.
-const (
-	defaultCacheSize           = 2 << 30   // 2 GiB, matching NewDefault's "2GB"
-	defaultPersistentCacheSize = 10 << 30  // 10 GiB, matching NewDefault's "10GB"
-	defaultWriteBufferMemory   = 512 << 20 // 512 MiB, matching NewDefault's "512MB"
-)
+// Fallback used only if a configured size fails to parse here after having passed
+// Configuration.Validate — see sizeOrDefault. It matches internal/config's NewDefault so that the
+// fallback is the documented default rather than a third number.
+//
+// The two cache capacities were here too until the cache construction moved to cache.NewFromConfig
+// (#178); their fallbacks live beside that mapping now, for the same reason the mapping does.
+const defaultWriteBufferMemory = 512 << 20 // 512 MiB, matching NewDefault's "512MB"
 
 // Adapter represents the main ObjectFS adapter
 type Adapter struct {
@@ -33,9 +34,15 @@ type Adapter struct {
 	mountPoint string
 	config     *config.Configuration
 
-	// Core components
+	// Core components.
+	//
+	// cache is the interface and not *cache.MultiLevelCache, because which implementation a mount gets
+	// is a configuration decision: `cluster.redis.enabled` selects a Redis-backed distributed cache
+	// instead. Naming the concrete type here is what kept cache.NewFromConfig from having a caller
+	// (#178) and so left the whole cluster: block unreachable — the field could not hold what the
+	// function returns.
 	backend     *s3.Backend
-	cache       *cache.MultiLevelCache
+	cache       types.Cache
 	writeBuffer *vfs.Writer
 	mountMgr    fuse.PlatformFileSystem
 	metrics     *metrics.Collector
@@ -127,27 +134,19 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize S3 backend: %w", err)
 	}
 
-	// 3. Initialize cache system
-	cacheConfig := &cache.MultiLevelConfig{
-		L1Config: &cache.L1Config{
-			Enabled:    true,
-			Size:       a.sizeOrDefault("performance.cache_size", a.config.Performance.CacheSize, defaultCacheSize),
-			MaxEntries: a.config.Cache.MaxEntries,
-			TTL:        a.config.Cache.TTL,
-			Prefetch:   true,
-		},
-		L2Config: &cache.L2Config{
-			Enabled: a.config.Cache.PersistentCache.Enabled,
-			Size: a.sizeOrDefault("cache.persistent_cache.max_size",
-				a.config.Cache.PersistentCache.MaxSize, defaultPersistentCacheSize),
-			Directory:   a.config.Cache.PersistentCache.Directory,
-			TTL:         a.config.Cache.TTL,
-			Compression: true,
-		},
-		Policy: a.config.Cache.EvictionPolicy,
-	}
-
-	a.cache, err = cache.NewMultiLevelCache(cacheConfig)
+	// 3. Initialize the cache.
+	//
+	// Through NewFromConfig, which is what makes the cluster: block reachable at all: it selects the
+	// Redis-backed distributed cache when cluster.enabled and cluster.redis.enabled are both set, and
+	// otherwise builds the in-process MultiLevelCache from the cache: block.
+	//
+	// This used to be a MultiLevelConfig literal built here, and NewFromConfig had no caller (#178). So
+	// seven cluster keys plus a seven-key redis: sub-block were decoded, defaulted and validated while
+	// no mount consulted any of them: a deployment that configured a shared Redis cache got a private
+	// in-process one, with no error and no warning, and looked correct until two nodes disagreed about
+	// a file. The mapping moved into internal/cache with the selection, because a duplicate of it here
+	// is how the two came to disagree in the first place.
+	a.cache, err = cache.NewFromConfig(ctx, a.config)
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
@@ -339,16 +338,28 @@ func (a *Adapter) Stop(ctx context.Context) error {
 
 	// 6. Clear the cache, then release the goroutines behind it.
 	//
-	// The Close is what retires the prefetch workers. Prefetch is enabled unconditionally above, so
-	// every mount wraps L1 in a predictive cache with four workers and a statistics ticker, and until
-	// this call existed nothing ever stopped them: a process that mounted and unmounted repeatedly
-	// accumulated a set per mount, each holding a reference to the cache it was built over.
+	// The Close is what retires the prefetch workers. Prefetch is enabled unconditionally for the
+	// in-process cache, so that mount wraps L1 in a predictive cache with four workers and a statistics
+	// ticker, and until this call existed nothing ever stopped them: a process that mounted and
+	// unmounted repeatedly accumulated a set per mount, each holding a reference to the cache it was
+	// built over.
+	//
+	// Both are type assertions because types.Cache declares neither, and it should not: Clear on a
+	// shared Redis cache would discard every *other* node's cached bytes as well, which is not what
+	// unmounting one mount means, and Close on the interface would oblige every implementation to have
+	// a lifecycle it may not have. So the interface stays the read/write contract and lifecycle is
+	// asked for rather than assumed — the assertion failing is the correct outcome for a cache with no
+	// local state to clear.
 	if a.cache != nil {
-		a.cache.Clear()
+		if clearer, ok := a.cache.(interface{ Clear() }); ok {
+			clearer.Clear()
+		}
 
-		if err := a.cache.Close(); err != nil {
-			slog.Error("error closing cache", "error", err)
-			lastErr = err
+		if closer, ok := a.cache.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				slog.Error("error closing cache", "error", err)
+				lastErr = err
+			}
 		}
 	}
 

@@ -1,6 +1,7 @@
 package redis_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func newTestCache(t *testing.T) (*redis.Cache, *miniredis.Miniredis) {
 		TTL:        5 * time.Minute,
 		MaxRetries: 1,
 	}
-	c, err := redis.NewCache(cfg)
+	c, err := redis.NewCache(context.Background(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c, mr
@@ -43,7 +44,7 @@ func TestNewCache_BadAddress(t *testing.T) {
 		Address:    "localhost:1", // nothing listening here
 		MaxRetries: 0,
 	}
-	_, err := redis.NewCache(cfg)
+	_, err := redis.NewCache(context.Background(), cfg)
 	assert.Error(t, err)
 }
 
@@ -136,7 +137,7 @@ func TestTTLExpiry(t *testing.T) {
 		TTL:        100 * time.Millisecond,
 		MaxRetries: 1,
 	}
-	c, err := redis.NewCache(cfg)
+	c, err := redis.NewCache(context.Background(), cfg)
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 
@@ -155,11 +156,11 @@ func TestKeyPrefix(t *testing.T) {
 	cfg1 := config.RedisConfig{Enabled: true, Address: mr.Addr(), KeyPrefix: "ns1", MaxRetries: 1}
 	cfg2 := config.RedisConfig{Enabled: true, Address: mr.Addr(), KeyPrefix: "ns2", MaxRetries: 1}
 
-	c1, err := redis.NewCache(cfg1)
+	c1, err := redis.NewCache(context.Background(), cfg1)
 	require.NoError(t, err)
 	defer func() { _ = c1.Close() }()
 
-	c2, err := redis.NewCache(cfg2)
+	c2, err := redis.NewCache(context.Background(), cfg2)
 	require.NoError(t, err)
 	defer func() { _ = c2.Close() }()
 
