@@ -163,8 +163,12 @@ updates:
   - javascript
   - automerge
 
-  # JavaScript SDK. No alerts today, but ci.yml runs `npm install && npm test` in this directory
-  # (ci.yml:289), so its dependencies are executed on every PR and belong under the same watch.
+  # JavaScript SDK. No alerts today, but ci.yml's sdk-metrics job runs `npm ci`, `npm run build`,
+  # `npm test` and `npm run lint` in this directory, so its dependencies are both compiled and
+  # executed on every PR and belong under the same watch. `npm ci` rather than `npm install` is
+  # deliberate: it installs from the committed package-lock.json, so what CI resolves is what a
+  # developer resolves, and an alert on a nested dependency describes a copy that is actually in
+  # the tree rather than whatever the manifest range happens to pick up that day.
   #
   # The groups below exist because two of these packages cannot move alone. `npm install` enforces
   # peer ranges, so bumping half of a coupled pair fails at install time, not at test time:
@@ -188,8 +192,25 @@ updates:
   #   - TypeScript 7 is not reachable at any grouping. ts-jest's latest (29.4.12) peers `<7` and has
   #     no release above it. The ceiling is TypeScript 6, which typedoc@0.28 allows. See #314.
   #
-  # #314 also records why none of this is caught: nothing in CI runs `tsc`, so the SDK's 48 build
-  # errors are invisible and only `npm install` failures ever show up here.
+  # The TypeScript 6 bump needs two tsconfig.json changes that no error message names together, both
+  # measured against the current source rather than predicted:
+  #
+  #   - `moduleResolution: "node"` is TS5107 under 6.0. This is a *config-level* error, so tsc exits
+  #     before typechecking anything — which makes "1 error" look like a nearly-clean bump when the
+  #     real count behind it is 63. Either add `"ignoreDeprecations": "6.0"` or move `module` and
+  #     `moduleResolution` together to Node16; changing `moduleResolution` alone is TS5110.
+  #   - TypeScript 6 no longer auto-includes `@types/node`, which is where all 63 come from
+  #     (`Cannot find name 'process'`, `'console'`, `'child_process'`). Adding `"types": ["node"]`
+  #     takes it to zero. Bumping @types/node does not help; the package is `typesVersions`-only.
+  #
+  # Verified end to end on a scratch copy: typescript@6.0.3 + typedoc@0.28.20 + jest/@types/jest@30
+  # with those two tsconfig keys gives 0 tsc errors, 65 passing jest tests, and an emitted dist/.
+  # Keeping `module: commonjs` avoids ts-jest's TS151002 hybrid-module warning that Node16 triggers.
+  #
+  # #314 records why none of this used to be caught: nothing in CI ran `tsc`, so the SDK's 48 build
+  # errors were invisible and only `npm install` failures ever showed up here. The `npm run build`
+  # and `npm run lint` steps above are that gap closed — a Dependabot bump that breaks compilation
+  # now fails the PR instead of merging green.
 - package-ecosystem: npm
   directory: /sdks/javascript
   schedule:
