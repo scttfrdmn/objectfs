@@ -290,6 +290,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     boolean fails startup naming the variable, where the feature-flag variables coerce anything but
     `"true"` to false. These two govern unauthenticated endpoints that default to on, so silent
     coercion is wrong in whichever direction it picks.
+  - **The endpoints are documented.** `grep -rn health_port docs/ README.md configs/ examples/` used to
+    return nothing: the knobs existed, were read, changed behavior, and appeared in no shipped
+    documentation or example config ([#192]). The README now has a *Metrics and health endpoints*
+    section with both addresses, the `curl` that reaches each, the environment overrides, and why the
+    defaults are loopback; `docs/index.md` names the addresses beside the features rather than listing
+    "health monitoring" with nowhere to point a probe.
 
   The test gap is the more interesting half. `TestStartMetricsBindsTheEndpoint` scraped `127.0.0.1`
   and passed against a wildcard bind, because a wildcard bind answers on loopback too — so the tests

@@ -1187,17 +1187,18 @@ func validateEncryptionConfig(cfg EncryptionConfig) error {
 
 // validateListenAddr rejects a monitoring listen address the runtime cannot bind.
 //
-// The check is here rather than at the listener because of where the failure lands otherwise. Both
-// servers bind on a goroutine and log the error: metrics from inside a `go func()` in Collector.Start
-// that nothing reads the result of, health from startHTTPServer, which logs and returns. So a
-// malformed address leaves the mount up and working with no endpoint, and the only report is one line
-// in a log the operator has no reason to be reading — the config parsed, the mount succeeded, and
-// `curl` gets connection refused.
+// Both listeners now bind synchronously and return the error, so a malformed address does fail the
+// mount without this check. What this adds is where the failure is reported: net.Listen can only say
+// "address 127.0.0.1:99999: invalid port", naming neither the setting nor the file. Validation here
+// names the field an operator has to edit, and does it before the backend is constructed and a bucket
+// is contacted. Both servers used to bind on a goroutine and log — metrics from inside a `go func()`
+// whose result nothing read, health from startHTTPServer, which logged and returned — so the mount
+// came up working with no endpoint and one line in a log the operator had no reason to be reading.
 //
-// port is what this most needs to catch and what a listener cannot report well. `health_port: 99999`
-// was a config an operator could write; it reached net.Listen as "[::]:99999", failed in the address
-// parse, and produced exactly the silent-no-endpoint above (#192). net.SplitHostPort accepts it —
-// "99999" is a syntactically fine port string — so the range is checked here explicitly.
+// port is what this most needs to catch. `health_port: 99999` was a config an operator could write;
+// it reached net.Listen as "[::]:99999" and failed there, producing exactly that silent
+// no-endpoint (#192). net.SplitHostPort accepts it — "99999" is a syntactically fine port string —
+// so the range is checked here explicitly.
 //
 // A name is allowed to fail resolution: "localhost" is the address an operator is most likely to
 // write, and refusing anything that does not parse as an IP would reject it. What is checked is the
@@ -1219,9 +1220,8 @@ func validateListenAddr(field, addr string) error {
 
 	n, err := strconv.Atoi(port)
 	if err != nil {
-		return fmt.Errorf("%s has a non-numeric port: %q. A service name is not resolved here, because "+
-			"the listener would fail at bind time on a goroutine and the mount would come up with no "+
-			"endpoint and no error", field, port)
+		return fmt.Errorf("%s has a non-numeric port: %q. A service name is not looked up in "+
+			"/etc/services here; write the number", field, port)
 	}
 	if n < 1 || n > 65535 {
 		return fmt.Errorf("%s port %d is outside 1-65535. Port 0 is not how these endpoints are "+
