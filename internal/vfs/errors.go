@@ -44,6 +44,18 @@ var (
 	// that escapes the root.
 	ErrInvalid = errors.New("vfs: invalid argument")
 
+	// ErrNoSpace reports that a resource limit is exhausted and flushing did not relieve it.
+	//
+	// This is about ObjectFS's own buffers, not the bucket's capacity — S3 has none. It exists
+	// because the write path holds dirty byte ranges in memory until they are flushed, and
+	// write_buffer.max_memory was declared, defaulted, and validated for three releases while being
+	// read by nothing: the configuration reported a 512 MB ceiling and the process had none.
+	//
+	// Refusing a write is the last resort. A writer at its limit flushes to make room first, and this
+	// is returned only when that failed to release enough — because a bound that rejects writes it
+	// could have absorbed is worse than the unbounded growth it replaced.
+	ErrNoSpace = errors.New("vfs: no space in write buffer")
+
 	// ErrIntegrity reports that stored data could not be verified against its recorded checksum,
 	// or that its storage encoding is not one this build can decode.
 	//

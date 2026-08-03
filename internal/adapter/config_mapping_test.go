@@ -442,3 +442,69 @@ func TestBuildRetryConfigKeepsTheDefaultRetryableErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildWriterOptionsMapsTheWriteBufferBounds is #205's half of the same seam D12 lived in.
+//
+// write_buffer.max_memory and write_buffer.max_buffers were declared in internal/config, defaulted by
+// NewDefault to "512MB" and 1000, and checked by validateSizes — and read by nothing. Every mount
+// therefore reported a write-buffer ceiling it did not enforce, on the path that holds dirty byte
+// ranges in memory until they are flushed.
+//
+// Values are written out rather than computed, for the reason the test above documents: deriving the
+// expectation from the input would agree with a mapping that read max_buffers into max_memory.
+func TestBuildWriterOptionsMapsTheWriteBufferBounds(t *testing.T) {
+	t.Parallel()
+
+	cfg := createTestConfig()
+	cfg.WriteBuffer.MaxMemory = "256MB"
+	cfg.WriteBuffer.MaxBuffers = 42
+
+	got := (&Adapter{config: cfg}).buildWriterOptions()
+
+	if got.MaxMemory != 268435456 {
+		t.Errorf("buildWriterOptions().MaxMemory = %d, want 268435456 (\"256MB\"). A zero here is the "+
+			"defect: an unbounded write path while the configuration reports a limit", got.MaxMemory)
+	}
+	if got.MaxBuffers != 42 {
+		t.Errorf("buildWriterOptions().MaxBuffers = %d, want 42", got.MaxBuffers)
+	}
+}
+
+// TestBuildWriterOptionsFallsBackToTheDocumentedDefault pins the empty-value path.
+//
+// An absent write_buffer block must yield the default NewDefault documents, not zero. Zero means
+// unbounded in vfs.WriterOptions, so a partial config file — the shape a partial config is meant to
+// have — would silently restore the very defect #205 fixed.
+func TestBuildWriterOptionsFallsBackToTheDocumentedDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := createTestConfig()
+	cfg.WriteBuffer.MaxMemory = ""
+
+	got := (&Adapter{config: cfg}).buildWriterOptions()
+
+	if got.MaxMemory != defaultWriteBufferMemory {
+		t.Errorf("buildWriterOptions().MaxMemory = %d for an empty max_memory, want %d. Zero would "+
+			"mean unbounded, which is what a config file omitting the block must not get",
+			got.MaxMemory, defaultWriteBufferMemory)
+	}
+}
+
+// TestDefaultConfigProducesABoundedWritePath is the end-to-end statement of #205.
+//
+// Not a mapping assertion: this one asks whether the *shipped defaults* bound the write path. It would
+// have failed for every release through v0.10.3, at the only configuration most users ever run.
+func TestDefaultConfigProducesABoundedWritePath(t *testing.T) {
+	t.Parallel()
+
+	got := (&Adapter{config: config.NewDefault()}).buildWriterOptions()
+
+	if got.MaxMemory <= 0 {
+		t.Errorf("the default configuration produces MaxMemory=%d, an unbounded write path. "+
+			"config.NewDefault sets write_buffer.max_memory to \"512MB\"; a mount that does not "+
+			"enforce it is the defect #205 exists to close", got.MaxMemory)
+	}
+	if got.MaxBuffers <= 0 {
+		t.Errorf("the default configuration produces MaxBuffers=%d, an unbounded node count", got.MaxBuffers)
+	}
+}
