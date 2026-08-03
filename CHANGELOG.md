@@ -57,6 +57,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
+### Changed
+
+- Updated five direct dependencies: `aws-sdk-go-v2` 1.41.5 → 1.43.2, `aws-sdk-go-v2/config`
+  1.31.12 → 1.32.33, `klauspost/compress` 1.18.7 → 1.19.1, `pierrec/lz4/v4` 4.1.22 → 4.1.27, and
+  `redis/go-redis/v9` 9.18.0 → 9.21.0. Two consequences are worth naming rather than leaving in the
+  lockfile: the AWS SDK pulled `smithy-go` to 1.27.5, which clears the ≥1.26.0 floor the real
+  Pricing API work needs ([#183]), and the SDK restructured SSO authentication — `internal/ini` is
+  gone and `service/signin` is new. Full suite green under `-race`, coverage gate and lint clean.
+  ([#249], [#250], [#251], [#252], [#253])
+
+[#183]: https://github.com/scttfrdmn/objectfs/issues/183
+[#249]: https://github.com/scttfrdmn/objectfs/pull/249
+[#250]: https://github.com/scttfrdmn/objectfs/pull/250
+[#251]: https://github.com/scttfrdmn/objectfs/pull/251
+[#252]: https://github.com/scttfrdmn/objectfs/pull/252
+[#253]: https://github.com/scttfrdmn/objectfs/pull/253
+
 ## [0.11.0] - 2026-08-03
 
 POSIX completeness and write-path safety: the operations a user reaches for first — `rm`, `rmdir`,
