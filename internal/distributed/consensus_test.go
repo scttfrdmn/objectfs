@@ -11,7 +11,7 @@ import (
 // initialized correctly.
 func TestNewConsensusEngine(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("ce-node"))
+	cm, err := NewClusterManager(testConfig(t, "ce-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestNewConsensusEngine(t *testing.T) {
 // engine starts as a follower.
 func TestConsensusEngine_InitialState_IsFollower(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("follower-node"))
+	cm, _ := NewClusterManager(testConfig(t, "follower-node"))
 	ce := cm.consensus
 
 	if got := ce.GetCurrentState(); got != StateFollower {
@@ -36,7 +36,7 @@ func TestConsensusEngine_InitialState_IsFollower(t *testing.T) {
 // TestConsensusEngine_InitialTerm_IsZero verifies that the initial term is 0.
 func TestConsensusEngine_InitialTerm_IsZero(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("term-node"))
+	cm, _ := NewClusterManager(testConfig(t, "term-node"))
 	ce := cm.consensus
 
 	if got := ce.GetCurrentTerm(); got != 0 {
@@ -48,7 +48,7 @@ func TestConsensusEngine_InitialTerm_IsZero(t *testing.T) {
 // pre-seeded with exactly one no-op entry.
 func TestConsensusEngine_InitialLog_HasNoopEntry(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("log-node"))
+	cm, _ := NewClusterManager(testConfig(t, "log-node"))
 	ce := cm.consensus
 
 	ce.mu.RLock()
@@ -68,7 +68,7 @@ func TestConsensusEngine_InitialLog_HasNoopEntry(t *testing.T) {
 // any election.
 func TestConsensusEngine_IsLeader_InitiallyFalse(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("not-leader"))
+	cm, _ := NewClusterManager(testConfig(t, "not-leader"))
 	if cm.consensus.IsLeader() {
 		t.Error("IsLeader() should be false before any election")
 	}
@@ -97,7 +97,7 @@ func TestConsensusState_String(t *testing.T) {
 // values returned by GetStats.
 func TestConsensusEngine_GetStats_InitialValues(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("stats-ce"))
+	cm, _ := NewClusterManager(testConfig(t, "stats-ce"))
 	stats := cm.consensus.GetStats()
 
 	if stats == nil {
@@ -123,7 +123,7 @@ func TestConsensusEngine_GetStats_InitialValues(t *testing.T) {
 // peer votes are available to complete the election.
 func TestConsensusEngine_TriggerElection_BecomesCandidate(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("cand-node"))
+	cm, _ := NewClusterManager(testConfig(t, "cand-node"))
 	ce := cm.consensus
 
 	if err := ce.TriggerElection(context.Background()); err != nil {
@@ -152,8 +152,8 @@ func TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 
-	cfg1 := testConfig("node-a")
-	cfg2 := testConfig("node-b")
+	cfg1 := testConfig(t, "node-a")
+	cfg2 := testConfig(t, "node-b")
 
 	cm1, err := NewClusterManager(cfg1)
 	if err != nil {
@@ -217,8 +217,8 @@ func TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 
-	cfg1 := testConfig("leader-noop-a")
-	cfg2 := testConfig("leader-noop-b")
+	cfg1 := testConfig(t, "leader-noop-a")
+	cfg2 := testConfig(t, "leader-noop-b")
 
 	cm1, err := NewClusterManager(cfg1)
 	if err != nil {
@@ -279,7 +279,7 @@ func TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp(t *testing.T) {
 // the leader can propose changes.
 func TestConsensusEngine_ProposeChange_NotLeader_ReturnsError(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("not-leader-prop"))
+	cm, _ := NewClusterManager(testConfig(t, "not-leader-prop"))
 	ce := cm.consensus
 
 	err := ce.ProposeChange(context.Background(), &ConsensusProposal{
@@ -294,7 +294,7 @@ func TestConsensusEngine_ProposeChange_NotLeader_ReturnsError(t *testing.T) {
 // TestConsensusEngine_StartStop verifies the lifecycle without panics.
 func TestConsensusEngine_StartStop(t *testing.T) {
 	t.Parallel()
-	cfg := testConfig("lifecycle-ce")
+	cfg := testConfig(t, "lifecycle-ce")
 	cfg.ElectionTimeout = 30 * time.Second // prevent elections during the test
 	cm, err := NewClusterManager(cfg)
 	if err != nil {
@@ -326,7 +326,7 @@ func TestConsensusEngine_StartStop(t *testing.T) {
 func TestConsensusEngine_StopRacesAnInboundHeartbeat(t *testing.T) {
 	t.Parallel()
 
-	cfg := testConfig("stop-race")
+	cfg := testConfig(t, "stop-race")
 	cfg.ElectionTimeout = time.Hour // no election fires on its own during this test
 	cm, err := NewClusterManager(cfg)
 	if err != nil {

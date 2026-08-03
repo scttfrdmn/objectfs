@@ -6,12 +6,34 @@ package tests
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/scttfrdmn/objectfs/internal/distributed"
 )
+
+// writeClusterSecret writes a shared cluster secret to a file and returns its path.
+//
+// Gossip authentication (#206) fails closed: a cluster cannot be constructed without a secret,
+// because an unauthenticated gossip port lets any host on the network join and announce ownership of
+// cached objects. Every cluster built in this file therefore needs one.
+//
+// A file rather than OBJECTFS_CLUSTER_SECRET because the environment is process-wide, and mode 0600
+// because LoadClusterSecret refuses anything more permissive.
+func writeClusterSecret(tb testing.TB) string {
+	tb.Helper()
+
+	path := filepath.Join(tb.TempDir(), "cluster.secret")
+	if err := os.WriteFile(path, []byte(strings.Repeat("s", 32)), 0o600); err != nil {
+		tb.Fatalf("writing the cluster secret: %v", err)
+	}
+
+	return path
+}
 
 func TestClusterManager_BasicOperations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -20,6 +42,7 @@ func TestClusterManager_BasicOperations(t *testing.T) {
 	// Create cluster configuration
 	config := &distributed.ClusterConfig{
 		NodeID:            "test-node-1",
+		SecretFile:        writeClusterSecret(t),
 		ListenAddr:        "127.0.0.1:18080",
 		AdvertiseAddr:     "127.0.0.1:18080",
 		ElectionTimeout:   2 * time.Second,
@@ -94,6 +117,7 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 
 	config := &distributed.ClusterConfig{
 		NodeID:           "test-node-2",
+		SecretFile:       writeClusterSecret(t),
 		ListenAddr:       "127.0.0.1:18081",
 		AdvertiseAddr:    "127.0.0.1:18081",
 		ElectionTimeout:  time.Second,
@@ -155,6 +179,7 @@ func TestConsensusEngine_LeaderElection(t *testing.T) {
 
 	config := &distributed.ClusterConfig{
 		NodeID:            "consensus-test-1",
+		SecretFile:        writeClusterSecret(t),
 		ElectionTimeout:   time.Second,
 		HeartbeatInterval: 200 * time.Millisecond,
 		LeadershipTTL:     5 * time.Second,
@@ -200,6 +225,7 @@ func TestGossipProtocol_BasicFunctionality(t *testing.T) {
 	// Test basic gossip protocol functionality
 	config := &distributed.ClusterConfig{
 		NodeID:          "gossip-test-1",
+		SecretFile:      writeClusterSecret(t),
 		ListenAddr:      "127.0.0.1:18082",
 		AdvertiseAddr:   "127.0.0.1:18082",
 		GossipInterval:  100 * time.Millisecond,
@@ -238,6 +264,7 @@ func TestGossipProtocol_BasicFunctionality(t *testing.T) {
 func TestLoadBalancer_NodeSelection(t *testing.T) {
 	config := &distributed.ClusterConfig{
 		NodeID:            "lb-test-1",
+		SecretFile:        writeClusterSecret(t),
 		MaxConcurrentOps:  5,
 		ConsistencyLevel:  "eventual",
 		ReplicationFactor: 2,
@@ -321,10 +348,16 @@ func TestMultiNodeCluster(t *testing.T) {
 	nodeCount := 3
 	clusters := make([]*distributed.ClusterManager, nodeCount)
 
+	// One secret for the whole cluster, not one per node. Gossip authentication (#206) uses a
+	// shared cluster secret, so three different secrets would produce three clusters of one —
+	// which is the failure this test exists to distinguish from a working cluster.
+	secretFile := writeClusterSecret(t)
+
 	// Create and start multiple cluster nodes
 	for i := 0; i < nodeCount; i++ {
 		config := &distributed.ClusterConfig{
 			NodeID:            fmt.Sprintf("multi-node-%d", i),
+			SecretFile:        secretFile,
 			ListenAddr:        fmt.Sprintf("127.0.0.1:1808%d", i),
 			AdvertiseAddr:     fmt.Sprintf("127.0.0.1:1808%d", i),
 			ElectionTimeout:   time.Second + time.Duration(i)*100*time.Millisecond,
@@ -416,6 +449,7 @@ func TestConcurrentOperations(t *testing.T) {
 
 	config := &distributed.ClusterConfig{
 		NodeID:           "concurrent-test",
+		SecretFile:       writeClusterSecret(t),
 		ListenAddr:       "127.0.0.1:18090",
 		AdvertiseAddr:    "127.0.0.1:18090",
 		ElectionTimeout:  time.Second,
@@ -496,6 +530,7 @@ func BenchmarkDistributedOperations(b *testing.B) {
 
 	config := &distributed.ClusterConfig{
 		NodeID:           "bench-node",
+		SecretFile:       writeClusterSecret(b),
 		ElectionTimeout:  500 * time.Millisecond,
 		MaxConcurrentOps: 100,
 		ConsistencyLevel: "eventual",

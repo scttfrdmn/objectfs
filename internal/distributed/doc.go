@@ -84,24 +84,57 @@ docs/design/conditional-writes-vs-raft.md (#169).
 		Consistency: distributed.ConsistencyStrong,
 	}
 
+# Gossip Authentication
+
+Every node in a cluster must hold the same cluster secret, and a cluster will not start without one.
+This is deliberate: the gossip protocol runs over UDP, and before authentication existed any host
+that could reach the port could add itself to the cluster and announce that it held the current copy
+of a cached object. Running unauthenticated is the failure nobody notices, so it is refused at
+construction rather than warned about.
+
+Generate a secret once per cluster and distribute it the way the rest of the node configuration is
+distributed:
+
+	openssl rand -hex 32 > /etc/objectfs/cluster.secret
+	chmod 600 /etc/objectfs/cluster.secret
+
+Then name it in the cluster configuration, or set OBJECTFS_CLUSTER_SECRET, which takes precedence
+and is what a container orchestrator injects. The secret is never a field in the YAML configuration:
+packaging installs that file world-readable, so a secret in it would be published to every user on
+the node. A secret file readable by anyone but its owner is refused for the same reason.
+
+Each message carries an HMAC-SHA256 over its exact bytes, plus a timestamp and message ID checked
+against a 30-second freshness window, so a captured datagram cannot be replayed later to reassert
+state that has since been replaced. Rejections are counted in [GossipStats] — separately for a bad
+MAC, a replay, and an envelope version this build does not understand, because those three send an
+operator to three different places. A cluster of one with a rising MessagesUnauthenticated count is
+a wrong secret; the same cluster with a rising MessagesWrongVersion is a half-finished upgrade.
+
+What this does not do: gossip payloads are not encrypted (they are membership metadata and cache
+keys), and because every member holds the same key, a compromised node can impersonate any other.
+Defending against that needs per-node keys and is a different threat model.
+
 # Setting Up a Cluster
 
 Basic cluster configuration:
 
 	config := &distributed.ClusterConfig{
-		Enabled:           true,
-		NodeID:            "node-1",
-		ListenAddr:        "0.0.0.0:8080",
-		AdvertiseAddr:     "192.168.1.10:8080",
-		SeedNodes:         []string{
+		NodeID:        "node-1",
+		ListenAddr:    "0.0.0.0:8080",
+		AdvertiseAddr: "192.168.1.10:8080",
+		SeedNodes: []string{
 			"192.168.1.11:8080",
 			"192.168.1.12:8080",
 		},
 		ReplicationFactor: 3,
 		ConsistencyLevel:  "eventual",
+
+		// Required. The same file, with the same contents, on every node.
+		SecretFile: "/etc/objectfs/cluster.secret",
 	}
 
-	// Create cluster manager
+	// Create cluster manager. This returns an error rather than a cluster if no secret
+	// is configured, so a missing deployment step is caught at startup.
 	cluster, err := distributed.NewClusterManager(config)
 	if err != nil {
 		log.Fatal(err)
@@ -113,8 +146,10 @@ Basic cluster configuration:
 	}
 	defer cluster.Stop()
 
-	// Create coordinator
-	coordinator, err := distributed.NewCoordinator(cluster, config)
+	// Create coordinator. The third argument is the types.Backend it executes
+	// operations against; nil leaves it unset, and operations then fail rather
+	// than silently succeeding.
+	coordinator, err := distributed.NewCoordinator(cluster, config, backend)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -326,7 +361,6 @@ Example: Complete Cluster Setup
 
 	func main() {
 		config := &distributed.ClusterConfig{
-			Enabled:           true,
 			NodeID:            "node-primary",
 			ListenAddr:        "0.0.0.0:8080",
 			AdvertiseAddr:     "192.168.1.10:8080",
@@ -334,7 +368,8 @@ Example: Complete Cluster Setup
 			ReplicationFactor: 3,
 			ConsistencyLevel:  "eventual",
 			GossipInterval:    time.Second,
-			FailureTimeout:    30 * time.Second,
+			HeartbeatInterval: time.Second,
+			SecretFile:        "/etc/objectfs/cluster.secret",
 		}
 
 		// Initialize cluster
@@ -350,7 +385,7 @@ Example: Complete Cluster Setup
 		defer cluster.Stop()
 
 		// Initialize coordinator
-		coordinator, err := distributed.NewCoordinator(cluster, config)
+		coordinator, err := distributed.NewCoordinator(cluster, config, backend)
 		if err != nil {
 			log.Fatal(err)
 		}

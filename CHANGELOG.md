@@ -37,6 +37,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed — an unconditional fallback would turn "exactly one node performs this tier transition" into
   "every node does," which is the failure the coordination exists to prevent, occurring silently.
 
+### Security
+
+- **Gossip messages are authenticated, and a cluster will not start without a shared secret**
+  ([#206]). The gossip protocol runs over UDP and verified nothing about who sent a datagram, so any
+  host that could reach the port could add itself to the cluster, announce that a node was dead, or
+  announce that it held the current copy of a cached object — which is a path to a reading process
+  being served bytes chosen by whoever sent the last announcement. Every message now carries an
+  HMAC-SHA256 over its exact bytes, checked before the payload is parsed, so an unauthenticated
+  datagram never reaches the decoding of any message type, let alone a handler.
+
+  The secret comes from `OBJECTFS_CLUSTER_SECRET` or from a file named by `SecretFile`, and never
+  from a YAML field: packaging installs the shipped configuration world-readable, so a secret there
+  would be published to every user on the node. A secret file readable by anyone but its owner is
+  refused, as is one shorter than 32 bytes, and both errors say how to generate a good one. If no
+  secret is configured at all, `NewClusterManager` returns an error naming both sources rather than
+  starting unauthenticated — running without authentication is the failure nobody notices, so it is
+  refused at construction. That fail-closed behavior broke five existing tests when it landed, which
+  is the evidence that it cannot be bypassed.
+
+  A MAC authenticates the sender but not the moment, so messages also carry a timestamp and ID
+  checked against a 30-second window with a nonce cache: a captured "node N owns key K" cannot be
+  replayed later to undo the state that replaced it. Freshness is checked *after* the MAC, because a
+  nonce cache writable by an unauthenticated sender could be flooded with random IDs to evict the
+  real entries and re-open the window. Rejections are counted separately for a bad MAC, a replay,
+  and an unknown envelope version, and each logs a different operator hint — a cluster of one with a
+  rising unauthenticated count is a wrong secret, while the same cluster with a rising wrong-version
+  count is a half-finished upgrade. What this does not do is stated in the package documentation:
+  payloads are not encrypted, and because every member holds the same key, a compromised node can
+  impersonate any other.
+
+[#206]: https://github.com/scttfrdmn/objectfs/issues/206
+
 ### Fixed
 
 - `MountManager.Wait` and the FUSE serving goroutine read `m.server` without holding the mutex that

@@ -15,7 +15,7 @@ import (
 // (the manager's own ID) pre-registered, without calling Start().
 func makeClusterWithNode(t *testing.T, nodeID string) *ClusterManager {
 	t.Helper()
-	cm, err := NewClusterManager(testConfig(nodeID))
+	cm, err := NewClusterManager(testConfig(t, nodeID))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -102,7 +102,7 @@ func (e *errBackend) HealthCheck(_ context.Context) error { return e.err }
 // non-nil coordinator with its load balancer and replicator initialized.
 func TestNewCoordinator(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("c-node"))
+	cm, err := NewClusterManager(testConfig(t, "c-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestNewCoordinator(t *testing.T) {
 // returns an error when no alive nodes are available.
 func TestCoordinator_ExecuteOperation_NoAliveNodes(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("c-node"))
+	cm, err := NewClusterManager(testConfig(t, "c-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestCoordinator_ExecuteOperation_StrongConsistency(t *testing.T) {
 func TestCoordinator_ExecuteOperation_ExplicitTargetNodes(t *testing.T) {
 	t.Parallel()
 	// No alive nodes in the cluster, but explicit targets are provided.
-	cm, err := NewClusterManager(testConfig("explicit-node"))
+	cm, err := NewClusterManager(testConfig(t, "explicit-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestCoordinator_ExecuteOperation_ListUsesLeader(t *testing.T) {
 // the expected top-level keys.
 func TestCoordinator_GetStats_Structure(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("stats-coord"))
+	cm, err := NewClusterManager(testConfig(t, "stats-coord"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -384,8 +384,8 @@ func TestCoordinator_ExecuteOperation_TwoNodes_RealUDP(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 
-	cfg1 := testConfig("coord-node-a")
-	cfg2 := testConfig("coord-node-b")
+	cfg1 := testConfig(t, "coord-node-a")
+	cfg2 := testConfig(t, "coord-node-b")
 
 	cm1, err := NewClusterManager(cfg1)
 	if err != nil {
@@ -457,7 +457,7 @@ func TestCoordinator_ExecuteOperation_TwoNodes_RealUDP(t *testing.T) {
 // TestCoordinator_StartStop verifies the coordinator lifecycle.
 func TestCoordinator_StartStop(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("coord-lifecycle"))
+	cm, err := NewClusterManager(testConfig(t, "coord-lifecycle"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestCoordinator_StartStop(t *testing.T) {
 // node list returns an empty result without error.
 func TestLoadBalancer_SelectNodes_Empty(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("lb-empty"))
+	cm, err := NewClusterManager(testConfig(t, "lb-empty"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestLoadBalancer_SelectNodes_Empty(t *testing.T) {
 // through all provided nodes.
 func TestLoadBalancer_RoundRobin(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("lb-rr"))
+	cm, err := NewClusterManager(testConfig(t, "lb-rr"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestLoadBalancer_RoundRobin(t *testing.T) {
 // than available returns only as many as are available.
 func TestLoadBalancer_CountCappedToAvailable(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("lb-cap"))
+	cm, err := NewClusterManager(testConfig(t, "lb-cap"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestLoadBalancer_CountCappedToAvailable(t *testing.T) {
 // TestLoadBalancer_LeastLoad selects nodes by ascending load order.
 func TestLoadBalancer_LeastLoad(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("lb-ll"))
+	cm, err := NewClusterManager(testConfig(t, "lb-ll"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestLoadBalancer_LeastLoad(t *testing.T) {
 // returns the requested number of nodes from the front of the list.
 func TestLoadBalancer_ConsistentHash(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("lb-ch"))
+	cm, err := NewClusterManager(testConfig(t, "lb-ch"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -700,8 +700,8 @@ func TestClusterManager_CacheInvalidation_TwoNodes(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 
-	cfg1 := testConfig("inval-node-a")
-	cfg2 := testConfig("inval-node-b")
+	cfg1 := testConfig(t, "inval-node-a")
+	cfg2 := testConfig(t, "inval-node-b")
 
 	cm1, err := NewClusterManager(cfg1)
 	if err != nil {
