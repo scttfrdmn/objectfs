@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `MountManager.Wait` and the FUSE serving goroutine read `m.server` without holding the mutex that
+  `Unmount` writes it under. Both reads are also nil dereferences: if the unmount lands first,
+  `m.server.Wait()` panics on a background goroutine, which is unrecoverable and takes the process
+  down together with the mount — unmounting under every open file descriptor. The serving goroutine
+  now waits on the server value already in scope, and `Wait` reads the field into a local under the
+  lock before dereferencing it; the lock is not held across the wait itself, which would deadlock
+  every real unmount. Caught by CI's race detector on a documentation-only pull request, so it was
+  live on `main`, and it reproduces only on Linux — on darwin the racing goroutine needs a real
+  macFUSE mount to start at all. The regression test drives both sides directly rather than through
+  a mount, so it fails deterministically instead of once in many runs. ([#267])
+
+[#267]: https://github.com/scttfrdmn/objectfs/issues/267
+
 ## [0.11.0] - 2026-08-03
 
 POSIX completeness and write-path safety: the operations a user reaches for first — `rm`, `rmdir`,
