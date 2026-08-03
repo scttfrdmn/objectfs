@@ -4,7 +4,7 @@ package s3_test
 // is the stored object.
 //
 // Every layer between the config and S3 agrees on the tier by construction: ValidateWrite enforces the
-// tier's minimum size, the logs name the tier, and ConvertTierToStorageClass has a unit test asserting
+// tier's minimum-size warning names the tier, the logs name the tier, and ConvertTierToStorageClass has a unit test asserting
 // it maps STANDARD_IA to STANDARD_IA. All of that passed while the upload path stored a different class
 // entirely, because the class the object is written with is chosen inside the CargoShip transporter
 // from a config built alongside — not from the value those layers agree about. A tier defect is silent
@@ -60,7 +60,9 @@ func TestConfiguredStorageTierReachesTheStoredObject(t *testing.T) {
 			ts := testaws.Start(t)
 			ctx := context.Background()
 
-			// 192 KiB clears the 128 KiB billing minimum the IA tiers enforce on the way in.
+			// 192 KiB clears the 128 KiB billing minimum the IA tiers warn about on the way in. Not
+			// required since #154 — a smaller object is stored and billed as the minimum rather than
+			// refused — but this test is about the storage class, not about the warning.
 			const size = 192 * 1024
 
 			for _, path := range []struct {

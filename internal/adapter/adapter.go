@@ -489,10 +489,13 @@ func (a *Adapter) buildS3Config() *s3.Config {
 	// TierConstraints, CostOptimization, PricingConfig and the credential fields are deliberately
 	// left at their zero values, and each for its own reason rather than by omission:
 	//
-	//   - TierConstraints overrides a tier's built-in minimum size and deletion embargo. Those come
-	//     from StorageTiers, which is derived from what AWS actually enforces; a config file that
-	//     could raise or lower them has no correct value to hold, and lowering one produces writes
-	//     S3 rejects.
+	//   - TierConstraints is a policy floor, not a description of S3. Its MinObjectSize is the one
+	//     value in the struct that still refuses a write, and it refuses writes S3 would accept —
+	//     AWS's per-tier minimum is a billing floor, so a smaller object is stored and billed as the
+	//     minimum (see TierValidator.ValidateWrite). Mapping it from a config file would mean a mount
+	//     could be given a floor above zero by default, and a floor above zero rejects the zero-byte
+	//     PUTs that create directories and empty files. If it is ever mapped, it has to stay opt-in
+	//     and unset by default, and the deletion embargo needs the same care for the same reason.
 	//
 	//   - CostOptimization is not mappable. internal/config.S3CostOptimization and
 	//     s3.CostOptimization are disjoint types — {Enabled, TieringEnabled, LifecycleEnabled,
