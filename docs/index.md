@@ -19,7 +19,7 @@ What is implemented and on the mount path today:
 - **Multi-tier caching** (LRU, persistent, predictive)
 - **Write buffering** with dirty-range tracking and read-modify-write flush
 - **SHA-256 verification** of whole-object reads against the checksum recorded at write
-- **Transparent compression** (ZSTD, LZ4) — opt-in, off by default
+- **Transparent compression** (ZSTD, LZ4, gzip) — opt-in, off by default
 - **Health monitoring** and metrics endpoints
 
 Some documented capabilities are not on that path. See [Not yet wired up](#not-yet-wired-up) below,
@@ -48,10 +48,10 @@ which names them rather than leaving them mixed in with the list above.
 
 ### 📦 Compression
 
-- **ZSTD and LZ4**, opt-in per mount. Off by default, because a compressed object is no longer
-  readable by `aws s3 cp` or boto3. The guidance page on what that costs and when it pays is
-  [issue 186](https://github.com/scttfrdmn/objectfs/issues/186); until it is written, the one
-  tradeoff that has bitten users is stated in the README's data integrity section.
+- **ZSTD, LZ4, and gzip**, opt-in per mount. Off by default, because a compressed object is no longer
+  readable by `aws s3 cp` or boto3 — both hand back the compressed bytes with a successful exit
+  status. [Transparent compression](features/compression.md) covers what that costs, which data is
+  worth compressing, and when the saving is zero.
 
 ### 🔧 Operations
 

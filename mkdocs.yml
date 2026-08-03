@@ -141,6 +141,7 @@ nav:
   - Features:
     - Read-ahead & Predictive Caching: features/read-ahead.md
     - Multipart Uploads: features/multipart-uploads.md
+    - Transparent Compression: features/compression.md
     - S3 Transfer Acceleration: s3-acceleration.md
 
   - Operations:

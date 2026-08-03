@@ -288,6 +288,26 @@ per-object in CloudTrail and nothing can be revoked short of deleting the data. 
 review asks for encryption at rest with a customer-managed key, `sse-kms` is the mode that answers
 it.
 
+### Transparent compression
+
+Off by default. Turning it on is a decision with four non-obvious costs — most importantly that a
+compressed object is not readable by `aws s3 cp`, boto3, or the S3 console, which hand back the
+compressed bytes with a successful exit status.
+
+```yaml
+write_buffer:
+  compression:
+    enabled: true
+    algorithm: zstd     # none, zstd, lz4, gzip
+    level: 3            # zstd 0-22, gzip 0-9; 0 selects the codec default
+    min_size: 4KB       # smaller objects are stored as-is
+```
+
+Read [docs/features/compression.md](docs/features/compression.md) first. It covers what compresses
+(most research data does not — it arrived compressed), why a partial read of a compressed object
+transfers the whole object, which storage tiers make the saving zero, and why compression inside the
+file format is usually the better answer.
+
 ### The two shipped config files
 
 - [`configs/example.yaml`](configs/example.yaml) — a short, copyable starting point. Every key in it is read on the mount path.
