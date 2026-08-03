@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `MountManager.Wait` and the FUSE serving goroutine read `m.server` without holding the mutex that
+  `Unmount` writes it under. Both reads are also nil dereferences: if the unmount lands first,
+  `m.server.Wait()` panics on a background goroutine, which is unrecoverable and takes the process
+  down together with the mount — unmounting under every open file descriptor. The serving goroutine
+  now waits on the server value already in scope, and `Wait` reads the field into a local under the
+  lock before dereferencing it; the lock is not held across the wait itself, which would deadlock
+  every real unmount. Caught by CI's race detector on a documentation-only pull request, so it was
+  live on `main`, and it reproduces only on Linux — on darwin the racing goroutine needs a real
+  macFUSE mount to start at all. The regression test drives both sides directly rather than through
+  a mount, so it fails deterministically instead of once in many runs. ([#267])
+
 - **`internal/distributed`'s package documentation described consistency guarantees the code does not
   provide** ([#169]). The Strong Consistency section claimed "Linearizable operations across cluster";
   what `executeStrongConsistency` does is fan N identical PUTs of the same bytes at the same key and
@@ -55,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consensus engine elects leaders and replicates nothing.
 
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
+[#267]: https://github.com/scttfrdmn/objectfs/issues/267
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
