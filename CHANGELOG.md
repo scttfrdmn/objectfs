@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-03
+
+POSIX completeness and write-path safety: the operations a user reaches for first — `rm`, `rmdir`,
+`mv`, `chmod` — do the thing rather than returning an error or, worse, succeeding without acting. All
+28 issues on the milestone closed before this tag was cut.
+
+Two themes run through it. The first is that a configuration key should select something: nine
+blocks that a loader had never read now reach the code they name, and the pricing region — read at
+exactly one line, and only to label a summary — now picks the prices, so a mount in `sa-east-1` no
+longer reports us-east-1's rates under its own region's name. The second is that a fix is paired
+with the mechanism that fails if it recurs, because most of what this release corrects was invisible
+to the compiler, to vet, and to lint: a config key nothing reads, a cost figure nothing checks, a
+gate that cannot fail.
+
+This is the first release cut from the merge commit that closes its milestone, which is the rule
+v0.10.3 established after two tags shipped without the work they were named for.
+
 ### Added
 
 - **`rm` and `rmdir` work.** `Unlink` and `Rmdir` delete the object rather than returning EROFS
@@ -230,42 +247,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The package went from no tests to 89.9%, `internal/awsrates` from 76.2% to 100%, and the generator
   from no tests to 74.4%. `internal/awsrates/offerfile/offertest` builds the fixtures all three suites
   share, so a rule is stated once rather than transcribed per suite.
-
-### Changed
-
-- **The release security scan is a gate** ([#196]). `security-scan` in `release.yml` already scanned
-  the exact binary `publish` attaches, which is the right shape, but it could not fail: trivy-action's
-  `exit-code` has no default, so findings uploaded as SARIF and the step passed. It now exits 1 on
-  `HIGH,CRITICAL`, with `ignore-unfixed: true` and `scanners: vuln`.
-
-  Each of those is a decision rather than a default. MEDIUM and below still upload and stay visible on
-  the security tab without stopping a publish, because MEDIUM in a transitive dependency of a
-  filesystem binary is generally not worth delaying a release for. `ignore-unfixed` because a
-  vulnerability with no released fix cannot be actioned by a release — blocking on one means the
-  project cannot ship until an upstream maintainer acts, which is an availability problem wearing a
-  security posture. And the SARIF upload is now `if: always()`, so the findings that failed the step
-  are the ones that reach the security tab; without it a HIGH stopped the job before the upload and
-  left whoever was cutting the release with an exit code and no way to see the cause.
-
-  It was not a gate before now for a reason worth keeping, because it is the same reason it can be one
-  now: the first real run of this scan found a MODERATE advisory in the pinned `aws-sdk-go-v2` ([#195]),
-  and switching the gate on then would have blocked every release on a scan nobody had triaged. A gate
-  turned on against existing findings is a broken build everyone learns to bypass. That advisory is
-  fixed and the baseline is clean, which is the only state in which turning it on means anything.
-
-  The asymmetry the issue names is resolved toward gating: `govulncheck` in `security.yml` exits
-  non-zero and so has always been a hard gate on `main` and every PR, while the release — the artifact
-  users actually download — was not gated at all. The repository-wide `trivy fs` scan in that file is
-  deliberately still not a gate, and now says so: it reports on the source tree rather than on what
-  ships, including dependencies reached only by tests, so the gates are `govulncheck` and the binary
-  scan. It picks up the same severity floor and `ignore-unfixed` regardless, so a finding in one place
-  means what a finding in the other means.
-
-- **`klauspost/compress` v1.18.0 → v1.18.7**, for GO-2026-5841, an out-of-bounds read in the `s2`
-  package. Not reachable from this code — `govulncheck` reported it under "packages you import" with
-  zero called vulnerabilities — but present in the module the binary is built from, which is what a
-  binary scan sees and what the new release gate above would have failed on. Found while verifying the
-  baseline was clean before switching that gate on, which is the check being described.
 
 ### Fixed
 
@@ -806,6 +787,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   committed table against a fresh extraction across five regions spanning every price band AWS
   publishes. `internal/cost`'s drift guard moves onto `PricingManager.StorageRate` for the same reason:
   the field it read no longer exists, and the manager is the path a caller actually takes.
+
+- **The release security scan is a gate** ([#196]). `security-scan` in `release.yml` already scanned
+  the exact binary `publish` attaches, which is the right shape, but it could not fail: trivy-action's
+  `exit-code` has no default, so findings uploaded as SARIF and the step passed. It now exits 1 on
+  `HIGH,CRITICAL`, with `ignore-unfixed: true` and `scanners: vuln`.
+
+  Each of those is a decision rather than a default. MEDIUM and below still upload and stay visible on
+  the security tab without stopping a publish, because MEDIUM in a transitive dependency of a
+  filesystem binary is generally not worth delaying a release for. `ignore-unfixed` because a
+  vulnerability with no released fix cannot be actioned by a release — blocking on one means the
+  project cannot ship until an upstream maintainer acts, which is an availability problem wearing a
+  security posture. And the SARIF upload is now `if: always()`, so the findings that failed the step
+  are the ones that reach the security tab; without it a HIGH stopped the job before the upload and
+  left whoever was cutting the release with an exit code and no way to see the cause.
+
+  It was not a gate before now for a reason worth keeping, because it is the same reason it can be one
+  now: the first real run of this scan found a MODERATE advisory in the pinned `aws-sdk-go-v2` ([#195]),
+  and switching the gate on then would have blocked every release on a scan nobody had triaged. A gate
+  turned on against existing findings is a broken build everyone learns to bypass. That advisory is
+  fixed and the baseline is clean, which is the only state in which turning it on means anything.
+
+  The asymmetry the issue names is resolved toward gating: `govulncheck` in `security.yml` exits
+  non-zero and so has always been a hard gate on `main` and every PR, while the release — the artifact
+  users actually download — was not gated at all. The repository-wide `trivy fs` scan in that file is
+  deliberately still not a gate, and now says so: it reports on the source tree rather than on what
+  ships, including dependencies reached only by tests, so the gates are `govulncheck` and the binary
+  scan. It picks up the same severity floor and `ignore-unfixed` regardless, so a finding in one place
+  means what a finding in the other means.
+
+- **`klauspost/compress` v1.18.0 → v1.18.7**, for GO-2026-5841, an out-of-bounds read in the `s2`
+  package. Not reachable from this code — `govulncheck` reported it under "packages you import" with
+  zero called vulnerabilities — but present in the module the binary is built from, which is what a
+  binary scan sees and what the new release gate above would have failed on. Found while verifying the
+  baseline was clean before switching that gate on, which is the check being described.
 
 ### Removed
 
@@ -1441,7 +1456,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/scttfrdmn/objectfs/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/scttfrdmn/objectfs/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/scttfrdmn/objectfs/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/scttfrdmn/objectfs/compare/v0.10.0...v0.10.1

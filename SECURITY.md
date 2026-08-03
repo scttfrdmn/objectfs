@@ -24,7 +24,8 @@ credit the reporter by whatever name or handle they give.
 
 | Version | Supported |
 |---|---|
-| 0.10.3 | ✅ |
+| 0.11.0 | ✅ |
+| 0.10.3 | ❌ Superseded. No known security defect; it simply predates the release above, and only the latest release gets fixes |
 | 0.10.2 | ❌ Superseded. Importable and does not lose data, but it was tagged before eleven of its twelve milestone issues merged, so it lacks all of the correctness and cost fixes in v0.10.3 |
 | 0.10.1 | ❌ Superseded. Not importable as a Go module — the tag declares a module path that is not this repository (#213), so `go get` fails on it |
 | 0.10.0 | ❌ **Withdrawn** — see the banner in [README.md](README.md); it loses data |
