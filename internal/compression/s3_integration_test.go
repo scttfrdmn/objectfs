@@ -143,9 +143,12 @@ func TestCompressor_DecompressMatchingEncoding(t *testing.T) {
 		t.Fatalf("Compress: err=%v, wasCompressed=%v", err, wasCompressed)
 	}
 
-	got, err := c.Decompress(compressed, "zstd")
+	got, decoded, err := c.Decompress(compressed, "zstd")
 	if err != nil {
 		t.Fatalf("Decompress: %v", err)
+	}
+	if !decoded {
+		t.Error("Decompress reported it did not decode an object encoded with its own algorithm")
 	}
 	if !bytes.Equal(got, original) {
 		t.Errorf("roundtrip mismatch: got len %d, want len %d", len(got), len(original))
@@ -160,30 +163,42 @@ func TestCompressor_DecompressNoEncoding(t *testing.T) {
 	}
 
 	data := []byte("not compressed")
-	got, err := c.Decompress(data, "")
+	got, decoded, err := c.Decompress(data, "")
 	if err != nil {
 		t.Fatalf("Decompress: %v", err)
+	}
+	if decoded {
+		t.Error("Decompress claimed to decode an object with no Content-Encoding")
 	}
 	if !bytes.Equal(got, data) {
 		t.Error("Decompress with no encoding should return data unchanged")
 	}
 }
 
-func TestCompressor_DecompressMismatchEncoding(t *testing.T) {
+// TestCompressor_DecompressUnknownEncoding covers a token no codec in this build claims.
+//
+// Passing the bytes through is deliberate: an object another tool wrote with `Content-Encoding: br`
+// is that tool's format, and returning it unchanged is what every other S3 client does. What must
+// not happen is a silent pass-through that the caller cannot detect — hence the second return, which
+// is how the S3 backend knows to cross-check against objectfs-original-size and fail closed for an
+// object ObjectFS itself compressed.
+func TestCompressor_DecompressUnknownEncoding(t *testing.T) {
 	t.Parallel()
 	c, err := NewCompressor(makeConfig(true, "zstd", "0", 0))
 	if err != nil {
 		t.Fatalf("NewCompressor: %v", err)
 	}
 
-	data := []byte("gzip encoded data (pretend)")
-	got, err := c.Decompress(data, "gzip")
+	data := []byte("brotli encoded data (pretend)")
+	got, decoded, err := c.Decompress(data, "br")
 	if err != nil {
 		t.Fatalf("Decompress: %v", err)
 	}
-	// encoding doesn't match our codec → pass through unchanged
+	if decoded {
+		t.Error("Decompress claimed to decode \"br\", which no codec in this build implements")
+	}
 	if !bytes.Equal(got, data) {
-		t.Error("Decompress with mismatched encoding should return data unchanged")
+		t.Error("an encoding this build does not implement should pass through unchanged")
 	}
 }
 

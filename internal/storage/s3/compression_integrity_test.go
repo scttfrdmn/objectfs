@@ -203,13 +203,18 @@ func TestHeadObjectAgreesWithGetObject(t *testing.T) {
 	}
 }
 
-// TestUndecodableObjectFailsClosed covers the objects the write-path fix cannot help: ones already
-// stored with the encoding in user metadata by an earlier build.
+// TestUndecodableObjectFailsClosed covers the objects no read-path fix can decode: ones whose stored
+// Content-Encoding is missing or names a coding this build does not implement.
 //
-// Compressor.Decompress returns data *unchanged* when the encoding is empty or unrecognized (audit
-// finding C2), so without a guard the read path hands back a raw zstd frame with exit status 0. The
-// backend now cross-checks the decoded length against the recorded objectfs-original-size and
-// refuses.
+// Compressor.Decompress returns the data *unchanged* in both cases — correctly, since a coding
+// ObjectFS does not implement belongs to whatever tool wrote it — so without a guard the read path
+// hands back a raw zstd frame with exit status 0 (audit finding C2). The backend cross-checks the
+// decoded length against the recorded objectfs-original-size and refuses.
+//
+// Note what is deliberately *not* here any more. Through #230 a third case belonged on this list: an
+// encoding naming a codec ObjectFS implements but the mount was not configured to write. That was
+// never undecodable — every codec is linked into the binary — so it is now decoded rather than
+// refused, and TestEveryConfiguredAlgorithmReadsEveryStoredEncoding covers it.
 func TestUndecodableObjectFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -244,11 +249,13 @@ func TestUndecodableObjectFailsClosed(t *testing.T) {
 			},
 		},
 		{
-			// Audit finding C2: the header is correct, but names a codec this build is not
-			// configured for — which is what a change of compression algorithm leaves behind.
-			// Decompress returns the data *unchanged* on a mismatch rather than failing.
-			name:   "encoding names a codec this build cannot decode",
-			header: "lz4",
+			// A registered HTTP content coding ObjectFS does not implement. Chosen over a nonsense
+			// token because it is the realistic version: a bucket shared with a tool that writes
+			// brotli. "lz4" used to sit here, and it does not belong any more — since #230 lz4 is
+			// decodable regardless of what the mount writes, so this case would have been asserting
+			// that a readable object is refused.
+			name:   "encoding names a coding this build does not implement",
+			header: "br",
 			metadata: map[string]string{
 				metaOriginalSizeKey: "8192",
 			},

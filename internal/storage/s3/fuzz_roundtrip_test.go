@@ -263,11 +263,15 @@ func TestRoundTripAcrossACodecChange(t *testing.T) {
 
 			got, err := reader.GetObject(context.Background(), key, 0, -1)
 			if err != nil {
-				// Failing closed is acceptable: an integrity error tells the user their data needs a
-				// build that can decode it. Returning wrong bytes is not.
-				t.Logf("read failed closed, which is acceptable: %v", err)
-
-				return
+				// This used to accept a fail-closed read: an integrity error at least told the user
+				// their data needed a build that could decode it, which beat returning wrong bytes.
+				// It is a failure now. Every codec ObjectFS can write is linked into the same binary
+				// and the read path dispatches on the object's own encoding (#230), so there is no
+				// configuration of this mount that legitimately cannot read this object.
+				t.Fatalf("an object written with %s could not be read by a mount configured %s: %v\n"+
+					"Failing closed was acceptable while the read path decoded only its configured "+
+					"algorithm. Since #230 it decodes all of them, so this is a regression rather "+
+					"than a safe refusal", tc.wroteWith, tc.readWith, err)
 			}
 
 			if !bytes.Equal(got, content) {

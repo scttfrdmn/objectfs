@@ -243,11 +243,12 @@ latency — what else does it provide?* Less than you would expect.
 - **It does not speed up writes.** It costs CPU on the write path, and until [#184](https://github.com/scttfrdmn/objectfs/issues/184)
   lands it costs that CPU even on data that cannot compress.
 - **It does not make small objects cheap.** See the billing minimums above.
-- **It adds a failure mode.** An object whose stored encoding this mount cannot decode fails closed with
-  an integrity error. That is the correct behavior — v0.10.0 returned the raw compressed frame with exit
+- **It adds a failure mode.** An object whose stored encoding cannot be decoded fails closed with an
+  integrity error. That is the correct behavior — v0.10.0 returned the raw compressed frame with exit
   status 0, which is audit finding C2 — but it is a way for a read to fail that an uncompressed object
-  does not have. The way to reach it is to change `algorithm` after data has been written — see below,
-  a mount decodes only its configured algorithm.
+  does not have. Changing `algorithm` no longer reaches it ([#230](https://github.com/scttfrdmn/objectfs/issues/230)),
+  so what is left is an object whose `Content-Encoding` names a coding ObjectFS does not implement, or
+  one whose header was stripped after the write — a `CopyObject` or a tier transition does not carry it.
 
 ---
 
@@ -266,19 +267,24 @@ write_buffer:
 is reasonable. On `STANDARD_IA`, `ONEZONE_IA`, or `GLACIER_IR`, nothing below 128 KB can reduce your
 bill, so a `min_size` at or above `128KB` skips the objects where compression is pure cost.
 
-**Do not change `algorithm` once a bucket holds compressed objects.** A mount decodes only the one
-algorithm it is configured for, so switching from zstd to gzip makes every existing zstd object
-unreadable — the read fails with a `DATA_CORRUPTION` integrity error naming the encoding it could not
-handle. Verified against the in-process endpoint: an object written with `algorithm: zstd` reads
-correctly under `zstd` and fails under each of `gzip`, `lz4`, and `none`.
+**`algorithm` is safe to change.** A mount decodes every algorithm ObjectFS can write — `zstd`, `lz4`,
+and `gzip` — whichever one it is configured to write, because the codec is chosen from the object's
+stored `Content-Encoding` rather than from the configuration. Setting `enabled: false` is safe for the
+same reason: it stops new objects being compressed and still decodes the ones already in the bucket.
+Verified against the in-process endpoint as a full matrix — every writable algorithm read back by every
+algorithm and by a disabled mount — in `TestEveryConfiguredAlgorithmReadsEveryStoredEncoding`.
 
-Failing is the right behavior — v0.10.0 returned the raw compressed frame with exit status 0 — but it
-means the algorithm is effectively a property of the bucket, not a knob to tune. If you must change it,
-rewrite the objects through the new configuration. There is no in-place migration, and ObjectFS does not
-detect the situation in advance. Tracked as
-[#230](https://github.com/scttfrdmn/objectfs/issues/230): every codec is compiled in, so dispatching on
-each object's stored `Content-Encoding` would make this work, and only the single-codec `Compressor`
-prevents it.
+This is new in v0.11.0. Through v0.10.x a mount decoded only its configured algorithm, so switching
+from zstd to gzip made every existing zstd object unreadable, and so did turning compression off. That
+read failed closed with a `DATA_CORRUPTION` error rather than returning the raw frame, which was the
+correct half of it, but it meant the algorithm was effectively a property of the bucket rather than a
+knob to tune. Fixed in [#230](https://github.com/scttfrdmn/objectfs/issues/230); every codec was
+already compiled into the same binary, and only the single-codec `Compressor` stood between them and
+the read path.
+
+What remains a one-way door is the **format**, not the algorithm: a compressed object is still only
+readable by something that understands its `Content-Encoding`, which is cost #1 at the top of this
+page.
 
 Compression applies to whole objects on the write path. It does not compress the read cache, and it does
 not change what the persistent cache stores on local disk.
