@@ -35,7 +35,9 @@
 #                       built on it, which it does, with the message it exists to print
 #   pkg/archive         no tests — metadata types; dead code pending a decision (Part 4)
 #   pkg/compression     no tests in this package; its constants and SupportedAlgorithms list are
-#                       exercised from internal/compression, which is at 87.3%
+#                       exercised from internal/compression, which is at 88.6%. SupportedAlgorithms
+#                       is load-bearing there since #230 — the decoder table is derived from it, so
+#                       adding an algorithm to that list makes it readable with no second edit
 #   sdks/c              no tests — cgo shim, not reachable from `go test`
 
 internal/analytics       96
@@ -43,7 +45,9 @@ internal/archive         90
 internal/awsname         100
 internal/cache/redis     87
 internal/circuit         96
-internal/compression     87
+# internal/compression goes from 87 to 88 with the decoder-table tests #230 added: a matrix over
+# every writable algorithm read back by every algorithm and by a disabled compressor.
+internal/compression     88
 # internal/config goes from 83 to 86 with the validation the config plumbing added. The two points
 # that raise is worth are in what the new tests assert rather than in the number: each case checks
 # that the rejection message names the YAML path, because the failure being prevented is not "a bad

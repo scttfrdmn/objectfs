@@ -62,7 +62,9 @@ var (
 	// This is deliberately distinct from a generic I/O error. Integrity failures must fail closed:
 	// v0.10.0 returned raw compressed bytes with exit status 0 when an object's Content-Encoding
 	// did not match the configured codec, which is worse than any error, because the caller cannot
-	// tell that it happened.
+	// tell that it happened. That particular mismatch is no longer reachable — the read path decodes
+	// every algorithm ObjectFS can write, whatever a mount is configured to write — but a coding
+	// ObjectFS does not implement, and a header lost after the write, still are.
 	ErrIntegrity = errors.New("vfs: integrity check failed")
 
 	// ErrBackend reports a storage-backend failure whose cause is not otherwise classified.

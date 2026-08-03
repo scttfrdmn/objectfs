@@ -92,6 +92,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Changing `compression.algorithm` no longer orphans every object already in the bucket.** A mount
+  now decodes any algorithm ObjectFS can write, chosen from the object's stored `Content-Encoding`
+  rather than from the configuration ([#230]). Before this, `Compressor` held exactly one codec and
+  `Decompress` compared the stored encoding against that codec's token, so a mount could read back
+  only what it was currently configured to write. Switching `zstd` to `lz4` made every existing zstd
+  object unreadable — and so did setting `enabled: false`, which is how an operator turns compression
+  off after deciding the read amplification was not worth it. Turning compression off stops new
+  objects being compressed; it does not make the existing ones uncompressed, and it was the change
+  most likely to be made and least likely to be expected to break anything.
+
+  Nobody got wrong bytes: the read failed closed with a `DATA_CORRUPTION` error, because
+  `checkFullyDecoded` cross-checks the decoded length against the recorded `objectfs-original-size`.
+  That guard was compensating for a dispatch that could have succeeded — every codec was already
+  linked into the same binary. The decoder table is built from
+  `pkg/compression.SupportedAlgorithms` rather than listed by hand, so an algorithm added there is
+  readable without a second edit; that derivation is what stops the defect's actual shape, which was
+  a set of encoders and a set of decoders maintained independently. Pinned by the full
+  write-algorithm × read-configuration matrix, including a disabled reader, and the fail-closed
+  behavior still holds for the cases no dispatch can help: a `Content-Encoding` naming a coding
+  ObjectFS does not implement, and a header stripped after the write by a `CopyObject` or a tier
+  transition. A body its own declared codec rejects is now reported as non-retryable corruption
+  rather than a bare error the retry layer would take at face value.
+
 - **A mount on `STANDARD_IA`, `ONEZONE_IA`, or `GLACIER_IR` could not create anything at all.**
   `mkdir` and `touch` both failed, and so did writing any file smaller than 128 KiB ([#154]). AWS's
   per-tier minimum object size is a *billing* floor — S3 stores a zero-byte `STANDARD_IA` object and
@@ -216,6 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205
+[#230]: https://github.com/scttfrdmn/objectfs/issues/230
 
 ## [0.10.3] - 2026-08-02
 

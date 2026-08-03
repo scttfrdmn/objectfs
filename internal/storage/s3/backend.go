@@ -456,16 +456,51 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		return nil, err
 	}
 
-	// Decompress if the object was stored with transparent compression. The encoding comes from the
-	// object's own header rather than the write config, so objects stay readable across a config
-	// change (audit finding C2 is the opposite: dispatching on the configured codec silently returned
-	// the raw frame for anything else).
+	// Decompress if the object was stored with transparent compression.
+	//
+	// Both the decision to decode and the codec used come from the object's own header rather than
+	// from the write config, so objects stay readable across a config change — including a change to
+	// `enabled: false`, which does not make what is already in the bucket uncompressed. Audit finding
+	// C2 was that only the *decision* worked this way: the codec came from the configuration, so a
+	// mount could read back only the algorithm it was currently set to write, and anything else came
+	// through as a raw frame with a successful status (#230).
 	data := read.data
 	if b.compressor != nil && read.contentEncoding != "" {
-		decompressed, decompErr := b.compressor.Decompress(data, read.contentEncoding)
+		decompressed, decoded, decompErr := b.compressor.Decompress(data, read.contentEncoding)
 		if decompErr != nil {
-			return nil, fmt.Errorf("decompress object %q: %w", key, decompErr)
+			// The codec claimed the encoding and then rejected the body. That is corruption of the
+			// stored bytes, not a transient fault: a retry decodes the same frame and fails the same
+			// way, so this is reported structured and non-retryable rather than as a bare wrapped
+			// error the retry layer would take at face value.
+			corrupt := errors.NewError(errors.ErrCodeDataCorruption,
+				"stored object could not be decompressed by the codec its Content-Encoding names").
+				WithComponent("s3-backend").
+				WithOperation("GetObject").
+				WithContext("key", key).
+				WithContext("content_encoding", read.contentEncoding).
+				WithDetail("stored_size", len(data)).
+				WithDetail("cause", decompErr.Error()).
+				WithDetail("suggestion", "The body is not a valid "+read.contentEncoding+" frame. "+
+					"Either the object was truncated or overwritten in place, or its Content-Encoding "+
+					"names a different codec than the one that wrote it.")
+
+			b.metricsCollector.RecordError(corrupt)
+			b.healthTracker.RecordError("s3-reads", corrupt)
+
+			return nil, corrupt
 		}
+
+		if !decoded {
+			// A token no codec here claims. Not an error on its own — another tool may have written a
+			// coding ObjectFS does not implement, and handing those bytes back unchanged is what every
+			// other S3 client does. checkFullyDecoded below is what refuses it if the object is one
+			// ObjectFS compressed, and it can tell because only those carry objectfs-original-size.
+			b.logger.Warn("object has a Content-Encoding this build cannot decode",
+				"key", key,
+				"content_encoding", read.contentEncoding,
+				"decodable", b.compressor.DecodableEncodings())
+		}
+
 		data = decompressed
 	}
 
@@ -474,13 +509,17 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 	// objectfs-original-size is written only for objects that were actually compressed, so its
 	// presence is an assertion by the writer that the caller must receive that many bytes. If the
 	// data on hand is shorter, decompression did not happen — either the stored Content-Encoding was
-	// lost (which is what CargoShip's metadata-only upload did), or it names a codec this build
-	// cannot decode, or compression was reconfigured since the write.
+	// lost (which is what CargoShip's metadata-only upload did, and what a CopyObject or tier
+	// transition still does), or it names a coding ObjectFS does not implement. A change of configured
+	// algorithm is no longer on that list: since #230 every algorithm ObjectFS can write is decoded
+	// regardless of what this mount writes.
 	//
 	// Returning the bytes anyway is the worst option available: HeadObject reports the uncompressed
 	// size, so the kernel pads the shortfall with zeros and the caller gets a silently corrupt file
-	// with a successful exit status. Compressor.Decompress does exactly that today for an encoding it
-	// does not recognize, which is why the check lives here rather than there.
+	// with a successful exit status. Compressor.Decompress hands back unrecognized encodings unchanged
+	// by design — a foreign coding is the other tool's format, not an error — so this is the check that
+	// distinguishes those from an ObjectFS object that failed to decode, and it can only be made here,
+	// where objectfs-original-size is in hand.
 	if err := checkFullyDecoded(read.metadata, data, offset, size, read.contentEncoding, key); err != nil {
 		b.metricsCollector.RecordError(err)
 
@@ -2263,9 +2302,20 @@ func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int
 		return nil
 	}
 
+	// Two different causes reach here, and they want different advice. Since #230 the read path
+	// decodes every algorithm ObjectFS can write, whatever the mount is configured to write, so a
+	// codec change is no longer one of them.
 	detail := "the stored Content-Encoding was lost, so the object was never decompressed"
+	suggestion := "The object was written by a build that stored the encoding as user metadata " +
+		"instead of the Content-Encoding header. Rewrite it, or read it with a build that " +
+		"recognizes that layout."
+
 	if contentEncoding != "" {
 		detail = fmt.Sprintf("the object is encoded as %q, which this build cannot decode", contentEncoding)
+		suggestion = "No codec in this build claims that Content-Encoding. Since ObjectFS decodes " +
+			"every algorithm it can write regardless of configuration, the encoding was most likely " +
+			"set by another tool, or altered after the write — a CopyObject or a tier transition " +
+			"does not carry the header. Changing this mount's compression settings will not help."
 	}
 
 	return errors.NewError(errors.ErrCodeDataCorruption,
@@ -2277,9 +2327,7 @@ func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int
 		WithDetail("recorded_size", want).
 		WithDetail("decoded_size", len(data)).
 		WithDetail("cause", detail).
-		WithDetail("suggestion", "The object was written by a build that stored the encoding as user "+
-			"metadata instead of the Content-Encoding header. Rewrite it, or read it with a build "+
-			"that recognizes that layout.")
+		WithDetail("suggestion", suggestion)
 }
 
 // verifyChecksum recomputes the SHA-256 of a whole object's uncompressed content and compares it
