@@ -2,6 +2,7 @@ package distributed
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -308,4 +309,53 @@ func TestConsensusEngine_StartStop(t *testing.T) {
 	if err := cm.consensus.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+}
+
+// TestConsensusEngine_StopRacesAnInboundHeartbeat is the regression test for the data race CI caught
+// in TriggerElection's two peer tests.
+//
+// Stop read ce.electionTimer without holding ce.mu while resetElectionTimer replaces it — reached from
+// handleNetworkAppendEntries, which runs on the gossip receiver goroutine. Closing stopCh does not
+// order the two: the receiver belongs to GossipProtocol, which ClusterManager.Stop shuts down *after*
+// the consensus engine, so a heartbeat in flight is still being handled while Stop runs.
+//
+// Driving handleNetworkAppendEntries directly rather than over UDP is what makes this deterministic.
+// The peer tests hit it only when a heartbeat happened to land inside Stop's window, which is why it
+// showed up under CI's load and not locally; here the write is guaranteed to be concurrent with the
+// read, so -race reports it on every run without the fix.
+func TestConsensusEngine_StopRacesAnInboundHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("stop-race")
+	cfg.ElectionTimeout = time.Hour // no election fires on its own during this test
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	ce := cm.consensus
+
+	if err := ce.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// A heartbeat from a leader at a term above ours, which is the arm that resets the timer. The
+	// sender is not a known node, so the response send is skipped and no socket is needed.
+	body, err := json.Marshal(&AppendEntriesMessage{Term: 99, LeaderID: "leader"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg := &GossipMessage{Type: MessageTypeAppendEntries, From: "leader", Data: body}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			ce.handleNetworkAppendEntries(msg)
+		}
+	}()
+
+	if err := ce.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	<-done
 }

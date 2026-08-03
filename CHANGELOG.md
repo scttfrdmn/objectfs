@@ -92,6 +92,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A data race between `ConsensusEngine.Stop` and an inbound heartbeat.** `Stop` read
+  `ce.electionTimer` without holding `ce.mu` while `resetElectionTimer` was replacing it from the
+  gossip receiver goroutine, which is where an `AppendEntries` RPC is handled. Neither shutdown signal
+  ordered the two: the receiver does not watch the consensus engine's `stopCh`, and although
+  `ClusterManager.Stop` stops gossip first, `GossipProtocol.Stop` closes the socket without waiting
+  for the receiver, so a message already inside a handler keeps running. `Start`'s unlocked call to the
+  same function was the second instance. The regression test drives `handleNetworkAppendEntries`
+  concurrently with `Stop` rather than over UDP, because the two tests that caught this in CI hit it
+  only when a heartbeat happened to land inside `Stop`'s window — reproducible under CI's load and not
+  locally, which is the flake shape a `-race` gate is worst at.
 - **Changing `compression.algorithm` no longer orphans every object already in the bucket.** A mount
   now decodes any algorithm ObjectFS can write, chosen from the object's stored `Content-Encoding`
   rather than from the configuration ([#230]). Before this, `Compressor` held exactly one codec and
