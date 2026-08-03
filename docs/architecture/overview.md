@@ -160,14 +160,22 @@ interface that applications interact with.
 [supported-operations table in the README](../../README.md#supported-filesystem-operations), derived
 from the methods that exist in `internal/fuse` and `internal/vfs`.
 
-Summarised: read, write at any offset, truncate, flush/fsync, stat, create, mkdir, paginated
-readdir, chmod/chown on files, and statfs are implemented. **`unlink`, `rmdir`, `rename`, symlinks,
-xattrs, `mknod`, `fallocate`, and locking are not**, and each fails rather than silently doing
-nothing — `rm` returns `EROFS` rather than reporting a delete that did not happen.
+Summarised: read, write at any offset, truncate, flush/fsync, stat, create, mkdir, paginated readdir,
+chmod/chown on files, statfs, `unlink`, `rmdir`, and `rename` are implemented. **Symlinks, xattrs,
+`mknod`, `fallocate`, hard links, and locking are not**, and each fails rather than silently doing
+nothing.
 
-This list previously named `Rename()`, `Link()`, and `Symlink()` as supported. None of the three
-exists, and `Rmdir` and `Unlink` exist only as loud refusals. That gap is what the README table now
-pins, and it is checked against the code rather than against intent.
+Two entries need their caveat stated here rather than only in the table. `rename` is a server-side
+copy followed by a delete, per object, so it is **not atomic** and `renameat2`'s `RENAME_EXCHANGE`
+and `RENAME_NOREPLACE` are refused with `EINVAL` rather than approximated. Hard links are not
+"not yet" — S3 has no concept of two names for one object, so they will never be supported.
+
+This summary has been wrong in both directions, which is why it now points at the table first. It
+once named `Rename()`, `Link()`, and `Symlink()` as supported when none of the three existed; it was
+then corrected to say `unlink`, `rmdir`, and `rename` were unimplemented and that `rm` returned
+`EROFS`, and stayed that way after all three landed. A prose summary of a table is a second copy of
+the same facts, so it can only ever be as fresh as its last edit — the table is derived from the
+methods in `internal/fuse` and `internal/vfs` and is the thing to trust.
 
 ### 2. Cache Layer
 

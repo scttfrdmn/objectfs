@@ -9,8 +9,8 @@ ObjectFS transforms S3-compatible object storage into a high-performance filesys
 ## Overview
 
 ObjectFS is a FUSE filesystem for Linux and macOS that presents a POSIX interface over S3-compatible
-object storage. It is **not** a POSIX-compliant filesystem: roughly 10 of ~40 VFS operations are
-implemented, and several others fail by design rather than silently doing the wrong thing. The
+object storage. It is **not** a POSIX-compliant filesystem — a subset of the POSIX surface is
+implemented, and several operations fail by design rather than silently doing the wrong thing. The
 [supported-operations table in the README](https://github.com/scttfrdmn/objectfs#supported-operations)
 is the authority on what works, what errors, and which tools are known not to work.
 

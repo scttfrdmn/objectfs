@@ -13,9 +13,10 @@ These principles guide every architectural and implementation decision in Object
 ### What This Means
 
 - ✅ **A POSIX interface**: applications call `open`/`read`/`write` and get a filesystem, with no
-  ObjectFS-specific API. Not full POSIX compliance — this said "Full POSIX compliance" against ten
-  of roughly forty VFS operations, and the operations that are missing or refused are in the
-  [README's supported-operations table](../README.md#supported-operations). The principle is that
+  ObjectFS-specific API. Not full POSIX compliance — this said "Full POSIX compliance" against a
+  fraction of the VFS surface, and the operations that are missing or refused are in the
+  [README's supported-operations table](../README.md#supported-operations), which is the authority
+  on the count as well as the list. The principle is that
   ObjectFS does not ask applications to change; where S3 cannot support an operation, the aim is to
   fail loudly rather than to appear compliant
 - ✅ **No API changes required**: Existing code works unmodified

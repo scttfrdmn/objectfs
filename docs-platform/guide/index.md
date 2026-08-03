@@ -1,9 +1,9 @@
 # Introduction to ObjectFS
 
 ObjectFS presents a POSIX *interface* over AWS S3 using FUSE, so ordinary tools can read and write
-objects as files. It is **not** a POSIX-compliant filesystem — roughly 10 of ~40 VFS operations are
-implemented, and the gap is structural rather than incidental: S3 has no rename, no hard links, and
-no partial write. The
+objects as files. It is **not** a POSIX-compliant filesystem — a subset of the POSIX surface is
+implemented, and the gap is structural rather than incidental: S3 has no *atomic* rename, no hard
+links, and no partial object write. The
 [supported-operations table](https://github.com/scttfrdmn/objectfs/blob/main/README.md) is the
 authority for what works, what fails by design, and which tools are known not to work. Check it
 before pointing a workload here.
@@ -13,12 +13,12 @@ before pointing a workload here.
 ObjectFS uses FUSE (Filesystem in Userspace) to mount S3 buckets as local directories. This means
 you can:
 
-- **Use standard file operations** — `ls`, `cat`, `cp`, and redirection. Not `mv`: there is no
-  `rename`, and it returns `ENOTSUP`
+- **Use standard file operations** — `ls`, `cat`, `cp`, `rm`, `mkdir`, `rmdir`, `mv`, and redirection
 - **Access datasets stored in S3** as if they were local files, without downloading them first
-- **Run applications that read and write whole files.** Applications needing rename, hard links,
-  extended attributes, or byte-range locking will not work — `git`, `sqlite3`, and `tar -x` are
-  known not to
+- **Run applications that read and write whole files.** Applications needing *atomic* rename, hard
+  links, extended attributes, or byte-range locking will not work — `git` and `sqlite3` are known
+  not to. `mv` works, but as a server-side copy followed by a delete, so it is not atomic and the
+  write-temp-then-rename idiom is not safe between concurrent writers
 
 ## Key Features
 
