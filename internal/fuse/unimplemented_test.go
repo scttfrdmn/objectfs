@@ -8,16 +8,18 @@ package fuse
 // *dependency's* behavior, and until this file nothing in this repo made it true.
 //
 // That is the shape of defect this file exists to prevent. `mv` was documented as ENOSYS on the strength
-// of "rename is not implemented" plus a reasonable guess; the bridge returns ENOTSUP (fs/bridge.go, the
+// of "rename is not implemented" plus a reasonable guess; the bridge returned ENOTSUP (fs/bridge.go, the
 // final return of rawBridge.Rename). The guess was wrong in a way no build, lint, or test could notice,
-// because the claim lived only in prose.
+// because the claim lived only in prose. Rename is implemented now — see rename.go and rename_test.go —
+// so it has left the table below, which is the other half of the same discipline: a row asserting an
+// operation fails is as wrong as a row asserting the wrong errno once the operation works.
 //
 // Two things make this worth a test rather than a comment:
 //
-//   - The defaults differ per operation and are not guessable. Rename, Symlink, Link, Mknod, and
-//     Fallocate default to ENOTSUP; Getxattr and Removexattr default to ENOATTR (which *is* ENODATA on
-//     Linux); Listxattr defaults to OK with an empty list; and Unlink and Rmdir default to **success**,
-//     which is why this package implements them only to refuse — see delete_stub_test.go.
+//   - The defaults differ per operation and are not guessable. Symlink, Link, Mknod, and Fallocate
+//     default to ENOTSUP; Getxattr and Removexattr default to ENOATTR (which *is* ENODATA on Linux);
+//     Listxattr defaults to OK with an empty list; and Unlink and Rmdir default to **success**, which is
+//     why those two were implemented to refuse before they were implemented to work.
 //   - They are a dependency's choices, so a go-fuse upgrade can change them. A bump that turned
 //     Listxattr's empty-OK into ENOTSUP would change what every `ls -@` and `rsync -X` sees, and would
 //     be invisible without this.
@@ -72,17 +74,6 @@ func TestUnimplementedOperationsReturnTheDocumentedErrno(t *testing.T) {
 		// rather than only the mismatch.
 		why string
 	}{
-		{
-			name: "rename",
-			call: func(raw fuse.RawFileSystem) fuse.Status {
-				in := &fuse.RenameIn{InHeader: rootHeader(), Newdir: 1}
-				return raw.Rename(nil, in, "old.txt", "new.txt")
-			},
-			want: syscall.ENOTSUP,
-			why: "mv reports this verbatim, and the README told users it was ENOSYS. The two are not " +
-				"interchangeable: ENOSYS means 'this filesystem will never do this' and callers may " +
-				"stop asking, while ENOTSUP is answered per call",
-		},
 		{
 			name: "symlink",
 			call: func(raw fuse.RawFileSystem) fuse.Status {
@@ -147,6 +138,41 @@ func TestUnimplementedOperationsReturnTheDocumentedErrno(t *testing.T) {
 					tt.name, errnoName(got), errnoName(tt.want), tt.why)
 			}
 		})
+	}
+}
+
+// TestRenameIsDispatchedRatherThanDefaulted is the counterpart to the table above, for the one row that
+// left it.
+//
+// Rename's absence was invisible: rawBridge.Rename's final return is ENOTSUP, so an implementation that
+// failed to satisfy fs.NodeRenamer — a signature drifting on a go-fuse bump, a build tag excluding
+// rename.go on some platform — would go back to refusing every `mv` with no compile error. rename.go has
+// a compile-time assertion for the interface; this asserts the consequence, that the bridge dispatches
+// to it, which is the part the assertion cannot reach.
+//
+// EROFS rather than OK is the expected answer here because there is no backend behind this FileSystem:
+// this pins that the call arrived at ObjectFS's own code, not that the rename worked. rename_test.go
+// covers what it does once it arrives.
+func TestRenameIsDispatchedRatherThanDefaulted(t *testing.T) {
+	t.Parallel()
+
+	filesystem := NewFileSystem(nil, nil, nil, nil, &Config{ReadOnly: true})
+	raw := gofuse.NewNodeFS(filesystem.Root(), &gofuse.Options{})
+
+	in := &fuse.RenameIn{InHeader: rootHeader(), Newdir: 1}
+	got := syscall.Errno(raw.Rename(nil, in, "old.txt", "new.txt"))
+
+	if got == syscall.ENOTSUP {
+		t.Fatal("Rename returned ENOTSUP, which is go-fuse's default for an absent NodeRenamer rather " +
+			"than an answer from this package. Rename is implemented, so reaching the default means the " +
+			"interface is no longer satisfied — a changed signature, or a build tag that excluded " +
+			"rename.go — and every `mv` on the mount is silently refused again.")
+	}
+
+	if got != syscall.EROFS {
+		t.Errorf("Rename on a read-only mount returned %s, want EROFS. The errno is ObjectFS's own "+
+			"either way, so dispatch works; what this disagrees with is the refusal itself.",
+			errnoName(got))
 	}
 }
 

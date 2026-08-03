@@ -5,6 +5,7 @@ import (
 	cryptoRand "crypto/rand"
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -69,6 +70,22 @@ func (m *MockPredictiveBackend) SetObjectMetadata(ctx context.Context, key strin
 		return fmt.Errorf("object not found: %s", key)
 	}
 	m.meta[key] = copyMeta(meta)
+	return nil
+}
+
+// CopyObject copies the bytes and the metadata together, as rename requires: the destination has to
+// arrive with the source's mode, ownership, and content encoding.
+func (m *MockPredictiveBackend) CopyObject(ctx context.Context, src, dst string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	data, exists := m.objects[src]
+	if !exists {
+		return os.ErrNotExist
+	}
+
+	m.objects[dst] = append([]byte(nil), data...)
+	m.meta[dst] = copyMeta(m.meta[src])
 	return nil
 }
 

@@ -37,6 +37,26 @@ type Backend interface {
 	// header here would turn a chmod on a compressed object into an unreadable file.
 	SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error
 
+	// CopyObject copies src to dst without transferring the object's bytes through this process,
+	// preserving user metadata, content encoding, content type, and storage class. An existing dst is
+	// replaced. A src that does not exist is an error a caller can classify as absence.
+	//
+	// It exists for rename. S3 has no rename for general-purpose buckets, so `mv` is a copy followed by
+	// a delete, and the copy must be server-side: reading and rewriting through the client would turn
+	// renaming a 10 GiB file into 20 GiB of transfer, and renaming a directory into that times the
+	// number of objects under it.
+	//
+	// Every property named above must survive, for the reason spelled out on SetObjectMetadata: the read
+	// path dispatches decoding on the stored Content-Encoding and fails closed on one it cannot handle,
+	// so a copy that dropped the header would make a compressed object permanently unreadable — and one
+	// that dropped the storage class would silently promote the object to STANDARD, billing the user for
+	// a tier they did not choose. That is not hypothetical here; it is audit finding L26, observed on the
+	// tier-transition path.
+	//
+	// Implementations must not treat this as atomic with respect to anything. It is one copy of one
+	// object, and callers renaming a prefix are looping.
+	CopyObject(ctx context.Context, src, dst string) error
+
 	DeleteObject(ctx context.Context, key string) error
 	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
 

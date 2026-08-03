@@ -210,12 +210,12 @@ func modeBits(a vfs.Attr) uint32 {
 // size and mtime the file had when it was first looked up.
 func (f *FileNode) attr(ctx context.Context) (vfs.Attr, error) {
 	if f.fs.buffer != nil {
-		if a, ok := f.fs.buffer.Attr(f.path); ok {
+		if a, ok := f.fs.buffer.Attr(f.key()); ok {
 			return a, nil
 		}
 	}
 
-	info, err := f.fs.statObject(ctx, f.path)
+	info, err := f.fs.statObject(ctx, f.key())
 	if err != nil {
 		return vfs.Attr{}, err
 	}
@@ -228,7 +228,7 @@ func (f *FileNode) attr(ctx context.Context) (vfs.Attr, error) {
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	a, err := f.attr(ctx)
 	if err != nil {
-		slog.Error("getattr failed", "path", f.path, "error", err)
+		slog.Error("getattr failed", "path", f.key(), "error", err)
 
 		return toErrno(err)
 	}
@@ -277,8 +277,8 @@ func (f *FileNode) Setattr(
 		if size > math.MaxInt64 {
 			return syscall.EFBIG
 		}
-		if err := f.fs.buffer.Truncate(ctx, f.path, int64(size)); err != nil {
-			slog.Error("setattr: truncate failed", "path", f.path, "size", size, "error", err)
+		if err := f.fs.buffer.Truncate(ctx, f.key(), int64(size)); err != nil {
+			slog.Error("setattr: truncate failed", "path", f.key(), "size", size, "error", err)
 
 			return toErrno(err)
 		}
@@ -292,7 +292,7 @@ func (f *FileNode) Setattr(
 		// the S3 credentials the process holds, not by a mode bit, so a setuid bit that appeared to be
 		// stored would promise an escalation that cannot happen and could not be relied on either way.
 		slog.Warn("setattr: refusing to set mode bits outside the permission mask",
-			"path", f.path, "mode", mode)
+			"path", f.key(), "mode", mode)
 
 		return syscall.ENOTSUP
 	}
@@ -307,8 +307,8 @@ func (f *FileNode) Setattr(
 			from.Mtime = mtime
 		}
 
-		if err := f.fs.buffer.SetAttr(ctx, f.path, modeOK, uidOK, gidOK, from); err != nil {
-			slog.Error("setattr failed", "path", f.path, "error", err)
+		if err := f.fs.buffer.SetAttr(ctx, f.key(), modeOK, uidOK, gidOK, from); err != nil {
+			slog.Error("setattr failed", "path", f.key(), "error", err)
 
 			return toErrno(err)
 		}
@@ -321,15 +321,15 @@ func (f *FileNode) Setattr(
 	// value POSIX already permits a filesystem to keep only approximately.
 
 	if changed {
-		if err := f.fs.buffer.FlushContext(ctx, f.path); err != nil {
-			slog.Error("setattr: flush failed", "path", f.path, "error", err)
+		if err := f.fs.buffer.FlushContext(ctx, f.key()); err != nil {
+			slog.Error("setattr: flush failed", "path", f.key(), "error", err)
 
 			return toErrno(err)
 		}
 
 		// The object's size, mtime, and mode all just changed. Anything cached for the path describes
 		// what it was before.
-		f.fs.invalidate(f.path)
+		f.fs.invalidate(f.key())
 
 		if h, ok := fh.(*FileHandle); ok {
 			h.file.markClean()
@@ -338,7 +338,7 @@ func (f *FileNode) Setattr(
 
 	a, err := f.attr(ctx)
 	if err != nil {
-		slog.Error("setattr: cannot report resulting attributes", "path", f.path, "error", err)
+		slog.Error("setattr: cannot report resulting attributes", "path", f.key(), "error", err)
 
 		return toErrno(err)
 	}
@@ -363,14 +363,14 @@ func (f *FileNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sy
 		return 0
 	}
 
-	if err := f.fs.buffer.FlushContext(ctx, f.path); err != nil {
+	if err := f.fs.buffer.FlushContext(ctx, f.key()); err != nil {
 		f.fs.countError()
-		slog.Error("fsync failed", "path", f.path, "error", err)
+		slog.Error("fsync failed", "path", f.key(), "error", err)
 
 		return toErrno(err)
 	}
 
-	f.fs.invalidate(f.path)
+	f.fs.invalidate(f.key())
 
 	if h, ok := fh.(*FileHandle); ok {
 		h.file.markClean()
@@ -429,7 +429,7 @@ func (n *DirectoryNode) Setattr(
 	if modeOK || uidOK || gidOK {
 		slog.Warn("chmod and chown of a directory are not implemented; refusing rather than reporting "+
 			"a change that would not be visible on the next stat",
-			"path", n.path, "issue", 165)
+			"path", n.key(), "issue", 165)
 
 		return syscall.ENOTSUP
 	}

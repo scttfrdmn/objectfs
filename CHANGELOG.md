@@ -26,7 +26,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bucket and the write path: `Create` records attributes without a PUT, so a just-created file is
     real and visible to `stat` with no object behind it yet.
 
+- **`mv` works, and the README says exactly how far short of POSIX it falls.** `Rename` copies
+  server-side and then deletes, per object; renaming a directory moves everything under its prefix
+  ([#164]). Before this, go-fuse's default for an absent `NodeRenamer` answered every `mv` with
+  `ENOTSUP`. Six properties are load-bearing, each pinned by a test that was verified by mutation —
+  the implementation was broken in that specific way and the test watched to fail:
+  - **Each source object is deleted only after its own copy has succeeded.** An interruption
+    therefore leaves the data at the old name, the new name, or both — never at neither. Duplicated
+    data is an operator's cleanup problem; missing data is not recoverable, so the ordering is fixed
+    in that direction deliberately, and a partial directory move is resumable by re-running the same
+    `mv`.
+  - **The copy is server-side.** Reading and rewriting through the process would make renaming a
+    10 GiB file cost 20 GiB of transfer, and renaming a directory that times the object count.
+    Objects above S3's 5 GiB single-part `CopyObject` limit route through `UploadPartCopy`.
+  - **The write path is flushed before the copy runs.** A copy acts on objects, so a file whose only
+    content is dirty ranges in memory is invisible to it: `echo hi > a; mv a b` would have copied a
+    key that did not exist yet, deleted the source, and then flushed the pending ranges back to the
+    *old* name — the file landing at neither name the user asked for.
+  - **The moved node is repointed, recursively for a directory.** `go-fuse`'s `MvChild` re-parents the
+    *same* inode, so the `FileNode` survives a rename holding the path it was constructed with. A
+    stored path is stale the moment a rename succeeds, and the consequence is silent in a way nothing
+    would catch: after `mv a b`, a write to `b` flushed to `a` and recreated the source the rename
+    had just deleted. A stale key is a valid key, so every S3 call succeeds.
+  - **Prefix matching is on a path boundary.** `mv dir dir-new` must not move `dir2/file`. That is not
+    a hypothetical spelling mistake — it is the same defect the cache's `keyMatches` had, found in the
+    same audit.
+  - **`renameat2`'s `RENAME_EXCHANGE` and `RENAME_NOREPLACE` are refused with `EINVAL`, not
+    approximated.** Both are atomicity promises copy-then-delete cannot keep, `EINVAL` is what the
+    kernel and libc expect for an unsupported flag, and `mv` and Git fall back correctly on it. A
+    foreign `newParent` is `EXDEV`, which is what go-fuse's own `LoopbackNode` answers.
+
+  There is no atomic alternative to reach for. S3's `RenameObject`, added in 2026, is
+  directory-bucket (S3 Express) only, and object annotations — which ObjectFS needs for POSIX
+  attributes — are unsupported on directory buckets, so the two features are mutually exclusive. The
+  README now carries a **Rename is not atomic** section stating what a concurrent reader can observe,
+  what an interruption leaves behind, and which tools that breaks: anything relying on the
+  write-temp-then-rename idiom for atomic replacement is not safe here between concurrent writers.
+- `types.Backend.CopyObject`, a server-side copy that preserves content encoding, content type,
+  storage class, and user metadata. Each of the four is a requirement rather than a nicety, and the
+  interface documentation says which failure each one prevents: the read path dispatches decoding on
+  the stored `Content-Encoding` and fails closed on one it cannot handle, so dropping it would leave a
+  compressed object permanently unreadable with its bytes intact; the storage-class default is
+  `STANDARD`, so dropping it would silently promote the object out of the tier being paid for; and
+  POSIX mode, ownership, and mtime live in user metadata and nowhere else, so dropping it would reset
+  a file's permissions, which is not a thing `rename` does. Encryption is applied from configuration
+  rather than copied from the source, so a key rotation reaches renamed objects.
+- `internal/testaws`: a `DirectoryMarkerDelete` capability probe, and `RequireDirectoryMarkerDelete`
+  to skip on its absence. Deleting a `dir/` marker while `dir/child` still exists panics the substrate
+  emulator, because its object store is a filesystem abstraction where `dir/` is the *directory*
+  holding the child, and removing it orphans the child (filed as
+  [scttfrdmn/substrate#534](https://github.com/scttfrdmn/substrate/issues/534), reproduced against
+  afero alone with no substrate involved). In S3 a key is an opaque string and `dir/` is an ordinary
+  object, so this is the emulator's property and not ObjectFS's — which is the reason for a runtime
+  probe rather than an assertion either way. The alternative was to assert the emulator's behavior as
+  expected, which would encode a dependency's bug as this project's contract.
+- `internal/storage/s3/copy_live_test.go` (`-tags=integration`) covers the multipart copy path against
+  real AWS, at real part sizes. It has no hermetic equivalent: substrate dispatches on
+  `x-amz-copy-source` before checking `uploadId`, so it answers an `UploadPartCopy` as a whole-object
+  copy with a 200 (substrate#532). That leaves the branch where a mistake is most expensive resting on
+  nothing but reading — abandoned multipart parts are billed and invisible to `ListObjects`. Two
+  shapes, both deliberate: a legal three-part copy with a short final part, which is where
+  inclusive/exclusive range mistakes surface, and an *illegal* one that S3 rejects at
+  `CompleteMultipartUpload`, which is how the abort path gets a failure arriving after every part has
+  already uploaded.
+
 ### Fixed
+
+- **`chmod` and automatic tier transitions worked on every key except the ones containing a `+`.**
+  `x-amz-copy-source` is read by S3 as a URL path, and `url.PathEscape` leaves `+` as itself while S3
+  decodes `+` in that header as a space — so a self-copy of `a+b.txt` asked for `a b.txt` and came
+  back `404 NoSuchKey`. Both callers are operations a user expects to be invisible, so the symptom was
+  a `chmod` failing with `ENOENT` on a file that plainly exists, and a storage-tier transition failing
+  on a timer with nothing to attribute it to. A `+` in a filename is ordinary: version numbers, C++
+  sources, and any timestamp written as `2026-08-01T00:00+00:00`. Escaping is now in one place
+  (`Backend.copySource`) rather than open-coded at each call site, one of which built the header with
+  no escaping at all. Verified against real S3 in `us-west-2` rather than reasoned about — both
+  `url.PathEscape` and `(&url.URL{Path: …}).EscapedPath()` fail on such a key, `%2B` succeeds, and
+  every other character `PathEscape` passes through (`~ * ( ) $ & = @ :`) was probed on the same
+  endpoint and copies correctly.
+- **`objectfs stats` reported zero for six counters that were being maintained correctly all along.**
+  `GetStats` copies field by field, and its list named nine of fifteen fields: `Creates`, `Deletes`,
+  and `Renames`, each incremented by its own operation, and the three latency averages, each
+  maintained as an exponential moving average by `recordReadTime` and its siblings. All six were live
+  and none reached the snapshot. This is a whole class of quiet defect — a field added to `Stats` and
+  not added to the copy is not a compile error and not a test failure, just a number that reads zero
+  forever — so the guard is a reflection test that sets every counter to a *distinct* non-zero value
+  and asserts the snapshot reports each one. Distinct, so that a copy assigning the right field from
+  the wrong source is caught too, which naming them all `1` would not be. An enumeration of field
+  names would have had the same failure mode as the code it checks. `time.Duration`'s reflect kind is
+  `Int64`, which is how the three latency fields were found.
+- `README.md`: the not-implemented table still listed `unlink` and `rmdir` as `EROFS` and the
+  tools-that-do-not-work list still said `mv` fails with `ENOTSUP` "because there is no rename" — both
+  true when written and both false since. A row asserting an operation fails is as wrong as a row
+  naming the wrong errno once the operation works, and it misleads in the worse direction: a reader
+  avoids something that would have worked. `internal/fuse/unimplemented_test.go` is the mechanism for
+  the errnos in that table, and rename's departure from it is now pinned from the other side — a test
+  asserts the bridge *dispatches* to `Rename` rather than reaching go-fuse's `ENOTSUP` default, which
+  is what a drifted signature or a build tag excluding `rename.go` would silently restore.
 
 - **`write_buffer.max_memory` is enforced.** It was declared in the config schema, defaulted to
   `"512MB"`, validated as a size string, and read by nothing ([#205]) — so every mount since the key
@@ -49,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quietly.
 
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
+[#164]: https://github.com/scttfrdmn/objectfs/issues/164
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205
 
 ## [0.10.3] - 2026-08-02

@@ -18,6 +18,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/scttfrdmn/objectfs/internal/storage/s3"
 	"github.com/scttfrdmn/objectfs/internal/testaws"
 	objectfserrors "github.com/scttfrdmn/objectfs/pkg/errors"
@@ -360,5 +363,331 @@ func TestGetObjectNegativeSizeDoesNotPanic(t *testing.T) {
 
 			t.Logf("GetObject(%d, %d) → %d bytes", tc.offset, tc.size, len(got))
 		})
+	}
+}
+
+// TestCopyObjectPreservesWhatMakesTheDestinationUsable is the seam test for #164's backend half.
+//
+// Rename is a copy then a delete, and the copy has to be server-side or renaming a 10 GiB file becomes
+// 20 GiB of transfer. What the copy must carry across is not obvious, because S3's default is to carry
+// almost none of it: a CopyObject that names only a source and a destination produces an object with
+// the bucket's default storage class, no Content-Encoding, and — depending on the metadata directive —
+// no user metadata. Each omission is a distinct user-visible failure:
+//
+//   - user metadata is where POSIX mode, ownership, and mtime live, so losing it resets a renamed
+//     file's permissions, which is not a thing rename does;
+//   - Content-Encoding is what the read path dispatches decoding on, and it fails closed on an
+//     encoding it cannot handle, so losing it leaves a compressed object permanently unreadable with
+//     its bytes intact;
+//   - storage class defaults to STANDARD, so losing it silently promotes the object out of the tier
+//     the user is paying for — audit finding L26.
+//
+// Asserted through an independent client rather than through the backend's own HeadObject, so a
+// backend that dropped a property and then reported it from somewhere else could not pass.
+func TestCopyObjectPreservesWhatMakesTheDestinationUsable(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	backend := ts.Backend(func(cfg *s3.Config) { cfg.Compression.Enabled = false })
+	ctx := context.Background()
+
+	const src = "copy/source.bin"
+	const dst = "copy/destination.bin"
+
+	want := testaws.DeterministicBytes(src, 4096)
+	if err := backend.PutObject(ctx, src, want, map[string]string{
+		"objectfs-mode": "384", // 0600, deliberately not the default
+		"objectfs-uid":  "1234",
+	}); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	if err := backend.CopyObject(ctx, src, dst); err != nil {
+		t.Fatalf("CopyObject: %v", err)
+	}
+
+	if got := ts.GetObject(dst); !bytes.Equal(got, want) {
+		t.Errorf("the copy holds %d bytes, want %d, and the contents differ", len(got), len(want))
+	}
+
+	// The source survives. A copy that moved the object would make rename's delete step a double
+	// delete, and any failure between the two steps would lose the file outright.
+	if got := ts.GetObject(src); !bytes.Equal(got, want) {
+		t.Errorf("the source changed: %d bytes, want %d", len(got), len(want))
+	}
+
+	head, err := ts.ClientContext(ctx).HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(dst),
+	})
+	if err != nil {
+		t.Fatalf("HeadObject on the copy: %v", err)
+	}
+
+	// Metadata keys round-trip with inconsistent case — real S3 lower-cases them, a Go http.Header
+	// round trip title-cases them — so the lookup is case-insensitive. Comparing case-sensitively is
+	// how a test passes against one endpoint and fails against another.
+	for k, want := range map[string]string{"objectfs-mode": "384", "objectfs-uid": "1234"} {
+		var got string
+		for hk, hv := range head.Metadata {
+			if strings.EqualFold(hk, k) {
+				got = hv
+			}
+		}
+		if got != want {
+			t.Errorf("the copy's %s = %q, want %q. POSIX mode and ownership live in user metadata and "+
+				"nowhere else, so a copy that drops it renames a file into different permissions",
+				k, got, want)
+		}
+	}
+}
+
+// TestCopyObjectHandlesAKeyContainingAPlus is a regression test for a bug found by probing real S3,
+// not by reading the code — and one that was already shipping.
+//
+// S3 reads x-amz-copy-source as a URL path, so it has to be escaped. url.PathEscape looks like the
+// right tool and is not: it leaves "+" as itself, and S3 decodes "+" in this header as a space. So
+// copying "a+b.txt" asks for "a b.txt" and gets 404 NoSuchKey. Verified against real S3 in us-west-2,
+// where both url.PathEscape and (&url.URL{Path: …}).EscapedPath() fail on such a key and only %2B
+// works; the substrate endpoint this test runs against reproduces both answers exactly.
+//
+// A "+" in a filename is ordinary — version numbers, C++ sources, ISO timestamps with a UTC offset —
+// and the affected paths are ones a user expects to be invisible: SetObjectMetadata is how chmod
+// persists, and the tier optimizer's transition is automatic. Both returned NoSuchKey for a file that
+// plainly existed, and the tier transition surfaced it to nobody.
+func TestCopyObjectHandlesAKeyContainingAPlus(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	backend := ts.Backend(func(cfg *s3.Config) { cfg.Compression.Enabled = false })
+	ctx := context.Background()
+
+	// Each key exercises a character url.PathEscape treats differently from what S3 expects, or — for
+	// the space and the percent — one it handles correctly and which must keep working.
+	keys := []string{
+		"plus+key.bin",
+		"dir+one/file+two.bin",
+		"space name.bin",
+		"pct%20literal.bin",
+	}
+
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+
+			want := testaws.DeterministicBytes(key, 128)
+			if err := backend.PutObject(ctx, key, want, map[string]string{"objectfs-mode": "420"}); err != nil {
+				t.Fatalf("PutObject(%q): %v", key, err)
+			}
+
+			dst := "copied/" + key
+			if err := backend.CopyObject(ctx, key, dst); err != nil {
+				t.Fatalf("CopyObject(%q): %v. The copy source is escaped wrongly for this key, so S3 is "+
+					"being asked for an object that does not exist", key, err)
+			}
+
+			if got := ts.GetObject(dst); !bytes.Equal(got, want) {
+				t.Errorf("the copy of %q holds %d bytes, want %d", key, len(got), len(want))
+			}
+
+			// SetObjectMetadata is a self-copy and carries the same escaping, which is how this bug
+			// reached a shipped path: chmod on a file with a "+" in its name failed with NoSuchKey.
+			if err := backend.SetObjectMetadata(ctx, key, map[string]string{"objectfs-mode": "384"}); err != nil {
+				t.Fatalf("SetObjectMetadata(%q): %v. chmod persists through a self-copy, so it fails on "+
+					"exactly the keys CopyObject does", key, err)
+			}
+		})
+	}
+}
+
+// TestCopyObjectAboveTheSinglePartLimitUsesAMultipartCopy covers the branch a >5 GiB rename takes.
+//
+// S3's CopyObject fails outright above 5 GiB, so an object larger than that has to be copied part by
+// part with UploadPartCopy. Reaching that branch honestly would mean creating a 5 GiB object, which
+// costs real storage and hours of transfer — so in practice it does not get tested, and a mutation
+// deleting the routing produced no failure at all. The thresholds are scaled down instead, which
+// exercises the same code: the part loop, the CopySourceRange arithmetic, and the properties that have
+// to be restated because MetadataDirective=COPY does not exist for a multipart upload.
+//
+// That last point is why this test is not redundant with the single-part one. A multipart upload's
+// metadata is fixed at CreateMultipartUpload, so the source's map has to be carried across by hand —
+// entirely separate code from the single-part path, with its own way to silently lose the POSIX
+// attributes.
+//
+// The scaling has one honest limit: real S3 requires every non-final part to be at least 5 MB and
+// answers EntityTooSmall at Complete otherwise. A few-kilobyte part violates that, so this verifies the
+// mechanics of the path and not S3's part-size rule. The live integration suite is where a real
+// oversized object would belong.
+func TestCopyObjectAboveTheSinglePartLimitUsesAMultipartCopy(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireUploadPartCopy()
+
+	backend := ts.Backend(func(cfg *s3.Config) { cfg.Compression.Enabled = false })
+	ctx := context.Background()
+
+	// 10 KiB in 3 KiB parts: four parts, the last one short. An uneven final part is the case where
+	// off-by-one range arithmetic shows up — an exclusive/inclusive mixup on the last part either drops
+	// a byte or asks for one past the end.
+	const (
+		size            = 10 << 10
+		singlePartLimit = 4 << 10
+		partSize        = 3 << 10
+	)
+
+	const src = "bigcopy/source.bin"
+	const dst = "bigcopy/destination.bin"
+
+	want := testaws.DeterministicBytes(src, size)
+	if err := backend.PutObject(ctx, src, want, map[string]string{
+		"objectfs-mode": "384",
+		"objectfs-uid":  "1234",
+	}); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	s3.SetCopyThresholdsForTest(backend, singlePartLimit, partSize)
+
+	if err := backend.CopyObject(ctx, src, dst); err != nil {
+		t.Fatalf("CopyObject of a %d-byte object with a %d-byte single-part limit: %v",
+			size, singlePartLimit, err)
+	}
+
+	// The multipart path really ran. Without this the test would pass identically if the routing were
+	// deleted, which is the state it was written to fix.
+	if n := ts.Operations("UploadPartCopy"); n != 4 {
+		t.Errorf("the endpoint saw %d UploadPartCopy calls, want 4 (%d bytes in %d-byte parts). "+
+			"Zero means the copy took the single-part path and this test proves nothing about multipart",
+			n, size, partSize)
+	}
+
+	if got := ts.GetObject(dst); !bytes.Equal(got, want) {
+		t.Errorf("the assembled copy holds %d bytes, want %d, and the contents differ", len(got), len(want))
+	}
+
+	if got := ts.GetObject(src); !bytes.Equal(got, want) {
+		t.Errorf("the source changed: %d bytes, want %d", len(got), len(want))
+	}
+
+	// Restated by hand on this path, since CreateMultipartUpload fixes the metadata and there is no
+	// COPY directive to fall back on.
+	head, err := ts.ClientContext(ctx).HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(dst),
+	})
+	if err != nil {
+		t.Fatalf("HeadObject on the assembled copy: %v", err)
+	}
+
+	for k, want := range map[string]string{"objectfs-mode": "384", "objectfs-uid": "1234"} {
+		var got string
+		for hk, hv := range head.Metadata {
+			if strings.EqualFold(hk, k) {
+				got = hv
+			}
+		}
+		if got != want {
+			t.Errorf("the assembled copy's %s = %q, want %q. A multipart upload's metadata is fixed at "+
+				"CreateMultipartUpload, so this path has to restate it explicitly and is where losing it "+
+				"is easiest", k, got, want)
+		}
+	}
+
+	// No upload left behind. The parts of an abandoned multipart upload are billed and invisible to
+	// ListObjects, so a leak here is one an operator cannot find — audit finding H10.
+	if ids := ts.MultipartUploads(); len(ids) != 0 {
+		t.Errorf("after a successful multipart copy %d multipart upload(s) are still open: %v. "+
+			"Their parts are billed and no object listing shows them", len(ids), ids)
+	}
+}
+
+// TestCopyObjectAbortsTheUploadWhenAPartCopyFails is the leak half of the multipart copy path.
+//
+// A copy that fails partway has already created a multipart upload, and possibly uploaded parts. Those
+// parts are billed and invisible to ListObjects, so failing to abort leaks storage the operator has no
+// way to discover — audit finding H10, on this same mechanism, where one failure path aborted and the
+// other did not.
+//
+// The failure is provoked by deleting the source between the HEAD that sized it and the part copies that
+// read it, which is a real race as well as a convenient one: another writer can remove a file while a
+// rename of it is in flight.
+func TestCopyObjectAbortsTheUploadWhenAPartCopyFails(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireUploadPartCopy()
+
+	backend := ts.Backend(func(cfg *s3.Config) { cfg.Compression.Enabled = false })
+	ctx := context.Background()
+
+	const src = "abortcopy/source.bin"
+	const dst = "abortcopy/destination.bin"
+
+	want := testaws.DeterministicBytes(src, 10<<10)
+	if err := backend.PutObject(ctx, src, want, nil); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	head, err := backend.HeadObject(ctx, src)
+	if err != nil {
+		t.Fatalf("HeadObject: %v", err)
+	}
+	if head.Size != int64(len(want)) {
+		t.Fatalf("HeadObject reports %d bytes, want %d", head.Size, len(want))
+	}
+
+	s3.SetCopyThresholdsForTest(backend, 4<<10, 3<<10)
+
+	// Removed after the size is known but before the copy: the copy heads the source itself, and this
+	// only has to make the *part* copies fail, which a missing source does.
+	if err := backend.DeleteObject(ctx, src); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+
+	if err := backend.CopyObject(ctx, src, dst); err == nil {
+		t.Fatal("CopyObject of a source that no longer exists returned no error")
+	}
+
+	if ids := ts.MultipartUploads(); len(ids) != 0 {
+		t.Errorf("after a failed multipart copy %d multipart upload(s) are still open: %v. The deferred "+
+			"abort did not run, so their parts are billed and no object listing shows them",
+			len(ids), ids)
+	}
+
+	// And no partial object at the destination. A rename whose copy failed must leave the destination
+	// untouched, or the caller cannot retry it and cannot tell what happened.
+	if ts.ObjectExists(dst) {
+		t.Errorf("the destination %q exists after a failed copy; a partial object there is worse than "+
+			"none, since a retry would have to distinguish it from a complete one", dst)
+	}
+}
+
+// TestCopyObjectOfAMissingSourceIsClassifiableAsAbsence keeps rename able to answer ENOENT.
+//
+// Renaming a file that is not there is ENOENT, and the only way the FUSE layer can produce that answer
+// is if the copy's failure is recognizable as absence rather than as a generic error. It is the same
+// distinction that mattered for Lookup, where collapsing every HeadObject failure into "absent" let
+// Create zero an intact object: a classifier that cannot tell absence from a throttle is dangerous in
+// both directions.
+func TestCopyObjectOfAMissingSourceIsClassifiableAsAbsence(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	backend := ts.Backend(func(cfg *s3.Config) { cfg.Compression.Enabled = false })
+
+	err := backend.CopyObject(context.Background(), "never/written", "somewhere/else")
+	if err == nil {
+		t.Fatal("CopyObject of a missing source returned no error")
+	}
+
+	var objErr *objectfserrors.ObjectFSError
+	if !errors.As(err, &objErr) {
+		t.Fatalf("CopyObject returned an unstructured error, so no caller can classify it: %v", err)
+	}
+	if objErr.Code != objectfserrors.ErrCodeObjectNotFound {
+		t.Errorf("error code = %q, want %q. Rename has to answer ENOENT for a source that is not there, "+
+			"and it can only do that if absence is distinguishable here: %v",
+			objErr.Code, objectfserrors.ErrCodeObjectNotFound, err)
 	}
 }

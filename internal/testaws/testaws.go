@@ -218,7 +218,16 @@ func newClient(ctx context.Context, endpoint string) (*awss3.Client, error) {
 func (ts *TestServer) PutObject(key string, data []byte) {
 	ts.t.Helper()
 
-	if _, err := ts.Client().PutObject(context.Background(), &awss3.PutObjectInput{
+	ts.PutObjectContext(context.Background(), key, data)
+}
+
+// PutObjectContext is [TestServer.PutObject] with an explicit context, on the same reasoning as
+// [TestServer.ClientContext]: a caller that already holds one should not have to hand its work to a
+// detached context to use a helper.
+func (ts *TestServer) PutObjectContext(ctx context.Context, key string, data []byte) {
+	ts.t.Helper()
+
+	if _, err := ts.ClientContext(ctx).PutObject(ctx, &awss3.PutObjectInput{
 		Bucket: aws.String(ts.Bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(data),
@@ -232,7 +241,15 @@ func (ts *TestServer) PutObject(key string, data []byte) {
 func (ts *TestServer) GetObject(key string) []byte {
 	ts.t.Helper()
 
-	out, err := ts.Client().GetObject(context.Background(), &awss3.GetObjectInput{
+	return ts.GetObjectContext(context.Background(), key)
+}
+
+// GetObjectContext is [TestServer.GetObject] with an explicit context. See
+// [TestServer.PutObjectContext].
+func (ts *TestServer) GetObjectContext(ctx context.Context, key string) []byte {
+	ts.t.Helper()
+
+	out, err := ts.ClientContext(ctx).GetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(ts.Bucket),
 		Key:    aws.String(key),
 	})
@@ -314,6 +331,34 @@ type Capabilities struct {
 
 	// MetadataReplaceDetail explains a false MetadataReplace.
 	MetadataReplaceDetail string
+
+	// UploadPartCopy reports whether a part of a multipart upload can be filled by a server-side
+	// copy from a byte range of another object. When false, the request is not rejected — the
+	// emulator answers 200 and treats it as a whole-object CopyObject, so each "part" reports the
+	// same ETag, the destination key is written as a complete object, and the eventual Complete
+	// fails with InvalidPart. A test that only checked UploadPartCopy's error would pass while
+	// nothing resembling a part copy had happened.
+	UploadPartCopy bool
+
+	// UploadPartCopyDetail explains a false UploadPartCopy.
+	UploadPartCopyDetail string
+
+	// DirectoryMarkerDelete reports whether deleting a key ending in "/" leaves the keys beneath
+	// that prefix deletable.
+	//
+	// In S3 a key is an opaque string: "dir/" and "dir/a.txt" are two unrelated objects and deleting
+	// the first has no bearing on the second. An emulator backed by a filesystem abstraction does not
+	// have that property — "dir/" is the *directory node* that "dir/a.txt" hangs off, so removing it
+	// orphans the sibling and the next delete of that sibling panics inside the emulator rather than
+	// answering an error.
+	//
+	// ObjectFS writes exactly such a marker in Mkdir, so any operation that deletes a whole directory
+	// — rmdir of a tree, or the delete half of a rename — hits this. When false, the endpoint cannot
+	// represent the layout ObjectFS uses and the failure says nothing about the code under test.
+	DirectoryMarkerDelete bool
+
+	// DirectoryMarkerDeleteDetail explains a false DirectoryMarkerDelete.
+	DirectoryMarkerDeleteDetail string
 }
 
 // Capabilities probes the running server once and caches the result.
@@ -378,7 +423,218 @@ func (ts *TestServer) probeCapabilities() Capabilities {
 
 	caps.MetadataReplace, caps.MetadataReplaceDetail = ts.probeMetadataReplace(ctx)
 
+	caps.UploadPartCopy, caps.UploadPartCopyDetail = ts.probeUploadPartCopy(ctx)
+
+	caps.DirectoryMarkerDelete, caps.DirectoryMarkerDeleteDetail = ts.probeDirectoryMarkerDelete(ctx)
+
 	return caps
+}
+
+// probeDirectoryMarkerDelete checks whether deleting a "prefix/" marker object leaves the objects
+// under that prefix deletable.
+//
+// The sequence is the smallest one that reproduces it: write the marker and one object beneath it,
+// delete the marker, then delete the object. On real S3 both deletes are unremarkable — the two keys
+// are unrelated strings. On an emulator that stores objects in a filesystem tree, the marker *is* the
+// parent directory of the second key, so removing it detaches the child and the second delete faults
+// inside the emulator.
+//
+// The probe deletes in that order specifically. Deleting the child first succeeds on every
+// implementation, so a probe that did would report the capability present and the tests that depend on
+// it would fail later, in the code under test, naming the wrong culprit.
+func (ts *TestServer) probeDirectoryMarkerDelete(ctx context.Context) (bool, string) {
+	ts.t.Helper()
+
+	const (
+		markerKey = ".objectfs-capability-probe-dir/"
+		childKey  = ".objectfs-capability-probe-dir/child"
+	)
+
+	for _, key := range []string{markerKey, childKey} {
+		if _, err := ts.ClientContext(ctx).PutObject(ctx, &awss3.PutObjectInput{
+			Bucket: aws.String(ts.Bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader(nil),
+		}); err != nil {
+			return false, fmt.Sprintf("PutObject %q failed: %v", key, err)
+		}
+	}
+
+	if _, err := ts.ClientContext(ctx).DeleteObject(ctx, &awss3.DeleteObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(markerKey),
+	}); err != nil {
+		return false, fmt.Sprintf("deleting the marker object %q failed: %v", markerKey, err)
+	}
+
+	if _, err := ts.ClientContext(ctx).DeleteObject(ctx, &awss3.DeleteObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(childKey),
+	}); err != nil {
+		return false, fmt.Sprintf(
+			"after deleting the marker object %q, deleting %q failed: %v. The endpoint is treating the "+
+				"marker as the parent directory of the key beneath it rather than as an unrelated object, "+
+				"so removing it orphaned the child",
+			markerKey, childKey, err)
+	}
+
+	return true, ""
+}
+
+// RequireDirectoryMarkerDelete skips the test unless a "prefix/" marker can be deleted without
+// stranding the keys beneath it.
+//
+// Skipping rather than asserting, because there is nothing here to assert about ObjectFS: the endpoint
+// is refusing a delete that real S3 performs, so the operation under test cannot complete for a reason
+// that has nothing to do with whether it is implemented correctly. Asserting the failure would pin a
+// dependency's bug as expected behavior.
+func (ts *TestServer) RequireDirectoryMarkerDelete() {
+	ts.t.Helper()
+
+	if caps := ts.Capabilities(); !caps.DirectoryMarkerDelete {
+		ts.t.Skipf("the test endpoint cannot delete a directory marker object without stranding the "+
+			"keys beneath it: %s\n"+
+			"ObjectFS's Mkdir writes exactly such a marker, so any operation that empties a directory — "+
+			"rmdir of a tree, or the delete half of a directory rename — cannot complete against this "+
+			"endpoint. Real S3 has no such coupling: a key is an opaque string and \"dir/\" is not the "+
+			"parent of \"dir/a.txt\".\n"+
+			"Tracked upstream as scttfrdmn/substrate#534; rerun once the dependency includes the fix. "+
+			"The live integration suite covers this path against real S3.",
+			caps.DirectoryMarkerDeleteDetail)
+	}
+}
+
+// probeUploadPartCopy checks whether the endpoint implements UploadPartCopy — filling a part of a
+// multipart upload from a byte range of an existing object.
+//
+// It is the mechanism for copying an object above S3's 5 GiB single-part CopyObject limit, which is
+// the path rename(2) takes for a large file. The probe copies a 16-byte source in two 8-byte parts and
+// requires the assembled object to equal the source: that is what distinguishes a real part copy from
+// the failure mode below.
+//
+// The two parts are deliberately unequal in content, because the misrouting this catches is silent. An
+// endpoint that dispatches on x-amz-copy-source before checking uploadId handles each request as a
+// whole-object copy — returning 200 with a CopyPartResult the SDK accepts, ignoring
+// x-amz-copy-source-range, and recording no part. Only the assembled result reveals it.
+func (ts *TestServer) probeUploadPartCopy(ctx context.Context) (bool, string) {
+	ts.t.Helper()
+
+	const (
+		srcKey = ".objectfs-capability-probe-upc-src"
+		dstKey = ".objectfs-capability-probe-upc-dst"
+	)
+
+	body := []byte("ABCDEFGHIJKLMNOP")
+	ts.PutObjectContext(ctx, srcKey, body)
+
+	client := ts.ClientContext(ctx)
+
+	created, err := client.CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(dstKey),
+	})
+	if err != nil {
+		return false, fmt.Sprintf("CreateMultipartUpload failed: %v", err)
+	}
+
+	completed := false
+
+	// One deferred abort covering every way this probe can return, on the same reasoning as the code it
+	// probes: an upload left open holds billed parts that no object listing shows. Here the stakes are
+	// the harness's own credibility — MultipartUploads is how the H10 regression tests assert, so a
+	// probe leftover makes them fail while naming the wrong culprit. It did: the negative path below
+	// returns before Complete, which is exactly the shape H10 was.
+	defer func() {
+		if completed {
+			return
+		}
+
+		if _, abortErr := client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
+			Bucket:   aws.String(ts.Bucket),
+			Key:      aws.String(dstKey),
+			UploadId: created.UploadId,
+		}); abortErr != nil {
+			ts.t.Errorf("the UploadPartCopy probe could not abort its own multipart upload %q: %v; "+
+				"tests that assert on ListMultipartUploads will now see it and blame the code under test",
+				aws.ToString(created.UploadId), abortErr)
+		}
+	}()
+
+	var parts []s3types.CompletedPart
+
+	for i, rng := range []string{"bytes=0-7", "bytes=8-15"} {
+		partNum := int32(i + 1) //nolint:gosec // 1 or 2
+
+		out, copyErr := client.UploadPartCopy(ctx, &awss3.UploadPartCopyInput{
+			Bucket:          aws.String(ts.Bucket),
+			Key:             aws.String(dstKey),
+			UploadId:        created.UploadId,
+			PartNumber:      aws.Int32(partNum),
+			CopySource:      aws.String(url.PathEscape(ts.Bucket + "/" + srcKey)),
+			CopySourceRange: aws.String(rng),
+		})
+		if copyErr != nil {
+			return false, fmt.Sprintf("UploadPartCopy(%s) failed: %v", rng, copyErr)
+		}
+
+		if out.CopyPartResult == nil {
+			return false, fmt.Sprintf("UploadPartCopy(%s) returned no CopyPartResult", rng)
+		}
+
+		parts = append(parts, s3types.CompletedPart{
+			ETag:       out.CopyPartResult.ETag,
+			PartNumber: aws.Int32(partNum),
+		})
+	}
+
+	// Two different byte ranges of the same object cannot have the same ETag. Equal ones mean each
+	// request copied the whole object, which is the misrouting this probe exists to catch — and it is
+	// worth naming separately from the Complete failure it causes, because the cause is not otherwise
+	// recoverable from "InvalidPart".
+	if len(parts) == 2 && aws.ToString(parts[0].ETag) == aws.ToString(parts[1].ETag) {
+		return false, fmt.Sprintf(
+			"two disjoint 8-byte ranges of a 16-byte object returned the same part ETag (%s); the "+
+				"endpoint is ignoring x-amz-copy-source-range and handling each UploadPartCopy as a "+
+				"whole-object CopyObject", aws.ToString(parts[0].ETag))
+	}
+
+	if _, err := client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(ts.Bucket),
+		Key:             aws.String(dstKey),
+		UploadId:        created.UploadId,
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
+	}); err != nil {
+		return false, fmt.Sprintf("CompleteMultipartUpload over two copied parts failed: %v", err)
+	}
+
+	// Only now: a completed upload no longer exists, so aborting it would fail rather than clean up.
+	completed = true
+
+	if got := ts.GetObjectContext(ctx, dstKey); !bytes.Equal(got, body) {
+		return false, fmt.Sprintf(
+			"an object assembled from two copied ranges holds %q, want %q",
+			truncate(string(got), 40), string(body))
+	}
+
+	return true, ""
+}
+
+// RequireUploadPartCopy skips the test unless the endpoint implements UploadPartCopy.
+//
+// Skipping rather than asserting, for the reason the other Require helpers give: against an endpoint
+// that misroutes the request, ObjectFS's multipart copy behaves correctly and still fails, so the test
+// cannot tell a broken copy path from a broken endpoint.
+func (ts *TestServer) RequireUploadPartCopy() {
+	ts.t.Helper()
+
+	if caps := ts.Capabilities(); !caps.UploadPartCopy {
+		ts.t.Skipf("the test endpoint does not implement UploadPartCopy, which is the only way to copy "+
+			"an object above S3's 5 GiB single-part CopyObject limit, so a multipart copy here fails "+
+			"regardless of whether ObjectFS's own path is correct: %s\n"+
+			"Tracked upstream as scttfrdmn/substrate#532; rerun once the dependency includes it.\n"+
+			"Real S3 implements it and the live integration suite covers this path.",
+			caps.UploadPartCopyDetail)
+	}
 }
 
 // probeMetadataReplace checks whether a self-copy with MetadataDirective=REPLACE actually replaces the
