@@ -37,6 +37,19 @@ name: Dependabot Auto-Merge
 # Auto-merge covers minor and patch only. Majors get a comment and wait for a human, which matters
 # here: the aws-sdk-go-v2 major is explicitly ignored in dependabot.yml, and a go-fuse or cgofuse
 # major is a FUSE-behaviour change no green check would catch.
+#
+# One more thing to know, which is not a bug but reads like one. Branch protection on `main` has
+# `strict: true` (require branches to be up to date before merging), so a PR whose base has moved
+# since its last push goes to mergeStateStatus BEHIND, and `--auto` will not merge it — it waits,
+# indefinitely and silently, because BEHIND is not a failing check and nothing reports it. With a
+# queue of armed PRs this serializes them: the first merges, every other one becomes BEHIND, and
+# each needs a branch update before its turn. Dependabot does update its own branches when it
+# notices, but on its own schedule rather than immediately.
+#
+# `gh pr update-branch <n>` is the manual push. `allow_update_branch` is false at the repository
+# level, which is what would otherwise offer the button in the UI. Do not read a stalled armed PR
+# as another auto-merge failure; check mergeStateStatus first, and expect the queue to drain a few
+# PRs at a time rather than all at once.
 
 on:
   pull_request_target:
