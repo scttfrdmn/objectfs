@@ -79,7 +79,7 @@ jobs:
     # keyed on go.mod and go.sum but cached only ~/go/pkg/mod, leaving the build cache out — so
     # every release rebuilt the whole standard library four times over.
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
