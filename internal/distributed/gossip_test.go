@@ -26,7 +26,7 @@ func makeGossipMsg(t *testing.T, msgType MessageType, payload any) *GossipMessag
 // non-nil GossipProtocol with the expected initial state.
 func TestNewGossipProtocol(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("gp-node"))
+	cm, err := NewClusterManager(testConfig(t, "gp-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestNewGossipProtocol(t *testing.T) {
 // pre-seeded in the memberlist upon construction.
 func TestGossipProtocol_InitialMemberlist_HasSelf(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("self-node"))
+	cm, _ := NewClusterManager(testConfig(t, "self-node"))
 	gp := cm.gossip
 
 	ml := gp.GetMemberlist()
@@ -68,7 +68,7 @@ func TestGossipProtocol_InitialMemberlist_HasSelf(t *testing.T) {
 // GetStats are zero on a fresh GossipProtocol.
 func TestGossipProtocol_InitialStats_Zeroed(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("stats-gp"))
+	cm, _ := NewClusterManager(testConfig(t, "stats-gp"))
 	stats := cm.gossip.GetStats()
 
 	if stats == nil {
@@ -95,7 +95,7 @@ func TestGossipProtocol_InitialStats_Zeroed(t *testing.T) {
 // MessagesByType map is non-nil (not a nil map panic waiting to happen).
 func TestGossipProtocol_GetStats_MessagesByType_Initialized(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("mbt-node"))
+	cm, _ := NewClusterManager(testConfig(t, "mbt-node"))
 	stats := cm.gossip.GetStats()
 
 	if stats.MessagesByType == nil {
@@ -107,7 +107,7 @@ func TestGossipProtocol_GetStats_MessagesByType_Initialized(t *testing.T) {
 // returned by GetMemberlist does not affect internal state.
 func TestGossipProtocol_GetMemberlist_DeepCopy(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("copy-node"))
+	cm, _ := NewClusterManager(testConfig(t, "copy-node"))
 	gp := cm.gossip
 
 	copy1 := gp.GetMemberlist()
@@ -128,7 +128,7 @@ func TestGossipProtocol_GetMemberlist_DeepCopy(t *testing.T) {
 // adds the new node to the memberlist and updates the cluster manager.
 func TestGossipProtocol_HandleJoinMessage_AddsNode(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("host-node"))
+	cm, _ := NewClusterManager(testConfig(t, "host-node"))
 	gp := cm.gossip
 
 	joiner := &NodeInfo{
@@ -163,7 +163,7 @@ func TestGossipProtocol_HandleJoinMessage_AddsNode(t *testing.T) {
 // NodesDiscovered increments when a join message arrives.
 func TestGossipProtocol_HandleJoinMessage_IncrementsStat(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("stat-host"))
+	cm, _ := NewClusterManager(testConfig(t, "stat-host"))
 	gp := cm.gossip
 
 	before := gp.GetStats().NodesDiscovered
@@ -187,7 +187,7 @@ func TestGossipProtocol_HandleJoinMessage_IncrementsStat(t *testing.T) {
 // message for an unknown node adds it to the memberlist.
 func TestGossipProtocol_HandleAliveMessage_NewNode(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("alive-host"))
+	cm, _ := NewClusterManager(testConfig(t, "alive-host"))
 	gp := cm.gossip
 
 	before := gp.GetStats().NodesDiscovered
@@ -214,7 +214,7 @@ func TestGossipProtocol_HandleAliveMessage_NewNode(t *testing.T) {
 // alive message with a higher incarnation updates an existing node.
 func TestGossipProtocol_HandleAliveMessage_UpdatesExisting(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("update-host"))
+	cm, _ := NewClusterManager(testConfig(t, "update-host"))
 	gp := cm.gossip
 
 	// Manually insert an existing node at incarnation 1.
@@ -253,7 +253,7 @@ func TestGossipProtocol_HandleAliveMessage_UpdatesExisting(t *testing.T) {
 // suspect message transitions an alive node to StateSuspect.
 func TestGossipProtocol_HandleSuspectMessage_MarksSuspect(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("suspect-host"))
+	cm, _ := NewClusterManager(testConfig(t, "suspect-host"))
 	gp := cm.gossip
 
 	// Insert a live node at incarnation 1.
@@ -288,7 +288,7 @@ func TestGossipProtocol_HandleSuspectMessage_MarksSuspect(t *testing.T) {
 // suspect message with a non-matching incarnation is ignored.
 func TestGossipProtocol_HandleSuspectMessage_WrongIncarnation(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("wrong-inc"))
+	cm, _ := NewClusterManager(testConfig(t, "wrong-inc"))
 	gp := cm.gossip
 
 	gp.mu.Lock()
@@ -316,7 +316,7 @@ func TestGossipProtocol_HandleSuspectMessage_WrongIncarnation(t *testing.T) {
 // second suspect message from a different node is appended to Suspicion.From.
 func TestGossipProtocol_HandleSuspectMessage_MultipleReporters(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("multi-reporter"))
+	cm, _ := NewClusterManager(testConfig(t, "multi-reporter"))
 	gp := cm.gossip
 
 	gp.mu.Lock()
@@ -348,7 +348,7 @@ func TestGossipProtocol_HandleSuspectMessage_MultipleReporters(t *testing.T) {
 // transitions a node to StateDead.
 func TestGossipProtocol_HandleDeadMessage_MarksDead(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("dead-host"))
+	cm, _ := NewClusterManager(testConfig(t, "dead-host"))
 	gp := cm.gossip
 
 	gp.mu.Lock()
@@ -386,7 +386,7 @@ func TestGossipProtocol_HandleDeadMessage_MarksDead(t *testing.T) {
 // message with a lower incarnation is ignored.
 func TestGossipProtocol_HandleDeadMessage_StaleIncarnation(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("stale-dead"))
+	cm, _ := NewClusterManager(testConfig(t, "stale-dead"))
 	gp := cm.gossip
 
 	gp.mu.Lock()
@@ -414,7 +414,7 @@ func TestGossipProtocol_HandleDeadMessage_StaleIncarnation(t *testing.T) {
 // message adds unknown nodes to the memberlist.
 func TestGossipProtocol_HandleSyncMessage_MergesNodes(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("sync-host"))
+	cm, _ := NewClusterManager(testConfig(t, "sync-host"))
 	gp := cm.gossip
 
 	remoteNodes := map[string]*GossipNode{
@@ -446,7 +446,7 @@ func TestGossipProtocol_HandleSyncMessage_MergesNodes(t *testing.T) {
 // does not overwrite the local node's own entry.
 func TestGossipProtocol_HandleSyncMessage_SkipsSelf(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("sync-self"))
+	cm, _ := NewClusterManager(testConfig(t, "sync-self"))
 	gp := cm.gossip
 
 	// Record the original self incarnation.
@@ -476,7 +476,7 @@ func TestGossipProtocol_HandleSyncMessage_SkipsSelf(t *testing.T) {
 // heartbeat message updates the LastSeen time of the target node.
 func TestGossipProtocol_HandleHeartbeatMessage_UpdatesLastSeen(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("hb-host"))
+	cm, _ := NewClusterManager(testConfig(t, "hb-host"))
 	gp := cm.gossip
 
 	oldTime := time.Now().Add(-1 * time.Hour)
@@ -506,7 +506,7 @@ func TestGossipProtocol_HandleHeartbeatMessage_UpdatesLastSeen(t *testing.T) {
 // heartbeat from a suspected node clears suspicion and restores StateAlive.
 func TestGossipProtocol_HandleHeartbeatMessage_ClearsSuspicion(t *testing.T) {
 	t.Parallel()
-	cm, _ := NewClusterManager(testConfig("hb-suspect"))
+	cm, _ := NewClusterManager(testConfig(t, "hb-suspect"))
 	gp := cm.gossip
 
 	gp.mu.Lock()
@@ -541,7 +541,7 @@ func TestGossipProtocol_HandleHeartbeatMessage_ClearsSuspicion(t *testing.T) {
 // error or panic.
 func TestGossipProtocol_StartStop(t *testing.T) {
 	t.Parallel()
-	cfg := testConfig("lifecycle-gp")
+	cfg := testConfig(t, "lifecycle-gp")
 	cm, err := NewClusterManager(cfg)
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)

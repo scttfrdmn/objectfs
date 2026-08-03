@@ -2,6 +2,8 @@ package distributed
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,20 +12,50 @@ import (
 // testConfig returns a minimal ClusterConfig suitable for unit tests.
 // ListenAddr ":0" lets the OS assign an ephemeral UDP port.
 // ElectionTimeout is set long to prevent spurious elections during tests.
-func testConfig(nodeID string) *ClusterConfig {
+//
+// It needs a *testing.T because gossip authentication (#206) fails closed: a cluster cannot be
+// constructed without a cluster secret, so every test that builds one needs a secret file, and that
+// file's lifetime is the test's.
+func testConfig(t *testing.T, nodeID string) *ClusterConfig {
+	t.Helper()
+
 	return &ClusterConfig{
 		NodeID:            nodeID,
 		ListenAddr:        "127.0.0.1:0",
 		AdvertiseAddr:     "127.0.0.1:0",
 		ElectionTimeout:   30 * time.Second,
 		HeartbeatInterval: 100 * time.Millisecond,
+		SecretFile:        writeTestSecret(t),
 	}
+}
+
+// writeTestSecret writes a cluster secret to a file in the test's own temporary directory and
+// returns its path.
+//
+// A file rather than OBJECTFS_CLUSTER_SECRET: the environment is process-wide, and these tests run
+// with t.Parallel(), so a test that set and unset the variable would race every other test's cluster
+// construction. t.TempDir is already mode 0700 and is removed when the test finishes.
+func writeTestSecret(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "cluster.secret")
+
+	// Long enough to pass minSecretLen. Fixed rather than random because a test that fails should
+	// fail the same way twice.
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", minSecretLen)), 0o600); err != nil {
+		t.Fatalf("writing the test cluster secret: %v", err)
+	}
+
+	return path
 }
 
 // TestNewClusterManager_NilConfig verifies that a nil config is accepted and
 // defaults are applied.
 func TestNewClusterManager_NilConfig(t *testing.T) {
-	t.Parallel()
+	// A nil config still needs a secret, and the only source that does not require a config field
+	// is the environment. t.Setenv forbids t.Parallel, which is why this test does not call it.
+	t.Setenv(ClusterSecretEnv, strings.Repeat("b", minSecretLen))
+
 	cm, err := NewClusterManager(nil)
 	if err != nil {
 		t.Fatalf("NewClusterManager(nil): %v", err)
@@ -40,6 +72,7 @@ func TestNewClusterManager_GeneratesNodeID(t *testing.T) {
 	cm, err := NewClusterManager(&ClusterConfig{
 		ListenAddr:    "127.0.0.1:0",
 		AdvertiseAddr: "127.0.0.1:0",
+		SecretFile:    writeTestSecret(t),
 	})
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
@@ -58,7 +91,7 @@ func TestNewClusterManager_GeneratesNodeID(t *testing.T) {
 func TestNewClusterManager_PreservesExplicitNodeID(t *testing.T) {
 	t.Parallel()
 	const want = "explicit-node-id"
-	cm, err := NewClusterManager(testConfig(want))
+	cm, err := NewClusterManager(testConfig(t, want))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -71,7 +104,9 @@ func TestNewClusterManager_PreservesExplicitNodeID(t *testing.T) {
 // are filled with sensible defaults.
 func TestNewClusterManager_ConfigDefaults(t *testing.T) {
 	t.Parallel()
-	cfg := &ClusterConfig{NodeID: "n1"} // all other fields zero
+	// All fields zero except the two that have no default: the node ID under test, and the cluster
+	// secret, which fails closed rather than defaulting (#206).
+	cfg := &ClusterConfig{NodeID: "n1", SecretFile: writeTestSecret(t)}
 	_, err := NewClusterManager(cfg)
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
@@ -99,7 +134,7 @@ func TestNewClusterManager_ConfigDefaults(t *testing.T) {
 // before Start is called.
 func TestClusterManager_InitialState(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("init-node"))
+	cm, err := NewClusterManager(testConfig(t, "init-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -119,7 +154,7 @@ func TestClusterManager_InitialState(t *testing.T) {
 // the nodes map.
 func TestClusterManager_UpdateNodeInfo_Add(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("node-a"))
+	cm, err := NewClusterManager(testConfig(t, "node-a"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -149,7 +184,7 @@ func TestClusterManager_UpdateNodeInfo_Add(t *testing.T) {
 // fields are updated without creating a duplicate entry.
 func TestClusterManager_UpdateNodeInfo_Update(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("node-a"))
+	cm, err := NewClusterManager(testConfig(t, "node-a"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -176,7 +211,7 @@ func TestClusterManager_UpdateNodeInfo_Update(t *testing.T) {
 // does not affect the internal state.
 func TestClusterManager_GetNodes_DeepCopy(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("node-a"))
+	cm, err := NewClusterManager(testConfig(t, "node-a"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -204,7 +239,7 @@ func TestClusterManager_GetNodes_DeepCopy(t *testing.T) {
 // node's ID marks that node as leader but does not set isLeader.
 func TestClusterManager_SetLeader_OtherNode(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("self"))
+	cm, err := NewClusterManager(testConfig(t, "self"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -223,7 +258,7 @@ func TestClusterManager_SetLeader_OtherNode(t *testing.T) {
 // node ID sets isLeader = true.
 func TestClusterManager_SetLeader_SelfNode(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("self"))
+	cm, err := NewClusterManager(testConfig(t, "self"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -242,7 +277,7 @@ func TestClusterManager_SetLeader_SelfNode(t *testing.T) {
 // the election counter and records the leader in stats.
 func TestClusterManager_SetLeader_UpdatesStats(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("self"))
+	cm, err := NewClusterManager(testConfig(t, "self"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -265,7 +300,7 @@ func TestClusterManager_SetLeader_UpdatesStats(t *testing.T) {
 // TestClusterManager_RemoveNode verifies that a node is removed from the map.
 func TestClusterManager_RemoveNode(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("self"))
+	cm, err := NewClusterManager(testConfig(t, "self"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -282,7 +317,7 @@ func TestClusterManager_RemoveNode(t *testing.T) {
 // leader clears the leadership state.
 func TestClusterManager_RemoveNode_WasLeader(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("self"))
+	cm, err := NewClusterManager(testConfig(t, "self"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -303,7 +338,7 @@ func TestClusterManager_RemoveNode_WasLeader(t *testing.T) {
 // a freshly created manager.
 func TestClusterManager_GetStats_Initial(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("stats-node"))
+	cm, err := NewClusterManager(testConfig(t, "stats-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -323,7 +358,7 @@ func TestClusterManager_GetStats_Initial(t *testing.T) {
 // a non-nil coordinator satisfying the DistributedCoordinator interface.
 func TestClusterManager_GetCoordinator_NotNil(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("coord-node"))
+	cm, err := NewClusterManager(testConfig(t, "coord-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -336,7 +371,7 @@ func TestClusterManager_GetCoordinator_NotNil(t *testing.T) {
 // returns an error when no alive nodes are present.
 func TestClusterManager_DistributeOperation_NoNodes(t *testing.T) {
 	t.Parallel()
-	cm, err := NewClusterManager(testConfig("dist-node"))
+	cm, err := NewClusterManager(testConfig(t, "dist-node"))
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)
 	}
@@ -355,7 +390,7 @@ func TestClusterManager_DistributeOperation_NoNodes(t *testing.T) {
 // TestClusterManager_StartStop verifies the full lifecycle without panics.
 func TestClusterManager_StartStop(t *testing.T) {
 	t.Parallel()
-	cfg := testConfig("lifecycle-node")
+	cfg := testConfig(t, "lifecycle-node")
 	cm, err := NewClusterManager(cfg)
 	if err != nil {
 		t.Fatalf("NewClusterManager: %v", err)

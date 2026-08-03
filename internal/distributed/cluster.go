@@ -53,6 +53,16 @@ type ClusterConfig struct {
 	GossipFanout    int           `yaml:"gossip_fanout"`
 	MaxGossipPacket int           `yaml:"max_gossip_packet"`
 
+	// SecretFile is the path to the shared cluster secret used to authenticate gossip messages
+	// (#206). The secret itself is deliberately not a field here: this configuration is serialized
+	// into a file that packaging installs world-readable, so a secret in it would be published to
+	// every user on the node. The file must be mode 0600 or startup refuses it.
+	//
+	// OBJECTFS_CLUSTER_SECRET takes precedence, so this may be empty when the secret is injected
+	// through the environment. If neither is set, clustering does not start — see
+	// [NewGossipProtocol].
+	SecretFile string `yaml:"secret_file"`
+
 	// Cache coordination
 	CacheReplication  bool   `yaml:"cache_replication"`
 	ReplicationFactor int    `yaml:"replication_factor"`

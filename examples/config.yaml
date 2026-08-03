@@ -325,6 +325,15 @@ features:
 # whole mount; everything else under cluster: is read only by the experimental coordinator.
 # A Redis that cannot be reached at startup fails the mount rather than falling back, so two
 # nodes cannot both come up believing they share a cache when they do not.
+#
+# There is no secret_file key here, and its absence is deliberate rather than an omission. Gossip
+# messages are authenticated with a shared cluster secret and a cluster refuses to start without one
+# (#206), but the secret is configured on internal/distributed.ClusterConfig — a type disjoint from
+# this one (#139) — or through OBJECTFS_CLUSTER_SECRET. It is never a key in this file: packaging
+# installs this configuration world-readable, so a secret written here would be readable by every
+# user on the node. Generate one with `openssl rand -hex 32 > /etc/objectfs/cluster.secret` and
+# `chmod 600` it. Adding the key here before anything reads it would be a setting that silently
+# does nothing, which is the class of defect this file has been cleaned of.
 cluster:
   enabled: false
   node_id: ""                         # empty = derived at startup

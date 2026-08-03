@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -24,6 +25,12 @@ type GossipProtocol struct {
 	conn       *net.UDPConn
 	stats      *GossipStats
 	stopCh     chan struct{}
+
+	// auth signs outgoing datagrams and verifies incoming ones (#206). Never nil: a gossip
+	// protocol cannot be constructed without a cluster secret, because an unauthenticated gossip
+	// port lets any host on the network join the cluster and announce ownership of cached
+	// objects. See auth.go.
+	auth *messageAuthenticator
 }
 
 // GossipNode represents a node in the gossip protocol
@@ -144,10 +151,34 @@ type GossipStats struct {
 	NetworkErrors       int64            `json:"network_errors"`
 	AvgMessageLatency   time.Duration    `json:"avg_message_latency"`
 	LastMessageReceived time.Time        `json:"last_message_received"`
+
+	// Authentication rejections (#206). These are counted separately because they answer
+	// different operator questions, and a single "rejected" number cannot: a nonzero
+	// MessagesUnauthenticated means a peer has the wrong secret or a host that is not a member is
+	// talking to the port, MessagesReplayed means someone is re-sending captured datagrams or a
+	// node's clock is off by more than the freshness window, and MessagesWrongVersion means
+	// version skew during a rolling upgrade. MessagesRejected is their sum, so a monitor can alert
+	// on one series.
+	MessagesRejected        int64 `json:"messages_rejected"`
+	MessagesUnauthenticated int64 `json:"messages_unauthenticated"`
+	MessagesReplayed        int64 `json:"messages_replayed"`
+	MessagesWrongVersion    int64 `json:"messages_wrong_version"`
 }
 
-// NewGossipProtocol creates a new gossip protocol instance
+// NewGossipProtocol creates a new gossip protocol instance.
+//
+// It fails if no cluster secret is available. That is deliberate and is the whole point of #206:
+// starting without authentication would mean any host that can reach the gossip port can join the
+// cluster and announce cache ownership for arbitrary keys, which — once cache-warming reads fetch
+// from peers — makes a peer's response into file content a reading process sees. Refusing to start
+// with an error naming the missing secret is the failure an operator can fix; running unauthenticated
+// is the one nobody notices.
 func NewGossipProtocol(cluster *ClusterManager, config *ClusterConfig) (*GossipProtocol, error) {
+	secret, err := LoadClusterSecret(config.SecretFile)
+	if err != nil {
+		return nil, fmt.Errorf("gossip authentication: %w", err)
+	}
+
 	gp := &GossipProtocol{
 		cluster:    cluster,
 		config:     config,
@@ -156,6 +187,7 @@ func NewGossipProtocol(cluster *ClusterManager, config *ClusterConfig) (*GossipP
 			MessagesByType: make(map[string]int64),
 		},
 		stopCh: make(chan struct{}),
+		auth:   newMessageAuthenticator(secret),
 	}
 
 	// Initialize local node
@@ -309,9 +341,39 @@ func (gp *GossipProtocol) receiveMessages(ctx context.Context) {
 }
 
 func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) {
-	var msg GossipMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
-		slog.Warn("failed to unmarshal gossip message", "error", err)
+	// Authenticate before parsing (#206). A datagram that does not verify never reaches the JSON
+	// decoding of any message type, let alone a handler, so an unauthenticated host cannot join the
+	// cluster or announce cache ownership.
+	msg, err := gp.auth.open(data)
+	if err != nil {
+		// Rejections are counted and logged at warn, not dropped silently: a misconfigured secret
+		// and a network problem produce the same symptom — a cluster of one — and without this the
+		// operator has no way to tell them apart. The peer address is included because that is what
+		// identifies which node has the wrong secret, or which host should not be talking to this
+		// port at all.
+		// The hint differs by reason because the three send an operator to different places, and a
+		// single catch-all string would send two of them to the wrong one. A version mismatch during
+		// a rolling upgrade is not a secret problem, and telling someone to check a secret that is
+		// correct costs them the time it takes to rule it out.
+		var hint string
+
+		gp.stats.mu.Lock()
+		gp.stats.MessagesRejected++
+		switch {
+		case errors.Is(err, ErrReplayed):
+			gp.stats.MessagesReplayed++
+			hint = "a duplicate datagram, or clock skew beyond the freshness window — check NTP on both hosts"
+		case errors.Is(err, ErrUnknownAuthVersion):
+			gp.stats.MessagesWrongVersion++
+			hint = "a peer running a build that predates gossip authentication, or a newer envelope format"
+		default:
+			gp.stats.MessagesUnauthenticated++
+			hint = "a peer with a different cluster secret, or a host that is not a cluster member"
+		}
+		gp.stats.mu.Unlock()
+
+		slog.Warn("rejected gossip message", "error", err, "peer", addr, "hint", hint)
+
 		return
 	}
 
@@ -326,46 +388,46 @@ func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) 
 	// Process message based on type
 	switch msg.Type {
 	case MessageTypeJoin:
-		gp.handleJoinMessage(&msg)
+		gp.handleJoinMessage(msg)
 	case MessageTypeLeave:
-		gp.handleLeaveMessage(&msg)
+		gp.handleLeaveMessage(msg)
 	case MessageTypeAlive:
-		gp.handleAliveMessage(&msg)
+		gp.handleAliveMessage(msg)
 	case MessageTypeSuspect:
-		gp.handleSuspectMessage(&msg)
+		gp.handleSuspectMessage(msg)
 	case MessageTypeDead:
-		gp.handleDeadMessage(&msg)
+		gp.handleDeadMessage(msg)
 	case MessageTypeSync:
-		gp.handleSyncMessage(&msg)
+		gp.handleSyncMessage(msg)
 	case MessageTypeGossipHeartbeat:
-		gp.handleHeartbeatMessage(&msg)
+		gp.handleHeartbeatMessage(msg)
 
 	// Consensus messages
 	case MessageTypeRequestVote:
 		if gp.cluster.consensus != nil {
-			gp.cluster.consensus.handleNetworkRequestVote(&msg)
+			gp.cluster.consensus.handleNetworkRequestVote(msg)
 		}
 	case MessageTypeRequestVoteResp:
 		if gp.cluster.consensus != nil {
-			gp.cluster.consensus.handleNetworkRequestVoteResp(&msg)
+			gp.cluster.consensus.handleNetworkRequestVoteResp(msg)
 		}
 	case MessageTypeAppendEntries:
 		if gp.cluster.consensus != nil {
-			gp.cluster.consensus.handleNetworkAppendEntries(&msg)
+			gp.cluster.consensus.handleNetworkAppendEntries(msg)
 		}
 	case MessageTypeAppendEntriesResp:
 		if gp.cluster.consensus != nil {
-			gp.cluster.consensus.handleNetworkAppendEntriesResp(&msg)
+			gp.cluster.consensus.handleNetworkAppendEntriesResp(msg)
 		}
 
 	// Coordinator messages
 	case MessageTypeNodeOperation:
 		if gp.cluster.coordinator != nil {
-			gp.cluster.coordinator.handleNetworkOperation(&msg)
+			gp.cluster.coordinator.handleNetworkOperation(msg)
 		}
 	case MessageTypeNodeOperationResp:
 		if gp.cluster.coordinator != nil {
-			gp.cluster.coordinator.handleNetworkOperationResp(&msg)
+			gp.cluster.coordinator.handleNetworkOperationResp(msg)
 		}
 
 	// Cache invalidation
@@ -823,7 +885,10 @@ func (gp *GossipProtocol) calculateStats() {
 // Helper methods
 
 func (gp *GossipProtocol) sendMessage(addr string, msg *GossipMessage) error {
-	data, err := json.Marshal(msg)
+	// Every outgoing datagram is authenticated here rather than at each call site, because this is
+	// the only place that writes to the socket — so a new message type cannot be introduced
+	// unauthenticated by forgetting a step.
+	data, err := gp.auth.seal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
@@ -955,6 +1020,11 @@ func (gp *GossipProtocol) GetStats() *GossipStats {
 		AvgMessageLatency:   gp.stats.AvgMessageLatency,
 		LastMessageReceived: gp.stats.LastMessageReceived,
 		MessagesByType:      make(map[string]int64),
+
+		MessagesRejected:        gp.stats.MessagesRejected,
+		MessagesUnauthenticated: gp.stats.MessagesUnauthenticated,
+		MessagesReplayed:        gp.stats.MessagesReplayed,
+		MessagesWrongVersion:    gp.stats.MessagesWrongVersion,
 	}
 	maps.Copy(stats.MessagesByType, gp.stats.MessagesByType)
 	gp.stats.mu.RUnlock()
