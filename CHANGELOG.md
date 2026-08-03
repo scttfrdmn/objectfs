@@ -37,6 +37,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed — an unconditional fallback would turn "exactly one node performs this tier transition" into
   "every node does," which is the failure the coordination exists to prevent, occurring silently.
 
+  **The recommendation has been adopted.** The Raft build-out is closed as not-the-direction — [#128]
+  (`ConsensusLog`), [#130] (`PersistentState`, the only one labeled `priority: critical`), [#133]
+  (real proposal broadcast) and [#151] (log compaction) — and the work is filed as [#282]
+  (`Backend.PutObjectIf`, the sentinel errors, and a capability probe that detects by attempt rather
+  than by configuration), [#283] (a lease whose every guarded action re-asserts the CAS), [#284]
+  (replacing `executeStrongConsistency`'s N-identical-PUT fan-out and fixing the consistency
+  taxonomy) and [#285] (verifying MinIO and Wasabi against real endpoints). Gossip stats ([#132]) and
+  gossip authentication ([#206]) are unaffected; rendezvous hashing ([#131]) had already landed.
+
+  Closing the issues stopped the build-out but did not remove the ~6,000 lines that already elect
+  leaders and replicate nothing — [#284] is where the first of that comes out, and it is a breaking
+  change to the distributed configuration surface, because the three consistency levels it removes
+  turn out to be three names for two behaviours: `ConsistencySession` and `ConsistencyEventual` are
+  now nearly the same function, both executing on `targetNodes[0]` and then replicating
+  asynchronously, and `ConsistencyStrong` is the mislabeled fan-out.
+
 ### Security
 
 - **Gossip messages are authenticated, and a cluster will not start without a shared secret**
@@ -388,10 +404,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simultaneous leaders that the single-node fix alone produced. `TestMultiNodeCluster` now passes under
   `-race`; the whole `-tags=distributed` suite is green for the first time.
 
+[#128]: https://github.com/scttfrdmn/objectfs/issues/128
+[#130]: https://github.com/scttfrdmn/objectfs/issues/130
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
+[#133]: https://github.com/scttfrdmn/objectfs/issues/133
+[#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#240]: https://github.com/scttfrdmn/objectfs/issues/240
+[#282]: https://github.com/scttfrdmn/objectfs/issues/282
+[#283]: https://github.com/scttfrdmn/objectfs/issues/283
+[#284]: https://github.com/scttfrdmn/objectfs/issues/284
+[#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
 [#269]: https://github.com/scttfrdmn/objectfs/issues/269
 [#272]: https://github.com/scttfrdmn/objectfs/issues/272
