@@ -257,5 +257,7 @@ See [pkg/memmon](../pkg/memmon/) for complete API documentation.
 - [Error Handling and Recovery](./error-handling-recovery.md)
 - [Concurrency patterns](./concurrency-patterns.md)
 
-`./performance-tuning.md` and `./operations.md` were linked here and neither was written;
-`docs/operations/` exists as an empty directory.
+`./performance-tuning.md` and `./operations.md` were linked here and neither was written. There was
+a `docs/operations/` holding six such links and no files; it has been removed, along with five other
+empty directories, so that the tree no longer suggests pages that do not exist
+([#224](https://github.com/scttfrdmn/objectfs/issues/224)).

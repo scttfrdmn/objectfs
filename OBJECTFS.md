@@ -50,8 +50,8 @@ of the eight was a link to nothing and the one real section was unreachable from
 contents. See [issue 208](https://github.com/scttfrdmn/objectfs/issues/208) for the rest of the
 broken-link sweep.
 
-For what those sections would have covered, the material that does exist is:
-`docs/operations/monitoring.md`, `README.md`'s supported-operations table,
+For what those sections would have covered, the material that does exist is: `internal/metrics`'s
+package documentation for monitoring, `README.md`'s supported-operations table,
 `docs/architecture/overview.md`, and `CONTRIBUTING.md`.
 
 ---

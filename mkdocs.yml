@@ -123,74 +123,45 @@ extra:
     provider: mike
     default: latest
 
+# This nav lists the pages that exist. It previously listed 50 entries of which 3 resolved, and
+# omitted 14 of the 17 pages in the tree — including the four most substantial ones. `mkdocs build`
+# fails on an entry with no file, so it could never have built; nothing builds it (mkdocs is not
+# installed here, no workflow runs it, Pages is off), which is why a table of contents written
+# before its contents survived. Checked now by TestMkDocsNavMatchesTheTree, in both directions.
+#
+# The 47 deleted entries described a site nobody wrote: getting-started/ (4), user-guides/ (6),
+# personas/ (5), features/ (8 — the three real feature pages have different names), operations/ (6),
+# architecture/ (6 — the one real page is architecture/overview.md), development/ (6), api/ (3),
+# ROADMAP.md (it is at the repository root, outside docs_dir), and development/technical-debt.md.
+# The structure was a reasonable one and the intent was real; it is recorded here rather than
+# recreated as stubs, per #208. Add an entry when the page is written, not before.
 nav:
   - Home: index.md
 
-  - Getting Started:
-    - Quick Start: getting-started/quick-start.md
-    - Installation: getting-started/installation.md
-    - Configuration: getting-started/configuration.md
-    - First Mount: getting-started/first-mount.md
-
-  - User Guides:
-    - CLI Reference: user-guides/cli-reference.md
-    - Configuration Guide: user-guides/configuration-guide.md
-    - Cache Strategies: user-guides/cache-strategies.md
-    - Performance Tuning: user-guides/performance-tuning.md
-    - Monitoring & Metrics: user-guides/monitoring-metrics.md
-    - Troubleshooting: user-guides/troubleshooting.md
-
-  - Persona Walkthroughs:
-    - Computational Biologist: personas/computational-biologist.md
-    - Physics Researcher: personas/physics-researcher.md
-    - Climate Scientist: personas/climate-scientist.md
-    - Lab Manager: personas/lab-manager.md
-    - Research Computing Staff: personas/research-computing.md
-
   - Features:
-    - FUSE Filesystem: features/fuse-filesystem.md
-    - S3 Backend: features/s3-backend.md
-    - Multi-Tier Caching: features/caching.md
-    - Write Buffering: features/write-buffering.md
-    - Compression (v0.5.0): features/compression.md
-    - Archive Access (v0.5.0): features/archive-access.md
-    - Network Optimization: features/network-optimization.md
-    - Cost Tracking (v0.5.0): features/cost-tracking.md
+    - Read-ahead & Predictive Caching: features/read-ahead.md
+    - Multipart Uploads: features/multipart-uploads.md
+    - S3 Transfer Acceleration: s3-acceleration.md
 
   - Operations:
-    - Deployment: operations/deployment.md
-    - Systemd Integration: operations/systemd-integration.md
-    - Production Checklist: operations/production-checklist.md
-    - Backup & Recovery: operations/backup-recovery.md
-    - Security Hardening: operations/security-hardening.md
-    - Multi-Node Setup (v0.5.0): operations/multi-node-setup.md
+    - Error Handling & Recovery: error-handling-recovery.md
+    - Logging: enhanced-logging.md
+    - Memory Monitoring: memory-monitoring.md
 
   - Architecture:
+    - Overview: architecture/overview.md
+    - Concurrency Patterns: concurrency-patterns.md
     - Vision: VISION.md
     - Design Principles: DESIGN_PRINCIPLES.md
-    - System Architecture: architecture/system-architecture.md
-    - FUSE Layer: architecture/fuse-layer.md
-    - Storage Backend: architecture/storage-backend.md
-    - Cache Architecture: architecture/cache-architecture.md
-    - Metadata Management: architecture/metadata-management.md
-    - Health & Monitoring: architecture/health-monitoring.md
 
-  - Development:
-    - Development Setup: development/setup.md
-    - Building ObjectFS: development/building.md
-    - Testing Guide: development/testing.md
-    - Contributing: development/contributing.md
-    - Code Quality: development/code-quality.md
-    - Release Process: development/release-process.md
-
-  - Roadmap & Planning:
-    - Development Roadmap: ROADMAP.md
-    - Technical Debt: development/technical-debt.md
-
-  - API Reference:
-    - REST API: api/rest-api.md
-    - Metrics API: api/metrics-api.md
-    - Health API: api/health-api.md
+  # 2025 design records. Each opens with a banner saying where the code diverged from it, so they
+  # are kept as history rather than presented as current documentation.
+  - Design Records:
+    - Architecture Evolution: ARCHITECTURE_EVOLUTION.md
+    - Platform Strategy: PLATFORM_STRATEGY.md
+    - CargoShip Modularization Request: CARGOSHIP_MODULARIZATION_REQUEST.md
+    - AWS-C-S3 Integration Research: design/aws-c-s3-research.md
+    - Competitive Analysis: COMPETITIVE_ANALYSIS.md
 
   - Community:
     - Contributing: https://github.com/scttfrdmn/objectfs/blob/main/CONTRIBUTING.md

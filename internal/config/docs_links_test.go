@@ -276,6 +276,131 @@ func TestLinkGateSeesEveryMarkdownFile(t *testing.T) {
 	}
 }
 
+// TestMkDocsNavMatchesTheTree checks mkdocs.yml's nav in both directions, because that is the
+// direction the defect ran in.
+//
+// A nav entry is a link target with a different syntax, which is exactly why it went unchecked: the
+// gate above walks markdown, and nav: is YAML. When issue 224 measured it, 47 of 50 entries pointed
+// at no file and 14 of the 17 pages in the tree were absent from the nav — including the four most
+// substantial ones. So the navigation described a site nobody had written while omitting almost all
+// of the one that had been.
+//
+// mkdocs build fails on an entry with no file, so this could never have built. Nothing builds it:
+// mkdocs is not installed in this environment, no workflow runs it, and Pages is off on the
+// repository. A configuration for a build that never runs has no way to be told it is wrong.
+//
+// Hence both directions. Checking only that entries resolve would have left the 14 orphans, which is
+// the half a reader actually loses — a page absent from the nav is a page nobody finds.
+func TestMkDocsNavMatchesTheTree(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+
+	//nolint:gosec // a path built from the module root this test located itself
+	raw, err := os.ReadFile(filepath.Join(root, "mkdocs.yml"))
+	if err != nil {
+		t.Fatalf("read mkdocs.yml: %v", err)
+	}
+
+	entries := navTargets(string(raw))
+
+	if len(entries) < 10 {
+		t.Fatalf("found %d nav entries in mkdocs.yml; the nav has more than that, so navTargets "+
+			"has stopped matching and this test is checking nothing", len(entries))
+	}
+
+	inNav := make(map[string]bool, len(entries))
+
+	for _, entry := range entries {
+		inNav[entry.target] = true
+
+		if _, err := os.Stat(filepath.Join(root, "docs", entry.target)); err == nil {
+			continue
+		}
+
+		t.Errorf("mkdocs.yml:%d: nav entry %q has no file at docs/%s.\n"+
+			"mkdocs build fails on this. Add the entry when the page is written — do not create a "+
+			"stub page to satisfy the nav.", entry.line, entry.target, entry.target)
+	}
+
+	for _, path := range markdownFiles(t) {
+		rel, err := filepath.Rel(filepath.Join(root, "docs"), path)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue // outside docs_dir, so not mkdocs's to serve
+		}
+
+		if inNav[rel] || docsExemptFromNav[rel] != "" {
+			continue
+		}
+
+		t.Errorf("docs/%s is not in mkdocs.yml's nav, so a built site would not link it.\n"+
+			"Add it to the nav, or add it to docsExemptFromNav with the reason it is not a page.",
+			rel)
+	}
+}
+
+// docsExemptFromNav names a file under docs/ that is deliberately not a page in the site.
+//
+// An entry must say why. "Not written yet" is not a reason to be here — an unfinished page is
+// absent from the tree, not exempt from the nav.
+var docsExemptFromNav = map[string]string{
+	"README.md": "instructions for building this documentation, addressed to a contributor " +
+		"reading the repository; mkdocs would serve it at /README/ as a page about itself",
+}
+
+// navEntry is one nav target and the line it is on, so a failure can be clicked.
+type navEntry struct {
+	target string
+	line   int
+}
+
+// navTargets extracts the .md targets from mkdocs.yml's nav.
+//
+// A line-scan rather than a YAML parse, deliberately: mkdocs.yml carries !!python/name: tags for the
+// emoji and superfences extensions, which are not resolvable by a standard YAML decoder, so
+// unmarshalling the file requires either a custom resolver or unsafe mode. The nav is a flat list of
+// `- Title: path.md` lines and does not need either.
+//
+// External targets (http, https) are skipped: they are somebody else's to keep alive, the same rule
+// externalLink applies above.
+func navTargets(yaml string) []navEntry {
+	var (
+		targets []navEntry
+		inNav   bool
+	)
+
+	for i, line := range strings.Split(yaml, "\n") {
+		if strings.HasPrefix(line, "nav:") {
+			inNav = true
+
+			continue
+		}
+
+		// The nav runs to the next top-level key. Blank and comment lines do not end it.
+		if inNav && strings.TrimSpace(line) != "" && !strings.HasPrefix(line, " ") &&
+			!strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "#") {
+			inNav = false
+		}
+
+		if !inNav {
+			continue
+		}
+
+		match := navTarget.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		targets = append(targets, navEntry{target: match[1], line: i + 1})
+	}
+
+	return targets
+}
+
+// navTarget matches the path in `- Title: some/page.md`, and only a .md path — the Community section
+// holds absolute GitHub URLs, which end in .md too but are not files in this tree.
+var navTarget = regexp.MustCompile(`^\s*-\s+[^:]+:\s+(?:\./)?([A-Za-z0-9_][A-Za-z0-9_\-./]*\.md)\s*$`)
+
 // TestNoDocumentedLinkPointsIntoAnExampleDirectory guards the specific repair this gate's first run
 // forced, because the tempting fix for it is the one issue 208 warns against.
 //

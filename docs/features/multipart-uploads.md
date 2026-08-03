@@ -224,7 +224,7 @@ storage:
 ObjectFS's own tests do not use a container for this. `internal/testaws` runs a
 [substrate](https://github.com/scttfrdmn/substrate) endpoint in-process over real HTTP — no
 network, no credentials, no AWS account — which is both faster and closer to the real thing than a
-mock. See `docs/development/testing.md`.
+mock. See the Testing section of `CONTRIBUTING.md`.
 
 ## Performance Considerations
 

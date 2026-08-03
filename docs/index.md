@@ -260,10 +260,11 @@ ObjectFS is aimed at academic and research computing:
 - 👨‍🔬 **Lab Manager / PI**: team coordination, cost management
 - 🖥️ **Research Computing Staff**: infrastructure, multi-user deployments
 
-Each of these was a link to a page in `docs/personas/`, and that directory is empty — five links,
+Each of these was a link to a page in `docs/personas/`, a directory that held no files — five links,
 the whole audience section, pointing at nothing. The intent was real: `persona:` labels exist on
 GitHub for all five, so issues can be filed against them. The pages were not written, so the names
-are left as names rather than as promises.
+are left as names rather than as promises, and the empty directory has been removed
+([#224](https://github.com/scttfrdmn/objectfs/issues/224)) so it no longer implies otherwise.
 
 ---
 
