@@ -136,3 +136,73 @@ func TestDefaultConfigStoresStandard(t *testing.T) {
 			"names STANDARD and charges for something else.", got, s3.TierStandard)
 	}
 }
+
+// TestSmallObjectsOnStandardDecidesTheStoredClass asserts the setting's effect where it is visible:
+// on the object.
+//
+// This is the seam #203 is about. The whole cost-optimization block reached the backend through a
+// config type that shared no field with the one the backend read, so the only setting in it with a
+// live effect was gated by a flag named MonitorAccessPatterns — reporting, deciding storage. A test
+// that checked the flag, or checked HandleStandardTierOverhead's return value, would have passed
+// throughout: what was broken was whether the configuration could arrive at all. Only the stored
+// class can answer that.
+func TestSmallObjectsOnStandardDecidesTheStoredClass(t *testing.T) {
+	t.Parallel()
+
+	// 16 KiB is under STANDARD_IA's crossover (about 70 KiB at list prices), so it is a size where
+	// STANDARD is genuinely cheaper and the setting has something to do.
+	const small = 16 * 1024
+
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		want    string
+	}{
+		{
+			name:    "on stores the small object on Standard",
+			enabled: true,
+			want:    s3.TierStandard,
+		},
+		{
+			// The default. A mount must store objects on the class storage_tier names unless asked
+			// otherwise, which is the half of this that an operator reading their bill depends on.
+			name:    "off stores it on the configured tier",
+			enabled: false,
+			want:    s3.TierStandardIA,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := testaws.Start(t)
+			backend := ts.Backend(func(cfg *s3.Config) {
+				cfg.StorageTier = s3.TierStandardIA
+				cfg.CostOptimization.SmallObjectsOnStandard = tc.enabled
+
+				// Compression off: it changes the stored length, and the length is what the decision
+				// is made on.
+				cfg.Compression.Enabled = false
+			})
+
+			key := "cost/small-" + tc.want
+			body := testaws.DeterministicBytes(key, small)
+
+			if err := backend.PutObject(context.Background(), key, body, nil); err != nil {
+				t.Fatalf("PutObject: %v", err)
+			}
+
+			if got := ts.ObjectStorageClass(key); got != tc.want {
+				t.Errorf("with small_objects_on_standard=%v and storage_tier=STANDARD_IA, a %d-byte "+
+					"object was stored as %q, want %q. Nothing reports this: the object reads back "+
+					"either way and the difference is only on the invoice.",
+					tc.enabled, small, got, tc.want)
+			}
+
+			// The bytes have to survive the path that chose the class. A tier decision that also
+			// truncated the object would pass the assertion above.
+			if got := ts.GetObject(key); string(got) != string(body) {
+				t.Errorf("the stored object holds %d bytes, want %d", len(got), len(body))
+			}
+		})
+	}
+}

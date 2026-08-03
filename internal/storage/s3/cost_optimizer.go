@@ -509,21 +509,77 @@ type OptimizationReport struct {
 
 // Standard tier overhead handling helpers
 
-// HandleStandardTierOverhead manages Standard tier cost overhead for small objects
+// HandleStandardTierOverhead returns the storage class an object of this size should be written with:
+// the configured tier, or STANDARD where the configured tier would bill the object as larger than it
+// is and STANDARD is therefore cheaper.
+//
+// Three conditions, all required, where there used to be one:
+//
+//   - The configured tier publishes a minimum billable size. Only STANDARD_IA, ONEZONE_IA and
+//     GLACIER_IR do. The old test was `objectSize < minBillableSize128KB` with no reference to the
+//     configured tier at all, so with `storage_tier: STANDARD` it returned STANDARD — harmless — and
+//     with `storage_tier: DEEP_ARCHIVE` it moved every object under 128 KiB onto STANDARD, which is
+//     23× the storage rate. The tier that has no floor cannot be rounding anything up.
+//   - The object is below that minimum. Above it there is nothing to avoid.
+//   - STANDARD actually costs less for this object. Computed, not assumed, and this is the condition
+//     that does the most work: being below the floor does not make STANDARD cheaper. The crossover is
+//     at minBillable × rateTier / rateStandard, which at list prices is 69.6 KiB for STANDARD_IA,
+//     55.7 KiB for ONEZONE_IA and 22.3 KiB for GLACIER_IR — so a 32 KiB object is cheaper on
+//     GLACIER_IR *billed as 128 KiB* than on STANDARD at its own size, by nearly 3×. The old
+//     size-only test moved all three to STANDARD anywhere under 128 KiB and raised the bill across
+//     most of that range. [CostOptimizer.calculateObjectCost] also applies any volume or enterprise
+//     discount and any CustomPricing override, so the comparison is against the prices this
+//     deployment pays rather than list.
+//
+// The archive classes are outside this entirely, by the first condition, and that is deliberate
+// beyond the arithmetic: GLACIER and DEEP_ARCHIVE objects cannot be read without a restore, so
+// silently writing one to STANDARD instead would change what a read of that object does, not only
+// what it costs. A cost heuristic must not decide retrieval semantics.
 func (co *CostOptimizer) HandleStandardTierOverhead(objectKey string, objectSize int64) string {
-	// Below the IA classes' billable minimum, Standard is cheaper than a tier that would round the
-	// object up to 128 KB. Named constant rather than a repeated literal: this file spelled 128*1024
-	// twice while tiers.go spelled it once, and the threshold is the same fact in all three places.
-	if objectSize < minBillableSize128KB {
-		co.logger.Debug("Using Standard tier to avoid IA minimum charges",
-			"object", objectKey,
-			"size", objectSize,
-			"threshold", minBillableSize128KB)
+	configuredTier := co.backend.currentTier
+
+	if configuredTier == TierStandard {
 		return TierStandard
 	}
 
-	// For larger objects, use configured tier
-	return co.backend.currentTier
+	tierInfo, known := StorageTiers[configuredTier]
+	if !known {
+		return configuredTier
+	}
+
+	// No published floor: nothing is being rounded up, so there is no overhead to avoid. This is what
+	// keeps the archive classes and INTELLIGENT_TIERING out — see the doc comment.
+	if tierInfo.MinObjectSize <= 0 || objectSize >= tierInfo.MinObjectSize {
+		return configuredTier
+	}
+
+	configuredCost := co.calculateObjectCost(objectSize, configuredTier)
+	standardCost := co.calculateObjectCost(objectSize, TierStandard)
+
+	if standardCost >= configuredCost {
+		// Below the floor and still no cheaper on STANDARD, which a negotiated rate or a volume
+		// discount can produce. Logged rather than silent: it is the case an operator reading the
+		// setting's name would not predict.
+		co.logger.Debug("object is below the tier's billable minimum but Standard is not cheaper",
+			"object", objectKey,
+			"size", objectSize,
+			"tier", configuredTier,
+			"billable_minimum", tierInfo.MinObjectSize,
+			"tier_cost", configuredCost,
+			"standard_cost", standardCost)
+
+		return configuredTier
+	}
+
+	co.logger.Debug("Using Standard tier to avoid this tier's minimum billable size",
+		"object", objectKey,
+		"size", objectSize,
+		"tier", configuredTier,
+		"billable_minimum", tierInfo.MinObjectSize,
+		"tier_cost", configuredCost,
+		"standard_cost", standardCost)
+
+	return TierStandard
 }
 
 // EstimateStandardTierOverhead calculates potential overhead from using Standard tier

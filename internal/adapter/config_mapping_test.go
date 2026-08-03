@@ -55,6 +55,10 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 		Concurrency: 5,
 	}
 
+	// The one cost-optimization key with a live effect. Set to the non-default value so that the check
+	// below fails on a mount that drops it, rather than agreeing with a zero value.
+	cfg.Storage.S3.CostOptimization.SmallObjectsOnStandard = true
+
 	cfg.Performance.ConnectionPoolSize = 11
 	cfg.Performance.ParallelRead = config.ParallelReadConfig{
 		Enabled:   true,
@@ -282,10 +286,22 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 		t.Error("TierConstraints is non-zero; it overrides what AWS itself enforces for a tier, and " +
 			"lowering a minimum object size produces writes S3 rejects")
 	}
-	if !reflect.DeepEqual(got.CostOptimization, s3.CostOptimization{}) {
-		t.Error("CostOptimization is non-zero. internal/config.S3CostOptimization and " +
-			"s3.CostOptimization share no field, and the backend's tiering machinery has no caller — " +
-			"mapping them would wire a config block to an unreachable feature")
+	// The cost-optimization block has exactly one key and it must arrive. The rest of s3.CostOptimization
+	// stays zero: EnableAutoTiering and CostThreshold are read only by code no mount path invokes, and
+	// MonitorAccessPatterns populates a map that never evicts — so each is deliberately unreachable from
+	// YAML rather than accidentally unmapped (#203).
+	//
+	// Asserted as a whole-struct comparison rather than one field, because the failure that matters here
+	// is a *new* field arriving without a decision: the previous version of this test asserted the whole
+	// struct was zero, which passed for the wrong reason once the mapping existed, since the fixture
+	// never set the key. Set it above and compare against the exact expected struct.
+	wantCost := s3.CostOptimization{SmallObjectsOnStandard: true}
+	if !reflect.DeepEqual(got.CostOptimization, wantCost) {
+		t.Errorf("CostOptimization = %+v, want %+v. small_objects_on_standard is the one key in this "+
+			"block with an effect on the write path, and it decides the storage class objects are "+
+			"stored with — a mount that drops it stores every small object on the configured tier and "+
+			"pays that tier's billing minimum, silently. Any other non-zero field here was mapped "+
+			"without a reader.", got.CostOptimization, wantCost)
 	}
 
 	// write_buffer.max_memory, max_buffers and flush_interval have no reader: vfs.NewWriter takes no

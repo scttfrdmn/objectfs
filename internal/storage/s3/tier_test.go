@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -338,14 +339,75 @@ func TestTierValidator(t *testing.T) {
 func TestTierRecommendations(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
+	// The size-based recommendation, on both sides of the crossover and on a tier that has no floor.
+	//
+	// Asserted by whether a Standard recommendation appears, not by matching its exact wording: the
+	// previous version compared against the literal "Consider Standard tier for small objects to avoid
+	// IA minimum charges", which passes for any object under 128 KiB on any tier — including the tiers
+	// with no billing minimum, where the advice was wrong. A string equality check on advice cannot
+	// tell correct advice from incorrect advice with the same phrasing.
 	t.Run("Size-based Recommendations", func(t *testing.T) {
-		validator := NewTierValidator(TierStandardIA, TierConstraints{}, logger)
+		recommendsStandard := func(recs []string) bool {
+			for _, r := range recs {
+				if strings.Contains(r, "Consider Standard") {
+					return true
+				}
+			}
 
-		// Small objects should recommend Standard tier
-		recommendations := validator.GetRecommendations(64*1024, "unknown") // 64KB
-		found := slices.Contains(recommendations, "Consider Standard tier for small objects to avoid IA minimum charges")
-		if !found {
-			t.Error("Should recommend Standard tier for small objects")
+			return false
+		}
+
+		for _, tc := range []struct {
+			name string
+			tier string
+			size int64
+			want bool
+			why  string
+		}{
+			{
+				name: "below the crossover on STANDARD_IA",
+				tier: TierStandardIA,
+				size: 64 * 1024,
+				want: true,
+				why: "64 KiB billed as 128 KiB of STANDARD_IA costs more than 64 KiB of STANDARD; the " +
+					"crossover is about 70 KiB",
+			},
+			{
+				name: "above the crossover but below the floor on GLACIER_IR",
+				tier: TierGlacierIR,
+				size: 64 * 1024,
+				want: false,
+				why: "GLACIER_IR's crossover is about 22 KiB, so 64 KiB billed as 128 KiB there is still " +
+					"far cheaper than 64 KiB on STANDARD. Recommending a move would raise the bill, which " +
+					"is what the old size-only rule did for everything under 128 KiB",
+			},
+			{
+				name: "above the floor on STANDARD_IA",
+				tier: TierStandardIA,
+				size: 1024 * 1024,
+				want: false,
+				why:  "nothing is being rounded up, so there is no minimum to avoid",
+			},
+			{
+				name: "a tier with no billing minimum",
+				tier: TierDeepArchive,
+				size: 4 * 1024,
+				want: false,
+				why: "DEEP_ARCHIVE publishes no minimum billable size — its 40 KB is per-object overhead, " +
+					"which is added rather than rounded up to, and STANDARD is ~23× its storage rate",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				validator := NewTierValidator(tc.tier, TierConstraints{}, logger)
+
+				got := recommendsStandard(validator.GetRecommendations(tc.size, "unknown"))
+				if got != tc.want {
+					t.Errorf("GetRecommendations(%d, unknown) on %s recommends Standard = %v, want %v.\n%s",
+						tc.size, tc.tier, got, tc.want, tc.why)
+				}
+			})
 		}
 	})
 

@@ -201,8 +201,10 @@ storage:
     region: us-east-1
     use_acceleration: true
     cost_optimization:
-      enabled: true
-      tiering_enabled: true
+      # Store objects too small to be worth the configured tier's 128 KB billing
+      # minimum on STANDARD instead. The four other keys this block used to show
+      # were removed in v0.11.0 — they never reached the backend.
+      small_objects_on_standard: true
 
 performance:
   cache_size: 8GB

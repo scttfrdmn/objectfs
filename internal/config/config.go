@@ -533,13 +533,35 @@ type MultipartConfig struct {
 	Concurrency int `yaml:"concurrency"`
 }
 
-// S3CostOptimization represents S3 cost optimization settings
+// S3CostOptimization is the `storage.s3.cost_optimization` block.
+//
+// One key, where there were five. `enabled`, `tiering_enabled`, `lifecycle_enabled`,
+// `transition_to_ia` and `transition_to_glacier` were removed rather than plumbed, and the reason is
+// worth stating because the shape of this block was itself the defect (#203): this type and
+// s3.CostOptimization, the struct the backend reads, shared not one field name. There was no mapping
+// to write. `transition_to_ia: 30` had to become an element of a []TransitionRule carrying a source
+// tier, a destination tier, an access pattern and a size filter, none of which the YAML supplied —
+// and nothing in the repository read TransitionRules either, so the mapping would have invented four
+// values in order to reach code with no caller.
+//
+// Removed, not deprecated, and the loader rejects unknown keys — so a config file still carrying any
+// of the five fails at startup naming the key. That is the only way an operator learns the setting
+// never did anything. A block that had no effect for its entire existence has no behavior to
+// preserve, so the compatibility that matters here is telling the truth about that rather than
+// continuing to accept the words.
 type S3CostOptimization struct {
-	Enabled             bool `yaml:"enabled"`
-	TieringEnabled      bool `yaml:"tiering_enabled"`
-	LifecycleEnabled    bool `yaml:"lifecycle_enabled"`
-	TransitionToIA      int  `yaml:"transition_to_ia"`
-	TransitionToGlacier int  `yaml:"transition_to_glacier"`
+	// SmallObjectsOnStandard writes an object to STANDARD when `storage.s3.storage_tier` names a tier
+	// that would bill the object as larger than it is — the 128 KB minimum billable size on
+	// STANDARD_IA, ONEZONE_IA and GLACIER_IR.
+	//
+	// It is the only setting in this block with an effect, because it is the only cost decision made
+	// on a path a mount takes: the write. Everything else the backend's cost machinery can do runs
+	// through AnalyzeAndOptimize, which no mount calls.
+	//
+	// Off by default. It changes the storage class of stored objects, and a mount that silently
+	// stored objects on a class other than the one `storage_tier` names would be the same kind of
+	// surprise in the other direction.
+	SmallObjectsOnStandard bool `yaml:"small_objects_on_standard"`
 }
 
 // ClusterConfig represents distributed cluster settings
@@ -609,11 +631,7 @@ func NewDefault() *Configuration {
 					Level:     3,
 				},
 				CostOptimization: S3CostOptimization{
-					Enabled:             false,
-					TieringEnabled:      false,
-					LifecycleEnabled:    false,
-					TransitionToIA:      30,
-					TransitionToGlacier: 90,
+					SmallObjectsOnStandard: false,
 				},
 			},
 		},

@@ -513,8 +513,24 @@ func (a *Adapter) buildS3Config() *s3.Config {
 			a.config.Performance.ParallelRead.ChunkSize, defaults.ReadChunkSize)
 	}
 
-	// TierConstraints, CostOptimization, PricingConfig and the credential fields are deliberately
-	// left at their zero values, and each for its own reason rather than by omission:
+	// Cost optimization: one field of the four, and the only one a mount can act on.
+	//
+	// SmallObjectsOnStandard is read on the PutObject path, so it decides the storage class of stored
+	// objects on every mount. The other three — EnableAutoTiering, CostThreshold,
+	// MonitorAccessPatterns — gate AnalyzeAndOptimize and the access-pattern report, and nothing on
+	// the mount path calls either, so a YAML key for them would configure a feature no mount can
+	// invoke. They stay reachable to callers using internal/storage/s3 as a library.
+	//
+	// This block was unmappable rather than merely unmapped until #203: the two structs shared no
+	// field name, and `transition_to_ia: 30` had no reading that produced the []TransitionRule the
+	// backend declared. Reconciling them meant deleting the fields nothing read on both sides, which
+	// is a breaking change to keys that never had an effect — see S3CostOptimization.
+	cfg.CostOptimization = s3.CostOptimization{
+		SmallObjectsOnStandard: a.config.Storage.S3.CostOptimization.SmallObjectsOnStandard,
+	}
+
+	// TierConstraints, PricingConfig and the credential fields are deliberately left at their zero
+	// values, and each for its own reason rather than by omission:
 	//
 	//   - TierConstraints is a policy floor, not a description of S3. Its MinObjectSize is the one
 	//     value in the struct that still refuses a write, and it refuses writes S3 would accept —
@@ -523,16 +539,6 @@ func (a *Adapter) buildS3Config() *s3.Config {
 	//     could be given a floor above zero by default, and a floor above zero rejects the zero-byte
 	//     PUTs that create directories and empty files. If it is ever mapped, it has to stay opt-in
 	//     and unset by default, and the deletion embargo needs the same care for the same reason.
-	//
-	//   - CostOptimization is not mappable. internal/config.S3CostOptimization and
-	//     s3.CostOptimization are disjoint types — {Enabled, TieringEnabled, LifecycleEnabled,
-	//     TransitionToIA, TransitionToGlacier} against {EnableAutoTiering, TransitionRules,
-	//     LifecycleManagement, IntelligentTiering, CostThreshold, MonitorAccessPatterns} — with no
-	//     field in common. Nothing reads either one, and the backend's automatic-tiering machinery
-	//     (AnalyzeAndOptimize, applyOptimization) has no caller either, so mapping the two would
-	//     wire a config block to an unreachable feature. examples/config.yaml says so at the block.
-	//     MonitorAccessPatterns is additionally held back because it writes an unsynchronized map
-	//     from the read path and silently rewrites the storage class of objects under 128 KiB.
 	//
 	//   - PricingConfig's Pricing API path was removed in v0.10.1; what remains is a custom rate
 	//     table, which belongs in a file of its own (configs/discount-config.yaml) rather than in a

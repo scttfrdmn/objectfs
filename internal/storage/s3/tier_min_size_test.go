@@ -177,6 +177,113 @@ func TestConfiguredMinimumStillRefusesTheWrite(t *testing.T) {
 	}
 }
 
+// TestBillingWarningFollowsTheTierTheObjectIsStoredOn covers the other direction of the split: the
+// billing warnings describe AWS's charges, so they have to follow the tier the object actually lands
+// on rather than the one configured for the mount.
+//
+// `small_objects_on_standard` diverts an individual object to STANDARD when the configured tier would
+// bill it as larger than it is, and the validator is built once per mount. Validating against the
+// configured tier regardless produced the exactly-backwards message: an operator who enabled the
+// setting *because of* this warning still saw "billed_size 131072" on a 16 KiB object about to be
+// stored on STANDARD and billed as 16 KiB. Worse at the default log level, where the diversion's own
+// Debug line is invisible and the misleading warning is all there is.
+func TestBillingWarningFollowsTheTierTheObjectIsStoredOn(t *testing.T) {
+	t.Parallel()
+
+	// 16 KiB: under STANDARD_IA's 128 KiB floor, so the configured tier would warn.
+	const size = 16 * 1024
+
+	t.Run("diverted to Standard warns about nothing", func(t *testing.T) {
+		t.Parallel()
+
+		validator, logs := captureValidator(t, TierStandardIA, TierConstraints{})
+
+		if err := validator.ValidateWriteToTier("small.bin", size, TierStandard); err != nil {
+			t.Fatalf("ValidateWriteToTier(..., STANDARD) = %v, want nil", err)
+		}
+
+		for _, rec := range logs() {
+			if rec.Level == "WARN" {
+				t.Errorf("an object being stored on STANDARD drew the warning %q naming tier=%q: %+v.\n"+
+					"STANDARD has no minimum billable size, so there is nothing to warn about — this is "+
+					"the configured tier's floor being reported for a write that will not be billed "+
+					"against it.", rec.Msg, rec.Tier, rec)
+			}
+		}
+	})
+
+	t.Run("not diverted still warns about the configured tier", func(t *testing.T) {
+		t.Parallel()
+
+		// The half that must not have been silenced. Passing the configured tier explicitly is what
+		// PutObject does when no diversion happened, and it has to behave exactly like ValidateWrite.
+		validator, logs := captureValidator(t, TierStandardIA, TierConstraints{})
+
+		if err := validator.ValidateWriteToTier("small.bin", size, TierStandardIA); err != nil {
+			t.Fatalf("ValidateWriteToTier(..., STANDARD_IA) = %v, want nil", err)
+		}
+
+		var warned bool
+
+		for _, rec := range logs() {
+			if rec.Level == "WARN" && rec.BilledSize != nil && *rec.BilledSize == StorageTiers[TierStandardIA].MinObjectSize {
+				if rec.Tier != TierStandardIA {
+					t.Errorf("the billing warning reported tier=%q, want %q", rec.Tier, TierStandardIA)
+				}
+
+				warned = true
+			}
+		}
+
+		if !warned {
+			t.Errorf("a %d-byte write to STANDARD_IA with no diversion drew no billing warning naming "+
+				"its 128 KiB floor. Making the warning tier-aware must not silence it for the case it "+
+				"was written for.\nCaptured: %+v", size, logs())
+		}
+	})
+
+	t.Run("an unknown tier name falls back to the configured tier", func(t *testing.T) {
+		t.Parallel()
+
+		// Zero-valued StorageTierInfo means "no minimum, no overhead", so an unrecognized name must not
+		// reach the checks as one: it would silently warn about nothing, which is indistinguishable from
+		// a correct diversion to STANDARD.
+		validator, logs := captureValidator(t, TierStandardIA, TierConstraints{})
+
+		if err := validator.ValidateWriteToTier("small.bin", size, "GLACIER_DEEP_ARCHIVE_XL"); err != nil {
+			t.Fatalf("ValidateWriteToTier with an unknown tier = %v, want nil", err)
+		}
+
+		var warned bool
+
+		for _, rec := range logs() {
+			if rec.Level == "WARN" && rec.Tier == TierStandardIA {
+				warned = true
+			}
+		}
+
+		if !warned {
+			t.Errorf("an unrecognized tier name silenced the billing warning instead of falling back to "+
+				"the configured STANDARD_IA.\nCaptured: %+v", logs())
+		}
+	})
+
+	t.Run("the operator's floor is not relaxed by a diversion", func(t *testing.T) {
+		t.Parallel()
+
+		// tier_constraints.min_object_size is a policy for this mount, not a description of AWS billing.
+		// An internal cost diversion is not a reason to stop enforcing it, and letting it be one would
+		// make the floor quietly conditional on an unrelated setting.
+		validator, _ := captureValidator(t, TierStandardIA, TierConstraints{MinObjectSize: 64 * 1024})
+
+		if err := validator.ValidateWriteToTier("small.bin", size, TierStandard); err == nil {
+			t.Error("a diversion to STANDARD bypassed the configured 64 KiB minimum. The operator's " +
+				"floor applies to the mount; a cost optimization deciding not to enforce it is a policy " +
+				"change nobody asked for")
+		}
+	})
+}
+
 // TestConfiguringTheTierMinimumRestoresTheOldBehavior records the sharp edge the split leaves, so
 // that it is a documented consequence rather than a surprise. Setting the constraint to the tier's
 // own published number is a way to reinstate exactly the gate #154 removed, zero-byte directory
