@@ -104,7 +104,11 @@ public class ObjectFSClient implements AutoCloseable {
             assertSuccess(resp, "get " + key);
             ResponseBody body = resp.body();
             return body != null ? body.bytes() : new byte[0];
-        } catch (NotFoundException | ObjectFSException e) {
+        } catch (ObjectFSException e) {
+            // ObjectFSException alone, not `NotFoundException | ObjectFSException`. That was a
+            // compile error -- "Alternatives in a multi-catch statement cannot be related by
+            // subclassing" -- because NotFoundException extends ObjectFSException, so this arm
+            // already catches it. Behaviour is identical; the code simply could not be built.
             throw e;
         } catch (IOException e) {
             throw new ObjectFSException("get " + key + ": " + e.getMessage(), e);
@@ -203,8 +207,8 @@ public class ObjectFSClient implements AutoCloseable {
             ResponseBody body = resp.body();
             String bodyStr = body != null ? body.string() : "{}";
             return json.readValue(bodyStr, ObjectInfo.class);
-        } catch (NotFoundException | ObjectFSException e) {
-            throw e;
+        } catch (ObjectFSException e) {
+            throw e;  // Catches NotFoundException too; see the note on get().
         } catch (IOException e) {
             throw new ObjectFSException("head " + key + ": " + e.getMessage(), e);
         }

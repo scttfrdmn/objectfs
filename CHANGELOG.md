@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never invoked by anything, in any job, ever. It now runs as its own step, so a type error fails the
   build rather than waiting for someone to run the compiler by hand.
 
+- **A `mvn -B test` step for the Java SDK, the same gate for the same reason** ([#325]). Nothing in
+  this repository had ever run Maven, and the SDK did not compile; see the `Fixed` entry below for the
+  four errors that had been sitting there. The tests need no credentials and no network beyond
+  dependency resolution — they use `MockWebServer` — so there is nothing here for a flake to come
+  from, and `continue-on-error` is deliberately absent.
+
 - **Tests for the JavaScript SDK's configuration and storage layers** (`src/config.test.ts`,
   `src/storage.test.ts`; 61 tests across three suites, up from one). The configuration assertions come
   in pairs — the override applied *and* its siblings survived — because a one-level spread passes any
@@ -199,6 +205,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"@typescript-eslint/recommended"` without the required `plugin:` prefix, so eslint exited with
   "couldn't find the config to extend from" before reading a line of source. Zero errors once it
   could run, with 23 pre-existing `no-explicit-any` warnings left standing.
+
+- **The Java SDK compiles, and its 17 tests run** ([#325]). `mvn compile` failed with four errors and
+  had presumably always done, because nothing in this repository has ever invoked Maven — the same
+  structural gap that let 48 `tsc` errors ship in the JavaScript SDK, found by going looking for it
+  in the third SDK rather than by anyone reporting it:
+
+  - `ObjectFSClient` imported `com.fasterxml.jackson.datatype.jsr310.JavaTimeModule` and registers it
+    in its constructor, but `pom.xml` declared only `jackson-databind` — so
+    `package com.fasterxml.jackson.datatype.jsr310 does not exist`. `jackson-datatype-jsr310` is now
+    declared, on the same `${jackson.version}`.
+  - Two `catch (NotFoundException | ObjectFSException e)` clauses, which javac rejects:
+    *"Alternatives in a multi-catch statement cannot be related by subclassing."* `NotFoundException`
+    extends `ObjectFSException`, so catching the supertype alone is both legal and exactly equivalent.
+
+  With it building, the tests ran for the first time and one failed — a real expectation error, not a
+  flake. `list_includesPrefixAndLimitParams` asserted the request path contains `prefix=my/prefix`,
+  and okhttp percent-encodes `/` in a query *value*, so it carries `prefix=my%2Fprefix`. Verified by
+  probing okhttp directly rather than by reading its documentation. The implementation was right; the
+  test now asserts the encoded form **and** that the server decodes it back to `my/prefix`, so it
+  still means "the prefix arrives intact" rather than "okhttp escapes slashes."
+
+  The compiler plugin also moves from `source`+`target` 17 to `release` 17, which is what its own
+  build warning asked for on every run: compiling on a newer JDK with `-source`/`-target` accepts
+  calls to APIs that did not exist in 17, producing a jar that compiles clean and throws
+  `NoSuchMethodError` on the version it claims to target.
 
 - **The JavaScript SDK's entry point exports the error its own client throws, and reports the right
   license** ([#325]). Two defects found by carrying the Python fixes back across:

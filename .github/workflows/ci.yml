@@ -338,6 +338,25 @@ jobs:
         working-directory: sdks/javascript
         run: npm run lint
 
+      # Java, for the same reason as the `tsc` step above and with the same history: nothing in this
+      # repository had ever run Maven, and `mvn compile` failed with four errors — an import of
+      # com.fasterxml.jackson.datatype.jsr310 that pom.xml did not declare, and two
+      # `catch (NotFoundException | ObjectFSException e)` clauses, which is illegal because the first
+      # is a subclass of the second. So the SDK had never built and its 17 tests had never run; one
+      # of them was asserting a wire format okhttp does not produce.
+      #
+      # `mvn -B test` rather than `compile`: the tests use MockWebServer, so they need no network
+      # beyond Maven's own dependency resolution and no credentials.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Java SDK build and test
+        working-directory: sdks/java
+        run: mvn -B test
+
   # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must
   # load against the schema and must actually change something.
