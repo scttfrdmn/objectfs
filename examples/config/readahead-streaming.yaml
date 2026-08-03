@@ -1,46 +1,42 @@
-# NOT YET WIRED — see https://github.com/scttfrdmn/objectfs/issues/176
-#
-# The performance.read_ahead block below is validated at load and read by nothing: ObjectFS
-# constructs its read-ahead manager with a nil config and uses that manager's own built-in
-# defaults (64 KB window, 1 MB max distance, 3 sequential reads, 4 concurrent). Copying this file
-# will not change read-ahead behavior. It is kept as a record of the intended shape of the
-# setting, not as a working preset.
-#
 # ObjectFS Configuration - High-Performance Streaming
-# Best for: Video streaming, log processing, sequential file access
+# Best for: Video streaming, log processing, sequential whole-file reads
+#
+# This file was one of four presets for a performance.read_ahead block with twenty keys, none of which
+# reached any code: the mount constructed its read-ahead manager with a nil config and ran the
+# manager's built-in defaults. The block is wired now, and it has five keys, because that is how many
+# the prefetcher has (https://github.com/scttfrdmn/objectfs/issues/176). The keys that are gone —
+# strategy, enable_pattern_detection, sequential_threshold, prediction_window, enable_prefetch,
+# prefetch_ahead, prefetch_bandwidth_mbs, confidence_threshold, enable_ml_prediction, ml_model_path,
+# learning_rate, pattern_depth, metrics_enabled, statistics_interval, model_update_interval — described
+# a strategy selector and an ML predictor that do not exist. Setting one now fails at load with the key
+# named, rather than being silently discarded.
 
 performance:
-  cache_size: 4GB                         # Larger cache for streaming
-  write_buffer_size: 32MB                 # Larger buffers
+  cache_size: 4GB                   # a large prefetch is only useful if there is room to hold it
+  write_buffer_size: 32MB
   max_concurrency: 200
-  read_ahead_size: 128MB                  # Large read-ahead for streaming
 
-  # Optimized for sequential streaming workloads
+  # Read ahead early and far. A streaming reader is sequential by definition, so the risk this trades
+  # against — fetching bytes a random reader never asks for — is not the risk here.
   read_ahead:
     enabled: true
-    size: 128MB                           # Large buffer for streaming
-    strategy: predictive
-    sequential_min_size: 512KB            # Detect smaller sequential patterns
 
-    # Aggressive pattern detection
-    enable_pattern_detection: true
-    sequential_threshold: 0.6             # More aggressive (60% confidence)
-    prediction_window: 50                 # Shorter window for faster detection
+    # The floor on how far ahead to read. The prefetch is always at least the reader's own last read
+    # (a shorter prefetch cannot satisfy the read it anticipates: the cache answers only when it holds
+    # the whole requested range), so this raises it above that for readers taking small bites. 1MB
+    # against the kernel's 128KB MaxRead is eight reads' worth in flight.
+    window_size: 1MB
 
-    # Aggressive prefetching
-    enable_prefetch: true
-    max_concurrent_fetch: 8               # More parallelism for high throughput
-    prefetch_ahead: 5                     # Fetch further ahead
-    prefetch_bandwidth_mbs: 50            # Higher bandwidth allocation
-    confidence_threshold: 0.6             # Lower threshold for more prefetching
+    # Sequential reads required before prefetching starts. 6 is the effective floor whatever is written
+    # here: the prefetch also needs a confidence above 0.5, confidence is sequentialHits/10, so a
+    # smaller number changes nothing (#247). 6 is therefore as early as this can be set.
+    min_sequential: 6
 
-    # ML disabled (predictive sufficient for streaming)
-    enable_ml_prediction: false
-    ml_model_path: ''
-    learning_rate: 0.01
-    pattern_depth: 1000
+    # Prefetch workers, each doing one GET at a time. Streaming is the one workload where saturating
+    # the connection pool with prefetches is the goal rather than a cost.
+    concurrent_reads: 8
 
-    # Metrics for monitoring streaming performance
-    metrics_enabled: true
-    statistics_interval: 15s              # Frequent monitoring
-    model_update_interval: 5m
+    # How long an idle read pattern is remembered. Long, because a streaming reader that pauses — a
+    # paused video, a log tailer between batches — should not have to re-establish its pattern from the
+    # first sequential read on resume.
+    ttl: 30m

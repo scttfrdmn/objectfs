@@ -19,14 +19,26 @@ type ReadAheadManager struct {
 	stopOnce      sync.Once
 }
 
-// ReadAheadConfig configures read-ahead behavior
+// ReadAheadConfig configures read-ahead behavior.
+//
+// Built from performance.read_ahead by [CreatePlatformMountManager], which is what makes those keys
+// take effect: the mount path used to construct the manager with nil and run on the defaults below,
+// so the whole configuration block was validated at load and read by nothing (#176).
+//
+// No yaml tags. They were here and they bound to nothing — configuration is decoded into
+// config.Configuration, which has no FUSE section — which is exactly what made the block look
+// plumbed. config.ReadAheadConfig owns the YAML names now; this type is the internal shape it maps to.
+//
+// MaxDistance was removed with them. It was a field, a default of 1 MiB, and a yaml tag, and no code
+// in this package ever read it: the detector's decision to prefetch is MinSequential plus a confidence
+// floor, and how far ahead it reads is prefetchLength. A cap on read-ahead distance is a plausible
+// knob, but it was never one.
 type ReadAheadConfig struct {
-	Enabled         bool          `yaml:"enabled"`
-	WindowSize      int64         `yaml:"window_size"`      // Read-ahead window size
-	MaxDistance     int64         `yaml:"max_distance"`     // Maximum read-ahead distance
-	MinSequential   int           `yaml:"min_sequential"`   // Minimum sequential reads to trigger
-	ConcurrentReads int           `yaml:"concurrent_reads"` // Max concurrent prefetch operations
-	TTL             time.Duration `yaml:"ttl"`              // Pattern TTL
+	Enabled         bool
+	WindowSize      int64         // floor on the prefetch length; see prefetchLength
+	MinSequential   int           // sequential reads required before prefetching starts
+	ConcurrentReads int           // prefetch workers, each performing one GET at a time
+	TTL             time.Duration // how long an idle read pattern is remembered
 }
 
 // ReadPattern tracks access patterns for intelligent prefetching
@@ -47,17 +59,28 @@ type PrefetchRequest struct {
 	size   int64
 }
 
-// NewReadAheadManager creates a new read-ahead manager
+// DefaultReadAheadConfig is what a nil config becomes, and what performance.read_ahead defaults to.
+//
+// Exported so config.NewDefault's read-ahead block and this one can be asserted equal rather than
+// maintained in parallel by hand. They were not equal before they were wired: config defaulted to a
+// 64 MB read-ahead size with a "predictive" strategy while the manager ran a 64 KiB window, and the
+// mount used the manager's values because the config never reached it (#176).
+func DefaultReadAheadConfig() ReadAheadConfig {
+	return ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      64 * 1024, // 64KB
+		MinSequential:   3,
+		ConcurrentReads: 4,
+		TTL:             5 * time.Minute,
+	}
+}
+
+// NewReadAheadManager creates a new read-ahead manager. A nil config takes
+// [DefaultReadAheadConfig].
 func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadManager {
 	if config == nil {
-		config = &ReadAheadConfig{
-			Enabled:         true,
-			WindowSize:      64 * 1024,   // 64KB
-			MaxDistance:     1024 * 1024, // 1MB
-			MinSequential:   3,
-			ConcurrentReads: 4,
-			TTL:             5 * time.Minute,
-		}
+		defaults := DefaultReadAheadConfig()
+		config = &defaults
 	}
 
 	ram := &ReadAheadManager{

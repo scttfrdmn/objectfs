@@ -93,11 +93,15 @@ type GlobalConfig struct {
 // because there is nothing to wire it to: compression happens in the S3 backend, on the object, and
 // is configured by `storage.s3.compression`. A second boolean over the same feature could only
 // disagree with the first.
+//
+// Its `read_ahead_size` key is gone for the same reason (#176). It defaulted to 64MB, was read by
+// nothing, and sat beside the `read_ahead` block that describes the same feature — so a configuration
+// could name two different read-ahead sizes, and neither took effect. The block below is the one
+// setting, and `window_size` inside it is the size.
 type PerformanceConfig struct {
 	CacheSize       string `yaml:"cache_size"`
 	WriteBufferSize string `yaml:"write_buffer_size"`
 	MaxConcurrency  int    `yaml:"max_concurrency"`
-	ReadAheadSize   string `yaml:"read_ahead_size"`
 	// ConnectionPoolSize is the number of pooled S3 clients, and also the batch concurrency in
 	// GetObjects/PutObjects and MaxIdleConnsPerHost on the HTTP transport. Validated > 0 below:
 	// zero reached the batch paths as an unbuffered semaphore and blocked forever.
@@ -138,36 +142,60 @@ type PersistentCacheConfig struct {
 	MaxSize   string `yaml:"max_size"`
 }
 
-// ReadAheadConfig represents advanced read-ahead and predictive caching settings
+// ReadAheadConfig configures the sequential-read detector that prefetches ahead of a reader.
+//
+// Reaches the read-ahead manager as fuse.ReadAheadConfig, which is the only consumer. The mount path
+// previously constructed that manager with nil and used its built-in defaults, so every key here was
+// validated at load and read by nothing (#176).
+//
+// This block used to have twenty keys and now has five, and the reduction is the fix rather than a
+// simplification of it. The old set described a strategy selector with pattern-detection thresholds,
+// a prefetch bandwidth cap, and ML hooks — `strategy: ml`, `enable_ml_prediction`,
+// `ml_model_path`, `learning_rate`, `pattern_depth`, `model_update_interval`. No model loader exists
+// anywhere in the repository, and there is no field-name overlap with the implementation beyond
+// Enabled, so the two were not a plumbing omission that could be fixed by passing the value through:
+// they disagreed about what read-ahead is. What exists is a sequential-access detector with a
+// prefetch window, tuned against measured byte counts (see fuse.ReadAheadManager.prefetchLength).
+// The keys below are that detector's, one per knob it has.
+//
+// Wiring the old block would have been worse than leaving it inert. `strategy: ml` with a validated
+// model path reaching no model loader is a claim about the software, and `learning_rate` being
+// range-checked to 0-1 is what made the whole set look load-bearing: a user whose file is rejected
+// for an out-of-range value reasonably concludes the accepted values do something.
 type ReadAheadConfig struct {
-	// Basic read-ahead settings
-	Enabled           bool   `yaml:"enabled"`             // Enable read-ahead
-	Size              string `yaml:"size"`                // Read-ahead buffer size (e.g., "64MB")
-	Strategy          string `yaml:"strategy"`            // "simple", "predictive", "ml"
-	SequentialMinSize string `yaml:"sequential_min_size"` // Min size for sequential detection
+	// Enabled turns read-ahead off entirely. Off means a read fetches exactly what was asked for.
+	Enabled bool `yaml:"enabled"`
 
-	// Pattern detection settings
-	EnablePatternDetection bool    `yaml:"enable_pattern_detection"` // Detect sequential/temporal patterns
-	SequentialThreshold    float64 `yaml:"sequential_threshold"`     // Confidence threshold for sequential (0-1)
-	PredictionWindow       int     `yaml:"prediction_window"`        // Number of accesses to analyze
+	// WindowSize is the floor on how far ahead of a sequential reader to prefetch, and the prefetch is
+	// the larger of this and the reader's own last read size.
+	//
+	// It is a floor rather than the window because a prefetch shorter than the read it anticipates
+	// cannot satisfy that read: the cache answers only when it holds the whole requested range, so a
+	// 64 KiB prefetch ahead of a 128 KiB reader produces an entry every subsequent read walks past, and
+	// the bytes are paid for twice. That was measurable — a 3 MiB sequential traversal transferred
+	// 4,325,644 bytes with zero prefetch hits.
+	WindowSize string `yaml:"window_size"`
 
-	// Prefetch settings
-	EnablePrefetch       bool    `yaml:"enable_prefetch"`        // Enable intelligent prefetching
-	MaxConcurrentFetch   int     `yaml:"max_concurrent_fetch"`   // Max parallel prefetch operations
-	PrefetchAhead        int     `yaml:"prefetch_ahead"`         // Number of blocks to prefetch
-	PrefetchBandwidthMBs int     `yaml:"prefetch_bandwidth_mbs"` // Max prefetch bandwidth (MB/s)
-	ConfidenceThreshold  float64 `yaml:"confidence_threshold"`   // Min confidence to trigger prefetch (0-1)
+	// MinSequential is how many consecutive sequential reads must be seen before prefetching starts.
+	//
+	// The detector requires both this and a confidence above 0.5, and confidence is
+	// sequentialHits/10 — so a value below 6 is governed by the confidence floor rather than by this
+	// number. Set it above 6 to require a longer run than the confidence rule does.
+	//
+	// That the default is 3, and therefore in the inert range, is #247: two thresholds over the same
+	// counter, of which only one is configurable. The default is left where it is because it is what
+	// every mount has run since the prefetcher was written, and reconciling them changes prefetch
+	// behavior at the default configuration — a decision that wants measurement, not a default nudged
+	// in passing while a plumbing gap is closed.
+	MinSequential int `yaml:"min_sequential"`
 
-	// ML-based prediction settings (advanced)
-	EnableMLPrediction bool    `yaml:"enable_ml_prediction"` // Use ML for access prediction
-	MLModelPath        string  `yaml:"ml_model_path"`        // Path to trained ML model
-	LearningRate       float64 `yaml:"learning_rate"`        // Model learning rate (0-1)
-	PatternDepth       int     `yaml:"pattern_depth"`        // Analysis depth for patterns
+	// ConcurrentReads is the number of prefetch workers, each of which performs one GET at a time.
+	// It bounds how much prefetch traffic a mount can have in flight, so it is also a cost control.
+	ConcurrentReads int `yaml:"concurrent_reads"`
 
-	// Performance tuning
-	MetricsEnabled      bool   `yaml:"metrics_enabled"`       // Track read-ahead effectiveness
-	StatisticsInterval  string `yaml:"statistics_interval"`   // Stats collection interval
-	ModelUpdateInterval string `yaml:"model_update_interval"` // ML model update frequency
+	// TTL is how long an idle read pattern is remembered. A reader that pauses longer than this starts
+	// its sequential run over, which means the first few reads after a pause are not prefetched.
+	TTL time.Duration `yaml:"ttl"`
 }
 
 // WriteBufferConfig represents write buffer configuration.
@@ -593,31 +621,21 @@ func NewDefault() *Configuration {
 			CacheSize:          "2GB",
 			WriteBufferSize:    "16MB",
 			MaxConcurrency:     150,
-			ReadAheadSize:      "64MB",
 			ConnectionPoolSize: 8,
 			PredictiveCaching:  false,
 			MLModelPath:        "",
 			MultilevelCaching:  false,
+			// These are the read-ahead manager's own defaults, restated here because this is now the
+			// value that reaches it. They must stay equal to fuse.ReadAheadManager's nil-config
+			// fallback, which TestReadAheadDefaultsMatchTheManagers asserts — a mount and a
+			// directly-constructed manager reporting different behavior would be the same seam
+			// #176 was.
 			ReadAhead: ReadAheadConfig{
-				Enabled:                true,
-				Size:                   "64MB",
-				Strategy:               "predictive",
-				SequentialMinSize:      "1MB",
-				EnablePatternDetection: true,
-				SequentialThreshold:    0.7,
-				PredictionWindow:       100,
-				EnablePrefetch:         true,
-				MaxConcurrentFetch:     4,
-				PrefetchAhead:          3,
-				PrefetchBandwidthMBs:   10,
-				ConfidenceThreshold:    0.7,
-				EnableMLPrediction:     false,
-				MLModelPath:            "",
-				LearningRate:           0.01,
-				PatternDepth:           1000,
-				MetricsEnabled:         true,
-				StatisticsInterval:     "30s",
-				ModelUpdateInterval:    "5m",
+				Enabled:         true,
+				WindowSize:      "64KB",
+				MinSequential:   3,
+				ConcurrentReads: 4,
+				TTL:             5 * time.Minute,
 			},
 			ParallelRead: ParallelReadConfig{
 				Enabled:   true,
@@ -909,10 +927,6 @@ func getEnvMappings() []envMapping {
 			}
 			return nil
 		}},
-		{"OBJECTFS_READ_AHEAD_SIZE", func(c *Configuration, val string) error {
-			c.Performance.ReadAheadSize = val
-			return nil
-		}},
 		// Repointed from the removed performance.compression_enabled to the setting that actually
 		// controls compression (#157). The variable's name was never wrong; what it assigned to was
 		// read by nothing, so exporting it had no effect on whether objects were compressed.
@@ -975,29 +989,33 @@ func getEnvMappings() []envMapping {
 			return nil
 		}},
 
-		// Read-ahead settings
+		// Read-ahead. Four variables where there were six, matching the four keys the manager reads
+		// (#176). OBJECTFS_READAHEAD_STRATEGY, _PATTERN_DETECTION and _ML_PREDICTION are gone with the
+		// settings they assigned to, and OBJECTFS_READ_AHEAD_SIZE is gone with performance.read_ahead_size
+		// — its replacement is _READAHEAD_WINDOW_SIZE, which is the same quantity under the name the one
+		// consumer uses.
 		{"OBJECTFS_READAHEAD_ENABLED", func(c *Configuration, val string) error {
 			c.Performance.ReadAhead.Enabled = strings.ToLower(val) == TrueValue
 			return nil
 		}},
-		{"OBJECTFS_READAHEAD_SIZE", func(c *Configuration, val string) error {
-			c.Performance.ReadAhead.Size = val
+		{"OBJECTFS_READAHEAD_WINDOW_SIZE", func(c *Configuration, val string) error {
+			c.Performance.ReadAhead.WindowSize = val
 			return nil
 		}},
-		{"OBJECTFS_READAHEAD_STRATEGY", func(c *Configuration, val string) error {
-			c.Performance.ReadAhead.Strategy = val
+		{"OBJECTFS_READAHEAD_MIN_SEQUENTIAL", func(c *Configuration, val string) error {
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return fmt.Errorf("OBJECTFS_READAHEAD_MIN_SEQUENTIAL=%q is not an integer: %w", val, err)
+			}
+			c.Performance.ReadAhead.MinSequential = n
 			return nil
 		}},
-		{"OBJECTFS_READAHEAD_PATTERN_DETECTION", func(c *Configuration, val string) error {
-			c.Performance.ReadAhead.EnablePatternDetection = strings.ToLower(val) == TrueValue
-			return nil
-		}},
-		{"OBJECTFS_READAHEAD_PREFETCH", func(c *Configuration, val string) error {
-			c.Performance.ReadAhead.EnablePrefetch = strings.ToLower(val) == TrueValue
-			return nil
-		}},
-		{"OBJECTFS_READAHEAD_ML_PREDICTION", func(c *Configuration, val string) error {
-			c.Performance.ReadAhead.EnableMLPrediction = strings.ToLower(val) == TrueValue
+		{"OBJECTFS_READAHEAD_CONCURRENT_READS", func(c *Configuration, val string) error {
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return fmt.Errorf("OBJECTFS_READAHEAD_CONCURRENT_READS=%q is not an integer: %w", val, err)
+			}
+			c.Performance.ReadAhead.ConcurrentReads = n
 			return nil
 		}},
 	}
@@ -1332,9 +1350,7 @@ func (c *Configuration) validateSizes() error {
 	}{
 		{path: "performance.cache_size", value: c.Performance.CacheSize, required: true},
 		{path: "performance.write_buffer_size", value: c.Performance.WriteBufferSize},
-		{path: "performance.read_ahead_size", value: c.Performance.ReadAheadSize},
-		{path: "performance.read_ahead.size", value: c.Performance.ReadAhead.Size},
-		{path: "performance.read_ahead.sequential_min_size", value: c.Performance.ReadAhead.SequentialMinSize},
+		{path: "performance.read_ahead.window_size", value: c.Performance.ReadAhead.WindowSize},
 		{path: "performance.parallel_read.threshold", value: c.Performance.ParallelRead.Threshold},
 		{path: "performance.parallel_read.chunk_size", value: c.Performance.ParallelRead.ChunkSize},
 		{path: "cache.persistent_cache.max_size", value: c.Cache.PersistentCache.MaxSize},
@@ -1414,6 +1430,14 @@ func (c *Configuration) validateDurations() error {
 		{"cache.ttl", c.Cache.TTL},
 		{"cluster.redis.ttl", c.Cluster.Redis.TTL},
 
+		// Checked here and not in validateReadAheadConfig, even though that function checks the other
+		// four read-ahead keys, because that one returns early on a disabled block and this trap does
+		// not care whether the feature is on: `ttl: 5` is a mistake either way, and a mount that is
+		// later enabled would inherit it silently. Same boundary validateSizes draws — syntax always,
+		// semantics only where the value is read. This entry was added because the reflection walk in
+		// validate_durations_test.go found it the moment #176 gave the block a duration at all.
+		{"performance.read_ahead.ttl", c.Performance.ReadAhead.TTL},
+
 		// Not wired — vfs.NewWriter takes no configuration and nothing drives a periodic flush — and
 		// checked anyway. A value that is wrong now stays wrong when it is wired, and it would then be
 		// wrong in a release that changed nothing about it. This entry was added because the
@@ -1470,55 +1494,52 @@ func parseOptionalSize(s string) (int64, error) {
 	return utils.ParseBytes(s)
 }
 
-// validateReadAheadConfig validates read-ahead specific settings
+// validateReadAheadConfig rejects a read-ahead configuration the manager cannot run with.
+//
+// Only the values the manager reads are checked, which is the point of the change that shrank this
+// function. It used to range-check nine keys — sequential_threshold, learning_rate, pattern_depth,
+// prefetch_bandwidth_mbs and the rest — none of which reached any code, so a mount could be refused
+// over a setting that would have had no effect had it been accepted (#176).
+//
+// A disabled block is not validated, for the same reason a disabled listener's address is not: failing
+// a mount over a value nothing will read is the defect above in a different direction.
 func (c *Configuration) validateReadAheadConfig() error {
 	ra := c.Performance.ReadAhead
-
-	// Validate strategy
-	validStrategies := []string{"simple", "predictive", "ml"}
-	strategyValid := slices.Contains(validStrategies, ra.Strategy)
-	if !strategyValid {
-		return fmt.Errorf("invalid strategy: %s (must be one of: %s)",
-			ra.Strategy, strings.Join(validStrategies, ", "))
+	if !ra.Enabled {
+		return nil
 	}
 
-	// Validate thresholds
-	if ra.SequentialThreshold < 0 || ra.SequentialThreshold > 1 {
-		return fmt.Errorf("sequential_threshold must be between 0 and 1, got %f", ra.SequentialThreshold)
+	// ConcurrentReads is the worker count, and zero is not "no limit": NewReadAheadManager starts one
+	// goroutine per worker, so zero starts none and every prefetch is queued and never performed —
+	// read-ahead silently off while the configuration says it is on.
+	if ra.ConcurrentReads <= 0 {
+		return fmt.Errorf("performance.read_ahead.concurrent_reads must be greater than 0, got %d; "+
+			"it is the prefetch worker count, and zero starts no workers rather than removing a limit",
+			ra.ConcurrentReads)
 	}
 
-	if ra.ConfidenceThreshold < 0 || ra.ConfidenceThreshold > 1 {
-		return fmt.Errorf("confidence_threshold must be between 0 and 1, got %f", ra.ConfidenceThreshold)
+	if ra.MinSequential <= 0 {
+		return fmt.Errorf("performance.read_ahead.min_sequential must be greater than 0, got %d; "+
+			"prefetching before any sequential read has been observed would fetch ahead of a random "+
+			"reader", ra.MinSequential)
 	}
 
-	if ra.LearningRate < 0 || ra.LearningRate > 1 {
-		return fmt.Errorf("learning_rate must be between 0 and 1, got %f", ra.LearningRate)
+	if ra.TTL <= 0 {
+		return fmt.Errorf("performance.read_ahead.ttl must be greater than 0, got %s; it is how long "+
+			"an idle read pattern is remembered, and zero expires every pattern before the next read",
+			ra.TTL)
 	}
 
-	// Validate positive integers
-	if ra.PredictionWindow < 0 {
-		return fmt.Errorf("prediction_window must be non-negative, got %d", ra.PredictionWindow)
+	// WindowSize is parsed here as well as in validateSizes, because that check accepts an empty string
+	// and this one must not: an empty window is a zero floor, which leaves the prefetch equal to the
+	// reader's last read and is a different behavior from the documented default.
+	if ra.WindowSize == "" {
+		return fmt.Errorf("performance.read_ahead.window_size must be set when read-ahead is enabled; " +
+			"it is the floor on the prefetch length, and an empty value is a floor of zero")
 	}
 
-	if ra.MaxConcurrentFetch <= 0 {
-		return fmt.Errorf("max_concurrent_fetch must be greater than 0, got %d", ra.MaxConcurrentFetch)
-	}
-
-	if ra.PrefetchAhead < 0 {
-		return fmt.Errorf("prefetch_ahead must be non-negative, got %d", ra.PrefetchAhead)
-	}
-
-	if ra.PrefetchBandwidthMBs < 0 {
-		return fmt.Errorf("prefetch_bandwidth_mbs must be non-negative, got %d", ra.PrefetchBandwidthMBs)
-	}
-
-	if ra.PatternDepth < 0 {
-		return fmt.Errorf("pattern_depth must be non-negative, got %d", ra.PatternDepth)
-	}
-
-	// Validate ML settings if enabled
-	if ra.EnableMLPrediction && ra.MLModelPath == "" {
-		return fmt.Errorf("ml_model_path must be specified when enable_ml_prediction is true")
+	if _, err := utils.ParseBytes(ra.WindowSize); err != nil {
+		return fmt.Errorf("performance.read_ahead.window_size is not a size: %q (%w)", ra.WindowSize, err)
 	}
 
 	return nil

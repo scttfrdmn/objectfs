@@ -12,10 +12,13 @@
 > - **The Go in the later sections does not compile.** Roughly 700 lines of it — `OptimizationProfile`,
 >   `contentProfiles`, `LatencyProfile`, and the types they reference — name nothing that exists in
 >   the tree, and some of it is not valid Go.
-> - **The YAML schema is proposed, not implemented.** `mount:`, `latency_profile:`, and
->   `security.kms_key` are not keys the loader has; with strict decoding a config file using them
->   fails to start. `internal/config/docs_test.go` exempts this file from the schema check for
->   exactly this reason.
+> - **The YAML schema is proposed, not implemented.** `mount:`, `latency_profile:`,
+>   `performance.read_ahead_size` (and `OBJECTFS_READ_AHEAD_SIZE`), and `security.kms_key` are not
+>   keys the loader has; with strict decoding a config file using them fails to start.
+>   `internal/config/docs_test.go` exempts this file from the schema check for exactly this reason.
+>   Read-ahead is configured by the `performance.read_ahead` block, whose `window_size` is the
+>   nearest real equivalent to the `read_ahead_size` the profiles below set — see
+>   [docs/features/read-ahead.md](docs/features/read-ahead.md) for the five keys that exist (#176).
 > - **"POSIX-compliant" was wrong** and is corrected in the body rather than only noted here — a
 >   banner a reader may skip is weaker than a sentence that no longer makes the claim. ObjectFS
 >   presents a POSIX interface over object storage. There are no hard links and no cross-host

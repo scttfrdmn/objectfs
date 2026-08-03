@@ -336,11 +336,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mapping were absent. That is the shape of the original config-plumbing defect: a field nothing mapped
   still arriving at a plausible value from somewhere else.
 
+- **`performance.read_ahead` reaches the prefetcher, and has five keys instead of twenty ([#176]).**
+  Every read-ahead setting was decoded, defaulted, range-checked at load, documented on its own page,
+  and shipped in four preset config files — and read by nothing, because the mount constructed its
+  read-ahead manager with a literal `nil` and ran that manager's built-in defaults. So a deployment
+  that set `window_size: 128MB` for a streaming workload was prefetching 64 KB, and had no way to find
+  that out.
+
+  The reduction is the fix, not a simplification of it. The two sides did not disagree about a value;
+  they disagreed about what read-ahead *is*. `internal/config` described a strategy selector
+  (`strategy: simple|predictive|ml`) over a pattern detector with a confidence threshold and a
+  prediction window, a bandwidth-capped prefetcher, and an online-learning model with
+  `ml_model_path`, `learning_rate`, `pattern_depth` and `model_update_interval`. What exists in
+  `internal/fuse` is a sequential-access detector with a prefetch window, five fields, tuned against
+  measured byte counts. Beyond `enabled` there was no field-name overlap at all — nothing to pass
+  through — so the block was cut down to the detector's own knobs and wired:
+  `enabled`, `window_size`, `min_sequential`, `concurrent_reads`, `ttl`.
+
+  Wiring the old block would have been worse than leaving it inert. A validated `ml_model_path`
+  reaching no model loader is a claim about the software, and range-checking `learning_rate` to 0–1 is
+  what made the whole set look load-bearing: a user whose config is rejected for an out-of-range value
+  reasonably concludes the accepted values do something. Fifteen keys are **removed rather than
+  deprecated**, so a file still setting one fails to load with the key named — same reasoning as
+  `write_buffer.compression` above.
+
+  `performance.read_ahead_size` is removed too, and it is `compression_enabled`'s twin: a prominent
+  `64MB` default, read by nothing, sitting two lines above the block describing the same quantity with
+  a different default. Two names for one setting can only ever disagree.
+  `OBJECTFS_READ_AHEAD_SIZE` goes with it, and the six `OBJECTFS_READAHEAD_*` variables become four —
+  the two counts now report a parse failure rather than silently keeping the default, because a worker
+  count reverting to 4 when 1 was meant is prefetch traffic nobody asked for.
+
+  Behavior at the default configuration is deliberately unchanged: `config.NewDefault`'s block is now
+  exactly `fuse.DefaultReadAheadConfig`, which is what every mount has run all along, and tests on both
+  sides of the seam assert those two remain equal. Two validation rules are new because the values now
+  reach code — `concurrent_reads: 0` is rejected (it is the worker count, and zero starts no workers,
+  so every prefetch is queued and never performed: read-ahead silently off while the config says on),
+  and an empty `window_size` is rejected when enabled (an empty floor is a floor of zero, not the
+  default). A **disabled** block is no longer validated at all, which is the same defect pointing the
+  other way: a mount should not be refused over settings nothing will read. Two checks stay
+  unconditional, because they catch a typo rather than a setting: a `window_size` that is not a size at
+  all, and a `ttl` written without a unit — `ttl: 5` is five nanoseconds, silently, since yaml.v2 reads
+  a bare integer into a `time.Duration` as a raw nanosecond count. Both would otherwise surface months
+  later, when read-ahead is turned on, as a validation failure over a line nobody touched. The `ttl`
+  omission was found by the reflection walk over the schema that pins every duration to
+  `validateDurations`, the moment this change gave read-ahead a duration at all.
+
+  Presets and docs were rewritten rather than relabeled. `readahead-simple.yaml` became
+  `readahead-disabled.yaml` — it configured "no pattern detection, no prefetching", whose honest
+  spelling is read-ahead off — and `readahead-ml.yaml` was **deleted**, because a preset cannot be
+  corrected into configuring a model loader that does not exist. `docs/features/read-ahead.md` lost its
+  ML training guide and its three-strategy comparison for the same reason.
+
+  One thing the wiring exposed and did not fix: `min_sequential` has no effect below 6, because the
+  prefetch also requires a confidence above 0.5 and confidence is `sequentialHits/10` — two thresholds
+  over one counter, of which one is configurable. The shipped default of 3 is inside that range, so the
+  documented default does not describe the default behavior. Reconciling them changes prefetch
+  behavior at the default configuration, which wants a measurement rather than a number nudged in
+  passing, so it is filed as [#247] and documented where the setting is.
+
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
+[#176]: https://github.com/scttfrdmn/objectfs/issues/176
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#192]: https://github.com/scttfrdmn/objectfs/issues/192
 [#202]: https://github.com/scttfrdmn/objectfs/issues/202
@@ -349,6 +409,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#212]: https://github.com/scttfrdmn/objectfs/issues/212
 [#230]: https://github.com/scttfrdmn/objectfs/issues/230
 [#245]: https://github.com/scttfrdmn/objectfs/issues/245
+[#247]: https://github.com/scttfrdmn/objectfs/issues/247
 
 ## [0.10.3] - 2026-08-02
 

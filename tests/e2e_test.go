@@ -346,7 +346,7 @@ func (s *E2ETestSuite) TestConcurrencyAndPerformance() {
 	cfg := config.NewDefault()
 	cfg.Performance.MaxConcurrency = 200
 	cfg.Performance.ConnectionPoolSize = 16
-	cfg.Performance.ReadAheadSize = "8MB"
+	cfg.Performance.ReadAhead.WindowSize = "8MB"
 
 	adp, err := adapter.New(s.ctx, "s3://performance-test-bucket", "/tmp/performance-test", cfg)
 	require.NoError(t, err)
@@ -356,7 +356,7 @@ func (s *E2ETestSuite) TestConcurrencyAndPerformance() {
 	cfg2 := config.NewDefault()
 	cfg2.Performance.MaxConcurrency = 50
 	cfg2.Performance.ConnectionPoolSize = 4
-	cfg2.Performance.ReadAheadSize = "2MB"
+	cfg2.Performance.ReadAhead.WindowSize = "2MB"
 
 	adp2, err := adapter.New(s.ctx, "s3://conservative-bucket", "/tmp/conservative-test", cfg2)
 	require.NoError(t, err)

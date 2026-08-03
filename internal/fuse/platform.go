@@ -70,6 +70,10 @@ func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeB
 		}
 	}
 
+	// Nil is meaningful and is passed through as nil: NewReadAheadManager substitutes
+	// DefaultReadAheadConfig, which is what every mount ran on before this was plumbed.
+	fuseConfig.ReadAhead = config.ReadAhead
+
 	if o := config.Options; o != nil {
 		fuseConfig.ReadOnly = o.ReadOnly
 

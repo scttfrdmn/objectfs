@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/fuse"
 	"github.com/scttfrdmn/objectfs/internal/storage/s3"
 	"github.com/scttfrdmn/objectfs/pkg/retry"
 )
@@ -516,5 +517,118 @@ func TestDefaultConfigProducesABoundedWritePath(t *testing.T) {
 	}
 	if got.MaxBuffers <= 0 {
 		t.Errorf("the default configuration produces MaxBuffers=%d, an unbounded node count", got.MaxBuffers)
+	}
+}
+
+// TestBuildReadAheadConfigMapsEveryConfiguredValue is the mapping half of #176.
+//
+// performance.read_ahead was decoded by internal/config, defaulted by NewDefault, range-checked by
+// Validate, set to four different profiles in shipped preset files — and there was no function here to
+// map it, because nothing consumed it. NewFileSystem constructed the prefetcher with a literal nil, so
+// every mount ran the manager's built-in defaults and every read_ahead key in every config file was
+// decoration.
+//
+// Values are written out rather than computed, for the reason
+// TestBuildS3ConfigMapsEveryConfiguredValue documents at length: deriving the expectation from the input
+// would agree with a mapping that read min_sequential into concurrent_reads.
+func TestBuildReadAheadConfigMapsEveryConfiguredValue(t *testing.T) {
+	t.Parallel()
+
+	cfg := createTestConfig()
+	cfg.Performance.ReadAhead = config.ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      "512KB",
+		MinSequential:   11,
+		ConcurrentReads: 6,
+		TTL:             7 * time.Minute,
+	}
+
+	got := (&Adapter{config: cfg}).buildReadAheadConfig()
+
+	if got == nil {
+		t.Fatal("buildReadAheadConfig returned nil for an enabled block, so NewReadAheadManager would " +
+			"substitute its own defaults and the configuration would be ignored")
+	}
+
+	// Every number is spelled out: 512KB is 524288, and 11/6 are distinct from each other and from
+	// every default, so a crossed field fails rather than coincidentally matching.
+	want := fuse.ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      524288,
+		MinSequential:   11,
+		ConcurrentReads: 6,
+		TTL:             7 * time.Minute,
+	}
+
+	if *got != want {
+		t.Errorf("buildReadAheadConfig() = %+v, want %+v", *got, want)
+	}
+}
+
+// TestBuildReadAheadConfigIsNonNilWhenDisabled pins the arm that looks like it should return nil.
+//
+// It must not. Nil is [fuse.NewReadAheadManager]'s "use DefaultReadAheadConfig" signal, and those
+// defaults have read-ahead *on* — so returning nil for `enabled: false` would leave the prefetcher
+// running while the configuration said it was off, which is a worse failure than the one #176 fixed: it
+// generates S3 GETs and egress an operator explicitly asked not to pay for.
+func TestBuildReadAheadConfigIsNonNilWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := createTestConfig()
+	cfg.Performance.ReadAhead.Enabled = false
+
+	got := (&Adapter{config: cfg}).buildReadAheadConfig()
+
+	if got == nil {
+		t.Fatal("buildReadAheadConfig returned nil for read_ahead.enabled: false. Nil means \"use the " +
+			"manager's defaults\", and those have read-ahead enabled — so this would turn prefetching " +
+			"off in the config file and leave it running on the mount")
+	}
+
+	if got.Enabled {
+		t.Error("read_ahead.enabled: false produced an enabled prefetcher")
+	}
+}
+
+// TestBuildReadAheadConfigFallsBackToTheManagersWindow pins the empty-window path.
+//
+// window_size is the one read-ahead value that goes through [Adapter.sizeOrDefault], so it is the one
+// that can silently become zero. Zero is not "no floor": it makes the prefetch length equal to the
+// reader's own last read, which is a different behavior from the documented default and one no
+// configuration names. An absent value must reach the manager as the manager's own window.
+func TestBuildReadAheadConfigFallsBackToTheManagersWindow(t *testing.T) {
+	t.Parallel()
+
+	cfg := createTestConfig()
+	cfg.Performance.ReadAhead.Enabled = true
+	cfg.Performance.ReadAhead.WindowSize = ""
+
+	got := (&Adapter{config: cfg}).buildReadAheadConfig()
+
+	if want := fuse.DefaultReadAheadConfig().WindowSize; got.WindowSize != want {
+		t.Errorf("an empty read_ahead.window_size produced WindowSize=%d, want %d. Zero would make the "+
+			"prefetch floor the reader's last read length", got.WindowSize, want)
+	}
+}
+
+// TestDefaultConfigReachesTheManagerUnchanged is the end-to-end statement of #176.
+//
+// Not a mapping assertion: it asks whether the configuration most users run produces exactly what the
+// prefetcher would have chosen for itself. It must, because until this release that is literally what
+// every mount got, and a silent behavior change at the default configuration is not what closing a
+// plumbing gap should deliver.
+func TestDefaultConfigReachesTheManagerUnchanged(t *testing.T) {
+	t.Parallel()
+
+	got := (&Adapter{config: config.NewDefault()}).buildReadAheadConfig()
+
+	if got == nil {
+		t.Fatal("the default configuration produced no read-ahead config")
+	}
+
+	if *got != fuse.DefaultReadAheadConfig() {
+		t.Errorf("the shipped defaults now map to a prefetcher configuration that differs from the one "+
+			"every mount ran before performance.read_ahead was wired:\n got: %+v\nwant: %+v",
+			*got, fuse.DefaultReadAheadConfig())
 	}
 }

@@ -278,9 +278,14 @@ func TestConfigUnit(t *testing.T) {
 			WriteBufferSize:    "10MB",
 			MaxConcurrency:     8,
 			ConnectionPoolSize: 5,
+			// Every field is required when Enabled is true: the manager cannot run with a zero
+			// worker count, a zero sequential threshold, a zero TTL, or an empty window.
 			ReadAhead: config.ReadAheadConfig{
-				Strategy:           "predictive",
-				MaxConcurrentFetch: 4, // Required field
+				Enabled:         true,
+				WindowSize:      "64KB",
+				MinSequential:   3,
+				ConcurrentReads: 4,
+				TTL:             5 * time.Minute,
 			},
 		},
 		Cache: config.CacheConfig{

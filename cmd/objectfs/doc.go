@@ -195,8 +195,13 @@ YAML configuration with comprehensive options:
 	  cache_size: "4GB"
 	  write_buffer_size: "64MB"
 	  max_concurrency: 200
-	  read_ahead_size: "128MB"
 	  connection_pool_size: 8
+	  read_ahead:
+	    enabled: true
+	    window_size: "64KB"    # floor on the prefetch length
+	    min_sequential: 3      # sequential reads before prefetching starts
+	    concurrent_reads: 4    # prefetch workers
+	    ttl: 5m
 
 	cache:
 	  ttl: 5m
@@ -228,11 +233,17 @@ Core Settings:
 
 Performance Settings:
 
-	OBJECTFS_CACHE_SIZE             Cache size (e.g., "4GB")
-	OBJECTFS_MAX_CONCURRENCY        Maximum concurrent operations
-	OBJECTFS_WRITE_BUFFER_SIZE      Write buffer size
-	OBJECTFS_READ_AHEAD_SIZE        Read-ahead buffer size
-	OBJECTFS_COMPRESSION_ENABLED    Enable compression (true/false)
+	OBJECTFS_CACHE_SIZE                  Cache size (e.g., "4GB")
+	OBJECTFS_MAX_CONCURRENCY             Maximum concurrent operations
+	OBJECTFS_WRITE_BUFFER_SIZE           Write buffer size
+	OBJECTFS_COMPRESSION_ENABLED         Enable compression (true/false)
+
+Read-ahead Settings:
+
+	OBJECTFS_READAHEAD_ENABLED           Prefetch ahead of a sequential reader (strictly "true")
+	OBJECTFS_READAHEAD_WINDOW_SIZE       Floor on the prefetch length (e.g., "256KB")
+	OBJECTFS_READAHEAD_MIN_SEQUENTIAL    Sequential reads before prefetching starts
+	OBJECTFS_READAHEAD_CONCURRENT_READS  Prefetch workers; must be > 0
 
 AWS Settings:
 

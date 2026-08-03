@@ -85,7 +85,6 @@ performance:
   cache_size: 2GB                     # in-memory read cache
   write_buffer_size: 16MB             # not yet wired — write_buffer.max_memory is the live setting
   max_concurrency: 150
-  read_ahead_size: 64MB               # not yet wired — see read_ahead below
   # Pooled S3 clients. Also the batch concurrency in GetObjects/PutObjects and MaxIdleConnsPerHost
   # on the HTTP transport, so it bounds three things at once. Must be > 0: zero reached the batch
   # paths as an unbuffered channel and blocked forever.
@@ -94,28 +93,40 @@ performance:
   ml_model_path: ""                   # not yet wired
   multilevel_caching: false           # not yet wired — the multi-level cache is always used
 
-  # Read-ahead and prefetch. Not yet wired: internal/fuse constructs its read-ahead manager with
-  # nil config and uses its own built-in defaults, so nothing in this block is read.
+  # Prefetch ahead of a sequential reader.
+  #
+  # Five keys, one per setting the prefetcher has. This block used to have twenty, describing a
+  # strategy selector (simple/predictive/ml) and an ML predictor with a learning rate and a model
+  # path; there is one prefetcher and no model loader, and the whole block reached no code because
+  # the mount constructed its read-ahead manager with a nil config. Setting a removed key now fails
+  # at load with the key named. See examples/config/readahead-*.yaml for three worked profiles, and
+  # performance.parallel_read below for the other half of read optimization.
   read_ahead:
     enabled: true
-    size: 64MB
-    strategy: predictive              # simple, predictive, ml
-    sequential_min_size: 1MB
-    enable_pattern_detection: true
-    sequential_threshold: 0.7         # 0-1
-    prediction_window: 100
-    enable_prefetch: true
-    max_concurrent_fetch: 4
-    prefetch_ahead: 3
-    prefetch_bandwidth_mbs: 10
-    confidence_threshold: 0.7         # 0-1
-    enable_ml_prediction: false
-    ml_model_path: ""
-    learning_rate: 0.01               # 0-1
-    pattern_depth: 1000
-    metrics_enabled: true
-    statistics_interval: 30s
-    model_update_interval: 5m
+
+    # Floor on how far ahead to read. The prefetch is always at least the reader's own last read: a
+    # shorter one cannot satisfy the read it anticipates, because the cache answers a Get only when
+    # it holds the whole requested range, so a 64KB prefetch ahead of a 128KB reader is an entry
+    # every subsequent read walks past — paid for twice, in egress and in cache capacity.
+    window_size: 64KB
+
+    # Consecutive sequential reads required before prefetching starts.
+    #
+    # The effective floor is 6, not this number, and the default is below it: the prefetch also
+    # requires a confidence above 0.5, confidence is sequentialHits/10, so nothing is prefetched
+    # before the sixth consecutive sequential read whatever this says. 3 is kept as the default
+    # because it is what every mount has run since the prefetcher was written — raising it to 6
+    # would document the behavior more honestly but is a change to the shipped value, and the two
+    # thresholds want reconciling in the code rather than papering over here (#247).
+    min_sequential: 3
+
+    # Prefetch workers, each performing one GET at a time. Must be > 0 when enabled — zero starts no
+    # workers, so every prefetch is queued and never performed, which is read-ahead silently off
+    # while the configuration says it is on.
+    concurrent_reads: 4
+
+    # How long an idle read pattern is remembered.
+    ttl: 5m
 
   # Fan out a large read into concurrent range GETs.
   #

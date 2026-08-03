@@ -110,8 +110,13 @@ Configuration file format:
 	  cache_size: "2GB"
 	  write_buffer_size: "16MB"
 	  max_concurrency: 150
-	  read_ahead_size: "64MB"
 	  connection_pool_size: 8
+	  read_ahead:
+	    enabled: true
+	    window_size: "64KB"
+	    min_sequential: 3
+	    concurrent_reads: 4
+	    ttl: 5m
 
 	storage:
 	  s3:
@@ -157,6 +162,15 @@ Environment variable mapping:
 	OBJECTFS_CACHE_SIZE="4GB"
 	OBJECTFS_MAX_CONCURRENCY="200"
 	OBJECTFS_COMPRESSION_ENABLED="true"
+
+	# Read-ahead. The two counts report a parse failure rather than keeping the default: a worker
+	# count that silently reverts to 4 when 1 was meant is prefetch traffic nobody asked for.
+	# OBJECTFS_READ_AHEAD_SIZE, OBJECTFS_READAHEAD_STRATEGY, OBJECTFS_READAHEAD_PATTERN_DETECTION and
+	# OBJECTFS_READAHEAD_ML_PREDICTION are gone with the settings they assigned to (#176).
+	OBJECTFS_READAHEAD_ENABLED="true"
+	OBJECTFS_READAHEAD_WINDOW_SIZE="256KB"
+	OBJECTFS_READAHEAD_MIN_SEQUENTIAL="6"
+	OBJECTFS_READAHEAD_CONCURRENT_READS="4"
 
 	# Feature flags
 	OBJECTFS_PREFETCHING="true"
@@ -285,31 +299,41 @@ Access Control:
 
 # Performance Tuning Profiles
 
-Pre-configured performance profiles:
+Starting points, not measurements. Each is a plausible shape for a workload; the numbers have not been
+benchmarked against the alternatives, and cache_size in particular is bounded by the host rather than
+by the link.
 
-Low Latency Profile:
+Low Latency (same region, high bandwidth):
 
 	performance:
 	  cache_size: "1GB"
 	  max_concurrency: 100
-	  read_ahead_size: "32MB"
 	  connection_pool_size: 4
+	  read_ahead:
+	    window_size: "64KB"     # reads are cheap; a wrong prefetch is not worth much
+	    concurrent_reads: 4
 
-High Throughput Profile:
+High Throughput (large sequential reads):
 
 	performance:
 	  cache_size: "8GB"
 	  max_concurrency: 300
-	  read_ahead_size: "256MB"
 	  connection_pool_size: 16
+	  read_ahead:
+	    window_size: "1MB"      # read far ahead of a sequential reader
+	    min_sequential: 6       # 6 is the effective floor whatever is set; see ReadAheadConfig
+	    concurrent_reads: 8
 
-High Latency/Satellite Profile:
+High Latency / Satellite (a round trip is the dominant cost):
 
 	performance:
 	  cache_size: "16GB"
 	  max_concurrency: 25
-	  read_ahead_size: "1GB"
 	  connection_pool_size: 2
+	  read_ahead:
+	    window_size: "4MB"      # amortize the round trip over as many bytes as possible
+	    concurrent_reads: 2     # but few in flight: the link is the scarce resource
+	    ttl: 30m
 	write_buffer:
 	  flush_interval: 300s
 	  max_memory: "1GB"

@@ -518,7 +518,6 @@ func TestCacheHitsAreReportedToTheDetector(t *testing.T) {
 	f.fs.readAhead = NewReadAheadManager(f.fs, &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 * 1024,
-		MaxDistance:     1024 * 1024,
 		MinSequential:   3,
 		ConcurrentReads: 0, // no workers: schedulePrefetch fills the queue and nothing drains it
 		TTL:             time.Minute,
