@@ -3,10 +3,9 @@ package compression
 import (
 	"fmt"
 	"sort"
-	"strconv"
-	"strings"
 
 	comprpkg "github.com/scttfrdmn/objectfs/pkg/compression"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 // Settings are the inputs needed to build a Compressor.
@@ -75,7 +74,7 @@ func NewCompressor(cfg Settings) (*Compressor, error) {
 		return nil, fmt.Errorf("create %s codec: %w", cfg.Algorithm, err)
 	}
 
-	minSize, err := parseSize(cfg.MinSize)
+	minSize, err := utils.ParseOptionalBytes(cfg.MinSize)
 	if err != nil {
 		return nil, fmt.Errorf("invalid min_size %q: %w", cfg.MinSize, err)
 	}
@@ -218,41 +217,17 @@ func (c *Compressor) Stats(original, compressed int64) comprpkg.Stats {
 	}
 }
 
-// parseSize converts human-readable size strings (e.g. "4KB", "1MB") to bytes.
-// Accepted suffixes (case-insensitive): B, KB, MB, GB.
-// An empty or "0" string returns 0.
-func parseSize(s string) (int64, error) {
-	s = strings.TrimSpace(s)
-	if s == "" || s == "0" {
-		return 0, nil
-	}
-
-	upper := strings.ToUpper(s)
-	units := []struct {
-		suffix string
-		mult   int64
-	}{
-		{"GB", 1024 * 1024 * 1024},
-		{"MB", 1024 * 1024},
-		{"KB", 1024},
-		{"B", 1},
-	}
-
-	for _, u := range units {
-		if strings.HasSuffix(upper, u.suffix) {
-			numStr := strings.TrimSpace(s[:len(s)-len(u.suffix)])
-			n, err := strconv.ParseFloat(numStr, 64)
-			if err != nil {
-				return 0, fmt.Errorf("cannot parse %q: %w", s, err)
-			}
-			return int64(n * float64(u.mult)), nil
-		}
-	}
-
-	// Plain integer (bytes)
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("cannot parse %q as size", s)
-	}
-	return n, nil
-}
+// The parseSize that used to be here is gone; [utils.ParseOptionalBytes] is called directly from
+// NewCompressor (#159). It was one of four size parsers, and it accepted three things a compression
+// floor must not be:
+//
+//   - "1TB" and "1PB" as *errors*, because its unit table stopped at GB — so a size larger than the
+//     ones it knew was rejected while smaller malformed ones were accepted;
+//   - "-1MB" as -1048576, a negative minimum, which makes `len(data) < c.minSize` true for nothing and
+//     silently compresses every object including the ones below the floor an operator set;
+//   - "99999999999GB" as math.MaxInt64, because the multiply overflowed unchecked — a floor no object
+//     can reach, which is compression silently off while the configuration says it is on.
+//
+// The last two are the same defect in opposite directions and neither reports anything, which is the
+// argument for one parser rather than four: this one was the *safe* copy, in that it returned an error
+// at all.

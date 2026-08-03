@@ -165,14 +165,25 @@ func FormatBytes(bytes int64) string {
 // an optional trailing B. Multipliers are binary: 1 K is 1024 bytes, as everywhere else in ObjectFS.
 // Case and surrounding whitespace are ignored. A bare number is a count of bytes.
 //
-// This is the only size parser in the repository, and consolidating on it is the point. There were
-// four: this one, [internal/adapter.parseSize], one in internal/compression, and a fourth copy in
-// tests. They disagreed about the cases that matter. The adapter's returned 1 GiB — silently, with no
-// error — for *any* input it could not parse, so `cache_size: 2G` (no B) configured a 1 GiB cache and
-// `cache_size: tiny-typo` configured a 1 GiB cache, and neither said so. internal/compression's
-// treated "0" as zero where the adapter's treated it as a byte count. A configuration value that
-// means one thing to the layer that validates it and another to the layer that acts on it is audit
-// finding C1's mechanism, and four parsers is four chances to reintroduce it.
+// This is the only size parser in the repository, and consolidating on it was the point (#159). There
+// were four: this one, `internal/adapter.parseSize`, one in internal/compression, and a fourth copy in
+// tests/unit_test.go. They disagreed about exactly the cases that matter, in every direction:
+//
+//   - the adapter's returned 1 GiB — silently, with no error — for *any* input it could not parse, so
+//     `cache_size: 2G` (no B), `cache_size: 64MiB` and `cache_size: tpyo` all configured the same 1 GiB
+//     cache and none of them said so;
+//   - internal/compression's unit table stopped at GB, so it *rejected* "1TB" while accepting "-1MB" as
+//     a negative floor and "99999999999GB" as math.MaxInt64 — a compression floor below every object
+//     and a floor above every object, neither reported;
+//   - the copy in tests fell through to strconv.ParseFloat on the number, which accepts Go float
+//     syntax: it read "InfMB" as math.MaxInt64 and "1e3MB" as 1000 MB, and it rejected "1TB" for the
+//     same missing-unit reason;
+//   - and they disagreed about the empty string, which is the most common value in a config file:
+//     (0, nil), 1 GiB, and an error respectively.
+//
+// A configuration value that means one thing to the layer that validates it and another to the layer
+// that acts on it is audit finding C1's mechanism, and four parsers is four chances to reintroduce it.
+// See [ParseOptionalBytes] for the empty-string half.
 //
 // It is strict for the same reason [internal/config.Configuration.LoadFromFile] is strict: this
 // function's callers are reading operator configuration, and a size it accepts becomes a cache
@@ -239,6 +250,26 @@ func ParseBytes(s string) (int64, error) {
 	}
 
 	return int64(bytes), nil
+}
+
+// ParseOptionalBytes is [ParseBytes] for a size an operator may leave unset, where unset means zero.
+//
+// Zero is the caller's signal to fall back to a built-in default, and it is deliberately not distinct
+// from a literal "0": no caller in this repository distinguishes them, because a zero-byte threshold
+// and an absent one both mean "use the default". A caller that needs the distinction should read the
+// string itself rather than teach this function a third answer.
+//
+// It exists so that "" is handled identically everywhere, which was the second half of the four-parser
+// problem described on [ParseBytes]. The parsers disagreed about the empty string as much as about
+// malformed input: internal/compression's returned (0, nil), internal/adapter's returned 1 GiB and no
+// error, and the copy in tests returned an error. An unset size is the most common thing in a
+// configuration file, so that is the disagreement most likely to be reached.
+func ParseOptionalBytes(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	return ParseBytes(s)
 }
 
 // checkDecimal reports whether s is a plain non-negative decimal number.

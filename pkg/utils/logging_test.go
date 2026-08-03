@@ -456,6 +456,61 @@ func TestParseBytesErrorsQuoteTheInput(t *testing.T) {
 	}
 }
 
+// TestParseOptionalBytesDiffersOnlyOnTheEmptyString is the whole contract, and it is stated as a
+// difference rather than as a table of sizes on purpose.
+//
+// A table would restate TestParseBytes and pass just as well if ParseOptionalBytes grew a second
+// implementation — which is the defect this function exists to prevent, four times over. The parsers
+// it replaced disagreed about "" (compression's returned zero, the adapter's returned 1 GiB, the copy
+// in tests returned an error) *and* about "1TB", "-1MB" and "InfMB", because each was a separate
+// implementation rather than a wrapper. So the property asserted is delegation: for every input except
+// "", the two functions must return the same value and the same error-ness.
+func TestParseOptionalBytesDiffersOnlyOnTheEmptyString(t *testing.T) {
+	t.Parallel()
+
+	// Every shape a config file produces, plus the four the deleted parsers got wrong.
+	inputs := []string{
+		"0", "1", "512", "4KB", "1.5G", " 2 GB ", "1TB", "1PB", "128K",
+		"-1MB", "99999999999GB", "InfMB", "1e3MB", "64MiB", "4MG", "12abc", "not-a-size", " ",
+	}
+
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+
+			want, wantErr := ParseBytes(in)
+			got, gotErr := ParseOptionalBytes(in)
+
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("ParseOptionalBytes(%q) err=%v but ParseBytes err=%v: the two disagree about "+
+					"whether this value is usable, which is the four-parser defect returning", in, gotErr, wantErr)
+			}
+			if got != want {
+				t.Errorf("ParseOptionalBytes(%q) = %d, ParseBytes = %d: a size means one thing to the "+
+					"layer that validates it and another to the layer that acts on it", in, got, want)
+			}
+		})
+	}
+
+	// The one deliberate divergence. Unset is zero and not an error, because zero is the caller's
+	// signal to use its own default and an absent size is the most common thing in a config file.
+	n, err := ParseOptionalBytes("")
+	if err != nil {
+		t.Errorf("ParseOptionalBytes(\"\") = %v; an omitted size must mean \"use the default\", not "+
+			"\"refuse to start\" — every partial config file omits most sizes", err)
+	}
+	if n != 0 {
+		t.Errorf("ParseOptionalBytes(\"\") = %d, want 0: a non-zero substitute is the silent 1 GiB "+
+			"the adapter's parser returned", n)
+	}
+
+	// And ParseBytes itself must still reject it, since its callers require a size.
+	if _, err := ParseBytes(""); err == nil {
+		t.Error("ParseBytes(\"\") was accepted, so performance.cache_size could be omitted and " +
+			"become a zero-byte read cache rather than a config-load error")
+	}
+}
+
 // FuzzParseBytes asserts the parser is total and that what it accepts is non-negative.
 //
 // Two properties, both about what the callers do with the result. It reads operator configuration, so

@@ -52,7 +52,20 @@ internal/cache/redis     88
 internal/circuit         96
 # internal/compression goes from 87 to 88 with the decoder-table tests #230 added: a matrix over
 # every writable algorithm read back by every algorithm and by a disabled compressor.
-internal/compression     88
+#
+# 88 → 87 with #159's parser consolidation, and this is the deletion-of-tested-code shape rather than a
+# weakened gate — the same one internal/fuse's note below records. Counted rather than asserted: the
+# package went from 280 statements with 248 covered to 264 with 232, so all 16 statements that left were
+# covered ones and the uncovered count is unchanged at 32. `parseSize` and the `TestParseSize` that
+# exercised it both went; the floor a percentage produces moves even when nothing became less tested.
+#
+# What replaced them is not a smaller test. TestMinSizeIsParsedByTheSharedParser asserts `c.minSize` —
+# the floor that actually reaches the Compressor — over twelve cases including the three the deleted
+# parser got wrong, where TestParseSize asserted a private function's return value and passed while
+# disagreeing with the parser the mount used. The 32 statements still uncovered are the codec-table
+# construction failures in buildDecoders and NewCompressor, unreachable without breaking
+# SupportedAlgorithms itself.
+internal/compression     87
 # internal/config goes from 83 to 86 with the validation the config plumbing added. The two points
 # that raise is worth are in what the new tests assert rather than in the number: each case checks
 # that the rejection message names the YAML path, because the failure being prevented is not "a bad
@@ -168,6 +181,22 @@ internal/adapter         40
 # mount-only — the mount and unmount lifecycle and the signal handling around it — plus the kernel's
 # own half of direct I/O and page-cache retention, which is what the fuse_mount build tag and
 # `make test-fuse-mount` are for.
+#
+# 67 held, but not on the measurement it was set from, and the discrepancy is worth recording because it
+# is the third instance of the same mistake in this file. The package measures 67.5% run alone and 66.4%
+# under `go test ./...`, so the floor set from an isolated run failed the very next full-repo gate. Six
+# statements were load-dependent: the trim loop in inflightFetches.unclaimedStart and the arm in
+# performPrefetch that drops a prefetch whose whole range is already in flight. Both are only reached
+# when a read is outstanding at the instant a prefetch is scheduled, which an idle machine arranges by
+# accident and a loaded one does not — the same shape as internal/health's port race above and
+# internal/network's platform split below. A floor is a claim about a *measurement*, so the measurement
+# has to be the one CI takes.
+#
+# They are now owned by tests rather than by luck: unclaimedStart is driven directly over seven cases
+# including the chained advance a real reader cannot be made to produce on demand, and the drop arm is
+# driven by a fetch registered and never finished. The second one is bounded with an explicit timeout
+# because removing the arm makes the prefetch *block* on the read it was trimmed against rather than
+# fetch too much — a parked prefetch worker, which no byte-count assertion can see.
 internal/fuse            67
 
 # internal/cache went 74 → 76 with the re-keying work — the byte-range keying, splitting, coalescing,

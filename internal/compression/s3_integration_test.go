@@ -202,35 +202,70 @@ func TestCompressor_DecompressUnknownEncoding(t *testing.T) {
 	}
 }
 
-func TestParseSize(t *testing.T) {
+// TestMinSizeIsParsedByTheSharedParser replaces TestParseSize, which tested a copy of a parser this
+// package no longer has (#159).
+//
+// The subject is the floor that reaches the Compressor, not the parser — [utils.ParseBytes] has its own
+// table test and fuzz target in pkg/utils, and duplicating them here is what let the deleted copy
+// disagree with the real parser for a release without failing anything. What is asserted here is the
+// seam: that NewCompressor's min_size goes through the shared parser, so the cases the local copy got
+// wrong are now impossible.
+//
+// Three of the rows below are those cases, and each is a floor that silently disables or silently
+// bypasses compression rather than reporting anything:
+//
+//   - "1TB" was an *error*, because the local unit table stopped at GB. A size too large to be a
+//     sensible floor was rejected while smaller malformed strings were accepted.
+//   - "-1MB" parsed to a negative floor, which no object is below, so every object was compressed
+//     including the ones an operator set the floor to exclude.
+//   - "99999999999GB" overflowed to math.MaxInt64, a floor no object can reach — compression off while
+//     the configuration says it is on.
+func TestMinSizeIsParsedByTheSharedParser(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		input   string
+		name    string
+		minSize string
 		want    int64
 		wantErr bool
+		why     string
 	}{
-		{"", 0, false},
-		{"0", 0, false},
-		{"1", 1, false},
-		{"512", 512, false},
-		{"1KB", 1024, false},
-		{"4KB", 4096, false},
-		{"1MB", 1024 * 1024, false},
-		{"2GB", 2 * 1024 * 1024 * 1024, false},
-		{"1.5MB", int64(1.5 * 1024 * 1024), false},
-		{"not-a-size", 0, true},
-		{"1ZB", 0, true},
+		{name: "empty means no floor", minSize: "", want: 0,
+			why: "an unset min_size is the common case and must not be an error"},
+		{name: "zero means no floor", minSize: "0", want: 0,
+			why: "\"0\" and \"\" agree, which is what utils.ParseOptionalBytes exists to guarantee"},
+		{name: "bare number is bytes", minSize: "512", want: 512},
+		{name: "kilobytes", minSize: "4KB", want: 4096},
+		{name: "megabytes", minSize: "1MB", want: 1024 * 1024},
+		{name: "fractional", minSize: "1.5MB", want: int64(1.5 * 1024 * 1024)},
+		{name: "terabytes are a unit", minSize: "1TB", want: 1 << 40,
+			why: "the deleted copy's unit table stopped at GB, so this was an error"},
+		{name: "negative is rejected", minSize: "-1MB", wantErr: true,
+			why: "the deleted copy returned -1048576, a floor below every object, so the floor was " +
+				"silently ignored and everything was compressed"},
+		{name: "overflow is rejected", minSize: "99999999999GB", wantErr: true,
+			why: "the deleted copy overflowed to math.MaxInt64, a floor no object reaches, so " +
+				"compression was silently off"},
+		{name: "malformed is rejected", minSize: "not-a-size", wantErr: true},
+		{name: "unknown unit is rejected", minSize: "1ZB", wantErr: true},
+		{name: "trailing garbage is rejected", minSize: "4KiB", wantErr: true,
+			why: "the spelling someone who knows the units writes; accepting it as 4 bytes is worse " +
+				"than refusing it"},
 	}
+
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseSize(tt.input)
+			c, err := NewCompressor(makeConfig(true, "zstd", tt.minSize, 0))
 			if (err != nil) != tt.wantErr {
-				t.Errorf("parseSize(%q): err=%v, wantErr=%v", tt.input, err, tt.wantErr)
+				t.Fatalf("NewCompressor(min_size: %q): err=%v, wantErr=%v. %s",
+					tt.minSize, err, tt.wantErr, tt.why)
+			}
+			if tt.wantErr {
 				return
 			}
-			if !tt.wantErr && got != tt.want {
-				t.Errorf("parseSize(%q) = %d, want %d", tt.input, got, tt.want)
+			if c.minSize != tt.want {
+				t.Errorf("min_size %q became a floor of %d bytes, want %d. %s",
+					tt.minSize, c.minSize, tt.want, tt.why)
 			}
 		})
 	}

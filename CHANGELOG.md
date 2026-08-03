@@ -124,6 +124,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The read-ahead trim is covered by tests rather than by luck.** `inflightFetches.unclaimedStart`
+  and the arm of `performPrefetch` that drops a prefetch whose whole range is already in flight had no
+  test of their own. Both are reached only when a read is outstanding at the instant a prefetch is
+  scheduled, so an idle machine ran them by accident and a loaded one did not: `internal/fuse` measured
+  67.5% alone and 66.4% under `go test ./...`, and the coverage gate failed on a commit that touched
+  neither file. No behavior changed here — the point is that a branch nothing owns is a branch a
+  refactor can delete in silence, and this one prevents a sequential read from paying for the same
+  bytes twice.
+
+  The drop arm is asserted with an explicit timeout rather than a byte count, which is what removing it
+  actually does: a prefetch trimmed to a non-positive length waits on the very read it was trimmed
+  against, so the failure is a parked prefetch worker, not an over-large GET. With every worker parked
+  the read-ahead stops entirely and nothing reports it.
+
 - **A data race between `ConsensusEngine.Stop` and an inbound heartbeat.** `Stop` read
   `ce.electionTimer` without holding `ce.mu` while `resetElectionTimer` was replacing it from the
   gossip receiver goroutine, which is where an `AppendEntries` RPC is handled. Neither shutdown signal
@@ -295,6 +309,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix with it. A sixth implementation is one enrollment away from being held to the same contract.
 
 ### Changed
+
+- **One size parser reads every size in a configuration file ([#159]).** `pkg/utils.ParseBytes` is
+  now the only implementation; the three surviving copies — `internal/compression.parseSize`,
+  `internal/config.parseOptionalSize`, and a fourth in `tests/unit_test.go` — are deleted, and
+  `utils.ParseOptionalBytes` handles the unset-means-zero case identically everywhere. Every size a
+  config file names is therefore validated at load with a message naming the YAML key, and no size is
+  substituted silently.
+
+  Four parsers were four answers to the same string, and the disagreements were not cosmetic. Each
+  one is verified by running the deleted code rather than by reading it:
+  - `internal/compression`'s stopped its unit table at GB, so `min_size: 1TB` was an error while
+    `1GB` worked; it accepted `-1MB` as a **negative** compression floor, which makes
+    `len(data) < c.minSize` false for every input and compresses everything including the bytes the
+    threshold exists to skip; and `99999999999GB` overflowed to `math.MaxInt64`, the same defect
+    inverted — a floor nothing is ever below, so compression is configured on and never happens.
+    Neither reported anything.
+  - The copy in `tests/unit_test.go` fell through to `strconv.ParseFloat`, which accepts Go float
+    syntax: `InfMB` parsed as `math.MaxInt64` and `1e3MB` as 1000 MB. It also rejected `1TB`. A test
+    asserting against a private copy of a parser is a test that agrees with itself — this one passed
+    while disagreeing with the parser the mount used.
+  - `internal/adapter`'s, removed earlier in this release, returned 1 GiB and no error for anything
+    it could not parse.
+
+  `ParseBytes` is strict for the reason the loader is strict: it rejects trailing garbage (`4KiB`,
+  the spelling someone who knows the units writes), negatives, `Inf`/`NaN`, exponent and hex-float
+  notation, and any value that overflows `int64` once multiplied. The empty string is the one case
+  with a second meaning, and `ParseOptionalBytes` is where it lives — unset means zero, which is the
+  caller's signal to use its own default. It deliberately does not distinguish `""` from a literal
+  `"0"`, because no caller in this repository does.
 
 - **Each listener's address is one setting, beside the `enabled` flag that governs it
   ([#202], [#211], [#212]).** `global.metrics_port`, `global.health_port`, `global.profile_port`,
@@ -542,6 +585,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [scttfrdmn/cargoship#352]: https://github.com/scttfrdmn/cargoship/issues/352
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
+[#159]: https://github.com/scttfrdmn/objectfs/issues/159
 [#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
