@@ -184,6 +184,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops at `ExecStart=... \` and skips everything after it, so `--mount-point` and `--foreground` went
   unchecked — verified by mutation, changing `--mount-point` to `--mountpoint` left the test passing.
 
+### Changed
+
+- **The release security scan is a gate** ([#196]). `security-scan` in `release.yml` already scanned
+  the exact binary `publish` attaches, which is the right shape, but it could not fail: trivy-action's
+  `exit-code` has no default, so findings uploaded as SARIF and the step passed. It now exits 1 on
+  `HIGH,CRITICAL`, with `ignore-unfixed: true` and `scanners: vuln`.
+
+  Each of those is a decision rather than a default. MEDIUM and below still upload and stay visible on
+  the security tab without stopping a publish, because MEDIUM in a transitive dependency of a
+  filesystem binary is generally not worth delaying a release for. `ignore-unfixed` because a
+  vulnerability with no released fix cannot be actioned by a release — blocking on one means the
+  project cannot ship until an upstream maintainer acts, which is an availability problem wearing a
+  security posture. And the SARIF upload is now `if: always()`, so the findings that failed the step
+  are the ones that reach the security tab; without it a HIGH stopped the job before the upload and
+  left whoever was cutting the release with an exit code and no way to see the cause.
+
+  It was not a gate before now for a reason worth keeping, because it is the same reason it can be one
+  now: the first real run of this scan found a MODERATE advisory in the pinned `aws-sdk-go-v2` ([#195]),
+  and switching the gate on then would have blocked every release on a scan nobody had triaged. A gate
+  turned on against existing findings is a broken build everyone learns to bypass. That advisory is
+  fixed and the baseline is clean, which is the only state in which turning it on means anything.
+
+  The asymmetry the issue names is resolved toward gating: `govulncheck` in `security.yml` exits
+  non-zero and so has always been a hard gate on `main` and every PR, while the release — the artifact
+  users actually download — was not gated at all. The repository-wide `trivy fs` scan in that file is
+  deliberately still not a gate, and now says so: it reports on the source tree rather than on what
+  ships, including dependencies reached only by tests, so the gates are `govulncheck` and the binary
+  scan. It picks up the same severity floor and `ignore-unfixed` regardless, so a finding in one place
+  means what a finding in the other means.
+
+- **`klauspost/compress` v1.18.0 → v1.18.7**, for GO-2026-5841, an out-of-bounds read in the `s2`
+  package. Not reachable from this code — `govulncheck` reported it under "packages you import" with
+  zero called vulnerabilities — but present in the module the binary is built from, which is what a
+  binary scan sees and what the new release gate above would have failed on. Found while verifying the
+  baseline was clean before switching that gate on, which is the check being described.
+
 ### Fixed
 
 - **A bucket name one character long reported "is 1 characters".** `s3://b` is what someone types
@@ -654,6 +690,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
 [#134]: https://github.com/scttfrdmn/objectfs/issues/134
 [#135]: https://github.com/scttfrdmn/objectfs/issues/135
+[#195]: https://github.com/scttfrdmn/objectfs/issues/195
+[#196]: https://github.com/scttfrdmn/objectfs/issues/196
 [#159]: https://github.com/scttfrdmn/objectfs/issues/159
 [#156]: https://github.com/scttfrdmn/objectfs/issues/156
 [#157]: https://github.com/scttfrdmn/objectfs/issues/157
