@@ -42,6 +42,13 @@ Architecture
 Three levels are accepted, and this section says what each one does rather than what it is named
 after, because the names promise guarantees the code does not provide.
 
+Whichever level is used, a failed operation is reported both ways: [Coordinator.ExecuteOperation]
+returns a non-nil error and an [OperationResult] with Success false, and the error carries the same
+text as OperationResult.Error. Checking either is sufficient. Until v0.11.0 it was not — the
+executors reported failure only in the result and returned a nil error, so a caller checking err
+alone saw a success, which is what [ClusterManager.DistributeOperation] did when incrementing its
+own counters (#269).
+
 The reason they cannot provide them is structural, not a missing feature: every node in a cluster
 writes the same key in the same bucket. S3 is the single copy. So "replicate to the other nodes"
 means issuing the same PUT again from another node, and a majority of nodes reporting success means

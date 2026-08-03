@@ -290,6 +290,19 @@ func (c *Coordinator) ExecuteOperation(ctx context.Context, op *DistributedOpera
 	result.CompletedAt = time.Now()
 	result.Latency = time.Since(start)
 
+	// A result that failed is returned with an error, always. The three executors above each
+	// reported failure only in result.Success and returned a nil error, so a caller that checked
+	// err — the ordinary thing to do in Go, and what ClusterManager.DistributeOperation did —
+	// recorded an operation that failed on every node as a success (#269).
+	//
+	// Reconciling here rather than in each executor is deliberate: this is the single point every
+	// consistency level passes through, so a fourth level added later cannot reintroduce the
+	// disagreement, and none of them has to remember to return two representations of the same
+	// fact. The error text is result.Error so the two cannot drift either.
+	if err == nil && !result.Success {
+		err = fmt.Errorf("operation %s on %q failed: %s", op.Type, op.Key, result.Error)
+	}
+
 	// Update load balancer stats
 	c.loadBalancer.stats.mu.Lock()
 	c.loadBalancer.stats.RequestsRouted++

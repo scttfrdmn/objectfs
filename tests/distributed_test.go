@@ -14,7 +14,30 @@ import (
 	"time"
 
 	"github.com/scttfrdmn/objectfs/internal/distributed"
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
+
+// withBackend gives a cluster a real S3 backend, against an in-process substrate endpoint.
+//
+// Every test here that executed an operation used to run with no backend at all, so executeLocally
+// took its `c.backend == nil` arm and every operation failed with "no backend configured". The
+// assertions then said either nothing or the opposite of the truth — TestConcurrentOperations
+// reported ten failures and ten successes in the same run (#269). A test that asserts an operation
+// succeeded has to be able to perform one.
+//
+// A real backend rather than a mock, per the harness note in CLAUDE.md: a mock on the far side of
+// this seam would agree with the coordinator by construction, which is how the seam defects this
+// suite exists to catch were missed in the first place.
+// It returns the endpoint so a caller can seed the keys its operations read, and check afterwards
+// what actually reached storage.
+func withBackend(t *testing.T, cm *distributed.ClusterManager) *testaws.TestServer {
+	t.Helper()
+
+	srv := testaws.Start(t)
+	cm.SetBackend(srv.Backend())
+
+	return srv
+}
 
 // writeClusterSecret writes a shared cluster secret to a file and returns its path.
 //
@@ -131,6 +154,18 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 		t.Fatalf("Failed to create cluster manager: %v", err)
 	}
 
+	srv := withBackend(t, cm)
+
+	// The operation below is a GET, so the key has to exist. Seeded through the raw SDK rather than
+	// through the coordinator: a test that both writes and reads through the layer under test cannot
+	// tell a symmetric encoding bug from correct behaviour.
+	const (
+		key  = "test-key"
+		body = "distributed-operation-payload"
+	)
+
+	srv.PutObject(key, []byte(body))
+
 	err = cm.Start(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start cluster manager: %v", err)
@@ -143,7 +178,7 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 	// Create a distributed operation
 	op := &distributed.DistributedOperation{
 		Type:        distributed.OpTypeGet,
-		Key:         "test-key",
+		Key:         key,
 		Consistency: distributed.ConsistencyEventual,
 		Timeout:     3 * time.Second,
 	}
@@ -162,6 +197,12 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 		t.Errorf("Expected successful operation, got error: %s", result.Error)
 	}
 
+	// The bytes, not just the success flag. A GET reported successful that returned something else is
+	// the failure this assertion exists for.
+	if string(result.Data) != body {
+		t.Errorf("result.Data = %q, want %q", result.Data, body)
+	}
+
 	// Verify stats were updated
 	stats := cm.GetStats()
 	if stats.TotalOperations == 0 {
@@ -170,6 +211,41 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 
 	if stats.SuccessfulOps == 0 {
 		t.Error("Expected successful operation count to be incremented")
+	}
+
+	// And the counters must not contradict the result they describe (#269).
+	if stats.FailedOps != 0 {
+		t.Errorf("FailedOps = %d, want 0 for an operation that succeeded", stats.FailedOps)
+	}
+
+	// The same operation against a key that does not exist. Both halves are needed: with only the
+	// success case above, a fix that returned an error unconditionally would pass, and with only the
+	// failure case one that always errored would too. This is also the half that fails if the
+	// reconciliation in ExecuteOperation is removed — the assertion the counters could not make while
+	// every operation in this file failed for the same reason (#269).
+	failed, err := cm.DistributeOperation(ctx, &distributed.DistributedOperation{
+		Type:        distributed.OpTypeGet,
+		Key:         "a-key-that-was-never-written",
+		Consistency: distributed.ConsistencyEventual,
+		Timeout:     3 * time.Second,
+	})
+	if err == nil {
+		t.Error("DistributeOperation returned a nil error for a GET of a key that does not exist")
+	}
+	if failed == nil {
+		t.Fatal("Expected a non-nil result even on failure: it carries which node failed and why")
+	}
+	if failed.Success {
+		t.Error("result.Success = true for a GET of a key that does not exist")
+	}
+
+	stats = cm.GetStats()
+	if stats.FailedOps != 1 {
+		t.Errorf("FailedOps = %d, want 1 after one failed operation", stats.FailedOps)
+	}
+	if stats.SuccessfulOps != 1 {
+		t.Errorf("SuccessfulOps = %d, want 1: the failed operation must not be counted here",
+			stats.SuccessfulOps)
 	}
 }
 
@@ -463,6 +539,14 @@ func TestConcurrentOperations(t *testing.T) {
 		t.Fatalf("Failed to create cluster manager: %v", err)
 	}
 
+	// Execute concurrent operations
+	numOps := 10
+
+	srv := withBackend(t, cm)
+	for i := range numOps {
+		srv.PutObject(fmt.Sprintf("concurrent-key-%d", i), []byte(fmt.Sprintf("payload-%d", i)))
+	}
+
 	err = cm.Start(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start cluster manager: %v", err)
@@ -472,8 +556,6 @@ func TestConcurrentOperations(t *testing.T) {
 	// Wait for leadership
 	time.Sleep(2 * time.Second)
 
-	// Execute concurrent operations
-	numOps := 10
 	var wg sync.WaitGroup
 	errors := make(chan error, numOps)
 
@@ -497,6 +579,11 @@ func TestConcurrentOperations(t *testing.T) {
 
 			if result == nil || !result.Success {
 				errors <- fmt.Errorf("operation %d failed: %v", opID, result)
+				return
+			}
+
+			if want := fmt.Sprintf("payload-%d", opID); string(result.Data) != want {
+				errors <- fmt.Errorf("operation %d returned %q, want %q", opID, result.Data, want)
 			}
 		}(i)
 	}
@@ -519,6 +606,17 @@ func TestConcurrentOperations(t *testing.T) {
 	stats := cm.GetStats()
 	if int(stats.TotalOperations) < numOps {
 		t.Errorf("Expected at least %d operations, got %d", numOps, stats.TotalOperations)
+	}
+
+	// The counters have to agree with what the operations above actually did. This test used to print
+	// "Failed 10 out of 10" and "Successful: 10, Failed: 0" in the same run: every operation failed
+	// with "no backend configured", and DistributeOperation classified on an error the executors never
+	// returned, so the statistics an operator reads argued against investigating (#269).
+	if int(stats.SuccessfulOps) < numOps {
+		t.Errorf("SuccessfulOps = %d, want at least %d", stats.SuccessfulOps, numOps)
+	}
+	if stats.FailedOps != 0 {
+		t.Errorf("FailedOps = %d, want 0: every operation above succeeded", stats.FailedOps)
 	}
 
 	t.Logf("Concurrent test completed - Total ops: %d, Successful: %d, Failed: %d",
