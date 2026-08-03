@@ -131,8 +131,8 @@ func TestValidateRejectsUnusableS3Settings(t *testing.T) {
 		{
 			name: "a compression algorithm no codec implements",
 			mutate: func(c *Configuration) {
-				c.WriteBuffer.Compression.Enabled = true
-				c.WriteBuffer.Compression.Algorithm = "brotli"
+				c.Storage.S3.Compression.Enabled = true
+				c.Storage.S3.Compression.Algorithm = "brotli"
 			},
 			wantText: "brotli",
 			why: "this is audit finding C1's shape — the shipped default named an algorithm the " +
@@ -247,8 +247,8 @@ func TestValidateIgnoresACompressionAlgorithmInADisabledBlock(t *testing.T) {
 	t.Parallel()
 
 	cfg := NewDefault()
-	cfg.WriteBuffer.Compression.Enabled = false
-	cfg.WriteBuffer.Compression.Algorithm = "no-such-codec"
+	cfg.Storage.S3.Compression.Enabled = false
+	cfg.Storage.S3.Compression.Algorithm = "no-such-codec"
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate rejected an unusable algorithm inside a disabled compression block, so a "+

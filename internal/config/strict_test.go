@@ -38,15 +38,32 @@ func TestLoadFromFileRejectsUnknownKeys(t *testing.T) {
 		{
 			name:     "a misspelled leaf",
 			why:      "the compression block documented `enable` against the real `enabled`",
-			yaml:     "write_buffer:\n  compression:\n    enable: true\n",
+			yaml:     "storage:\n  s3:\n    compression:\n      enable: true\n",
 			mustName: "enable",
 		},
 		{
 			name: "a leaf named as the wrong type's field",
 			why: "`zstd_level` and `min_file_size` were documented for four releases against the " +
 				"real `level` and `min_size`, and nobody noticed because the block was inert",
-			yaml:     "write_buffer:\n  compression:\n    zstd_level: 3\n",
+			yaml:     "storage:\n  s3:\n    compression:\n      zstd_level: 3\n",
 			mustName: "zstd_level",
+		},
+		{
+			name: "the compression block at its old path",
+			why: "#157 moved compression from write_buffer to storage.s3. Removing the key rather " +
+				"than deprecating it is what makes an upgrade name the file and line to edit; " +
+				"leaving it in the schema as an ignored field would mean an operator's compression " +
+				"settings silently stopped applying on upgrade",
+			yaml:     "write_buffer:\n  compression:\n    enabled: true\n",
+			mustName: "compression",
+		},
+		{
+			name: "the dead performance.compression_enabled key",
+			why: "it defaulted to true, was read by nothing, and sat two sections away from the " +
+				"real setting that defaulted to false (#157). A config still setting it has to be " +
+				"told, because its author believed compression was on",
+			yaml:     "performance:\n  compression_enabled: true\n",
+			mustName: "compression_enabled",
 		},
 		{
 			name:     "a plausible key under a real block",

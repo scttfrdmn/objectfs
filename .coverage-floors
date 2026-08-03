@@ -54,7 +54,15 @@ internal/compression     88
 # value was accepted" but "a bad value was accepted, replaced with something plausible, and never
 # mentioned again" — an unrecognized storage class became STANDARD, and any unparseable size became
 # 1 GiB. An error that says "invalid configuration" leaves the operator exactly as stuck.
-internal/config          86
+#
+# 86 → 88 with #157's move of the compression block to storage.s3. The two points are in the
+# rejection cases rather than the move: `write_buffer.compression` and
+# `performance.compression_enabled` are removed rather than kept as ignored fields, and the tests that
+# hold that decision assert the loader *refuses* a file still setting either, naming the key. A key
+# kept in the schema and read by nothing is what produced the defect — a shipped
+# `compression_enabled: true` over a feature that was off — so a test that only checked the new path
+# worked would leave the old one free to come back as a silent no-op.
+internal/config          88
 internal/cost            98
 internal/difftest        75
 internal/distributed     67

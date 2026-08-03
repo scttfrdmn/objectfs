@@ -244,61 +244,67 @@ var configSeeds = []struct {
 	{
 		name: "C1 itself",
 		why:  "the v0.10.0 default: gzip named where no gzip codec existed",
-		yaml: `write_buffer:
-  compression:
-    enabled: true
-    algorithm: gzip
-    level: 6
-    min_size: 4KB
+		yaml: `storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: gzip
+      level: 6
+      min_size: 4KB
 `,
 	},
 	{
 		name: "every supported algorithm's name",
 		why:  "each must either validate and construct, or be rejected by Validate — never neither",
-		yaml: `write_buffer:
-  compression:
-    enabled: true
-    algorithm: zstd
-    level: 3
+		yaml: `storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: zstd
+      level: 3
 `,
 	},
 	{
 		name: "a level valid for one algorithm and not another",
 		why:  "zstd takes 0-22 and gzip only 0-9, so a name-matching validator cannot catch this",
-		yaml: `write_buffer:
-  compression:
-    enabled: true
-    algorithm: gzip
-    level: 19
+		yaml: `storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: gzip
+      level: 19
 `,
 	},
 	{
 		name: "an algorithm no codec exists for",
 		why:  "must be refused by Validate, with the supported set named",
-		yaml: `write_buffer:
-  compression:
-    enabled: true
-    algorithm: brotli
+		yaml: `storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: brotli
 `,
 	},
 	{
 		name: "a stale algorithm in a disabled block",
 		why:  "a setting with no effect must not refuse the mount",
-		yaml: `write_buffer:
-  compression:
-    enabled: false
-    algorithm: brotli
-    level: 99
+		yaml: `storage:
+  s3:
+    compression:
+      enabled: false
+      algorithm: brotli
+      level: 99
 `,
 	},
 	{
 		name: "an unparseable min_size",
 		why:  "parsed by internal/compression, not by the validator's own arithmetic",
-		yaml: `write_buffer:
-  compression:
-    enabled: true
-    algorithm: zstd
-    min_size: "4 gigglebytes"
+		yaml: `storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: zstd
+      min_size: "4 gigglebytes"
 `,
 	},
 	{
@@ -335,10 +341,33 @@ global:
 		name:             "a key that does not exist",
 		why:              "P-10: this exact document was silently accepted before v0.10.1, setting nothing",
 		rejectedByLoader: true,
+		yaml: `storage:
+  s3:
+    compression:
+      enable: true
+      zstd_level: 3
+`,
+	},
+	{
+		name: "the compression block at its pre-v0.11.0 path",
+		why: "#157 moved compression from write_buffer to storage.s3, and removed the key rather " +
+			"than keeping it as an ignored field. An operator upgrading with this in their file has " +
+			"to be told, because the alternative is their compression settings silently ceasing to " +
+			"apply — which is the same failure P-10 was about, arrived at by a different route",
+		rejectedByLoader: true,
 		yaml: `write_buffer:
   compression:
-    enable: true
-    zstd_level: 3
+    enabled: true
+    algorithm: zstd
+`,
+	},
+	{
+		name: "the dead performance.compression_enabled key",
+		why: "removed by #157. It defaulted to true and was read by nothing, so a file setting it " +
+			"was written by someone who believed compression was on when it was off",
+		rejectedByLoader: true,
+		yaml: `performance:
+  compression_enabled: true
 `,
 	},
 
@@ -635,10 +664,10 @@ func TestValidateRejectsWhatTheCodecFactoryRejects(t *testing.T) {
 			t.Parallel()
 
 			cfg := config.NewDefault()
-			cfg.WriteBuffer.Compression.Enabled = true
-			cfg.WriteBuffer.Compression.Algorithm = tc.algorithm
-			cfg.WriteBuffer.Compression.Level = tc.level
-			cfg.WriteBuffer.Compression.MinSize = tc.minSize
+			cfg.Storage.S3.Compression.Enabled = true
+			cfg.Storage.S3.Compression.Algorithm = tc.algorithm
+			cfg.Storage.S3.Compression.Level = tc.level
+			cfg.Storage.S3.Compression.MinSize = tc.minSize
 
 			err := cfg.Validate()
 

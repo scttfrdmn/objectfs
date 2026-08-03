@@ -48,10 +48,10 @@ func TestShippedDefaultsConstructABackend(t *testing.T) {
 	// The compression block comes from the application defaults verbatim. Assembling it by hand
 	// would be the mistake that let C1 ship: the value under test is the one the user actually gets.
 	cfg.Compression = s3.CompressionConfig{
-		Enabled:   defaults.WriteBuffer.Compression.Enabled,
-		Algorithm: defaults.WriteBuffer.Compression.Algorithm,
-		Level:     defaults.WriteBuffer.Compression.Level,
-		MinSize:   defaults.WriteBuffer.Compression.MinSize,
+		Enabled:   defaults.Storage.S3.Compression.Enabled,
+		Algorithm: defaults.Storage.S3.Compression.Algorithm,
+		Level:     defaults.Storage.S3.Compression.Level,
+		MinSize:   defaults.Storage.S3.Compression.MinSize,
 	}
 
 	backend, err := s3.NewBackend(context.Background(), ts.Bucket, cfg)
@@ -154,19 +154,19 @@ func TestCompressionValidationRejectsWhatTheCodecsCannotBuild(t *testing.T) {
 			t.Parallel()
 
 			cfg := config.NewDefault()
-			tc.mutate(&cfg.WriteBuffer.Compression)
+			tc.mutate(&cfg.Storage.S3.Compression)
 
 			err := cfg.Validate()
 
 			if tc.wantErr && err == nil {
 				t.Fatalf("Validate accepted %+v; the failure would surface at mount time as "+
-					"\"Failed to start adapter\"", cfg.WriteBuffer.Compression)
+					"\"Failed to start adapter\"", cfg.Storage.S3.Compression)
 			}
 
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("Validate rejected a usable configuration %+v: %v",
-						cfg.WriteBuffer.Compression, err)
+						cfg.Storage.S3.Compression, err)
 				}
 
 				return

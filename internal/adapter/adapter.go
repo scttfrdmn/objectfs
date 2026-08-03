@@ -455,11 +455,15 @@ func (a *Adapter) buildS3Config() *s3.Config {
 
 		StorageTier: s3cfg.StorageTier,
 
+		// Read from storage.s3.compression, not write_buffer.compression (#157). Nothing ever
+		// compressed a write buffer; the block always configured the codec the S3 backend applies to
+		// whole objects, and reading it from two sections away meant an operator tuning the write
+		// buffer changed how objects were stored on the wire.
 		Compression: s3.CompressionConfig{
-			Enabled:   a.config.WriteBuffer.Compression.Enabled,
-			Algorithm: a.config.WriteBuffer.Compression.Algorithm,
-			Level:     a.config.WriteBuffer.Compression.Level,
-			MinSize:   a.config.WriteBuffer.Compression.MinSize,
+			Enabled:   s3cfg.Compression.Enabled,
+			Algorithm: s3cfg.Compression.Algorithm,
+			Level:     s3cfg.Compression.Level,
+			MinSize:   s3cfg.Compression.MinSize,
 		},
 
 		CongestionAlgorithm: a.config.Network.CongestionAlgorithm,

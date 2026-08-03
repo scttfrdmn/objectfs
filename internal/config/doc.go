@@ -114,8 +114,15 @@ Configuration file format:
 	  write_buffer_size: "16MB"
 	  max_concurrency: 150
 	  read_ahead_size: "64MB"
-	  compression_enabled: true
 	  connection_pool_size: 8
+
+	storage:
+	  s3:
+	    compression:
+	      enabled: false
+	      algorithm: "zstd"
+	      level: 3
+	      min_size: "4KB"
 
 	cache:
 	  ttl: 5m
@@ -221,12 +228,16 @@ no way to be told it is stale. As of writing:
 	Cache.EvictionPolicy          "weighted_lru"
 	Features.Prefetching          true
 
-Two defaults are worth knowing because they are not what the name suggests:
+Two settings are worth knowing because their names have misled before:
 
-  - Performance.CompressionEnabled is true, but this is the *write-buffer* compression switch and is
-    separate from WriteBuffer.Compression.Enabled, which is false. Object compression is off by
-    default: it is a storage-format decision rather than a performance knob, and a compressed object
-    is not readable by `aws s3 cp`.
+  - Storage.S3.Compression is the only compression switch, and it defaults to off. There were two
+    others until v0.11.0 — Performance.CompressionEnabled, which defaulted to *true* and was read by
+    nothing, and WriteBuffer.Compression, which is where this block used to live despite nothing ever
+    compressing a write buffer. Both are removed rather than deprecated, so a config file that still
+    sets either fails to load with the key named. Compression is off by default because it is a
+    storage-format decision rather than a performance knob: a compressed object is not readable by
+    `aws s3 cp`. Algorithm is safe to change on an existing bucket — the read path decodes every
+    algorithm ObjectFS can write, whatever this is set to (#230).
   - Global.ProfilePort is 6060 but is read by nothing — no pprof listener is started at any port.
 
 # Security Considerations

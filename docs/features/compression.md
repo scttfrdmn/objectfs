@@ -5,13 +5,20 @@ applications see ordinary bytes and S3 stores fewer of them. It is **off by defa
 exists because turning it on costs you four things that are not obvious from the configuration key.
 
 ```yaml
-write_buffer:
-  compression:
-    enabled: false        # the default
-    min_size: 4KB         # smaller objects are stored as-is
-    algorithm: zstd       # none, zstd, lz4, gzip
-    level: 3              # zstd 0-22, gzip 0-9; 0 selects the codec's default
+storage:
+  s3:
+    compression:
+      enabled: false      # the default
+      min_size: 4KB       # smaller objects are stored as-is
+      algorithm: zstd     # none, zstd, lz4, gzip
+      level: 3            # zstd 0-22, gzip 0-9; 0 selects the codec's default
 ```
+
+This block was under `write_buffer` before v0.11.0. Nothing ever compressed a write buffer — it has
+always configured the codec the S3 backend applies to the whole object — so it now sits under the
+backend that stores the object. A config file still setting `write_buffer.compression`, or the
+`performance.compression_enabled` key that defaulted to `true` and was read by nothing, fails to load
+with the offending key named rather than being silently ignored.
 
 The short version:
 
@@ -255,12 +262,13 @@ latency — what else does it provide?* Less than you would expect.
 ## If you do enable it
 
 ```yaml
-write_buffer:
-  compression:
-    enabled: true
-    algorithm: zstd       # gzip only if HTTP clients must read the objects; see above
-    level: 3              # 3 is a good ratio-per-CPU point; above ~9 the returns are small
-    min_size: 4KB         # below this, framing overhead and the tier floor dominate
+storage:
+  s3:
+    compression:
+      enabled: true
+      algorithm: zstd     # gzip only if HTTP clients must read the objects; see above
+      level: 3            # 3 is a good ratio-per-CPU point; above ~9 the returns are small
+      min_size: 4KB       # below this, framing overhead and the tier floor dominate
 ```
 
 `min_size` deserves a thought rather than the default. On `STANDARD` there is no billing floor, so 4 KB

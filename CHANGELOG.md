@@ -92,6 +92,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A data race between `ConsensusEngine.Stop` and an inbound heartbeat.** `Stop` read
+  `ce.electionTimer` without holding `ce.mu` while `resetElectionTimer` was replacing it from the
+  gossip receiver goroutine, which is where an `AppendEntries` RPC is handled. Neither shutdown signal
+  ordered the two: the receiver does not watch the consensus engine's `stopCh`, and although
+  `ClusterManager.Stop` stops gossip first, `GossipProtocol.Stop` closes the socket without waiting
+  for the receiver, so a message already inside a handler keeps running. `Start`'s unlocked call to the
+  same function was the second instance. The regression test drives `handleNetworkAppendEntries`
+  concurrently with `Stop` rather than over UDP, because the two tests that caught this in CI hit it
+  only when a heartbeat happened to land inside `Stop`'s window — reproducible under CI's load and not
+  locally, which is the flake shape a `-race` gate is worst at.
 - **Changing `compression.algorithm` no longer orphans every object already in the bucket.** A mount
   now decodes any algorithm ObjectFS can write, chosen from the object's stored `Content-Encoding`
   rather than from the configuration ([#230]). Before this, `Compressor` held exactly one codec and
@@ -233,7 +243,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   succeeds and that the resulting object is whole, so a lossy reclaim fails rather than passing
   quietly.
 
+### Changed
+
+- **Compression is configured under `storage.s3.compression`, not `write_buffer.compression`
+  ([#157]).** Nothing has ever compressed a write buffer. The block always configured the codec the
+  S3 backend applies to a whole object on its way to the wire, and the misplacement mattered in both
+  directions: an operator tuning the write buffer was changing how objects were stored, and an
+  operator looking for how objects are stored had no reason to read the write-buffer section. It now
+  sits under the backend that applies it. Defaults are unchanged — `enabled: false`, `zstd`, level 3,
+  `min_size: 4KB`.
+
+  `write_buffer.compression` and `performance.compression_enabled` are **removed rather than
+  deprecated**, so a configuration file still setting either fails to load with the offending key
+  named. That is deliberate, and follows the precedent set by the `security.encryption` booleans
+  removed in v0.10.1: a key kept as an ignored field means an operator's compression settings
+  silently stop applying on upgrade, which is the same failure as the unknown keys strict decoding was
+  introduced to catch, arrived at by a different route.
+
+  `performance.compression_enabled` is the more instructive of the two. It defaulted to **true**, was
+  read by nothing, and sat two sections away from the real setting that defaulted to **false** — so
+  the shipped configuration contained a prominent `compression_enabled: true` while no object was ever
+  compressed, and anyone who read the file to find out came away with the opposite of the truth. It is
+  removed rather than wired up because compression happens in the S3 backend, on the object, and a
+  second boolean over one feature can only ever disagree with the first. `OBJECTFS_COMPRESSION_ENABLED`
+  survives and now assigns `storage.s3.compression.enabled`: the variable's name was never wrong, only
+  what it assigned to, and exporting it previously had no effect on whether anything was compressed.
+
+  One assertion in the mapping test had to change with it, for a reason worth recording: it asserted
+  `Algorithm: "zstd"`, which is also the default — so a `buildS3Config` that hardcoded `"zstd"` and
+  ignored the configuration passed. Verified by making exactly that mutation. The test now uses `lz4`,
+  because every value in a mapping test has to differ from the value the field would hold if the
+  mapping were absent. That is the shape of the original config-plumbing defect: a field nothing mapped
+  still arriving at a plausible value from somewhere else.
+
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
+[#157]: https://github.com/scttfrdmn/objectfs/issues/157
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164

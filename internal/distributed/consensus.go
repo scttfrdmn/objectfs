@@ -205,8 +205,13 @@ func NewConsensusEngine(cluster *ClusterManager, config *ClusterConfig) (*Consen
 func (ce *ConsensusEngine) Start(ctx context.Context) error {
 	slog.Info("starting consensus engine", "node_id", ce.cluster.GetNodeID())
 
-	// Reset election timer
+	// Under the write lock because resetElectionTimer writes ce.electionTimer and does not lock for
+	// itself — see its doc comment. This call is before any goroutine below exists, but the gossip
+	// receiver started by ClusterManager.Start already does, and an inbound AppendEntries reaches
+	// resetElectionTimer from there.
+	ce.mu.Lock()
 	ce.resetElectionTimer()
+	ce.mu.Unlock()
 
 	// Start background goroutines
 	go ce.electionLoop(ctx)
@@ -217,13 +222,25 @@ func (ce *ConsensusEngine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the consensus engine
+// Stop stops the consensus engine.
+//
+// The timer is read under the write lock, not unlocked. A heartbeat arriving from the gossip receiver
+// reaches resetElectionTimer, which replaces ce.electionTimer, and Stop racing that read the field
+// while it was being written — a data race CI caught in TriggerElection's two peer tests and that
+// reproduces locally only under -count on a loaded machine.
+//
+// Neither shutdown signal orders the two. Closing stopCh does not, because the receiver goroutine
+// belongs to GossipProtocol and does not watch it; and although ClusterManager.Stop stops gossip
+// before consensus, GossipProtocol.Stop closes the socket without waiting for the receiver, so a
+// message already in a handler keeps running past it.
 func (ce *ConsensusEngine) Stop() error {
 	close(ce.stopCh)
 
+	ce.mu.Lock()
 	if ce.electionTimer != nil {
 		ce.electionTimer.Stop()
 	}
+	ce.mu.Unlock()
 
 	slog.Info("consensus engine stopped")
 	return nil
@@ -829,11 +846,12 @@ func (ce *ConsensusEngine) executeProposal(proposal *ConsensusProposal) {
 
 // Utility methods
 
+// resetElectionTimer replaces the election timer with a fresh randomized one.
+//
+// ce.mu must be held for writing. It writes ce.electionTimer, which electionLoop reads under the read
+// lock and Stop reads under the write lock; every caller — Start, startElection, and
+// handleNetworkAppendEntries — holds it.
 func (ce *ConsensusEngine) resetElectionTimer() {
-	if ce.electionTimer != nil {
-		ce.electionTimer.Stop()
-	}
-
 	// Random timeout between 150ms and 300ms (scaled by ElectionTimeout)
 	timeoutMs := 150 + (rand.Intn(150))
 	timeout := time.Duration(timeoutMs) * time.Millisecond

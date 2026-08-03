@@ -59,6 +59,23 @@ storage:
       chunk_size: 16MB                # bytes per part; S3 rejects a non-final part under 5MB
       concurrency: 8                  # parts in flight at once
 
+    # Transparent object compression. Off by default, and worth understanding before turning on: a
+    # compressed object is an opaque frame to `aws s3 cp`, boto3, and every other S3 client, so
+    # enabling this revokes the "my data is just objects in S3" property. A ranged read of a
+    # compressed object must also fetch the whole object, because a compression frame cannot be
+    # sliced.
+    #
+    # This block was under `write_buffer` until v0.11.0, which was wrong in both directions: nothing
+    # ever compressed a write buffer, and an operator tuning the write buffer was changing how objects
+    # were stored on the wire. It lives here because the S3 backend is what applies it, to the object.
+    compression:
+      enabled: false
+      min_size: 4KB                   # smaller objects are stored as-is
+      # Safe to change on a bucket that already holds compressed objects: the read path decodes every
+      # algorithm ObjectFS can write, whatever this says. Changing the stored *format* is not.
+      algorithm: zstd                 # none, zstd, lz4, gzip
+      level: 3                        # zstd 0-22, gzip 0-9; 0 = codec default
+
     cost_optimization:                # not yet wired — none of this block reaches the backend
       enabled: false
       tiering_enabled: false
@@ -72,7 +89,6 @@ performance:
   write_buffer_size: 16MB             # not yet wired — write_buffer.max_memory is the live setting
   max_concurrency: 150
   read_ahead_size: 64MB               # not yet wired — see read_ahead below
-  compression_enabled: true           # not yet wired — write_buffer.compression is the live setting
   # Pooled S3 clients. Also the batch concurrency in GetObjects/PutObjects and MaxIdleConnsPerHost
   # on the HTTP transport, so it bounds three things at once. Must be > 0: zero reached the batch
   # paths as an unbuffered channel and blocked forever.
@@ -126,28 +142,18 @@ cache:
     directory: /var/cache/objectfs
     max_size: 10GB
 
-# Write buffering.
+# Write buffering — the bounds on dirty bytes held in memory before they are durable.
 #
-# Not yet wired: vfs.NewWriter takes no configuration, so none of the three sizes below is read.
-# What actually happens is that dirty ranges accumulate per open file until the kernel flushes, and
-# nothing bounds the total — a large enough write set is bounded by available memory rather than by
-# max_memory. Fixing that means backpressure in the writer, not a wider mapping, so these keys stay
-# marked rather than being plumbed to a component that cannot honour them.
+# This block no longer configures compression; that moved to storage.s3.compression, because nothing
+# here ever compressed anything (#157).
 write_buffer:
   flush_interval: 30s                 # not yet wired — flushes happen when the kernel asks
-  max_buffers: 1000                   # not yet wired
-  max_memory: 512MB                   # not yet wired — nothing bounds dirty bytes today
-
-  # Transparent object compression. Off by default, and worth understanding before turning on: a
-  # compressed object is an opaque frame to `aws s3 cp`, boto3, and every other S3 client, so
-  # enabling this revokes the "my data is just objects in S3" property. A ranged read of a
-  # compressed object must also fetch the whole object, because a compression frame cannot be
-  # sliced.
-  compression:
-    enabled: false
-    min_size: 4KB                     # smaller objects are stored as-is
-    algorithm: zstd                   # none, zstd, lz4, gzip
-    level: 3                          # zstd 0-22, gzip 0-9; 0 = codec default
+  max_buffers: 1000                   # maximum files with dirty ranges held at once
+  # Total dirty bytes across all open files. Reaching it flushes to make room rather than failing the
+  # write, and only a flush that could not release enough returns ENOSPC. Set to 0 for unbounded,
+  # which is what the process had for three releases while this key was declared, defaulted, and
+  # validated but read by nothing.
+  max_memory: 512MB
 
 # Network behavior.
 #

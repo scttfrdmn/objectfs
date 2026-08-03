@@ -394,6 +394,12 @@ func createTestConfig() *config.Configuration {
 				Profile:         "",
 				UseAcceleration: false,
 				ForcePathStyle:  false,
+				Compression: config.CompressionConfig{
+					Enabled:   true,
+					MinSize:   "1KB",
+					Algorithm: "gzip",
+					Level:     6,
+				},
 			},
 		},
 		Performance: config.PerformanceConfig{
@@ -401,7 +407,6 @@ func createTestConfig() *config.Configuration {
 			WriteBufferSize:    "16MB",
 			MaxConcurrency:     100,
 			ReadAheadSize:      "4MB",
-			CompressionEnabled: true,
 			ConnectionPoolSize: 8,
 			PredictiveCaching:  false,
 			MLModelPath:        "",
@@ -425,12 +430,6 @@ func createTestConfig() *config.Configuration {
 			FlushInterval: 30 * time.Second,
 			MaxBuffers:    1000,
 			MaxMemory:     "512MB",
-			Compression: config.CompressionConfig{
-				Enabled:   true,
-				MinSize:   "1KB",
-				Algorithm: "gzip",
-				Level:     6,
-			},
 		},
 		Network: config.NetworkConfig{
 			Timeouts: config.TimeoutConfig{
