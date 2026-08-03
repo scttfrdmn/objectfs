@@ -19,8 +19,14 @@ for what works, what fails by design, and which tools are known not to work.
 
 - **Issues**: <https://github.com/scttfrdmn/objectfs/issues>
 - **Milestones**: <https://github.com/scttfrdmn/objectfs/milestones>
-- **Projects**: <https://github.com/orgs/scttfrdmn/projects> (ObjectFS v0.5.0 Development #11, ObjectFS Technical Debt #12)
-- **Labels**: See label taxonomy below
+- **Projects**: <https://github.com/users/scttfrdmn/projects/12> — ObjectFS Technical Debt.
+  `scttfrdmn` is a user account, so `/orgs/scttfrdmn/projects`, which this line used to say, is a
+  404. Board #11, "ObjectFS v0.5.0 Development", is closed: its 14 items were all closed issues and
+  its title named a release five versions back. Board #12 has the same problem in a milder form —
+  all 8 of its items are closed and nothing has been added since February — but "technical debt" is
+  a category rather than a release, so new issues can join it. Milestones, not boards, are what this
+  project actually plans with
+- **Labels**: `.github/labels.yml` is the authority — see the taxonomy notes below
 
 Do not create local sprint/tracking/progress markdown files. Do not reference SPRINT_*.md, PROGRESS_REPORT.md, or similar. When tracking work, create GitHub issues and link them to the appropriate milestone and project.
 
@@ -75,11 +81,11 @@ go build ./...      # verify compilation
 
 ### Environment
 
-Private module — set these for go get:
-
-```bash
-GONOSUMDB="github.com/scttfrdmn/*" GOPRIVATE="github.com/scttfrdmn/*"
-```
+Nothing to set. This section told you to export `GOPRIVATE` and `GONOSUMDB` for
+`github.com/scttfrdmn/*` because the module was private; objectfs, cargoship, and substrate are all
+public now, and `go get github.com/scttfrdmn/objectfs` resolves through the module proxy with both
+variables explicitly empty — verified, not assumed. `sdks/c/Makefile` still sets them, which is
+harmless and no longer necessary.
 
 ### AWS Credentials
 
@@ -104,34 +110,27 @@ Pre-commit hooks run on every commit: trailing whitespace, YAML check (--unsafe 
 
 ## GitHub Label Taxonomy
 
-### Type
+**`.github/labels.yml` is the authority.** Every label, with its description and color, is defined
+there. Read it rather than a list here: the list that used to be here named 12 of 22 `area:` labels
+and did not mention five whole families, and a label enumeration in prose has the same problem as a
+version number in prose — no way to be told it is stale.
 
-| Label | Use |
-|-------|-----|
-| `type: bug` | Something broken |
-| `type: enhancement` | New feature |
-| `type: performance` | Perf optimization |
-| `type: technical-debt` | Refactor/cleanup |
-| `type: testing` | Test coverage |
-| `type: documentation` | Docs |
-| `type: ci-cd` | CI/CD |
-| `type: security` | Security |
+Every issue should carry a `type:`, a `priority:`, and at least one `area:`. Those three families,
+plus `status:`, `resolution:`, `effort:`, `persona:`, and `cargoship:`, are grouped and commented in
+`labels.yml`. Two pairs are easy to confuse and both members of each are in use: `type: ci-cd` is
+what kind of change it is, `area: ci-cd` is the part of the system it touches.
 
-### Priority
-
-`priority: critical` · `priority: high` · `priority: medium` · `priority: low`
-
-### Area
-
-`area: core` · `area: fuse` · `area: s3` · `area: buffer` · `area: cache` · `area: metadata` · `area: config` · `area: health` · `area: metrics` · `area: distributed` · `area: archive` · `area: sdk`
+`.github/labels.yml` and the repository's actual labels are checked against each other by
+`internal/config/labels_test.go`, in both directions, on every PR. When it fails,
+`.github/scripts/sync-labels.sh` reports the drift and `--apply` fixes the half that is safe to fix
+automatically. Do not add a label by way of `gh issue create --label` — that invents the label with
+no description and the default grey, which is how two of them got onto the repository without ever
+reaching the file.
 
 ## Milestones
 
-| Milestone | Purpose |
-|-----------|---------|
-| `v0.5.0 - Technical Debt` | Test coverage, stubs, hardcoded values |
-| `v0.5.0 - Phase 1: CargoShip Integration` | Archive filesystem, BBR networking |
-| `v0.5.0 - Phase 2: Advanced Compression` | ZSTD, adaptive compression |
-| `v0.5.0 - Phase 3: Distributed (Experimental)` | Redis cache, distributed ops |
-| `v0.5.0 - Phase 4: Cost Optimization` | ML predictions, cost tracking |
-| `Future Work` | Longer-horizon features, not yet scheduled |
+<https://github.com/scttfrdmn/objectfs/milestones> is the authority; file against the milestone for
+the next release. A table of milestone titles used to be here, and five of its six entries were
+closed `v0.5.0 - *` milestones while every live one was absent — including the one the release in
+progress was being filed against. Same reasoning as the version constant above: the guide links the
+authoritative view, so it should not also transcribe it.

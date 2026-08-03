@@ -327,3 +327,48 @@ jobs:
         run: |
           go test ./internal/config/ -v \
             -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'
+
+  # ---------------------------------------------------------------------------------------------
+  # labels — .github/labels.yml against the labels the repository actually has, both directions.
+  #
+  # Its own job because it is the one gate here that needs the GitHub API, and because a failure
+  # names an action outside the codebase: add a label to the file, or delete one from the
+  # repository. Nothing in a diff can tell a reviewer that.
+  #
+  # Not keyed on labels.yml changing, which is what #190 proposed. Every drift this repository has
+  # had originated on GitHub — two labels created in the web UI, one invented by `gh issue create
+  # --label`, six GitHub defaults never deleted — and none of those events touches the file, so a
+  # `paths:` filter would have fired on exactly zero of the nine. Verified with `git log -S` for
+  # the exact `- name:` form of each.
+  # ---------------------------------------------------------------------------------------------
+  labels:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      # The API half of the gate skips when gh cannot reach the API, which is right for a laptop and
+      # wrong here: a skipped gate reports success. So the output is checked for the skip, because
+      # `go test` exits 0 either way and this job exists to be the one place that cannot happen.
+      - name: Label taxonomy matches the repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          go test ./internal/config/ -v \
+            -run 'TestLabelsYAMLIsWellFormed|TestLabelsYAMLMatchesTheRepository|TestDependabotLabelsAreDefined|TestSyncLabelsScriptCanParseTheFile' \
+            2>&1 | tee labels.log
+
+          if grep -q 'SKIP.*TestLabelsYAMLMatchesTheRepository' labels.log; then
+            echo "::error::the label comparison skipped instead of running, so this job checked" \
+              "only the offline half. gh could not reach the API — that is a CI configuration" \
+              "failure, not a pass."
+            exit 1
+          fi

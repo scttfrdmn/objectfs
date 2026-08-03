@@ -1,6 +1,16 @@
 # ObjectFS GitHub Label System
 # Adapted from Prism's organizational model
-# Sync with: gh label sync -f .github/labels.yml scttfrdmn/objectfs
+#
+# This file is the authority for the labels this repository should have. Two things hold it to that:
+#
+#   internal/config/labels_test.go   the gate. Runs in CI on every PR, compares this file against
+#                                    the repository in both directions, and fails on a difference
+#   .github/scripts/sync-labels.sh   the fix. Reports drift by default; --apply creates and updates
+#
+# This header used to name a `gh label` subcommand that does not exist — the real ones are clone,
+# create, delete, edit, and list — so anyone who followed this line got "unknown command". Written
+# without quoting the old form on purpose: TestSyncLabelsScriptCanParseTheFile greps both this file
+# and the script for it, and a comment explaining the defect would otherwise trip the check for it.
 
 # ============================================================================
 # TYPE LABELS - What kind of issue is this?
@@ -140,6 +150,21 @@
 
 - name: 'area: docs'
   description: Documentation content and structure
+  color: c5def5
+
+# These two existed on GitHub and not here, and how each got there is the argument for the gate in
+# internal/config/labels_test.go. `area: sdk` was created by hand in the web UI. `area: ci-cd` was
+# created implicitly by `gh issue create --label`, which invents a label it cannot find rather than
+# failing — which is why it arrived with a null description and the default grey, both corrected
+# below. Neither event touches this file, so nothing keyed on this file changing could ever have
+# noticed. Note `area: ci-cd` is distinct from `type: ci-cd`, and both are in use on disjoint sets
+# of issues: one is the part of the system a change touches, the other is what kind of change it is.
+- name: 'area: ci-cd'
+  description: CI workflows, gates, and release automation
+  color: c5def5
+
+- name: 'area: sdk'
+  description: Client SDKs (Python, Java, JavaScript)
   color: c5def5
 
 # ============================================================================
@@ -333,6 +358,14 @@
 - name: javascript
   description: npm dependency (docs-platform, sdks/javascript)
   color: f1e05a
+
+# Created by Dependabot itself, on the first maven PR after sdks/java gained an ecosystem entry —
+# which is the drift this file exists to prevent happening while the issue about it was open. Its
+# description is Dependabot's wording, not ours, because that is what exists on the repository and
+# the point of this file is to describe what exists.
+- name: java
+  description: Pull requests that update java code
+  color: ffa221
 
 - name: needs-design
   description: Needs design discussion before implementation
