@@ -158,6 +158,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#314]: https://github.com/scttfrdmn/objectfs/issues/314
 
+- **Dependabot's `gomod` and `maven` queues were saturated, so outdated dependencies were silent
+  rather than current.** `open-pull-requests-limit` caps discovery, not just display: once the slots
+  are full Dependabot stops proposing, and there is nothing in the PR list to distinguish "nothing to
+  update" from "no room to say so." This is the same condition that hid three outdated GitHub Actions
+  majors behind [#254]-[#258] until #304 bumped them by hand.
+
+  Measured rather than assumed: `go list -u -m all` reported **twelve** outdated direct modules
+  against five slots, with `prometheus/client_golang`, `redis/go-redis`, `substrate` and
+  `golang.org/x/sys` absent from every open PR — not current, just unproposed. `sdks/java/pom.xml`
+  declares nine artifacts across seven version properties against three slots, and the three in
+  flight left `slf4j`, `junit`, `mockito` and `maven-compiler-plugin` with no way to be raised.
+
+  `gomod` goes 5 → 8 and `maven` 3 → 6, with the reasoning recorded in the config so a future
+  reduction is a deliberate choice. Both npm limits are left at 3 on purpose: those queues are full
+  of majors correctly waiting for a human, which is the limit doing its job rather than hiding work.
+
 - **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
   unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
   requires a string: *"The property '#/updates/0/schedule/time' of type integer did not match the

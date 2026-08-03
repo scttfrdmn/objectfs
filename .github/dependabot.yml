@@ -25,13 +25,23 @@
 version: 2
 updates:
   # Enable version updates for Go modules
+  #
+  # The limit is 8, not the default 5, and the reason generalises to every entry in this file: a
+  # saturated queue makes Dependabot silent, and a silent Dependabot is indistinguishable from an
+  # up-to-date one. Three outdated GitHub Actions majors were never proposed at all because
+  # #254-#258 held all five slots (#304 bumped them by hand once that was noticed). At the same
+  # moment, `go list -u -m all` showed twelve outdated direct modules against five slots, with
+  # prometheus/client_golang, redis/go-redis, substrate and golang.org/x/sys absent from every open
+  # PR — not because they were current, but because there was no room to say otherwise.
+  #
+  # If you lower this, check `go list -u -m all` afterwards rather than trusting the PR list.
 - package-ecosystem: gomod
   directory: /
   schedule:
     interval: weekly
     day: monday
     time: "09:00"
-  open-pull-requests-limit: 5
+  open-pull-requests-limit: 8
   reviewers:
   - scttfrdmn
   commit-message:
@@ -108,13 +118,17 @@ updates:
 
   # Java SDK. Five open alerts against jackson-databind (two high) were generated here with no
   # ecosystem entry to act on them.
+  #
+  # Limit 6 rather than 3 for the reason given on the gomod entry above. pom.xml declares nine
+  # artifacts across seven distinct version properties; three slots held jackson, okhttp and
+  # surefire, leaving slf4j, junit, mockito and maven-compiler-plugin with no way to be proposed.
 - package-ecosystem: maven
   directory: /sdks/java
   schedule:
     interval: weekly
     day: monday
     time: "09:00"
-  open-pull-requests-limit: 3
+  open-pull-requests-limit: 6
   reviewers:
   - scttfrdmn
   commit-message:
