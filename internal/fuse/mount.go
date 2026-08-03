@@ -243,10 +243,16 @@ func (m *MountManager) Mount(ctx context.Context) error {
 	m.currentOpID = ""
 	m.mu.Unlock()
 
-	// Start serving in background
+	// Start serving in background.
+	//
+	// Wait on the local server, not on m.server: Unmount sets m.server = nil under
+	// m.mu, so reading the field here both races that write and can dereference nil
+	// if Unmount wins — which would panic on the goroutine and take the process down
+	// with the mount. The value is the same server either way, and this goroutine's
+	// whole job is to outlive the field.
 	go func() {
 		slog.Info("starting FUSE server")
-		m.server.Wait()
+		server.Wait()
 		slog.Info("FUSE server stopped")
 		m.mu.Lock()
 		m.mounted = false
@@ -348,10 +354,21 @@ func (m *MountManager) GetMountPoint() string {
 	return m.config.MountPoint
 }
 
-// Wait waits for the mount to complete
+// Wait blocks until the FUSE server stops serving, and returns immediately if the
+// filesystem is not mounted.
+//
+// The server is read under m.mu and then waited on outside it. Holding the lock
+// across Wait would deadlock Unmount, which needs the same lock to clear the field;
+// checking m.server != nil and then dereferencing it unlocked, which this used to
+// do, is both a race with that write and a nil dereference if it lands between the
+// two.
 func (m *MountManager) Wait() {
-	if m.server != nil {
-		m.server.Wait()
+	m.mu.Lock()
+	server := m.server
+	m.mu.Unlock()
+
+	if server != nil {
+		server.Wait()
 	}
 }
 
