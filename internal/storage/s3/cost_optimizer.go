@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/scttfrdmn/objectfs/internal/awsrates"
 )
 
 // Access Frequency Constants
@@ -294,10 +296,10 @@ func (co *CostOptimizer) categorizeAccessFrequency(pattern *AccessPattern) strin
 
 // findOptimalTier finds the most cost-effective tier for an access pattern
 func (co *CostOptimizer) findOptimalTier(pattern *AccessPattern, accessFreq string) string {
-	objectSizeGB := float64(pattern.ObjectSize) / (1024 * 1024 * 1024)
+	objectSizeGB := awsrates.GBFromBytes(pattern.ObjectSize)
 
 	// Handle Standard tier overhead: small objects often stay in Standard
-	if pattern.ObjectSize < 128*1024 && accessFreq != AccessNever {
+	if pattern.ObjectSize < minBillableSize128KB && accessFreq != AccessNever {
 		return TierStandard // Avoid IA minimum charges for small, accessed objects
 	}
 
@@ -305,12 +307,12 @@ func (co *CostOptimizer) findOptimalTier(pattern *AccessPattern, accessFreq stri
 	case AccessFrequent:
 		return TierStandard
 	case AccessInfrequent:
-		if pattern.ObjectSize >= 128*1024 { // Meet IA minimum size
+		if pattern.ObjectSize >= minBillableSize128KB { // Meet IA minimum size
 			return TierStandardIA
 		}
 		return TierStandard
 	case AccessArchive:
-		if pattern.ObjectSize >= 128*1024 {
+		if pattern.ObjectSize >= minBillableSize128KB {
 			return TierGlacierIR
 		}
 		return TierStandardIA
@@ -324,7 +326,16 @@ func (co *CostOptimizer) findOptimalTier(pattern *AccessPattern, accessFreq stri
 	}
 }
 
-// calculateObjectCost calculates monthly storage cost for an object in a tier
+// calculateObjectCost calculates monthly storage cost for an object in a tier.
+//
+// Three things AWS bills that this has to keep separate, because two of them were previously the same
+// field and the third was the wrong unit:
+//
+//   - A minimum billable size *replaces* a smaller object's size. Three classes have one, at 128 KB.
+//   - A per-object overhead is *added* to the object's size. Only the two archive classes have one,
+//     at 40 KB, and 8 KB of that 40 is billed at the S3 Standard rate rather than the archive rate —
+//     which is a 23× difference on DEEP_ARCHIVE, not a rounding detail.
+//   - A GB is 10^9 bytes. This function divided by 2^30, understating every figure by 7.4%.
 func (co *CostOptimizer) calculateObjectCost(objectSize int64, tier string) float64 {
 	// Use pricing manager to get accurate pricing with discounts
 	tierPricing, err := co.backend.pricingManager.GetTierPricing(tier)
@@ -335,26 +346,41 @@ func (co *CostOptimizer) calculateObjectCost(objectSize int64, tier string) floa
 		if !exists {
 			tierInfo = StorageTiers[TierStandard]
 		}
+
+		archiveBytes, standardBytes := ArchiveOverhead(tier)
+
 		tierPricing = TierPricing{
-			StorageCostPerGBMonth: tierInfo.CostPerGBMonth,
-			MinimumBillableSize:   tierInfo.MinObjectSize,
+			StorageCostPerGBMonth:     tierInfo.CostPerGBMonth,
+			MinimumBillableSize:       tierInfo.MinObjectSize,
+			PerObjectOverheadBytes:    archiveBytes + standardBytes,
+			OverheadStandardRateBytes: standardBytes,
 		}
 	}
 
-	objectSizeGB := float64(objectSize) / (1024 * 1024 * 1024)
+	// The minimum, where the tier has one, is what a smaller object is billed as. It is zero on the
+	// five classes AWS publishes none for, and max with zero is the object's own size.
+	billableSize := max(objectSize, tierPricing.MinimumBillableSize)
 
-	// Handle minimum object size charges
-	if objectSize < tierPricing.MinimumBillableSize {
-		// Charge for minimum size
-		minSizeGB := float64(tierPricing.MinimumBillableSize) / (1024 * 1024 * 1024)
-		baseCost := minSizeGB * tierPricing.StorageCostPerGBMonth
-		// Apply volume discounts
-		return co.backend.pricingManager.CalculateVolumeDiscount(tier, minSizeGB, baseCost)
+	// The overhead is charged on top, split across two rates. The portion at this tier's own rate is
+	// folded into billableSize; the Standard-rate portion is priced separately below, because pricing
+	// it at an archive rate is where the 23× understatement would come from.
+	overheadAtStandardRate := tierPricing.OverheadStandardRateBytes
+	billableSize += tierPricing.PerObjectOverheadBytes - overheadAtStandardRate
+
+	billableGB := awsrates.GBFromBytes(billableSize)
+	baseCost := billableGB * tierPricing.StorageCostPerGBMonth
+
+	// Volume discounts apply to the tier's own storage, so they are computed on that portion alone.
+	cost := co.backend.pricingManager.CalculateVolumeDiscount(tier, billableGB, baseCost)
+
+	if overheadAtStandardRate > 0 {
+		standardRate, ok := awsrates.For(TierStandard)
+		if ok {
+			cost += awsrates.GBFromBytes(overheadAtStandardRate) * standardRate.StoragePerGBMonth
+		}
 	}
 
-	baseCost := objectSizeGB * tierPricing.StorageCostPerGBMonth
-	// Apply volume discounts
-	return co.backend.pricingManager.CalculateVolumeDiscount(tier, objectSizeGB, baseCost)
+	return cost
 }
 
 // generateOptimizationReason generates a human-readable reason for optimization
@@ -482,12 +508,14 @@ type OptimizationReport struct {
 
 // HandleStandardTierOverhead manages Standard tier cost overhead for small objects
 func (co *CostOptimizer) HandleStandardTierOverhead(objectKey string, objectSize int64) string {
-	// For objects smaller than 128KB, Standard tier avoids IA minimum charges
-	if objectSize < 128*1024 {
+	// Below the IA classes' billable minimum, Standard is cheaper than a tier that would round the
+	// object up to 128 KB. Named constant rather than a repeated literal: this file spelled 128*1024
+	// twice while tiers.go spelled it once, and the threshold is the same fact in all three places.
+	if objectSize < minBillableSize128KB {
 		co.logger.Debug("Using Standard tier to avoid IA minimum charges",
 			"object", objectKey,
 			"size", objectSize,
-			"threshold", 128*1024)
+			"threshold", minBillableSize128KB)
 		return TierStandard
 	}
 

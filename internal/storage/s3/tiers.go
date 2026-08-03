@@ -41,8 +41,49 @@ const (
 
 // StorageTierInfo contains tier-specific information and constraints
 type StorageTierInfo struct {
-	Name               string        `json:"name"`
-	MinObjectSize      int64         `json:"min_object_size"`
+	Name string `json:"name"`
+
+	// MinObjectSize is AWS's minimum *billable* object size: an object smaller than this is billed
+	// as though it were this size. Zero where AWS publishes none, which is five of the eight classes.
+	//
+	// Only three classes have one — STANDARD_IA, ONEZONE_IA, and GLACIER_IR, all at 128 KB. This
+	// field previously also carried 128 KB for INTELLIGENT_TIERING and 40 KB for GLACIER and
+	// DEEP_ARCHIVE, and neither of those is a minimum billable size; see PerObjectOverheadBytes and
+	// MonitoringEligibilityBytes below for what those two numbers actually are. AWS's storage class
+	// comparison table lists "Min billable object size" as None for Intelligent-Tiering and NA for
+	// both Glacier Flexible Retrieval and Deep Archive:
+	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html#sc-compare
+	//
+	// A floor and an overhead point opposite ways for anything that reasons about small objects,
+	// which is why they cannot share a field. Under a floor, compressing a 30 KB object to 10 KB
+	// saves nothing. Under an overhead, it saves 20 KB and the surcharge is unaffected.
+	MinObjectSize int64 `json:"min_object_size"`
+
+	// PerObjectOverheadBytes is storage AWS bills per object in addition to the object itself, zero
+	// where there is none.
+	//
+	// Only the two archive classes have it, at 40 KB, and it is not billed at one rate: 32 KB is
+	// charged at the archive class's own rate for the index and metadata Glacier maintains, and 8 KB
+	// at the S3 Standard rate for the name and metadata S3 keeps so the object can be listed. The
+	// split is why this is a poor fit for a single number, and callers that only need a size can use
+	// the sum; ArchiveOverhead returns the two parts for callers that price them.
+	//
+	// It dominates for small objects: a 10 KB object on DEEP_ARCHIVE is billed for 10 KB of payload
+	// plus 40 KB of overhead, so roughly 23× the payload's cost once the two rates are applied.
+	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html#sc-glacier
+	PerObjectOverheadBytes int64 `json:"per_object_overhead_bytes"`
+
+	// MonitoringEligibilityBytes is the size below which INTELLIGENT_TIERING does not monitor an
+	// object, zero for every other class.
+	//
+	// 128 KB, the same number as the IA classes' billable minimum, which is very likely how it came
+	// to be stored in MinObjectSize with the comment "128 KB minimum for optimization". It is not a
+	// billing floor in either direction: an object below it is billed for its real size, is not
+	// charged the per-object monitoring and automation fee, and stays in the Frequent Access tier
+	// permanently rather than being auto-tiered. So it is a statement about what the tier will *do*
+	// with an object, not about what the object costs.
+	MonitoringEligibilityBytes int64 `json:"monitoring_eligibility_bytes"`
+
 	DeletionEmbargo    time.Duration `json:"deletion_embargo"`
 	RetrievalLatency   string        `json:"retrieval_latency"`
 	RetrievalCost      bool          `json:"retrieval_cost"`
@@ -52,6 +93,55 @@ type StorageTierInfo struct {
 	// CostPerGBMonth is the us-east-1 list price in USD, filled in from [awsrates] rather than
 	// written in the literal below. See withRates.
 	CostPerGBMonth float64 `json:"cost_per_gb_month"`
+}
+
+// Sizes AWS states in KB, spelled in binary KiB.
+//
+// AWS writes "128 KB" and "40 KB" in the pricing pages and the storage class table, and does not say
+// which of the two a KB is. These constants use 1024, which makes 128 KB 131,072 bytes against a
+// decimal reading of 128,000 — a 2.4% difference, in the direction that overstates the floor and the
+// overhead, so every recommendation derived from them is conservative rather than optimistic.
+//
+// The choice is explicit here rather than left as a bare `128 * 1024` because the repository has been
+// wrong about exactly this before, in the other direction and more expensively: internal/cost divided
+// bytes by 2^30 to get GB with a comment asserting the binary reading was correct, and AWS bills
+// GB-months in decimal GB, so every storage figure was 7.4% low. See [awsrates.GBFromBytes]. Rates
+// are unambiguously decimal; these thresholds are not documented either way, which is why they get a
+// stated assumption instead of a silent one.
+const (
+	// kib is 1024 bytes. Named to make the assumption visible at each use.
+	kib = 1024
+
+	// minBillableSize128KB applies to STANDARD_IA, ONEZONE_IA, and GLACIER_IR.
+	minBillableSize128KB = 128 * kib
+
+	// archiveOverheadGlacierKB is the 32 KB of per-object index and metadata GLACIER and
+	// DEEP_ARCHIVE bill at their own rate.
+	archiveOverheadGlacierKB = 32 * kib
+
+	// archiveOverheadStandardKB is the 8 KB of per-object name and metadata the archive classes bill
+	// at the S3 Standard rate, so the object stays listable.
+	archiveOverheadStandardKB = 8 * kib
+
+	// monitoringEligibility128KB is the size below which INTELLIGENT_TIERING leaves an object in
+	// Frequent Access, unmonitored and not charged the automation fee.
+	monitoringEligibility128KB = 128 * kib
+)
+
+// ArchiveOverhead returns the per-object overhead for a tier, split by the rate each part is billed
+// at: archiveBytes at the tier's own rate, standardBytes at the S3 Standard rate.
+//
+// Both are zero for every class but GLACIER and DEEP_ARCHIVE. The split is exposed because pricing
+// the 40 KB at one rate is wrong by about a factor of six on the 8 KB portion — Standard is $0.023
+// per GB-month against Deep Archive's $0.00099 — so a caller that sums first and prices second gets
+// the cheaper answer for the more expensive part.
+func ArchiveOverhead(tier string) (archiveBytes, standardBytes int64) {
+	info, ok := StorageTiers[tier]
+	if !ok || info.PerObjectOverheadBytes == 0 {
+		return 0, 0
+	}
+
+	return archiveOverheadGlacierKB, archiveOverheadStandardKB
 }
 
 // StorageTiers holds the per-tier constraints and list price for every S3 storage class.
@@ -74,8 +164,8 @@ var StorageTiers = withRates(map[string]StorageTierInfo{
 	},
 	TierStandardIA: {
 		Name:               "Standard-Infrequent Access",
-		MinObjectSize:      128 * 1024,          // 128 KB minimum
-		DeletionEmbargo:    30 * 24 * time.Hour, // 30 days minimum storage
+		MinObjectSize:      minBillableSize128KB, // AWS publishes a 128 KB billable minimum
+		DeletionEmbargo:    30 * 24 * time.Hour,  // 30 days minimum storage
 		RetrievalLatency:   "instant",
 		RetrievalCost:      true, // $0.01 per GB retrieval cost
 		MinimumStorageDays: 30,
@@ -83,8 +173,8 @@ var StorageTiers = withRates(map[string]StorageTierInfo{
 	},
 	TierOneZoneIA: {
 		Name:               "One Zone-Infrequent Access",
-		MinObjectSize:      128 * 1024,          // 128 KB minimum
-		DeletionEmbargo:    30 * 24 * time.Hour, // 30 days minimum storage
+		MinObjectSize:      minBillableSize128KB, // AWS publishes a 128 KB billable minimum
+		DeletionEmbargo:    30 * 24 * time.Hour,  // 30 days minimum storage
 		RetrievalLatency:   "instant",
 		RetrievalCost:      true, // $0.01 per GB retrieval cost
 		MinimumStorageDays: 30,
@@ -101,39 +191,50 @@ var StorageTiers = withRates(map[string]StorageTierInfo{
 	},
 	TierGlacierIR: {
 		Name:               "Glacier Instant Retrieval",
-		MinObjectSize:      128 * 1024,          // 128 KB minimum
-		DeletionEmbargo:    90 * 24 * time.Hour, // 90 days minimum storage
+		MinObjectSize:      minBillableSize128KB, // AWS publishes a 128 KB billable minimum
+		DeletionEmbargo:    90 * 24 * time.Hour,  // 90 days minimum storage
 		RetrievalLatency:   "instant",
 		RetrievalCost:      true, // $0.03 per GB retrieval cost
 		MinimumStorageDays: 90,
 		RecommendedUseCase: "Archive data needing instant access",
 	},
 	TierGlacier: {
-		Name:               "Glacier Flexible Retrieval",
-		MinObjectSize:      40 * 1024,           // 40 KB minimum
-		DeletionEmbargo:    90 * 24 * time.Hour, // 90 days minimum storage
-		RetrievalLatency:   "minutes-hours",
-		RetrievalCost:      true, // Variable retrieval costs
-		MinimumStorageDays: 90,
-		RecommendedUseCase: "Long-term archive with flexible retrieval",
+		Name: "Glacier Flexible Retrieval",
+		// No billable minimum — AWS's storage class table says NA. The 40 KB this field used to hold
+		// is per-object overhead, which is added to the object's size rather than raised to.
+		MinObjectSize:          0,
+		PerObjectOverheadBytes: archiveOverheadGlacierKB + archiveOverheadStandardKB,
+		DeletionEmbargo:        90 * 24 * time.Hour, // 90 days minimum storage
+		RetrievalLatency:       "minutes-hours",
+		RetrievalCost:          true, // Variable retrieval costs
+		MinimumStorageDays:     90,
+		RecommendedUseCase:     "Long-term archive with flexible retrieval",
 	},
 	TierDeepArchive: {
-		Name:               "Glacier Deep Archive",
-		MinObjectSize:      40 * 1024,            // 40 KB minimum
-		DeletionEmbargo:    180 * 24 * time.Hour, // 180 days minimum storage
-		RetrievalLatency:   "hours",
-		RetrievalCost:      true, // Variable retrieval costs
-		MinimumStorageDays: 180,
-		RecommendedUseCase: "Long-term archive rarely accessed",
+		Name: "Glacier Deep Archive",
+		// No billable minimum; same 40 KB per-object overhead as GLACIER. It matters more here,
+		// because the storage rate is the cheapest AWS offers and the overhead is not discounted with
+		// it: at $0.00099/GB-month for the payload, a 10 KB object costs about 23× its own size once
+		// the 32 KB archive-rate and 8 KB Standard-rate portions are added.
+		MinObjectSize:          0,
+		PerObjectOverheadBytes: archiveOverheadGlacierKB + archiveOverheadStandardKB,
+		DeletionEmbargo:        180 * 24 * time.Hour, // 180 days minimum storage
+		RetrievalLatency:       "hours",
+		RetrievalCost:          true, // Variable retrieval costs
+		MinimumStorageDays:     180,
+		RecommendedUseCase:     "Long-term archive rarely accessed",
 	},
 	TierIntelligent: {
-		Name:               "Intelligent Tiering",
-		MinObjectSize:      128 * 1024, // 128 KB minimum for optimization
-		DeletionEmbargo:    0,
-		RetrievalLatency:   "variable",
-		RetrievalCost:      false, // No retrieval charges
-		MinimumStorageDays: 0,
-		RecommendedUseCase: "Automatic cost optimization for changing access patterns",
+		Name: "Intelligent Tiering",
+		// No billable minimum — AWS's table says None. The 128 KB this field used to hold governs
+		// whether an object is monitored and auto-tiered, not what it is billed.
+		MinObjectSize:              0,
+		MonitoringEligibilityBytes: monitoringEligibility128KB,
+		DeletionEmbargo:            0,
+		RetrievalLatency:           "variable",
+		RetrievalCost:              false, // No retrieval charges
+		MinimumStorageDays:         0,
+		RecommendedUseCase:         "Automatic cost optimization for changing access patterns",
 	},
 })
 
@@ -188,7 +289,16 @@ func NewTierValidator(tier string, constraints TierConstraints, logger *slog.Log
 	}
 }
 
-// ValidateWrite validates a write operation against tier constraints
+// ValidateWrite validates a write operation against tier constraints.
+//
+// Note what the minimum check does and does not mean. AWS accepts an object below a tier's minimum
+// billable size and bills it as though it were that size; it does not reject the write. So refusing
+// here is ObjectFS's policy, not S3's behavior, and #154 is about downgrading it to a warning. What
+// #229 fixed is the input: this gate previously refused writes under 40 KB to GLACIER and
+// DEEP_ARCHIVE and under 128 KB to INTELLIGENT_TIERING, and AWS publishes no minimum billable size
+// for any of those three — so it was rejecting writes on the strength of numbers that were not
+// minimums at all. Those three now have no minimum, and the two archive classes warn about their
+// per-object overhead instead, which is the real cost and points the other way.
 func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
 	// Check minimum object size constraint
 	minSize := tv.tierInfo.MinObjectSize
@@ -199,6 +309,20 @@ func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
 	if dataSize < minSize {
 		return fmt.Errorf("object size %d bytes is below minimum %d bytes for %s tier",
 			dataSize, minSize, tv.tier)
+	}
+
+	// The archive classes bill 40 KB of metadata per object regardless of its size, so a small object
+	// costs a multiple of what its bytes suggest. Worth saying at the point of the write, because the
+	// remedy — pack small files into an archive before storing them — is not available afterward.
+	if overhead := tv.tierInfo.PerObjectOverheadBytes; overhead > 0 && dataSize < overhead {
+		tv.logger.Warn("object is smaller than the per-object overhead this tier bills",
+			"tier", tv.tier,
+			"key", key,
+			"size", dataSize,
+			"per_object_overhead", overhead,
+			"note", "AWS bills 32 KB at the archive rate and 8 KB at the S3 Standard rate for every "+
+				"archived object, in addition to the object; packing small files into one archive "+
+				"avoids paying it per file")
 	}
 
 	// Log tier-specific warnings
@@ -247,7 +371,7 @@ func (tv *TierValidator) GetRecommendations(objectSize int64, accessFrequency st
 	recommendations := make([]string, 0, 3)
 
 	// Size-based recommendations
-	if objectSize < 128*1024 {
+	if objectSize < minBillableSize128KB {
 		recommendations = append(recommendations, "Consider Standard tier for small objects to avoid IA minimum charges")
 	}
 

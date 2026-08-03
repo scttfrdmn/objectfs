@@ -2,6 +2,7 @@ package s3
 
 import (
 	"log/slog"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -170,24 +171,114 @@ func TestCostOptimizer_CostCalculation(t *testing.T) {
 	backend.pricingManager = NewPricingManager(PricingConfig{}, logger)
 	optimizer := NewCostOptimizer(backend, config, logger)
 
-	t.Run("Standard Tier Cost", func(t *testing.T) {
-		// 1GB object in Standard tier
-		cost := optimizer.calculateObjectCost(1024*1024*1024, TierStandard)
-		expected := 1.0 * StorageTiers[TierStandard].CostPerGBMonth
+	// Every expectation below is a hand-computed dollar figure written as a literal, not a formula
+	// over the same fields the code reads.
+	//
+	// That is the point, and this test is here because the previous version demonstrates why. It
+	// passed 1024*1024*1024 bytes, called it "1GB", and asserted `1.0 * CostPerGBMonth` — an
+	// expectation that holds whether the code divides by 10^9 or by 2^30, because the test made the
+	// same choice the code did. AWS bills GB-months in decimal GB, so 2^30 understates every storage
+	// figure by 7.4%, and this assertion could not see it. A test that recomputes the implementation's
+	// formula agrees with the implementation by construction.
+	const tolerance = 1e-12
 
-		if cost != expected {
-			t.Errorf("Expected cost %f, got %f", expected, cost)
+	t.Run("one decimal GB in Standard", func(t *testing.T) {
+		t.Parallel()
+
+		// Exactly 10^9 bytes at $0.023/GB-month.
+		cost := optimizer.calculateObjectCost(1_000_000_000, TierStandard)
+
+		if math.Abs(cost-0.023) > tolerance {
+			t.Errorf("1 decimal GB in Standard = $%.10f, want $0.023", cost)
 		}
 	})
 
-	t.Run("Standard-IA Minimum Size Charge", func(t *testing.T) {
-		// 64KB object in Standard-IA should be charged for 128KB minimum
-		cost := optimizer.calculateObjectCost(64*1024, TierStandardIA)
-		minSizeGB := float64(128*1024) / (1024 * 1024 * 1024)
-		expected := minSizeGB * StorageTiers[TierStandardIA].CostPerGBMonth
+	t.Run("one binary GiB in Standard costs 7.4% more than a GB", func(t *testing.T) {
+		t.Parallel()
 
-		if cost != expected {
-			t.Errorf("Expected minimum size charge %f, got %f", expected, cost)
+		// 2^30 bytes is 1.073741824 decimal GB, so $0.023 × 1.073741824 = $0.024696061952.
+		// This is the case the old test asserted as $0.023 flat.
+		cost := optimizer.calculateObjectCost(1024*1024*1024, TierStandard)
+
+		if math.Abs(cost-0.024696061952) > tolerance {
+			t.Errorf("1 GiB in Standard = $%.12f, want $0.024696061952 — if this reads $0.023, "+
+				"something is dividing bytes by 2^30 to get GB again", cost)
+		}
+	})
+
+	t.Run("a 64 KB object in Standard-IA is billed at the 128 KB minimum", func(t *testing.T) {
+		t.Parallel()
+
+		// 131,072 bytes billable (the minimum replaces the object's 65,536) = 1.31072e-4 GB
+		// × $0.0125/GB-month = $0.000001638400.
+		cost := optimizer.calculateObjectCost(64*kib, TierStandardIA)
+
+		if math.Abs(cost-0.0000016384) > tolerance {
+			t.Errorf("64 KB in Standard-IA = $%.12f, want $0.000001638400 (billed as 128 KB)", cost)
+		}
+	})
+
+	t.Run("the minimum does not raise an object already above it", func(t *testing.T) {
+		t.Parallel()
+
+		// 1 MiB = 1,048,576 bytes = 1.048576e-3 GB × $0.0125 = $0.0000131072.
+		cost := optimizer.calculateObjectCost(1024*kib, TierStandardIA)
+
+		if math.Abs(cost-0.0000131072) > tolerance {
+			t.Errorf("1 MiB in Standard-IA = $%.12f, want $0.000013107200", cost)
+		}
+	})
+
+	// The two archive classes have no minimum billable size and do have a per-object overhead, which
+	// is the #229 fix. These assertions are the ones that would fail if the 40 KB went back into
+	// MinObjectSize: under a minimum, a 10 KB object is billed as 40 KB; under an overhead it is
+	// billed as 50 KB, split across two rates.
+	t.Run("a small Deep Archive object pays its bytes plus the 40 KB overhead", func(t *testing.T) {
+		t.Parallel()
+
+		// 10,240 bytes payload + 32,768 bytes at the Deep Archive rate = 43,008 bytes
+		//   → 4.3008e-5 GB × $0.00099 = $0.0000000425779200
+		// 8,192 bytes at the S3 Standard rate
+		//   → 8.192e-6 GB × $0.023   = $0.0000001884160000
+		// total                        = $0.0000002309939200
+		cost := optimizer.calculateObjectCost(10*kib, TierDeepArchive)
+
+		if math.Abs(cost-0.00000023099392) > tolerance {
+			// Both signatures below were checked by making the mutation, not predicted: putting the
+			// 40 KB back in MinObjectSize gives exactly $0.00000004055040, and pricing the whole 40 KB
+			// at the archive rate gives $0.00000005068800.
+			t.Errorf("10 KB in Deep Archive = $%.14f, want $0.00000023099392.\nIf this came back "+
+				"$0.0000000406 the 40 KB is being treated as a minimum billable size again, and if it "+
+				"came back $0.0000000507 the 8 KB portion is being priced at the archive rate instead "+
+				"of Standard's", cost)
+		}
+	})
+
+	t.Run("the overhead is a surcharge, so a larger object pays it too", func(t *testing.T) {
+		t.Parallel()
+
+		// 1 MiB + 32 KiB at the Deep Archive rate = 1,081,344 bytes
+		//   → 1.081344e-3 GB × $0.00099 = $0.00000107053056
+		// plus the same 8 KiB at Standard = $0.000000188416
+		// total                          = $0.00000125894656
+		cost := optimizer.calculateObjectCost(1024*kib, TierDeepArchive)
+
+		if math.Abs(cost-0.00000125894656) > tolerance {
+			t.Errorf("1 MiB in Deep Archive = $%.14f, want $0.00000125894656 — the overhead applies "+
+				"at every size, not only below 40 KB", cost)
+		}
+	})
+
+	t.Run("Intelligent-Tiering has no minimum, so a small object is billed for its bytes", func(t *testing.T) {
+		t.Parallel()
+
+		// 10,240 bytes = 1.024e-5 GB × $0.023 = $0.00000023552. Under the old table this object was
+		// billed as 128 KB, about 12.8× too much, on the strength of a number that governs monitoring
+		// eligibility rather than billing.
+		cost := optimizer.calculateObjectCost(10*kib, TierIntelligent)
+
+		if math.Abs(cost-0.00000023552) > tolerance {
+			t.Errorf("10 KB in Intelligent-Tiering = $%.14f, want $0.00000023552", cost)
 		}
 	})
 }

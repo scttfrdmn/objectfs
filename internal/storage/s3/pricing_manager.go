@@ -121,9 +121,20 @@ func (pm *PricingManager) getDefaultPricing(tier string) TierPricing {
 			HeadRequestCost: rate.GetRequest,
 		},
 		MinimumBillableSize: tierInfo.MinObjectSize,
-		MinimumBillableDays: tierInfo.MinimumStorageDays,
-		TransitionCosts:     make(map[string]float64),
+		// Carried separately from the minimum because it is added to the object's size rather than
+		// substituted for it. See TierPricing's field comments; the two were one field until #229.
+		PerObjectOverheadBytes:    tierInfo.PerObjectOverheadBytes,
+		OverheadStandardRateBytes: overheadStandardRateBytes(tier),
+		MinimumBillableDays:       tierInfo.MinimumStorageDays,
+		TransitionCosts:           make(map[string]float64),
 	}
+}
+
+// overheadStandardRateBytes is the part of a tier's per-object overhead billed at the S3 Standard
+// rate, zero for every tier that has no overhead.
+func overheadStandardRateBytes(tier string) int64 {
+	_, standardBytes := ArchiveOverhead(tier)
+	return standardBytes
 }
 
 // applyDiscounts applies configured discounts to base pricing

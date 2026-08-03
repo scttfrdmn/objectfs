@@ -145,12 +145,14 @@ lever.
 objects below it are not auto-tiered, stay in the Frequent Access tier, and are not charged the
 monitoring fee.
 
-Two of those rows contradict what `internal/storage/s3/tiers.go` encodes today — it carries a 40 KB
+Three of those rows used to contradict what `internal/storage/s3/tiers.go` encoded: it carried a 40 KB
 minimum for `GLACIER` and `DEEP_ARCHIVE` and a 128 KB minimum for `INTELLIGENT_TIERING`, none of which
-AWS publishes. That table is a write gate rather than a billing hint, which is its own defect
-([#154](https://github.com/scttfrdmn/objectfs/issues/154)); the values are corrected under
-[#229](https://github.com/scttfrdmn/objectfs/issues/229). The AWS pages linked above are the authority,
-not this page and not that table.
+AWS publishes. Corrected in [#229](https://github.com/scttfrdmn/objectfs/issues/229), which gave the
+40 KB and the 128 KB fields named for what they are — `PerObjectOverheadBytes` and
+`MonitoringEligibilityBytes` — and pinned all eight classes against the AWS pages linked above in
+`TestTierSizeThresholdsMatchWhatAWSPublishes`. That the table is a *write gate* rather than a billing
+hint remains its own defect ([#154](https://github.com/scttfrdmn/objectfs/issues/154)). The AWS pages
+are the authority, not this page and not that table.
 
 ---
 
