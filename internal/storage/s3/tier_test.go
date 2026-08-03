@@ -83,6 +83,185 @@ func TestStorageTiers(t *testing.T) {
 	}
 }
 
+// The two AWS pages that publish the figures the next test pins, named once so each failure can cite
+// the one a reader has to open.
+const (
+	awsStorageClassTable = "https://docs.aws.amazon.com/AmazonS3/latest/userguide/" +
+		"storage-class-intro.html#sc-compare"
+	awsS3Pricing = "https://aws.amazon.com/s3/pricing/"
+)
+
+// TestTierSizeThresholdsMatchWhatAWSPublishes pins every size threshold in StorageTiers against the
+// AWS page that publishes it, for all eight classes rather than the four TestStorageTiers covers.
+//
+// It exists because three of these values were wrong and were wrong in a way that reads as
+// deliberate. MinObjectSize held 40 KB for GLACIER and DEEP_ARCHIVE and 128 KB for
+// INTELLIGENT_TIERING, each with a confident comment ("40 KB minimum", "128 KB minimum for
+// optimization"), and AWS publishes no minimum billable object size for any of the three. The
+// comments are why it survived review: a number with a stated reason looks checked.
+//
+// Both of the wrong numbers are real AWS numbers used for the wrong thing, which is the harder error
+// to see. The archive classes' 40 KB is per-object metadata AWS bills *in addition* to the object —
+// 32 KB at the archive rate, 8 KB at Standard's — and Intelligent-Tiering's 128 KB is the size below
+// which an object is not monitored, not auto-tiered, and not charged the automation fee. A floor and
+// a surcharge point opposite ways for every small-object recommendation: under a floor, compressing a
+// 30 KB object saves nothing, and under a surcharge it saves every byte it removes.
+//
+// The threshold is asserted zero where AWS publishes none, not merely "not 128 KB", because zero is
+// what the arithmetic in calculateObjectCost and the gate in ValidateWrite both read.
+//
+// This is the shape of internal/awsrates/rates_aws_test.go applied to the constraints rather than the
+// rates: that file exists because a table someone believed is a different thing from a table
+// something checked. The rates can be re-read from the live Pricing API; these thresholds cannot,
+// since the Pricing API does not publish them, so the citation in the failure message is the
+// substitute — it names the page to open rather than asserting the reader will remember which.
+func TestTierSizeThresholdsMatchWhatAWSPublishes(t *testing.T) {
+	t.Parallel()
+
+	// 128 KB and 40 KB as AWS writes them, read here as binary KiB. See the constants in tiers.go for
+	// why that choice is explicit: AWS does not say which a KB is, and 1024 overstates the threshold
+	// by 2.4%, which is the conservative direction for both a floor and a surcharge.
+	const (
+		kb128 = 128 * 1024
+		kb40  = 40 * 1024
+	)
+
+	cases := map[string]struct {
+		minBillable   int64
+		overhead      int64
+		monitoringMin int64
+		source        string
+		why           string
+	}{
+		TierStandard: {
+			source: awsS3Pricing,
+			why:    "no minimum billable size, no per-object overhead",
+		},
+		TierReducedRedundancy: {
+			source: awsS3Pricing,
+			why:    "deprecated, and never had a minimum",
+		},
+		TierStandardIA: {
+			minBillable: kb128,
+			source:      awsS3Pricing,
+			why:         "AWS bills a 128 KB minimum on Standard-IA",
+		},
+		TierOneZoneIA: {
+			minBillable: kb128,
+			source:      awsS3Pricing,
+			why:         "AWS bills a 128 KB minimum on One Zone-IA",
+		},
+		TierGlacierIR: {
+			minBillable: kb128,
+			source:      awsS3Pricing,
+			why:         "AWS bills a 128 KB minimum on Glacier Instant Retrieval",
+		},
+		TierGlacier: {
+			overhead: kb40,
+			source:   awsStorageClassTable,
+			why: "the storage class table lists min billable object size as NA for Glacier Flexible " +
+				"Retrieval; its 40 KB is per-object metadata billed on top of the object",
+		},
+		TierDeepArchive: {
+			overhead: kb40,
+			source:   awsStorageClassTable,
+			why: "the storage class table lists min billable object size as NA for Deep Archive; its " +
+				"40 KB is per-object metadata billed on top of the object",
+		},
+		TierIntelligent: {
+			monitoringMin: kb128,
+			source:        awsStorageClassTable,
+			why: "the storage class table lists min billable object size as None for " +
+				"Intelligent-Tiering; its 128 KB bounds auto-tiering monitoring, not billing",
+		},
+	}
+
+	// Every class, so a ninth tier cannot arrive without a decision about its thresholds.
+	for _, class := range awsname.StorageClasses() {
+		if _, ok := cases[class]; !ok {
+			t.Errorf("awsname admits storage class %q and this test has no expectation for its size "+
+				"thresholds. Add one, citing the AWS page: %s", class, awsStorageClassTable)
+		}
+	}
+
+	for tier, want := range cases {
+		t.Run(tier, func(t *testing.T) {
+			t.Parallel()
+
+			info, ok := StorageTiers[tier]
+			if !ok {
+				t.Fatalf("StorageTiers has no entry for %q", tier)
+			}
+
+			if info.MinObjectSize != want.minBillable {
+				t.Errorf("StorageTiers[%q].MinObjectSize = %d, want %d.\n%s\nSource: %s\n\n"+
+					"This field is AWS's minimum *billable* object size and nothing else. A value here "+
+					"makes ValidateWrite refuse smaller writes and makes calculateObjectCost bill them "+
+					"as this size — so a number that is not a minimum produces a refusal AWS would not "+
+					"make and a cost AWS would not charge.",
+					tier, info.MinObjectSize, want.minBillable, want.why, want.source)
+			}
+
+			if info.PerObjectOverheadBytes != want.overhead {
+				t.Errorf("StorageTiers[%q].PerObjectOverheadBytes = %d, want %d.\n%s\nSource: %s\n\n"+
+					"This is billed in addition to the object, not instead of a smaller size. Only "+
+					"GLACIER and DEEP_ARCHIVE have it.",
+					tier, info.PerObjectOverheadBytes, want.overhead, want.why, want.source)
+			}
+
+			if info.MonitoringEligibilityBytes != want.monitoringMin {
+				t.Errorf("StorageTiers[%q].MonitoringEligibilityBytes = %d, want %d.\n%s\nSource: %s\n\n"+
+					"Only INTELLIGENT_TIERING has one, and it governs whether an object is monitored "+
+					"and auto-tiered — not what it is billed.",
+					tier, info.MonitoringEligibilityBytes, want.monitoringMin, want.why, want.source)
+			}
+
+			// The two are mutually exclusive on every class AWS publishes, and the exclusion is the
+			// invariant that broke: the 40 KB sat in MinObjectSize because there was no other field for
+			// it. If a future class has both, this assertion is the place to record why.
+			if info.MinObjectSize > 0 && info.PerObjectOverheadBytes > 0 {
+				t.Errorf("StorageTiers[%q] has both a minimum billable size (%d) and a per-object "+
+					"overhead (%d). No S3 class published today has both, and the two are "+
+					"arithmetically opposite — a minimum replaces the object's size, an overhead adds "+
+					"to it. If AWS has introduced a class with both, calculateObjectCost needs to be "+
+					"read again before this assertion is relaxed.",
+					tier, info.MinObjectSize, info.PerObjectOverheadBytes)
+			}
+		})
+	}
+
+	// The split, asserted separately: it is what keeps the 8 KB portion from being priced at an
+	// archive rate, which understates it about 23-fold on DEEP_ARCHIVE.
+	for _, tier := range []string{TierGlacier, TierDeepArchive} {
+		archiveBytes, standardBytes := ArchiveOverhead(tier)
+
+		if archiveBytes != 32*1024 || standardBytes != 8*1024 {
+			t.Errorf("ArchiveOverhead(%q) = (%d, %d), want (32768, 8192).\nAWS bills 32 KB of the 40 "+
+				"at the archive class's rate and 8 KB at the S3 Standard rate.\nSource: %s",
+				tier, archiveBytes, standardBytes, awsStorageClassTable)
+		}
+
+		if archiveBytes+standardBytes != StorageTiers[tier].PerObjectOverheadBytes {
+			t.Errorf("ArchiveOverhead(%q) sums to %d but PerObjectOverheadBytes is %d; the split and "+
+				"the total have to agree or one of the two callers is pricing a different object",
+				tier, archiveBytes+standardBytes, StorageTiers[tier].PerObjectOverheadBytes)
+		}
+	}
+
+	// And zero for everything else, so the helper cannot start reporting an overhead for a class that
+	// has none.
+	for _, class := range awsname.StorageClasses() {
+		if class == TierGlacier || class == TierDeepArchive {
+			continue
+		}
+
+		if a, s := ArchiveOverhead(class); a != 0 || s != 0 {
+			t.Errorf("ArchiveOverhead(%q) = (%d, %d), want (0, 0) — only the two archive classes bill "+
+				"a per-object overhead", class, a, s)
+		}
+	}
+}
+
 func TestTierValidator(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 

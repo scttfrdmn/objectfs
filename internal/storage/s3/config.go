@@ -269,12 +269,28 @@ type PricingConfig struct {
 
 // TierPricing defines pricing for a specific storage tier
 type TierPricing struct {
-	StorageCostPerGBMonth float64            `yaml:"storage_cost_per_gb_month"` // $/GB/month for storage
-	RetrievalCostPerGB    float64            `yaml:"retrieval_cost_per_gb"`     // $/GB for retrieval
-	RequestCosts          RequestCosts       `yaml:"request_costs"`             // Per-request pricing
-	MinimumBillableSize   int64              `yaml:"minimum_billable_size"`     // Minimum billable object size
-	MinimumBillableDays   int                `yaml:"minimum_billable_days"`     // Minimum billable period
-	TransitionCosts       map[string]float64 `yaml:"transition_costs"`          // Cost to transition to other tiers
+	StorageCostPerGBMonth float64      `yaml:"storage_cost_per_gb_month"` // $/GB/month for storage
+	RetrievalCostPerGB    float64      `yaml:"retrieval_cost_per_gb"`     // $/GB for retrieval
+	RequestCosts          RequestCosts `yaml:"request_costs"`             // Per-request pricing
+
+	// MinimumBillableSize is the size an object smaller than it is billed as. Zero for the five
+	// classes AWS publishes no minimum for — see [StorageTierInfo.MinObjectSize], which this mirrors.
+	MinimumBillableSize int64 `yaml:"minimum_billable_size"`
+
+	// PerObjectOverheadBytes is billed *in addition* to the object, not instead of a smaller size.
+	// Only the two archive classes have it. It is a separate field from MinimumBillableSize because
+	// the two are arithmetically opposite: a minimum replaces the size, an overhead adds to it. Both
+	// were previously carried in MinimumBillableSize, which made the cost of a 10 KB DEEP_ARCHIVE
+	// object 40 KB when it is 50 KB, and made compressing it look free of benefit when it is not.
+	PerObjectOverheadBytes int64 `yaml:"per_object_overhead_bytes"`
+
+	// OverheadStandardRateBytes is the portion of PerObjectOverheadBytes billed at the S3 Standard
+	// rate rather than at this tier's rate — 8 KB of the archive classes' 40 KB. Priced at the tier
+	// rate it would be understated about 23-fold on DEEP_ARCHIVE.
+	OverheadStandardRateBytes int64 `yaml:"overhead_standard_rate_bytes"`
+
+	MinimumBillableDays int                `yaml:"minimum_billable_days"` // Minimum billable period
+	TransitionCosts     map[string]float64 `yaml:"transition_costs"`      // Cost to transition to other tiers
 }
 
 // RequestCosts defines per-request pricing
