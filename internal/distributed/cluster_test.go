@@ -417,6 +417,46 @@ func TestClusterManager_StartStop(t *testing.T) {
 	}
 }
 
+// ── Statistics are current when Start returns (#275) ──────────────────────────
+
+// TestClusterManager_StartComputesStatsImmediately verifies that GetStats describes the cluster as soon
+// as Start returns, with no sleep.
+//
+// The absence of a sleep is the test. Until v0.11.0 the statistics were computed only by updateStats'
+// five-second ticker, so for the first five seconds of every process GetStats reported zero nodes while
+// GetNodes over the same membership reported one. Both are public accessors and the one that
+// disagreed with the truth is the one an operator, a health check, and the three tagged tests in
+// tests/distributed_test.go read (#275). A test that slept before asserting could not tell the fix from
+// the defect.
+func TestClusterManager_StartComputesStatsImmediately(t *testing.T) {
+	t.Parallel()
+
+	cm, err := NewClusterManager(testConfig(t, "stats-at-start"))
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	if err := cm.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = cm.Stop() }()
+
+	stats := cm.GetStats()
+
+	if stats.TotalNodes != 1 {
+		t.Errorf("TotalNodes = %d immediately after Start, want 1", stats.TotalNodes)
+	}
+	if stats.AliveNodes != 1 {
+		t.Errorf("AliveNodes = %d immediately after Start, want 1", stats.AliveNodes)
+	}
+
+	// The two accessors must agree, which is the invariant the defect broke rather than either value
+	// being wrong in isolation.
+	if got := len(cm.GetNodes()); stats.TotalNodes != got {
+		t.Errorf("GetStats().TotalNodes = %d but GetNodes() has %d entries; the two describe the same "+
+			"membership and must agree", stats.TotalNodes, got)
+	}
+}
+
 // ── Local node statistics (#132) ──────────────────────────────────────────────
 
 // TestRefreshLocalStats_PopulatesMemoryAndOperations verifies that this node measures its own memory
@@ -583,6 +623,56 @@ func TestCalculateClusterStats_SumsCacheSizeAcrossAliveNodes(t *testing.T) {
 	}
 	if stats.CacheHitRate <= 0 {
 		t.Errorf("CacheHitRate = %v, want > 0", stats.CacheHitRate)
+	}
+}
+
+// TestCalculateClusterStats_TalliesUnderTheLock is a race test, not an assertion test: under -race it
+// fails on the defect and passes after it, and without -race it passes either way.
+//
+// calculateClusterStats used to maps.Copy cm.nodes and walk the copy after unlocking. maps.Copy on a
+// map[string]*NodeInfo copies the pointers, so every field read below aliased a struct UpdateNodeInfo
+// writes in place from the gossip receive goroutine (#278). What makes it a real defect rather than a
+// stale read is that Status is read to classify the node while CacheSize and CacheHitRate are summed
+// from it — a node counted alive on a torn read contributes figures from a different moment, and
+// TotalCacheSize is what a size-aware balancer routes on.
+//
+// The loop runs long enough for the two goroutines to interleave many times; -race needs the accesses
+// to actually overlap, not merely to be possible.
+func TestCalculateClusterStats_TalliesUnderTheLock(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "race-host")
+
+	cm.mu.Lock()
+	cm.nodes["race-peer"] = &NodeInfo{ID: "race-peer", Status: NodeStatusAlive, Metadata: map[string]string{}}
+	cm.mu.Unlock()
+
+	const rounds = 500
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range rounds {
+			// The same path handleAliveMessage takes: a fresh NodeInfo for a node already known, whose
+			// fields are copied onto the existing record in place.
+			cm.UpdateNodeInfo("race-peer", &NodeInfo{
+				ID:           "race-peer",
+				Status:       NodeStatusAlive,
+				LastSeen:     time.Now(),
+				CacheSize:    int64(i),
+				CacheHitRate: float64(i%100) / 100,
+				Metadata:     map[string]string{},
+			})
+		}
+	}()
+
+	for range rounds {
+		cm.calculateClusterStats()
+	}
+	<-done
+
+	// Sanity, so a test that raced but computed nothing does not look like a pass: the peer and the
+	// self node are both alive.
+	if stats := cm.GetStats(); stats.AliveNodes != 2 {
+		t.Errorf("AliveNodes = %d, want 2", stats.AliveNodes)
 	}
 }
 

@@ -381,6 +381,14 @@ func (ce *ConsensusEngine) startElection() {
 
 	// Send vote requests to all other nodes
 	ce.sendVoteRequests()
+
+	// And evaluate the majority we may already hold. Until v0.11.0 this check lived only in
+	// handleVoteResponse, which is reached only when a peer replies — so a single-node cluster, which
+	// satisfies its own majority with the vote cast on the line above, never evaluated it. The election
+	// timer fired again, the term incremented, and the loop repeated for the life of the process. A
+	// cluster of one is not a corner case: it is the first thing anyone runs, and the shape a
+	// deployment has while the second node is still being provisioned (#275).
+	ce.checkVoteMajority()
 }
 
 func (ce *ConsensusEngine) sendVoteRequests() {
@@ -427,13 +435,47 @@ func (ce *ConsensusEngine) handleVoteResponse(nodeID string, voteGranted bool) {
 		slog.Info("received vote", "from", nodeID, "total_votes", ce.voteCount)
 	}
 
-	// Check if we have majority
+	ce.checkVoteMajority()
+}
+
+// checkVoteMajority promotes this node to leader if the votes it has collected are a majority of the
+// alive membership.
+//
+// Called from every point where the vote count changes — startElection, which casts this node's vote
+// for itself, and handleVoteResponse, which counts a peer's. That is the whole of the fix for #275:
+// the comparison used to live inline in handleVoteResponse alone, so it was evaluated only when a
+// peer replied, and a cluster of one — which satisfies its own majority the moment startElection
+// increments the count to 1 — never evaluated it at all.
+//
+// The caller must hold ce.mu, as becomeLeader requires and both callers already do.
+func (ce *ConsensusEngine) checkVoteMajority() {
+	if ce.state != StateCandidate {
+		return
+	}
+
 	nodes := ce.cluster.GetNodes()
 	aliveNodes := 0
 	for _, node := range nodes {
 		if node.Status == NodeStatusAlive {
 			aliveNodes++
 		}
+	}
+
+	// A membership of just this node is a majority of one — but only if this node is the whole cluster.
+	// A node configured with seed nodes has peers it has not discovered yet: gossip learns of a peer
+	// from an inbound message, and startElection runs on a timer that does not wait for it. Promoting
+	// on a self-only view would elect every node of a starting cluster its own leader at term 1, each
+	// on one vote, before any of them had heard of the others — which is what a probe of three seeded
+	// nodes showed once the majority check reached startElection at all.
+	//
+	// So the rule is the bootstrap-versus-join distinction: a node that names no seeds is declaring
+	// itself the whole of a new cluster and may elect itself, which is #275's case and the shape of
+	// every single-node deployment. A node that names seeds must hear from one before it can hold a
+	// majority. Discovery makes aliveNodes exceed one and the ordinary vote path takes over.
+	if aliveNodes <= 1 && ce.cluster.expectsPeers() {
+		slog.Debug("declining to self-elect before discovering the configured seed nodes",
+			"term", ce.currentTerm, "alive_nodes", aliveNodes)
+		return
 	}
 
 	majority := aliveNodes/2 + 1
@@ -587,7 +629,9 @@ func (ce *ConsensusEngine) handleNetworkRequestVote(msg *GossipMessage) {
 	ce.mu.Lock()
 
 	// Step down if we see a higher term.
+	steppedDown := false
 	if req.Term > ce.currentTerm {
+		steppedDown = ce.state == StateLeader
 		ce.currentTerm = req.Term
 		ce.state = StateFollower
 		ce.votedFor = ""
@@ -608,6 +652,16 @@ func (ce *ConsensusEngine) handleNetworkRequestVote(msg *GossipMessage) {
 
 	currentTerm := ce.currentTerm
 	ce.mu.Unlock()
+
+	// A leader that steps down on a higher term has to stop claiming leadership, for the same reason
+	// handleNetworkAppendEntries does — see the comment there. There is no new leader to name: the
+	// candidate that sent this request has not won anything yet. Clearing it is what an empty leader
+	// means, and monitorCluster already uses that value when a leader is declared dead.
+	if steppedDown {
+		slog.Info("stepping down: a vote request arrived at a higher term",
+			"term", currentTerm, "candidate", req.CandidateID)
+		ce.cluster.SetLeader("")
+	}
 
 	resp := &RequestVoteRespMessage{
 		Term:        currentTerm,
@@ -660,6 +714,9 @@ func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 
 	ce.mu.Lock()
 
+	// Set while ce.mu is held, applied after it is released — see the comment at the assignment.
+	newLeader := ""
+
 	success := false
 	if req.Term >= ce.currentTerm {
 		// Recognized leader — step down if needed and reset election timer.
@@ -670,6 +727,19 @@ func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 		ce.state = StateFollower
 		ce.resetElectionTimer()
 		success = true
+
+		// And tell the cluster manager, which is what callers actually ask. Until v0.11.0 this line was
+		// missing: becomeLeader calls SetLeader but no step-down path did, so cm.isLeader was
+		// effectively write-once. A node that had been leader and then received a heartbeat from a
+		// higher term became a follower in ce.state while ClusterManager.IsLeader kept returning true
+		// for the life of the process — so two nodes each claiming leadership stayed that way
+		// permanently instead of resolving, which is how a transient election race became a durable
+		// split brain (#275).
+		//
+		// Deferred past ce.mu.Unlock below rather than called here: SetLeader takes cm.mu, and while
+		// ce.mu → cm.mu is the established order (becomeLeader does exactly that), there is no reason
+		// to hold the consensus lock across it.
+		newLeader = req.LeaderID
 
 		// Append any new entries (simplified; full consistency is future work).
 		for _, entry := range req.Entries {
@@ -690,6 +760,10 @@ func (ce *ConsensusEngine) handleNetworkAppendEntries(msg *GossipMessage) {
 
 	matchIndex := req.PrevLogIndex + uint64(len(req.Entries))
 	ce.mu.Unlock()
+
+	if newLeader != "" {
+		ce.cluster.SetLeader(newLeader)
+	}
 
 	resp := &AppendEntriesResponse{
 		Success:    success,

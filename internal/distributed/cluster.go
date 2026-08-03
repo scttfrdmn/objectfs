@@ -274,8 +274,29 @@ func NewClusterManager(config *ClusterConfig) (*ClusterManager, error) {
 	return cm, nil
 }
 
-// Start starts the cluster manager
+// Start starts the cluster manager.
+//
+// When it returns, [ClusterManager.GetStats] already describes the cluster: the statistics are
+// computed once here rather than left to the first tick of the background refresher. Until v0.11.0
+// they were not, so for the first five seconds of every process GetStats reported zero nodes while
+// GetNodes correctly reported one — two accessors over the same membership disagreeing, and the one an
+// operator or a health check reads being the wrong one (#275).
 func (cm *ClusterManager) Start(ctx context.Context) error {
+	if err := cm.startLocked(ctx); err != nil {
+		return err
+	}
+
+	// After startLocked releases cm.mu, because calculateClusterStats takes it for reading and a Go
+	// RWMutex is not reentrant.
+	cm.calculateClusterStats()
+
+	slog.Info("cluster manager started successfully")
+	return nil
+}
+
+// startLocked registers this node and starts the components and background tasks, holding cm.mu for
+// the whole of it.
+func (cm *ClusterManager) startLocked(ctx context.Context) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -313,7 +334,6 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 	go cm.monitorCluster(ctx)
 	go cm.updateStats(ctx)
 
-	slog.Info("cluster manager started successfully")
 	return nil
 }
 
@@ -545,45 +565,59 @@ func (cm *ClusterManager) updateStats(ctx context.Context) {
 }
 
 func (cm *ClusterManager) calculateClusterStats() {
+	var (
+		totalNodes     int
+		aliveNodes     int
+		suspectNodes   int
+		deadNodes      int
+		leader         string
+		totalCacheSize int64
+		totalHitRate   float64
+	)
+
+	// Tallied under cm.mu, not from a copy taken under it.
+	//
+	// This used to maps.Copy cm.nodes and then walk the copy after unlocking — which looks
+	// synchronized and is not, because the copy holds the same *NodeInfo pointers. Every field read
+	// below therefore hit a struct UpdateNodeInfo was concurrently writing from the gossip receive
+	// goroutine, and -race reported it on any cluster where a node is still announcing itself while
+	// the stats ticker fires, which is every cluster (#278). GetNodes does this correctly, copying
+	// each NodeInfo by value inside the critical section; this function is where the pattern was
+	// missed.
+	//
+	// Only cm.mu is held here: the results land in cm.stats afterwards, so the two locks are never
+	// nested and no order between them has to be established.
 	cm.mu.RLock()
-	nodes := make(map[string]*NodeInfo)
-	maps.Copy(nodes, cm.nodes)
-	leader := cm.leader
+	totalNodes = len(cm.nodes)
+	leader = cm.leader
+	for _, node := range cm.nodes {
+		switch node.Status {
+		case NodeStatusAlive:
+			aliveNodes++
+			totalCacheSize += node.CacheSize
+			totalHitRate += node.CacheHitRate
+		case NodeStatusSuspect:
+			suspectNodes++
+		case NodeStatusDead:
+			deadNodes++
+		}
+	}
 	cm.mu.RUnlock()
 
 	cm.stats.mu.Lock()
 	defer cm.stats.mu.Unlock()
 
-	// Reset counters
-	cm.stats.TotalNodes = len(nodes)
-	cm.stats.AliveNodes = 0
-	cm.stats.SuspectNodes = 0
-	cm.stats.DeadNodes = 0
+	cm.stats.TotalNodes = totalNodes
+	cm.stats.AliveNodes = aliveNodes
+	cm.stats.SuspectNodes = suspectNodes
+	cm.stats.DeadNodes = deadNodes
 	cm.stats.CurrentLeader = leader
-
-	totalCacheSize := int64(0)
-	totalCacheHitRate := 0.0
-	aliveNodesCount := 0
-
-	for _, node := range nodes {
-		switch node.Status {
-		case NodeStatusAlive:
-			cm.stats.AliveNodes++
-			totalCacheSize += node.CacheSize
-			totalCacheHitRate += node.CacheHitRate
-			aliveNodesCount++
-		case NodeStatusSuspect:
-			cm.stats.SuspectNodes++
-		case NodeStatusDead:
-			cm.stats.DeadNodes++
-		}
-	}
-
 	cm.stats.TotalCacheSize = totalCacheSize
 
-	// Calculate average cache hit rate
-	if aliveNodesCount > 0 {
-		cm.stats.CacheHitRate = totalCacheHitRate / float64(aliveNodesCount)
+	// Left at its previous value when no node is alive, rather than zeroed: a hit rate of zero is a
+	// cache that never hits, which is not what "there was nothing to average" means.
+	if aliveNodes > 0 {
+		cm.stats.CacheHitRate = totalHitRate / float64(aliveNodes)
 	}
 }
 
@@ -651,6 +685,26 @@ func (cm *ClusterManager) UpdateNodeInfo(nodeID string, info *NodeInfo) {
 		maps.Copy(newNode.Metadata, info.Metadata)
 		cm.nodes[nodeID] = &newNode
 	}
+}
+
+// expectsPeers reports whether this node is configured to join an existing cluster rather than to be
+// the whole of a new one.
+//
+// It is the seed list, minus this node's own address, exactly as [ClusterManager.joinCluster] treats
+// it: a seed pointing at ourselves is not a peer to wait for. [ConsensusEngine.checkVoteMajority] uses
+// this to decide whether a membership view of one is a cluster of one or a cluster whose other members
+// have not been discovered yet — the two are indistinguishable from the membership map alone, and
+// electing a leader on the wrong answer is a split brain (#275).
+//
+// No lock: cm.config is written once by NewClusterManager and never mutated, which is why joinCluster
+// reads SeedNodes unlocked too.
+func (cm *ClusterManager) expectsPeers() bool {
+	for _, seed := range cm.config.SeedNodes {
+		if seed != cm.config.AdvertiseAddr {
+			return true
+		}
+	}
+	return false
 }
 
 // SetLeader updates the cluster leader

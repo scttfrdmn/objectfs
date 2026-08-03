@@ -908,15 +908,23 @@ func (gp *GossipProtocol) performGossip() {
 		incarnation = self.Incarnation
 	}
 
-	nodes := make([]*GossipNode, 0, len(gp.memberlist))
+	// Addresses, not *GossipNode.
+	//
+	// This used to collect the pointers and read targetNode.Info after the unlock below, which is a
+	// read of a field handleAliveMessage assigns from the receive goroutine — the whole point of a
+	// memberlist is that another goroutine is updating it. Resolving the address here, inside the
+	// critical section, is all the send loop actually needs, and it removes the aliasing rather than
+	// synchronizing around it (#278).
+	localID := gp.localNode.ID
+	targets := make([]string, 0, len(gp.memberlist))
 	for _, node := range gp.memberlist {
 		// Guard against nodes whose Info was never populated (e.g. added via a
 		// sync message with a nil Info field) to prevent a nil dereference (#113).
 		if node.Info == nil {
 			continue
 		}
-		if node.Info.ID != gp.localNode.ID && node.State != StateDead && node.State != StateLeft {
-			nodes = append(nodes, node)
+		if node.Info.ID != localID && node.State != StateDead && node.State != StateLeft {
+			targets = append(targets, node.Info.Address)
 		}
 	}
 
@@ -930,16 +938,16 @@ func (gp *GossipProtocol) performGossip() {
 		return
 	}
 
-	if len(nodes) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 
 	// Select random nodes to gossip with
-	fanout := min(gp.config.GossipFanout, len(nodes))
+	fanout := min(gp.config.GossipFanout, len(targets))
 
 	msg := &GossipMessage{
 		Type:      MessageTypeAlive,
-		From:      gp.localNode.ID,
+		From:      localID,
 		Timestamp: time.Now(),
 		MessageID: gp.generateMessageID(),
 		Data:      data,
@@ -947,24 +955,21 @@ func (gp *GossipProtocol) performGossip() {
 
 	// Gossip to random subset of nodes
 	for i := range fanout {
-		targetNode := nodes[i%len(nodes)]
-		if targetNode.Info != nil {
-			_ = gp.sendMessage(targetNode.Info.Address, msg)
-		}
+		_ = gp.sendMessage(targets[i%len(targets)], msg)
 	}
 
 	// Send heartbeat. Same incarnation as the alive message above, deliberately: the two describe one
 	// moment, and handleHeartbeatMessage clears suspicion on `>=`, so a heartbeat carrying a stale
 	// number would fail to clear a suspicion the accompanying alive message just refuted.
 	heartbeatMsg := &HeartbeatMessage{
-		Node:        gp.localNode.ID,
+		Node:        localID,
 		Timestamp:   time.Now(),
 		Incarnation: incarnation,
 	}
 
 	heartbeatGossipMsg := &GossipMessage{
 		Type:      MessageTypeGossipHeartbeat,
-		From:      gp.localNode.ID,
+		From:      localID,
 		Timestamp: time.Now(),
 		MessageID: gp.generateMessageID(),
 	}
@@ -1101,43 +1106,60 @@ func (gp *GossipProtocol) sendMessage(addr string, msg *GossipMessage) error {
 }
 
 func (gp *GossipProtocol) broadcastMessage(msg *GossipMessage) error {
+	// Addresses rather than *NodeInfo, for the reason performGossip resolves them under the lock too:
+	// a pointer taken out of the memberlist aliases a struct the receive goroutine owns. This one
+	// happens to be safe today, because the only NodeInfo anything mutates in place is gp.localNode
+	// and the ID filter below excludes it — but that is a property of a filter two lines away, not of
+	// the code doing the read, and it is the same reasoning that made three other sites wrong (#278).
 	gp.mu.RLock()
-	nodes := make([]*NodeInfo, 0, len(gp.memberlist))
+	localID := gp.localNode.ID
+	targets := make([]string, 0, len(gp.memberlist))
 	for _, gossipNode := range gp.memberlist {
-		if gossipNode.Info != nil && gossipNode.Info.ID != gp.localNode.ID &&
+		if gossipNode.Info != nil && gossipNode.Info.ID != localID &&
 			gossipNode.State != StateDead && gossipNode.State != StateLeft {
-			nodes = append(nodes, gossipNode.Info)
+			targets = append(targets, gossipNode.Info.Address)
 		}
 	}
 	gp.mu.RUnlock()
 
-	for _, node := range nodes {
+	for _, addr := range targets {
 		go func(addr string) {
 			_ = gp.sendMessage(addr, msg)
-		}(node.Address)
+		}(addr)
 	}
 
 	return nil
 }
 
 func (gp *GossipProtocol) sendSyncMessage(addr string) error {
-	gp.mu.RLock()
-	nodes := make(map[string]*GossipNode)
-	maps.Copy(nodes, gp.memberlist)
-	gp.mu.RUnlock()
-
-	syncMsg := &SyncMessage{
-		Nodes: nodes,
-	}
-
 	msg := &GossipMessage{
 		Type:      MessageTypeSync,
-		From:      gp.localNode.ID,
 		Timestamp: time.Now(),
 		MessageID: gp.generateMessageID(),
 	}
 
-	data, _ := json.Marshal(syncMsg)
+	// Marshaled under the lock, as performGossip does for its own message and for the same reason.
+	//
+	// This used to take the read lock only to maps.Copy the memberlist and then marshal outside it —
+	// which looks synchronized and is not, because maps.Copy copies the *GossipNode pointers. The copy
+	// therefore aliases the originals, and this node's entry aliases gp.localNode itself, since
+	// NewGossipProtocol stores that very pointer as its Info. So the marshal walked structs that
+	// performGossip was concurrently stamping with a fresh LastSeen and that handleSyncMessage was
+	// concurrently overwriting. -race reported it on any cluster where a node joins while the gossip
+	// loop runs, which is every cluster (#278).
+	//
+	// Marshaling under the lock rather than deep-copying, because the alternative is a copy that has
+	// to stay deep as GossipNode grows — it holds two pointers today — and a shallow one is exactly the
+	// bug being fixed. If the memberlist ever gets large enough that holding gp.mu across a marshal
+	// matters, the answer is to bound the sync (#277), not to reintroduce a copy that can be wrong.
+	gp.mu.RLock()
+	msg.From = gp.localNode.ID
+	data, marshalErr := json.Marshal(&SyncMessage{Nodes: gp.memberlist})
+	gp.mu.RUnlock()
+
+	if marshalErr != nil {
+		return fmt.Errorf("marshaling the sync message: %w", marshalErr)
+	}
 	msg.Data = data
 
 	return gp.sendMessage(addr, msg)

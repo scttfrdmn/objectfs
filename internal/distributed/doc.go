@@ -314,6 +314,53 @@ Leader Election:
 	// - Configuration changes
 	// - Quorum decisions
 
+A cluster of one elects itself, within one election timeout of [ClusterManager.Start] and without any
+message being sent. That is worth stating because until v0.11.0 it did not: the majority comparison
+lived only in the handler for an inbound vote reply, so a node with no peers — the first thing anyone
+runs, and the shape a deployment has while its second node is still being provisioned — cycled
+candidate → timeout → candidate for the life of the process, incrementing its term each round, and
+[ClusterManager.IsLeader] never returned true (#275).
+
+"A cluster of one" means SeedNodes names no address other than this node's own. That distinction is
+load-bearing rather than pedantic: a node that is configured to join a cluster holds a membership view
+of just itself for the first few hundred milliseconds, because gossip learns of a peer only from an
+inbound message and the election timer does not wait for one. Reading that view as a majority of one
+would have every node of a starting three-node cluster elect itself at term 1, each on its own single
+vote, before any had heard of the others. So a node with seeds waits to hear from one; a node without
+seeds is declaring itself the whole of a new cluster and proceeds.
+
+Leadership is also given up, not only taken. A node that sees a higher term — in a heartbeat or in a
+vote request — steps down in the consensus engine *and* through [ClusterManager.SetLeader]. Before
+v0.11.0 only the promotion path told the cluster manager, so [ClusterManager.IsLeader] was effectively
+write-once: a deposed leader kept reporting itself as leader for the life of the process, which is what
+turned a momentary election race into a permanent split brain rather than something the next heartbeat
+resolved (#275).
+
+Statistics are also current the moment Start returns. [ClusterManager.GetStats] and
+[ClusterManager.GetNodes] describe the same membership and agree from the first call; previously the
+statistics were computed only by a five-second ticker, so for the first five seconds GetStats reported
+zero nodes while GetNodes reported one (#275).
+
+# Membership Maps and Locking
+
+Both membership maps in this package — ClusterManager.nodes and GossipProtocol.memberlist — hold
+pointers, and every struct behind those pointers is mutated in place by the gossip receive goroutine.
+The invariant that follows is worth stating because it was violated at four separate sites (#278):
+
+Never carry a pointer out of a membership map across the unlock. Copying the map does not help; a
+map copy copies the pointers, so the copy aliases exactly the structs another goroutine is writing.
+Instead, do the read inside the critical section and carry out only values — a tally, a marshaled
+byte slice, an address string, or a by-value struct copy as [ClusterManager.GetNodes] and
+[GossipProtocol.GetMemberlist] do.
+
+This is not a stale-read concern. calculateClusterStats classifies a node by Status and sums CacheSize
+and CacheHitRate from it in the same iteration, so a torn read mixes moments inside a single figure a
+load balancer routes on; and handleSyncMessage decides whether to accept an update by comparing
+incarnations, so an inconsistently-marshaled memberlist affects whether membership converges.
+
+Regression tests for this class are race tests: they pass under `go test` and fail only under -race, so
+a green run without the flag is not evidence.
+
 # Configuration
 
 ClusterConfig controls all distributed system behavior:
