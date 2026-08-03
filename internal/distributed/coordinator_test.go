@@ -839,10 +839,12 @@ func TestCoordinator_ExecuteLocally_BackendError(t *testing.T) {
 
 // ── Cache invalidation tests ──────────────────────────────────────────────────
 
-// mockCache is a minimal types.Cache for testing cache invalidation.
+// mockCache is a minimal types.Cache for testing cache invalidation, and for the local-stats refresh
+// in cluster_test.go, which needs Stats to return something distinguishable from a zero value.
 type mockCache struct {
 	mu      sync.Mutex
 	deleted []string
+	stats   types.CacheStats
 }
 
 func (mc *mockCache) Get(_ string, _, _ int64) []byte { return nil }
@@ -852,9 +854,14 @@ func (mc *mockCache) Delete(key string) {
 	mc.deleted = append(mc.deleted, key)
 	mc.mu.Unlock()
 }
-func (mc *mockCache) Evict(_ int64) bool      { return false }
-func (mc *mockCache) Size() int64             { return 0 }
-func (mc *mockCache) Stats() types.CacheStats { return types.CacheStats{} }
+func (mc *mockCache) Evict(_ int64) bool { return false }
+func (mc *mockCache) Size() int64        { return 0 }
+func (mc *mockCache) Stats() types.CacheStats {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	return mc.stats
+}
 
 // TestClusterManager_InvalidateCacheKey_NoGossip verifies that
 // InvalidateCacheKey is a no-op (does not panic) when gossip is not running.

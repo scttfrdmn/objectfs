@@ -886,8 +886,22 @@ func (gp *GossipProtocol) performGossip() {
 	// One critical section, because the incarnation must be the one that goes out with this payload:
 	// taking the write lock to stamp, dropping it, and then calling getCurrentIncarnation would let a
 	// refutation land in between and publish the old number with the new stats.
+	// Sampled before the lock, because ReadMemStats stops the world and cm.cache is read under
+	// cm.mu — holding gp.mu across either invites a stall or a lock-order inversion. The values land in
+	// gp.localNode below, under gp.mu, alongside the timestamp they belong with.
+	var fresh NodeInfo
+	gp.cluster.refreshLocalStats(&fresh)
+
 	gp.mu.Lock()
 	gp.localNode.LastSeen = time.Now()
+
+	// The figures a peer will route on. Until v0.11.0 these six fields were set to zero at
+	// construction and never written again, so every node advertised itself as idle with an empty cache
+	// forever — and the incarnation guard meant a peer would have discarded the update anyway (#132).
+	gp.localNode.MemoryUsage = fresh.MemoryUsage
+	gp.localNode.CacheSize = fresh.CacheSize
+	gp.localNode.CacheHitRate = fresh.CacheHitRate
+	gp.localNode.Operations = fresh.Operations
 
 	incarnation := uint32(1)
 	if self, exists := gp.memberlist[gp.localNode.ID]; exists {

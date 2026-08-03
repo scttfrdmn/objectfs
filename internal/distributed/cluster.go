@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"runtime"
 	"sync"
 	"time"
 
@@ -84,13 +85,27 @@ type NodeInfo struct {
 	Version  string            `json:"version"`
 	Metadata map[string]string `json:"metadata"`
 
-	// Resource information
+	// Resource information.
+	//
+	// MemoryUsage is the Go heap in use as a fraction of the heap obtained from the OS, from
+	// runtime.ReadMemStats. It is the process's own memory, not the host's — a node under memory
+	// pressure from something else on the box reports a low number here, which is the honest answer to
+	// the question this field can actually answer.
+	//
+	// CPUUsage, DiskUsage, and NetworkBandwidth are not populated and are left at zero. Every one of
+	// them needs a platform-specific source that is not in this repository: /proc/stat or host_statistics
+	// for CPU, statfs against a cache directory this package does not know about for disk, and interface
+	// counters sampled over an interval for bandwidth. Filling a field with a proxy from an unrelated
+	// quantity would be worse than leaving it zero — an obviously-zero CPUUsage prompts someone to
+	// implement it, while one carrying heap fragmentation looks like a measurement and gets used as one
+	// (#132).
 	CPUUsage         float64 `json:"cpu_usage"`
 	MemoryUsage      float64 `json:"memory_usage"`
 	DiskUsage        float64 `json:"disk_usage"`
 	NetworkBandwidth int64   `json:"network_bandwidth"`
 
-	// Cache statistics
+	// Cache statistics. Populated from the injected cache's own Stats, so they are absent rather than
+	// zero when no cache is set — see refreshLocalStats.
 	CacheSize    int64   `json:"cache_size"`
 	CacheHitRate float64 `json:"cache_hit_rate"`
 	Operations   int64   `json:"operations"`
@@ -128,8 +143,15 @@ type ClusterStats struct {
 	FailedOps       int64         `json:"failed_ops"`
 	AvgOpLatency    time.Duration `json:"avg_op_latency"`
 
-	// Cache coordination
+	// Cache coordination.
+	//
+	// CacheHitRate is the mean across alive nodes and TotalCacheSize their sum, which is why the two are
+	// combined differently: a rate averaged over nodes answers "how well is the cluster caching",
+	// while a size summed answers "how much is cached", and summing rates or averaging sizes answers
+	// nothing. TotalCacheSize was accumulated and then discarded with `_ =` until v0.11.0 — the value
+	// was correct and simply never assigned anywhere (#132).
 	CacheHitRate          float64 `json:"cache_hit_rate"`
+	TotalCacheSize        int64   `json:"total_cache_size"`
 	ReplicationEvents     int64   `json:"replication_events"`
 	ConsistencyViolations int64   `json:"consistency_violations"`
 
@@ -366,6 +388,7 @@ func (cm *ClusterManager) GetStats() *ClusterStats {
 		FailedOps:             cm.stats.FailedOps,
 		AvgOpLatency:          cm.stats.AvgOpLatency,
 		CacheHitRate:          cm.stats.CacheHitRate,
+		TotalCacheSize:        cm.stats.TotalCacheSize,
 		ReplicationEvents:     cm.stats.ReplicationEvents,
 		ConsistencyViolations: cm.stats.ConsistencyViolations,
 		MessagesSent:          cm.stats.MessagesSent,
@@ -556,11 +579,50 @@ func (cm *ClusterManager) calculateClusterStats() {
 		}
 	}
 
+	cm.stats.TotalCacheSize = totalCacheSize
+
 	// Calculate average cache hit rate
 	if aliveNodesCount > 0 {
 		cm.stats.CacheHitRate = totalCacheHitRate / float64(aliveNodesCount)
 	}
-	_ = totalCacheSize
+}
+
+// refreshLocalStats reads this node's current resource and cache figures into dst.
+//
+// It is called once per gossip round rather than on a ticker of its own, because the only consumer is
+// the alive message that immediately follows: sampling on an independent schedule would publish
+// figures from an arbitrary point before the send with no benefit. ReadMemStats stops the world
+// briefly, which is why this is bounded by the gossip interval and not called per request (#132).
+//
+// The fields it does not touch are as deliberate as the ones it sets; see the NodeInfo comments.
+func (cm *ClusterManager) refreshLocalStats(dst *NodeInfo) {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	// HeapSys is what the process obtained from the OS and HeapInuse what it is actually using, so the
+	// ratio is how much of its own footprint is live rather than fragmentation. HeapSys is zero only
+	// before the first allocation, which cannot happen here, but the guard costs nothing and a division
+	// by zero would put a NaN into a field a load balancer compares.
+	if mem.HeapSys > 0 {
+		dst.MemoryUsage = float64(mem.HeapInuse) / float64(mem.HeapSys)
+	}
+
+	cm.mu.RLock()
+	cache := cm.cache
+	cm.mu.RUnlock()
+
+	// Left untouched when no cache is injected, rather than zeroed. Zero is a meaningful cache size —
+	// an empty cache — and reporting it for "there is no cache" would make a node with no cache look
+	// like the emptiest and therefore most attractive one to a size-aware strategy.
+	if cache != nil {
+		cacheStats := cache.Stats()
+		dst.CacheSize = cacheStats.Size
+		dst.CacheHitRate = cacheStats.HitRate
+	}
+
+	cm.stats.mu.RLock()
+	dst.Operations = cm.stats.TotalOperations
+	cm.stats.mu.RUnlock()
 }
 
 // Helper method to update node information

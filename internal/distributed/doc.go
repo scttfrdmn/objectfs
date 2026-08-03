@@ -241,18 +241,28 @@ Check cluster health and node status:
 	// Get cluster state
 	nodes := cluster.GetNodes()
 	for nodeID, node := range nodes {
-		log.Printf("Node %s: Status=%s, Load=%.2f",
-			nodeID, node.Status, node.Load)
+		log.Printf("Node %s: Status=%s, Memory=%.2f, Cache=%d bytes",
+			nodeID, node.Status, node.MemoryUsage, node.CacheSize)
 	}
 
 	// Get leader
-	:= cluster.GetLeader()
+	leader := cluster.GetLeader()
 	log.Printf("Current leader: %s", leader)
 
 	// Check if this node is leader
 	if cluster.IsLeader() {
 		// Perform leader-only operations
 	}
+
+Which of [NodeInfo]'s figures mean anything is worth knowing before building on them. MemoryUsage,
+CacheSize, CacheHitRate, and Operations are measured once per gossip round and travel with each alive
+message. CPUUsage, DiskUsage, and NetworkBandwidth are always zero: each needs a platform-specific
+source that is not in this repository, and a plausible stand-in would be worse than a zero, because a
+zero prompts someone to implement the field while a number that looks measured gets used as one.
+
+None of the four carried a live value before v0.11.0. They were set at construction and never written
+again, so every node advertised itself as idle with an empty cache — and the receiving side would have
+discarded an update anyway, for the incarnation reason described below (#132, #272).
 
 Failure Detection & Recovery
 
