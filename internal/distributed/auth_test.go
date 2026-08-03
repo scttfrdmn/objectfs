@@ -430,9 +430,11 @@ func TestLoadClusterSecret(t *testing.T) {
 		t.Setenv(ClusterSecretEnv, "")
 
 		path := filepath.Join(t.TempDir(), "secret")
-		// 0644 is the whole point: this is the insecure file the loader must refuse. gosec's G306 is
-		// suppressed rather than satisfied, because satisfying it would delete the test.
-		if err := os.WriteFile(path, []byte(strings.Repeat("h", minSecretLen)), 0o644); err != nil { //nolint:gosec // deliberately world-readable
+		// 0644 is the whole point: this is the insecure file the loader must refuse. G306 is
+		// suppressed rather than satisfied, because satisfying it would delete the test. Both
+		// directives, since golangci-lint honors only //nolint and standalone gosec only #nosec.
+		//nolint:gosec // deliberately world-readable: this is the file the loader must reject
+		if err := os.WriteFile(path, []byte(strings.Repeat("h", minSecretLen)), 0o644); err != nil { // #nosec G306 -- deliberately world-readable
 			t.Fatalf("writing the secret file: %v", err)
 		}
 

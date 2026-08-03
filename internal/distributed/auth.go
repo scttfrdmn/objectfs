@@ -143,7 +143,11 @@ func LoadClusterSecret(secretFile string) ([]byte, error) {
 			ErrSecretPermissions, secretFile, perm, secretFile)
 	}
 
-	raw, err := os.ReadFile(secretFile) //nolint:gosec // the path is operator-supplied configuration
+	// Both directives, deliberately: golangci-lint's gosec honors only //nolint, and the standalone
+	// gosec whose SARIF feeds GitHub code scanning honors only #nosec. One without the other passes
+	// the lint job and fails the security check.
+	//nolint:gosec // the path is operator-supplied configuration, which is the point
+	raw, err := os.ReadFile(secretFile) // #nosec G304 -- operator-supplied path; reading the file it names is the function
 	if err != nil {
 		return nil, fmt.Errorf("reading cluster secret file %s: %w", secretFile, err)
 	}
