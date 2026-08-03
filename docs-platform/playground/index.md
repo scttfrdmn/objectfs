@@ -237,9 +237,8 @@ for cache_size in "1GB" "4GB" "8GB" "16GB"; do
     sync
     time dd if=/mnt/test/testfile of=/dev/null bs=1M 2>/dev/null
 
-    # Cleanup. rm returns EROFS on a mount today, so remove the object at the
-    # source; unmount by signalling the process, which flushes on the way out.
-    aws s3 rm s3://benchmark-bucket/testfile
+    # Cleanup. Unmount by signalling the process, which flushes on the way out.
+    rm /mnt/test/testfile
     kill -TERM "$objectfs_pid"
     wait "$objectfs_pid" 2>/dev/null
 

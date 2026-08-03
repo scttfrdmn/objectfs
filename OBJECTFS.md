@@ -18,8 +18,10 @@
 >   exactly this reason.
 > - **"POSIX-compliant" was wrong** and is corrected in the body rather than only noted here — a
 >   banner a reader may skip is weaker than a sentence that no longer makes the claim. ObjectFS
->   presents a POSIX interface over object storage. There is no rename, no links, no locking. See the
->   README's supported-operations table.
+>   presents a POSIX interface over object storage. There are no hard links and no cross-host
+>   locking, and `rename` works but is not atomic. See the README's supported-operations table,
+>   which is the authority; this line named the missing operations and went stale the moment three
+>   of them landed.
 > - **The performance and coverage figures are aspirations**, including a "95%" coverage badge and a
 >   "10-100x" speedup, neither of which was measured.
 >

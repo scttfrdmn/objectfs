@@ -1,7 +1,27 @@
-// Package filesystem defines the common interface that all protocol handlers use
-// to interact with the ObjectFS backend. This abstraction allows FUSE, SMB, NFS,
-// and other protocols to share the same S3 backend, cost optimization, and
-// enterprise pricing features without code duplication.
+// Package filesystem declares a protocol-agnostic filesystem interface that nothing implements.
+//
+// # This is a design sketch, not a working contract
+//
+// The intent was for FUSE, SMB, and NFS handlers to share one backend abstraction. That has not
+// happened and this package is not on the way there: it has **no importers anywhere in the tree**,
+// and [FilesystemInterface]'s only implementation is `mockFilesystem` in this package's own test.
+// The live path is `internal/fuse` → `internal/vfs` → `pkg/types.Backend`, which owes nothing to
+// anything here.
+//
+// The distinction matters because this file reads like a capability list. It declares Rename,
+// Truncate, Chmod, Chown, Link, Symlink, Readlink, four xattr methods, and Statfs — and a reader
+// who takes a method here as evidence of support will be wrong about several of them. Symlinks,
+// hard links, and xattrs are not implemented at all, and hard links never will be: S3 has no
+// concept of two names for one object. See [internal/vfs.FileType], whose comment records that
+// this interface advertising Symlink and Link with no implementation behind them is precisely what
+// went wrong in v0.10.0.
+//
+// The supported-operations table in README.md is the authority, and it is derived from the methods
+// that exist in `internal/fuse` and `internal/vfs`. Do not infer support from this file.
+//
+// Kept rather than deleted because the multi-protocol work it sketches is tracked (#181) and this
+// records the original shape of it. If that work starts, this interface is a starting point to
+// argue with — not a contract to fill in.
 package filesystem
 
 import (
@@ -11,9 +31,10 @@ import (
 	"time"
 )
 
-// FilesystemInterface defines the common operations that all protocol handlers
-// need to perform. This interface abstracts away the specific S3 backend
-// implementation and allows multiple protocols to operate on the same data.
+// FilesystemInterface is the operation set a protocol handler would implement.
+//
+// Nothing implements it except this package's test mock, and the presence of a method here says
+// nothing about whether the operation works on a mount. See the package comment.
 type FilesystemInterface interface {
 	// File operations
 	Open(ctx context.Context, path string, flags int) (FileHandle, error)

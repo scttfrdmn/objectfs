@@ -138,16 +138,22 @@ cp /path/to/local/file.txt /mnt/objectfs/
 mkdir /mnt/objectfs/my-folder
 ```
 
-Two operations this section used to show do **not** work, and fail loudly rather than silently:
+`mv` and `rm` work now, and both have a caveat worth knowing before you rely on them:
 
 ```bash
-mv /mnt/objectfs/old.txt /mnt/objectfs/new.txt   # ENOTSUP — there is no rename
-rm /mnt/objectfs/unwanted-file.txt               # EROFS   — delete is not implemented
+mv /mnt/objectfs/old.txt /mnt/objectfs/new.txt   # works — but not atomically
+rm /mnt/objectfs/unwanted-file.txt               # works — deletes the object
 ```
 
-`rm` returning an error is deliberate. go-fuse defaults an unimplemented `Unlink` to *success*, so
-without the refusal `rm` would exit 0 while the object survived in S3 — the user believes the file is
-gone and it is still there and still billing. The
+A rename is a server-side copy followed by a delete, because S3 has no atomic rename to use. So a
+concurrent reader can briefly see both names, and an interruption leaves the data at the old name,
+the new one, or both — never at neither, since each source is deleted only after its own copy
+succeeds. Anything that depends on rename being atomic, such as the write-temp-then-rename idiom,
+is not safe here between concurrent writers.
+
+Earlier releases refused both operations: `mv` returned `ENOTSUP` and `rm` returned `EROFS`. The
+`rm` refusal was deliberate rather than an oversight — go-fuse defaults an unimplemented `Unlink`
+to *success*, so without it `rm` exited 0 while the object survived in S3. The
 [supported-operations table](https://github.com/scttfrdmn/objectfs#supported-operations) is the
 authority on which operations are in which state.
 

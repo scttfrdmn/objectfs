@@ -6,9 +6,12 @@
 
 This is a vision document: it describes what ObjectFS is *for*, not what it currently does. Where the
 two differ, the [README's supported-operations table](../README.md#supported-operations) is the
-authority. In particular, "POSIX-compliant" appeared three times below and is gone from all three:
-ObjectFS implements roughly ten of forty VFS operations, has no rename and no links, and full
-compliance is not reachable over an object store rather than merely unfinished.
+authority — and it is the authority for the count as well as the list. "POSIX-compliant" appeared
+three times below and is gone from all three, but the sentence that replaced it went on to state a
+fraction of the VFS surface as a number, which went stale the moment `unlink`, `rmdir`, and `rename`
+landed. What does not go stale is the reason: full POSIX compliance is unreachable over an object
+store, not merely unfinished, because S3 has no atomic rename, no hard links, and no partial object
+write.
 
 We exist to eliminate the friction between cloud object storage and traditional filesystem-based workflows, enabling researchers and engineers to access petabytes of data as naturally as local files.
 

@@ -124,6 +124,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asserts the bridge *dispatches* to `Rename` rather than reaching go-fuse's `ENOTSUP` default, which
   is what a drifted signature or a build tag excluding `rename.go` would silently restore.
 
+- **Eight documents outside the README described the pre-rename filesystem, and four of them told
+  users an operation fails that works** ([#162]). `docs/architecture/overview.md` listed `unlink`,
+  `rmdir`, and `rename` as unimplemented and said `rm` returns `EROFS`; `docs-platform/guide/`
+  told users `mv` fails with `ENOTSUP` "because there is no rename"; the playground's benchmark
+  script worked around `rm` by shelling out to `aws s3 rm`. Every one was an accurate description of
+  v0.10.3 being read by users of a version where those operations work — understating rather than
+  overstating, which is friendlier and still wrong, because it sends people to build workarounds for
+  a problem that is fixed.
+
+  Two mechanical gates now cover the class, because it has gone stale twice in the same place
+  (`internal/config/docs_posix_test.go`):
+  - **No document may state an operation count.** Eight files said "roughly 10 of ~40 VFS operations
+    are implemented", each having copied it from the audit that measured it once; six operations
+    landed across three releases and not one sentence changed. This is the version-constant problem
+    exactly — one number, many copies, no way for a copy to learn it is wrong — so it gets the same
+    answer: say a subset is implemented and point at the table. `CHANGELOG.md` is exempt, with the
+    reason recorded in the code: a released section is an immutable record of what that release did,
+    and editing its counts to match today would falsify the record.
+  - **The README's "Not implemented" table may not name an operation whose go-fuse interface
+    `internal/fuse` asserts.** It reads the `_ fs.NodeUnlinker = (*DirectoryNode)(nil)` assertions
+    rather than the method set, because the assertion is what makes support real — go-fuse probes each
+    interface with a type assertion and substitutes a default when it is absent, and for `Unlink` and
+    `Rmdir` that default is *success*. A method with a drifted signature compiles and is silently
+    never called; the assertion is what fails.
+
+  The tempting third gate — flag any line pairing an implemented operation with a refusal errno,
+  repo-wide — was written, measured, and rejected: ten hits, of which eight are changelog entries
+  correctly describing past releases. A gate whose output is 80% false gets deleted. Both surviving
+  gates were verified by mutation, and the first one's word list is written out in full because a
+  first draft with `ten|twenty|thirty|forty` passed on "sixteen of forty VFS operations" — a narrow
+  pattern that passes is indistinguishable from a correct repository.
+
+- `internal/filesystem/interface.go` says what it is: a design sketch with **no importers anywhere in
+  the tree**, whose only implementation is its own test mock. It reads like a capability list — it
+  declares `Rename`, `Truncate`, `Chmod`, `Chown`, `Link`, `Symlink`, `Readlink`, four xattr methods,
+  and `Statfs` — and a reader taking a method there as evidence of support would be wrong about
+  several. That is not hypothetical: `internal/vfs`'s `FileType` comment already records this
+  interface advertising `Symlink` and `Link` with nothing behind them as what went wrong in v0.10.0.
+  Kept rather than deleted because the multi-protocol work it sketches is tracked ([#181]) and this is
+  the record of its original shape.
+
 - **`write_buffer.max_memory` is enforced.** It was declared in the config schema, defaulted to
   `"512MB"`, validated as a size string, and read by nothing ([#205]) — so every mount since the key
   appeared reported a write-buffer ceiling and enforced none, on the one path that holds user data in
@@ -144,8 +185,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   succeeds and that the resulting object is whole, so a lossy reclaim fails rather than passing
   quietly.
 
+[#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
+[#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205
 
 ## [0.10.3] - 2026-08-02
