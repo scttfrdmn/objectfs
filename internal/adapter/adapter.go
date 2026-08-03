@@ -181,13 +181,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 	// 5. Initialize platform-specific FUSE filesystem
 	mountConfig := &fuse.MountConfig{
 		MountPoint: a.mountPoint,
-		Options: &fuse.MountOptions{
-			FSName:   "objectfs",
-			Subtype:  "s3",
-			MaxWrite: 128 * 1024,
-			Debug:    false,
-		},
-		ReadAhead: a.buildReadAheadConfig(),
+		Options:    a.buildMountOptions(),
+		ReadAhead:  a.buildReadAheadConfig(),
 	}
 
 	a.mountMgr = fuse.CreatePlatformMountManager(a.backend, a.cache, a.writeBuffer, a.metrics, mountConfig)
@@ -574,6 +569,37 @@ func (a *Adapter) buildReadAheadConfig() *fuse.ReadAheadConfig {
 		MinSequential:   ra.MinSequential,
 		ConcurrentReads: ra.ConcurrentReads,
 		TTL:             ra.TTL,
+	}
+}
+
+// buildMountOptions maps the `fuse` config section onto the mount's options.
+//
+// A method rather than a struct literal at the one call site, so the mapping can be asserted without
+// a mount. That is not a stylistic preference: this mapping is the seam #180 is about. Nine fields on
+// fuse.MountOptions and fuse.Config named real FUSE capabilities and reached nothing, and they
+// survived a release because there was no place to put a test — the literal lived inside Start,
+// between initializing the write path and constructing the mount manager, and nothing short of a
+// live mount could observe it.
+//
+// FSName, Subtype and MaxWrite are constants here rather than configuration. Their operator-facing
+// keys were removed by #180 for lack of a reader; giving them one is separate work and neither has a
+// use case behind it. Debug is false rather than mapped to global.log_level: go-fuse's Debug logs
+// every FUSE request and reply, which is a different thing from an application log level and would
+// make DEBUG unusable for anything else.
+func (a *Adapter) buildMountOptions() *fuse.MountOptions {
+	return &fuse.MountOptions{
+		FSName:   "objectfs",
+		Subtype:  "s3",
+		MaxWrite: 128 * 1024,
+		Debug:    false,
+
+		// The three settings the `fuse` section carries — the first FUSE block any loader has read.
+		// DirectIO and KeepCache travel further, to fuse.Config, because they are returned from every
+		// open rather than set at mount time; CreatePlatformMountManager is what carries them. SyncRead
+		// stops here, being a field on go-fuse's own fuse.MountOptions.
+		DirectIO:  a.config.FUSE.DirectIO,
+		KeepCache: a.config.FUSE.KeepCache,
+		SyncRead:  a.config.FUSE.SyncRead,
 	}
 }
 

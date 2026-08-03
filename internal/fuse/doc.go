@@ -84,6 +84,15 @@ Flexible mount configuration options:
 			AttrTimeout:  5 * time.Second,
 			EntryTimeout: 10 * time.Second,
 
+			// What the kernel is told about caching and dispatch. All three default to off, and off
+			// is the kernel's own behavior in each case, so an ordinary mount sets none of them.
+			// DirectIO and KeepCache are returned from every Open rather than set at mount time, and
+			// DirectIO wins if both are set. SyncRead is go-fuse's field; it withholds
+			// CAP_ASYNC_READ, which is what kernel readahead depends on.
+			DirectIO:  false,
+			KeepCache: false,
+			SyncRead:  false,
+
 			// Platform-specific
 			FSName:       "objectfs",
 			Subtype:      "s3",
@@ -96,17 +105,29 @@ Flexible mount configuration options:
 		},
 	}
 
-Every option above takes effect. That is now a property of the type rather than a claim about this
-example: `MountOptions` and `Config` between them carried fourteen fields — `MaxRead`, `DirectIO`,
+Every option above takes effect, and that is a property of the type rather than a claim about this
+example. `MountOptions` and `Config` between them carried fourteen fields — `MaxRead`, `DirectIO`,
 `KeepCache`, `BigWrites`, `AsyncRead`, `WritebackCache`, the three splice flags, `AllowOther` on
-`Config`, `ReadAhead`, `WriteBuffer`, and `Concurrency` — that were read by nothing, and they are
-gone. `MaxWrite` is the only size that is settable: go-fuse derives `max_read` and `MaxPages` from
-it, so the read size is not independently configurable.
+`Config`, `ReadAhead`, `WriteBuffer`, and `Concurrency` — that were read by nothing. Three of them are
+back, plumbed and tested (#180); the rest are gone. `MaxWrite` is the only size that is settable:
+go-fuse derives `max_read` and `MaxPages` from it, so the read size is not independently configurable.
 
-The yaml tags on these structs bind to nothing, and never did. Configuration is decoded into
-[config.Configuration], which has no FUSE section, so a mount is configured by the code above and by
-`internal/adapter`, not by a `fuse:` block in a config file. #180 tracks plumbing the four removed
-flags that name real go-fuse capabilities, along with the tests that would show they took effect.
+Two of the four #180 nominated were not plumbable, and both reasons are worth stating because each
+would otherwise look like an omission:
+
+  - Splice. go-fuse only splices a [fuse.ReadResult] backed by a file descriptor, and
+    [FileHandle.Read] returns [fuse.ReadResultData] at every return site — the bytes come from S3 or
+    from an in-memory cache, and there is no fd to splice from. Setting `DisableSplice` would disable
+    a path this filesystem never takes.
+  - The writeback cache. It maps to `fuse.MountOptions.ExplicitDataCacheControl`, which asks the
+    kernel to stop invalidating data caches automatically and makes the filesystem responsible for
+    doing it. There is not one `NotifyContent`, `NotifyEntry`, or `NotifyInvalInode` call in this
+    repository, so enabling it would make stale pages permanent rather than bounded.
+
+The yaml tags on these structs still bind to nothing, and that is now deliberate rather than an
+oversight. As of v0.11.0 [config.Configuration] does have a `fuse` section — the first one any loader
+has read — and it reaches these structs through `internal/adapter`, not by being decoded into them.
+The operator-facing names are [config.FUSEConfig]'s.
 
 # Usage Examples
 

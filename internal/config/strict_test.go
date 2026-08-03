@@ -249,3 +249,80 @@ func TestTopLevelKeysMatchesTheSchema(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadFromFileReadsTheFUSESection is #180 at the layer where that issue actually began.
+//
+// A `fuse:` block in a config file was silently discarded through v0.10.0 — Configuration had no such
+// key, so non-strict decoding dropped the whole section. That is why nine fields on
+// internal/fuse.MountOptions and internal/fuse.Config carried yaml tags to no effect: the tags were
+// real, the fields were settable, and no document could ever reach them. Under the strict decoding
+// added in v0.11.0 the same file would have been rejected outright, which is better but still not the
+// same as being read.
+//
+// So this asserts the section is read, and asserts it with non-default values: a document setting all
+// three to false would pass against a loader that ignored the block entirely.
+func TestLoadFromFileReadsTheFUSESection(t *testing.T) {
+	t.Parallel()
+
+	const doc = `fuse:
+  direct_io: true
+  keep_cache: true
+  sync_read: true
+`
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := NewDefault()
+	if err := cfg.LoadFromFile(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	want := FUSEConfig{DirectIO: true, KeepCache: true, SyncRead: true}
+	if cfg.FUSE != want {
+		t.Errorf("the fuse section loaded as %+v, want %+v. A section the loader drops is how nine "+
+			"settable-but-inert FUSE fields survived to a release (#180)", cfg.FUSE, want)
+	}
+}
+
+// TestLoadFromFileRejectsTheRemovedFUSEKeys pins the other half of #180's removal.
+//
+// The nine names are gone, and gone means rejected rather than accepted-and-ignored. An operator who
+// had written `fuse: {big_writes: true}` was already getting nothing; the difference now is being
+// told. `async_read` is in this list too, and it is the interesting one: it names a real capability
+// and its replacement is `sync_read`, the inverse — so accepting it silently would invert the setting
+// an operator asked for, which is worse than any of the eight that merely did nothing.
+func TestLoadFromFileRejectsTheRemovedFUSEKeys(t *testing.T) {
+	t.Parallel()
+
+	removed := []string{
+		"big_writes", "max_read", "async_read", "writeback_cache",
+		"splice_read", "splice_write", "splice_move",
+	}
+
+	for _, key := range removed {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+
+			doc := "fuse:\n  " + key + ": true\n"
+
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			err := NewDefault().LoadFromFile(path)
+			if err == nil {
+				t.Fatalf("fuse.%s was accepted. It names no field, so it would be silently discarded — "+
+					"the failure mode the strict loader exists to end", key)
+			}
+
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("the error for fuse.%s does not name the key, so an operator cannot tell which "+
+					"line to fix: %v", key, err)
+			}
+		})
+	}
+}

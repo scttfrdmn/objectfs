@@ -90,6 +90,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CompleteMultipartUpload`, which is how the abort path gets a failure arriving after every part has
   already uploaded.
 
+- **A `fuse:` section in the configuration file, and it is the first one any loader has read**
+  ([#180]). `direct_io`, `keep_cache`, and `sync_read`. Nine fields on `internal/fuse.MountOptions` and
+  `internal/fuse.Config` carried yaml tags for a whole release and were decoded by nothing, because
+  `config.Configuration` had no `fuse` key at all — so a `fuse:` block in a config file was silently
+  discarded, and the two flags that reach the kernel per-open were settable in Go and returned as the
+  literal `0` from every `Open`. All three new fields default to false, false is the kernel's own
+  behavior for each, and `NewDefault` therefore names no `fuse` section: the zero value *is* the
+  default, and a second place for it to live is how the last set drifted.
+
+  Each of the four seams between the YAML key and the value the kernel receives is now asserted by a
+  test verified by mutation — the mapping was deleted or reverted to v0.10.0's code and the intended
+  test watched to fail. That is the point of the change rather than a detail of it: every one of those
+  nine fields was correct at the layer that declared it, and died at a boundary no test crossed. The
+  adapter mapping in particular passed its package's whole suite with the three assignment lines
+  removed, which is why it was extracted into a method that can be called without a mount.
+
+  What the flags do to the *kernel* — whether a second `read(2)` at the same offset reaches the
+  filesystem, whether cached pages survive `open(2)` — cannot be observed without `/dev/fuse`, so it
+  lives behind a `fuse_mount` build tag with a `make test-fuse-mount` target. CI compiles the tag it
+  cannot run, because a build tag nothing compiles is how four others in this repo came to carry code
+  that does not build ([#240]). Those tests fail rather than skip when the device is absent: a test
+  that skips itself reports success.
+
+  Two of the four flags [#180] nominated are **not** plumbable, and both reasons are recorded at the
+  field that would have carried each rather than being dropped in silence. Splice: go-fuse only splices
+  a `ReadResult` backed by a file descriptor, and this filesystem's reads come from S3 or from memory
+  and return `fuse.ReadResultData` at every return site, so `DisableSplice` would disable a path never
+  taken — a config key whose effect is provably nothing. The writeback cache: it maps to
+  `ExplicitDataCacheControl`, which makes the filesystem responsible for invalidating the kernel's data
+  cache, and there is not one `NotifyContent`, `NotifyEntry`, or `NotifyInvalInode` call in the
+  repository — enabling it would convert bounded staleness into permanent staleness.
+
 ### Fixed
 
 - **A data race between `ConsensusEngine.Stop` and an inbound heartbeat.** `Stop` read
@@ -517,6 +549,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164
 [#176]: https://github.com/scttfrdmn/objectfs/issues/176
 [#178]: https://github.com/scttfrdmn/objectfs/issues/178
+[#180]: https://github.com/scttfrdmn/objectfs/issues/180
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#192]: https://github.com/scttfrdmn/objectfs/issues/192
 [#202]: https://github.com/scttfrdmn/objectfs/issues/202
@@ -525,6 +558,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#211]: https://github.com/scttfrdmn/objectfs/issues/211
 [#212]: https://github.com/scttfrdmn/objectfs/issues/212
 [#230]: https://github.com/scttfrdmn/objectfs/issues/230
+[#240]: https://github.com/scttfrdmn/objectfs/issues/240
 [#245]: https://github.com/scttfrdmn/objectfs/issues/245
 [#247]: https://github.com/scttfrdmn/objectfs/issues/247
 

@@ -66,11 +66,15 @@ type MountConfig struct {
 // MaxWrite, so the read size is not separately settable. BigWrites named a FUSE capability that has
 // been unconditional since kernel 4.20.
 //
-// The yaml tags are what made the whole set look plumbed, and they were never bound to anything:
-// configuration is decoded into [config.Configuration], whose top-level keys include no FUSE
-// section, so nothing has ever decoded YAML into this type. Removing a tag no user could set breaks
-// no config file. #180 tracks the four that name genuine go-fuse capabilities (direct I/O, the
-// writeback cache, splice, and async read) for plumbing with the tests that would show they work.
+// The yaml tags on this type are still bound to nothing, and that is now deliberate rather than an
+// oversight: the operator-facing names live on [config.FUSEConfig], which is the type a config file
+// decodes into, and this type is reached from it through internal/adapter. Two names for one setting
+// is the drift #180 and #176 were both about, so the tags below are kept only because they predate
+// that discovery and nothing decodes them.
+//
+// Three of the four capabilities #180 nominated for plumbing are the DirectIO, KeepCache, and
+// AsyncRead fields below. The fourth, splice, is not plumbable — see [Config.DirectIO] for why, and
+// [config.FUSEConfig] for the same note in operator-facing terms.
 type MountOptions struct {
 	// Basic options
 	ReadOnly     bool `yaml:"read_only"`
@@ -81,6 +85,27 @@ type MountOptions struct {
 	// MaxWrite is the largest WRITE the kernel may send, and go-fuse derives max_read and MaxPages
 	// from it. It is the one size that is settable.
 	MaxWrite uint32 `yaml:"max_write"`
+
+	// DirectIO and KeepCache are the two open-time flags, carried through to [Config] by
+	// [CreatePlatformMountManager] because [FileNode.Open] is what returns them to the kernel — they
+	// are not mount-time options and are not on go-fuse's [fuse.MountOptions] at all. See
+	// [Config.DirectIO] for the precedence between them.
+	DirectIO  bool `yaml:"direct_io"`
+	KeepCache bool `yaml:"keep_cache"`
+
+	// SyncRead makes the kernel keep at most one READ outstanding against one file.
+	//
+	// Named for go-fuse's field rather than for the AsyncRead the removed struct had, because
+	// AsyncRead is the negation and SyncRead is the thing that exists: go-fuse turns SyncRead into a
+	// disabled CAP_ASYNC_READ at INIT (fuse/server.go:187) and there is no field going the other way.
+	// Keeping the negated name would also have made false the interesting value, so a zero-valued
+	// MountOptions would have serialized every read on the mount. Off is asynchronous reads, which is
+	// both the kernel's default and this one's.
+	//
+	// Turning it on costs read throughput on any sequential reader: kernel readahead is precisely the
+	// mechanism CAP_ASYNC_READ enables. It is here for a backend that cannot serve concurrent reads
+	// of one file. S3 can.
+	SyncRead bool `yaml:"sync_read"`
 
 	// Advanced options
 	Debug        bool          `yaml:"debug"`
@@ -449,6 +474,12 @@ func (m *MountManager) buildFUSEOptions() *fs.Options {
 			Debug:       m.config.Options.Debug,
 			AllowOther:  m.config.Options.AllowOther,
 			MaxWrite:    int(m.config.Options.MaxWrite),
+
+			// go-fuse's own field, and the reason MountOptions.SyncRead is not named AsyncRead. This
+			// is the whole of that setting's plumbing: go-fuse ORs CAP_ASYNC_READ into
+			// DisabledCapabilities at INIT when it is set (fuse/server.go:187), so the capability is
+			// never negotiated with the kernel.
+			SyncRead: m.config.Options.SyncRead,
 		},
 
 		// Attribute caching

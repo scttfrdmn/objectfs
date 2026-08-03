@@ -49,6 +49,83 @@ type Configuration struct {
 	Monitoring  MonitoringConfig  `yaml:"monitoring"`
 	Features    FeatureConfig     `yaml:"features"`
 	Cluster     ClusterConfig     `yaml:"cluster"`
+	FUSE        FUSEConfig        `yaml:"fuse"`
+}
+
+// FUSEConfig configures how the kernel is asked to cache and dispatch to this mount.
+//
+// This block is new in v0.11.0 and it is the first FUSE section any loader has ever read. Nine
+// fields on internal/fuse.MountOptions and internal/fuse.Config carried yaml tags for a whole
+// release and were decoded by nothing — Configuration had no `fuse` key, so a `fuse:` block in a
+// config file was silently discarded, and under strict decoding it would now be rejected outright.
+// They are the fields #180 removed.
+//
+// Only settings with a demonstrated effect on the kernel's behavior are here, which is why the block
+// is three keys and not nine. Two of the four #180 nominated turned out not to be plumbable, and the
+// evidence is recorded at the field that would have carried them — see DirectIO's comment for
+// splice, and KeepCache's for the writeback cache.
+//
+// All three default to false, which is both the kernel's behavior in the absence of the flag and
+// ObjectFS's behavior before this block existed. That is why NewDefault does not name this section:
+// the zero value is the default, so a Configuration built as a literal and one built by NewDefault
+// cannot describe different mounts. Each field is also named so that false is the uninteresting
+// value — SyncRead rather than AsyncRead, for one — since a negated name would have made the zero
+// value the surprising one.
+type FUSEConfig struct {
+	// DirectIO asks the kernel not to cache this mount's file data: FOPEN_DIRECT_IO on every open.
+	//
+	// Off by default. It costs the page cache — every read(2) becomes a READ request into
+	// FileHandle.Read even when the same bytes were read a microsecond ago — and buys coherence with a
+	// bucket other clients are writing. The internal byte-range cache still serves those reads, so
+	// what is given up is the kernel's copy, not all caching. It also makes reads land at the offset
+	// and length the application asked for rather than page-aligned and rounded up, which is what
+	// makes it the setting to reach for when a reader does large strided reads of a huge object.
+	//
+	// `splice_read`, the fourth flag #180 named, is not here and is not plumbable as things stand.
+	// go-fuse only splices a ReadResult that carries a file descriptor (fuse.ReadResultFd, via the
+	// seekableResult/statefulResult interfaces in fuse/read.go); FileHandle.Read returns
+	// fuse.ReadResultData at all four of its return sites, because the bytes come from S3 or from an
+	// in-memory cache and there is no fd to splice from. trySplice returns errRecoverSplice for such
+	// a result and go-fuse copies instead. Setting DisableSplice would therefore disable a path this
+	// filesystem never takes — a config key whose effect is provably nothing, which is the defect
+	// #180 exists to stop repeating.
+	DirectIO bool `yaml:"direct_io"`
+
+	// KeepCache asks the kernel to retain cached pages across open(2): FOPEN_KEEP_CACHE.
+	//
+	// Off by default, so an open(2) drops whatever the page cache held for that file and the next
+	// read comes to this filesystem. Turning it on trades that for speed on a workload that opens the
+	// same file repeatedly — and it is only safe when nothing else writes the bucket, because a page
+	// the kernel keeps is a page ObjectFS cannot invalidate: see the writeback-cache note below for
+	// why there is no notification path to invalidate it with.
+	//
+	// Ignored when DirectIO is set. The two are contradictory — one asks the kernel to cache harder
+	// and the other asks it not to cache at all — and go-fuse's own bridge clears FOPEN_KEEP_CACHE
+	// when it takes a passthrough path (fs/bridge.go:805). Which one wins is decided in internal/fuse
+	// rather than left to the kernel; see FileNode.Open.
+	//
+	// `writeback_cache`, also named in #180, is not here. It maps to
+	// fuse.MountOptions.ExplicitDataCacheControl, which asks the kernel *not* to invalidate data
+	// caches automatically and makes the filesystem "fully responsible for invalidating data cache"
+	// (go-fuse's own words). ObjectFS makes no invalidation calls at all: there is not one
+	// NotifyContent, NotifyEntry, or NotifyInvalInode in the tree. Enabling it would hand the mount a
+	// responsibility nothing discharges and turn stale pages into a permanent condition rather than
+	// one bounded by cache.ttl. It needs the notification path first, tracked separately.
+	KeepCache bool `yaml:"keep_cache"`
+
+	// SyncRead makes the kernel keep at most one READ outstanding against a file.
+	//
+	// Off by default, so reads are asynchronous — the kernel's default and ObjectFS's. It reaches
+	// go-fuse's SyncRead field, which go-fuse turns into a disabled CAP_ASYNC_READ at INIT
+	// (fuse/server.go:187). #180 proposed exposing this as `async_read`, the name the removed field
+	// had; it is `sync_read` instead, because AsyncRead is the negation of the flag that exists and a
+	// negated key would make `async_read: false` — the value a half-filled config file produces — the
+	// one that serializes every read on the mount.
+	//
+	// Turning it on costs read throughput on any sequential reader: kernel readahead is exactly the
+	// mechanism CAP_ASYNC_READ enables. It is here for a backend that cannot serve concurrent reads of
+	// one file. S3 can.
+	SyncRead bool `yaml:"sync_read"`
 }
 
 // GlobalConfig represents global application settings.
@@ -775,6 +852,12 @@ func NewDefault() *Configuration {
 				MaxRetries: 3,
 			},
 		},
+		// FUSE is deliberately absent, unlike every other section above.
+		//
+		// All three of its fields are false by default and false is the kernel's own behavior for each,
+		// so the zero value *is* the default and naming it here would only create a second place for
+		// that default to live. TestFUSEZeroValueIsTheDefault pins the property this omission depends
+		// on — that a Configuration built as a literal and one built here describe the same mount.
 	}
 }
 

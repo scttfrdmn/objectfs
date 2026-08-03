@@ -648,3 +648,93 @@ func TestDefaultConfigReachesTheManagerUnchanged(t *testing.T) {
 			*got, fuse.DefaultReadAheadConfig())
 	}
 }
+
+// TestBuildMountOptionsMapsTheFUSESection is the mapping half of #180.
+//
+// The three fields it checks are the ones that survived that issue's audit. Nine others named real FUSE
+// capabilities, carried yaml tags, and reached nothing — and the reason none of them was caught is the
+// reason this test exists: they were set in a struct literal inside Adapter.Start, where no test could
+// reach them, and nothing between there and the kernel ever read them back.
+//
+// Values are written out rather than derived from the input, for the reason
+// TestBuildS3ConfigMapsEveryConfiguredValue documents: an expectation computed from cfg would agree with
+// a mapping that read direct_io into keep_cache. Here that matters more than usual, because all three
+// fields are bools of the same type — a crossed pair is invisible unless the inputs differ.
+func TestBuildMountOptionsMapsTheFUSESection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		fuseCfg config.FUSEConfig
+		want    fuse.MountOptions
+	}{
+		{
+			// All three distinct is impossible with three bools, so each subtest sets exactly one. A
+			// field mapped from the wrong source therefore shows up as the wrong field being true.
+			name:    "direct_io alone",
+			fuseCfg: config.FUSEConfig{DirectIO: true},
+			want:    fuse.MountOptions{DirectIO: true},
+		},
+		{
+			name:    "keep_cache alone",
+			fuseCfg: config.FUSEConfig{KeepCache: true},
+			want:    fuse.MountOptions{KeepCache: true},
+		},
+		{
+			name:    "sync_read alone",
+			fuseCfg: config.FUSEConfig{SyncRead: true},
+			want:    fuse.MountOptions{SyncRead: true},
+		},
+		{
+			// The shipped default, and the one row that would pass on a mapping that dropped the section
+			// entirely — which is why it is not the only row.
+			name:    "the default section",
+			fuseCfg: config.FUSEConfig{},
+			want:    fuse.MountOptions{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := createTestConfig()
+			cfg.FUSE = tc.fuseCfg
+
+			got := (&Adapter{config: cfg}).buildMountOptions()
+
+			if got == nil {
+				t.Fatal("buildMountOptions returned nil, which MountManager would replace with its own " +
+					"defaults and every fuse: key in the config file would be ignored")
+			}
+
+			// Compared whole rather than field by field, so a fourth setting added to the `fuse` section
+			// and not mapped here fails this test instead of silently joining the nine.
+			want := tc.want
+			want.FSName = "objectfs"
+			want.Subtype = "s3"
+			want.MaxWrite = 128 * 1024
+
+			if *got != want {
+				t.Errorf("buildMountOptions() = %+v, want %+v", *got, want)
+			}
+		})
+	}
+}
+
+// TestFUSEZeroValueIsTheDefault is the property NewDefault relies on by omission.
+//
+// Every other section of Configuration is named in NewDefault. `fuse` is not, because all three of its
+// fields default to off and off is both the kernel's behavior and ObjectFS's behavior before the section
+// existed. That omission is only safe while the zero value and the default agree, so this asserts it:
+// otherwise a caller building a Configuration as a literal — which internal/adapter's own tests do —
+// would get a different mount from one built by NewDefault.
+func TestFUSEZeroValueIsTheDefault(t *testing.T) {
+	t.Parallel()
+
+	if got := config.NewDefault().FUSE; got != (config.FUSEConfig{}) {
+		t.Errorf("NewDefault().FUSE = %+v, want the zero value. Either name the section in NewDefault "+
+			"or keep the two in agreement; a config built as a literal must describe the same mount",
+			got)
+	}
+}
