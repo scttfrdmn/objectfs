@@ -174,6 +174,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reduction is a deliberate choice. Both npm limits are left at 3 on purpose: those queues are full
   of majors correctly waiting for a human, which is the limit doing its job rather than hiding work.
 
+- **Three cache TTL tests were flaky in a way that reported as a cache defect.** They configured a
+  100 ms TTL and then asserted that an entry exists "immediately after `Put`". But `Put` stamps
+  `Timestamp: now` on entry (`internal/cache/persistent.go:305`) and *then* gzip-encodes and writes to
+  disk, so the entry's clock starts before its bytes land. Any delay between `Put` returning and the
+  following `Get` — GC, scheduler contention on a shared runner, a slow temp filesystem — spends the
+  same 100 ms the assertion depends on.
+
+  `TestPersistentCache_TTLExpiration` failed on CI for a pull request that changed nothing but
+  `.github/dependabot.yml`, which is the tell. Reproduced deliberately by sleeping 120 ms after the
+  `Put`: the entry is gone before it is ever read. `TestPersistentCache_Optimize` was the more
+  fragile of the two — it asserts a final count of 1, so it needed a fourth `Put` *and* a full index
+  sweep to finish inside the window, and losing that race looks like `Optimize` evicting a fresh
+  entry. `TestLRUCache_TTLExpiration` has the same shape; being in-memory it is far less likely to
+  miss, which makes it the one that would have outlived the other two.
+
+  The tests are what changed, not the caches. TTL measured from the start of the write is the
+  defensible semantic — an entry is as old as its data — so the fix is a 2 s budget wide enough that
+  scheduling noise cannot reach it, plus an `expiryWait` helper that keeps runtime tied to the TTL
+  rather than to a second hardcoded sleep. Each of the three was confirmed to fail against a
+  `isExpired() { return false }` mutant before being called fixed.
+
 - **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
   unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
   requires a string: *"The property '#/updates/0/schedule/time' of type integer did not match the
