@@ -30,9 +30,8 @@ type ReadAheadManager struct {
 // plumbed. config.ReadAheadConfig owns the YAML names now; this type is the internal shape it maps to.
 //
 // MaxDistance was removed with them. It was a field, a default of 1 MiB, and a yaml tag, and no code
-// in this package ever read it: the detector's decision to prefetch is MinSequential plus a confidence
-// floor, and how far ahead it reads is prefetchLength. A cap on read-ahead distance is a plausible
-// knob, but it was never one.
+// in this package ever read it: the detector's decision to prefetch is MinSequential, and how far ahead
+// it reads is prefetchLength. A cap on read-ahead distance is a plausible knob, but it was never one.
 type ReadAheadConfig struct {
 	Enabled         bool
 	WindowSize      int64         // floor on the prefetch length; see prefetchLength
@@ -41,7 +40,13 @@ type ReadAheadConfig struct {
 	TTL             time.Duration // how long an idle read pattern is remembered
 }
 
-// ReadPattern tracks access patterns for intelligent prefetching
+// ReadPattern tracks access patterns for intelligent prefetching.
+//
+// There was a confidence float64 here, assigned sequentialHits/10 and clamped to 1.0. It was read at
+// exactly one place — the prefetch gate, as `confidence > 0.5` alongside the MinSequential check — so
+// the two conditions were the same counter in different units and the stricter always won. Removed
+// with the gate rather than left as an unread field, because a score derived from the threshold it
+// guards is not independent evidence and cannot become any (#247).
 type ReadPattern struct {
 	path           string
 	lastOffset     int64
@@ -49,7 +54,6 @@ type ReadPattern struct {
 	sequentialHits int
 	lastAccess     time.Time
 	predictedNext  int64
-	confidence     float64
 }
 
 // PrefetchRequest represents a prefetch operation
@@ -124,18 +128,11 @@ func (ram *ReadAheadManager) OnRead(path string, offset, size int64) {
 		ram.activeReads[path] = pattern
 	}
 
-	// Update pattern
 	if offset == pattern.lastOffset+pattern.lastSize {
-		// Sequential read detected
 		pattern.sequentialHits++
-		pattern.confidence = float64(pattern.sequentialHits) / 10.0
-		if pattern.confidence > 1.0 {
-			pattern.confidence = 1.0
-		}
 	} else {
-		// Non-sequential read, reset
+		// Non-sequential read: the run is over, and a new one has to earn MinSequential again.
 		pattern.sequentialHits = 0
-		pattern.confidence = 0.1
 	}
 
 	pattern.lastOffset = offset
@@ -143,8 +140,27 @@ func (ram *ReadAheadManager) OnRead(path string, offset, size int64) {
 	pattern.lastAccess = time.Now()
 	pattern.predictedNext = offset + size
 
-	// Trigger prefetch if pattern is strong enough
-	if pattern.sequentialHits >= ram.config.MinSequential && pattern.confidence > 0.5 {
+	// MinSequential alone, which is what it says it is.
+	//
+	// This was `sequentialHits >= MinSequential && confidence > 0.5`, and confidence was
+	// sequentialHits/10 — so the second condition was `sequentialHits > 5`, the same quantity in
+	// different units, and the stricter of the two always won. The effective gate was
+	// max(MinSequential, 6): setting 1, 2, 3, 4 or 5 all prefetched first on the sixth sequential read,
+	// so the shipped default of 3 did not describe the shipped behavior, and the setting worked as
+	// documented only above 6 (#247).
+	//
+	// Dropping the floor rather than raising the defaults to 6, and the measurement is why. A
+	// continuing traversal costs the same either way — 3 MiB read sequentially at the kernel's 128 KiB
+	// buffer transfers exactly 3,145,728 bytes at every MinSequential from 1 to 10, because
+	// FileSystem.fetch shares one flight between a prefetch and the read it anticipates, so a prefetch
+	// that is going to be read adds no bytes. The cost of prefetching sooner is a run that *stops*
+	// before consuming what was fetched, and that cost is exactly one prefetch: a reader that goes
+	// sequential and then walks away wastes 131,072 bytes whether it stops after 3 reads at
+	// MinSequential=3 or after 6 at MinSequential=6. The floor did not prevent a class of waste, it
+	// only moved when the single unredeemed prefetch became possible. Trading one prefetch's bytes for
+	// prefetching from the third read instead of the sixth is worth it, and now the number a user sets
+	// is the number the detector uses.
+	if pattern.sequentialHits >= ram.config.MinSequential {
 		ram.schedulePrefetch(path, pattern.predictedNext, ram.prefetchLength(size))
 	}
 }

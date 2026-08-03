@@ -130,14 +130,9 @@ performance:
     # every subsequent read walks past — paid for twice, in egress and in cache capacity.
     window_size: 64KB
 
-    # Consecutive sequential reads required before prefetching starts.
-    #
-    # The effective floor is 6, not this number, and the default is below it: the prefetch also
-    # requires a confidence above 0.5, confidence is sequentialHits/10, so nothing is prefetched
-    # before the sixth consecutive sequential read whatever this says. 3 is kept as the default
-    # because it is what every mount has run since the prefetcher was written — raising it to 6
-    # would document the behavior more honestly but is a change to the shipped value, and the two
-    # thresholds want reconciling in the code rather than papering over here (#247).
+    # Consecutive sequential reads required before prefetching starts. At 3, the third sequential
+    # read triggers the first prefetch. A non-sequential read ends the run and the next one starts
+    # over from zero, so a reader that seeks constantly is never prefetched for.
     min_sequential: 3
 
     # Prefetch workers, each performing one GET at a time. Must be > 0 when enabled — zero starts no

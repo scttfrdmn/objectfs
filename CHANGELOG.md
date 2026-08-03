@@ -71,6 +71,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`min_sequential` now means what it says: read-ahead had two thresholds over the same counter, and
+  only one was configurable** ([#247]). The prefetch gate required `sequentialHits >= MinSequential`
+  *and* `confidence > 0.5`, where confidence was assigned `sequentialHits / 10.0` a few lines above — so
+  the second condition was `sequentialHits > 5`, the same quantity in different units, and the stricter
+  always won. The effective gate was `max(MinSequential, 6)`: setting 1, 2, 3, 4 or 5 all prefetched
+  first on the sixth sequential read, and the shipped default is 3, so the documented default did not
+  describe the default behavior. Above 6 the floor was redundant, meaning the setting worked as
+  documented in exactly the upper part of its range.
+
+  The confidence floor is gone rather than the defaults being raised to 6, and the measurement is why. A
+  continuing traversal costs the same either way: 3 MiB read sequentially at the kernel's 128 KiB buffer
+  transfers exactly 3,145,728 bytes at every `MinSequential` from 1 to 10, because `FileSystem.fetch`
+  shares one flight between a prefetch and the read it anticipates, so a prefetch that is going to be
+  read adds no bytes at all. What prefetching sooner actually costs is a run that *stops* before
+  consuming what was fetched — and that cost is exactly one prefetch, not a growing tail: a reader that
+  goes sequential and then walks away wastes 131,072 bytes whether it stops after three reads at
+  `min_sequential: 3` or after six at `min_sequential: 6`. The floor never prevented a class of waste,
+  it only moved the point at which the single unredeemed prefetch became possible. So the default
+  configuration now prefetches from the third sequential read instead of the sixth, for one prefetch's
+  worth of exposure on abandoned runs.
+
+  The `confidence` field is deleted rather than left computed-and-unread: it was read at exactly one
+  place, the gate, and a score derived from the threshold it guards is not independent evidence and
+  cannot become any. The paragraph in `examples/config.yaml` explaining why the number did not mean what
+  it said is deleted too, which is the test of whether this was actually fixed rather than documented.
+
+  The gate test now drives both sides of the threshold — nothing on the read before it, a prefetch on
+  the read at it. It previously read six times at `min_sequential: 3` and asserted a prefetch, with a
+  comment explaining that six was required; so it documented the defect instead of catching it, and
+  would have passed identically if `MinSequential` were ignored altogether. A gate test that only drives
+  the satisfying case cannot tell a threshold of 3 from a threshold of 6.
+
 - **A three-node cluster could not form at the default gossip packet size, and said the cluster secret
   was wrong** ([#277]). `MaxGossipPacket` defaulted to 1024 bytes. A sealed sync message costs about 200
   bytes of envelope plus about 415 bytes per member — measured, not estimated, because `seal` wraps the
