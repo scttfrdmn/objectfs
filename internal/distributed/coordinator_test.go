@@ -3,6 +3,8 @@ package distributed
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -482,7 +484,7 @@ func TestLoadBalancer_SelectNodes_Empty(t *testing.T) {
 	}
 	lb := cm.coordinator.loadBalancer
 
-	got, err := lb.SelectNodes([]string{}, 3)
+	got, err := lb.SelectNodes("objects/data.bin", []string{}, 3)
 	if err != nil {
 		t.Fatalf("SelectNodes: %v", err)
 	}
@@ -503,7 +505,7 @@ func TestLoadBalancer_RoundRobin(t *testing.T) {
 	lb.strategy = StrategyRoundRobin
 
 	nodes := []string{"n1", "n2", "n3"}
-	got, err := lb.SelectNodes(nodes, 3)
+	got, err := lb.SelectNodes("objects/data.bin", nodes, 3)
 	if err != nil {
 		t.Fatalf("SelectNodes: %v", err)
 	}
@@ -524,7 +526,7 @@ func TestLoadBalancer_CountCappedToAvailable(t *testing.T) {
 	lb.strategy = StrategyRoundRobin
 
 	nodes := []string{"n1", "n2"}
-	got, err := lb.SelectNodes(nodes, 10) // request more than available
+	got, err := lb.SelectNodes("objects/data.bin", nodes, 10) // request more than available
 	if err != nil {
 		t.Fatalf("SelectNodes: %v", err)
 	}
@@ -550,7 +552,7 @@ func TestLoadBalancer_LeastLoad(t *testing.T) {
 	lb.stats.NodeLoad["n3"] = 5
 	lb.stats.mu.Unlock()
 
-	got, err := lb.SelectNodes([]string{"n1", "n2", "n3"}, 1)
+	got, err := lb.SelectNodes("objects/data.bin", []string{"n1", "n2", "n3"}, 1)
 	if err != nil {
 		t.Fatalf("SelectNodes: %v", err)
 	}
@@ -559,8 +561,14 @@ func TestLoadBalancer_LeastLoad(t *testing.T) {
 	}
 }
 
-// TestLoadBalancer_ConsistentHash verifies that consistent-hash selection
-// returns the requested number of nodes from the front of the list.
+// TestLoadBalancer_ConsistentHash verifies that consistent-hash selection maps a key to the same
+// nodes regardless of the order the node list arrives in.
+//
+// This test used to assert only the count, and its own comment described the behavior as "returns
+// the requested number of nodes from the front of the list" — which was an accurate description of
+// the defect (#131). A count assertion passes on `return nodes[:count]`, so it could not tell a hash
+// ring from a slice prefix. The assertion below cannot pass on a slice prefix: aliveNodes reaches
+// this function from a map iteration, so a prefix gives a different answer per permutation.
 func TestLoadBalancer_ConsistentHash(t *testing.T) {
 	t.Parallel()
 	cm, err := NewClusterManager(testConfig(t, "lb-ch"))
@@ -570,13 +578,179 @@ func TestLoadBalancer_ConsistentHash(t *testing.T) {
 	lb := cm.coordinator.loadBalancer
 	lb.strategy = StrategyConsistentHash
 
-	nodes := []string{"n1", "n2", "n3"}
-	got, err := lb.SelectNodes(nodes, 2)
+	const key = "objects/dataset.bin"
+
+	want, err := lb.SelectNodes(key, []string{"n1", "n2", "n3"}, 2)
+	if err != nil {
+		t.Fatalf("SelectNodes: %v", err)
+	}
+	if len(want) != 2 {
+		t.Fatalf("expected 2 nodes, got %d: %v", len(want), want)
+	}
+
+	for _, order := range [][]string{
+		{"n3", "n2", "n1"},
+		{"n2", "n3", "n1"},
+		{"n2", "n1", "n3"},
+		{"n3", "n1", "n2"},
+	} {
+		got, err := lb.SelectNodes(key, order, 2)
+		if err != nil {
+			t.Fatalf("SelectNodes(%v): %v", order, err)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("nodes in order %v selected %v, want %v — selection depends on input order",
+				order, got, want)
+		}
+	}
+
+	// Different keys must not all land on the same node, or affinity is technically satisfied and
+	// practically useless — every object in the bucket served by one member of the cluster.
+	owners := make(map[string]bool)
+	for i := range 32 {
+		got, err := lb.SelectNodes(fmt.Sprintf("objects/file-%d.bin", i), []string{"n1", "n2", "n3"}, 1)
+		if err != nil {
+			t.Fatalf("SelectNodes: %v", err)
+		}
+		owners[got[0]] = true
+	}
+	if len(owners) < 2 {
+		t.Errorf("32 distinct keys reached %d node(s): %v", len(owners), owners)
+	}
+}
+
+// TestLoadBalancer_ConsistentHashWithoutAKey covers the operation types that carry no key — a list
+// with no leader, and a batch. Hashing "" would send every keyless operation to one node, so the
+// strategy falls back to round-robin, and this pins that it does rather than returning a prefix.
+func TestLoadBalancer_ConsistentHashWithoutAKey(t *testing.T) {
+	t.Parallel()
+	cm, err := NewClusterManager(testConfig(t, "lb-ch-nokey"))
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	lb := cm.coordinator.loadBalancer
+	lb.strategy = StrategyConsistentHash
+
+	got, err := lb.SelectNodes("", []string{"n1", "n2", "n3"}, 2)
 	if err != nil {
 		t.Fatalf("SelectNodes: %v", err)
 	}
 	if len(got) != 2 {
-		t.Errorf("expected 2 nodes, got %d", len(got))
+		t.Fatalf("expected 2 nodes, got %d: %v", len(got), got)
+	}
+}
+
+// TestSelectTargetNodes_IsOrderIndependent is the end-to-end version, and the one that matters:
+// selectTargetNodes builds its node slice by ranging the cluster's node map, so this exercises the
+// randomized iteration the unit test above can only simulate. Repeated calls with unchanged
+// membership must select the same node for the same key.
+func TestSelectTargetNodes_IsOrderIndependent(t *testing.T) {
+	t.Parallel()
+
+	cm, err := NewClusterManager(testConfig(t, "n1"))
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	cm.coordinator.loadBalancer.strategy = StrategyConsistentHash
+
+	// Five alive members, so a prefix over a randomized iteration would almost never agree with
+	// itself across 50 calls. Registered directly rather than via Start, because Start opens a
+	// socket and runs gossip, and this test is about the selection decision.
+	cm.mu.Lock()
+	for _, id := range []string{"n1", "n2", "n3", "n4", "n5"} {
+		cm.nodes[id] = &NodeInfo{ID: id, Address: "10.0.0.1:8080", Status: NodeStatusAlive}
+	}
+	cm.mu.Unlock()
+
+	op := &DistributedOperation{Type: OpTypeGet, Key: "objects/dataset.bin"}
+
+	want, err := cm.coordinator.selectTargetNodes(op)
+	if err != nil {
+		t.Fatalf("selectTargetNodes: %v", err)
+	}
+
+	for i := range 50 {
+		got, err := cm.coordinator.selectTargetNodes(op)
+		if err != nil {
+			t.Fatalf("selectTargetNodes (call %d): %v", i, err)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("call %d selected %v, want %v — map iteration order reached the decision",
+				i, got, want)
+		}
+	}
+}
+
+// TestSelectTargetNodes_SortsAliveNodes covers the half of the fix the hash ring does not: the ring
+// sorts its own nodes, so removing the sort in selectTargetNodes changes nothing a consistent-hash
+// test can see — verified by removing it. Round-robin and the least-load tiebreak index the slice
+// positionally, so for them the order the map was iterated in *is* the decision.
+//
+// StrategyRoundRobin with count == len(nodes) returns the slice as given, which makes it the
+// cheapest probe for whether the caller sorted.
+func TestSelectTargetNodes_SortsAliveNodes(t *testing.T) {
+	t.Parallel()
+
+	cm, err := NewClusterManager(testConfig(t, "n1"))
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	cm.coordinator.loadBalancer.strategy = StrategyRoundRobin
+	cm.config.ReplicationFactor = 5
+
+	cm.mu.Lock()
+	for _, id := range []string{"n1", "n2", "n3", "n4", "n5"} {
+		cm.nodes[id] = &NodeInfo{ID: id, Address: "10.0.0.1:8080", Status: NodeStatusAlive}
+	}
+	cm.mu.Unlock()
+
+	want := []string{"n1", "n2", "n3", "n4", "n5"}
+	op := &DistributedOperation{Type: OpTypePut, Key: "objects/dataset.bin"}
+
+	// 50 calls, because an unsorted 5-element map iteration lands on ascending order roughly 1 time
+	// in 120; a single call would pass on the unsorted code more often than it would be worth.
+	for i := range 50 {
+		got, err := cm.coordinator.selectTargetNodes(op)
+		if err != nil {
+			t.Fatalf("selectTargetNodes (call %d): %v", i, err)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("call %d selected %v, want %v — alive nodes reach the strategy in map order",
+				i, got, want)
+		}
+	}
+}
+
+// TestSelectTargetNodes_ExcludesDeadNodes is the precondition the two tests above assume: selection
+// happens over the alive set. Asserted rather than assumed, because sorting a slice that contains
+// dead nodes would be deterministic and still route to a node that cannot answer.
+func TestSelectTargetNodes_ExcludesDeadNodes(t *testing.T) {
+	t.Parallel()
+
+	cm, err := NewClusterManager(testConfig(t, "n1"))
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	cm.coordinator.loadBalancer.strategy = StrategyConsistentHash
+
+	cm.mu.Lock()
+	cm.nodes["n1"] = &NodeInfo{ID: "n1", Status: NodeStatusAlive}
+	cm.nodes["n2"] = &NodeInfo{ID: "n2", Status: NodeStatusDead}
+	cm.nodes["n3"] = &NodeInfo{ID: "n3", Status: NodeStatusSuspect}
+	cm.mu.Unlock()
+
+	// Enough keys that a node in the candidate set would be selected by at least one of them.
+	for i := range 64 {
+		got, err := cm.coordinator.selectTargetNodes(&DistributedOperation{
+			Type: OpTypeGet,
+			Key:  fmt.Sprintf("objects/file-%d.bin", i),
+		})
+		if err != nil {
+			t.Fatalf("selectTargetNodes: %v", err)
+		}
+		if len(got) != 1 || got[0] != "n1" {
+			t.Fatalf("selected %v, want [n1]: only n1 is alive", got)
+		}
 	}
 }
 

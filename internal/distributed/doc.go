@@ -205,9 +205,15 @@ Least Load (StrategyLeastLoad):
 - Default strategy
 
 Consistent Hash (StrategyConsistentHash):
-- Maps keys to specific nodes
-- Minimizes rebalancing on node changes
-- Good for cache distribution
+- Maps a key to a node by rendezvous (highest-random-weight) hashing
+- The same key reaches the same node for as long as that node is alive
+- Removing a node moves only the keys it owned, about 1/n, not the whole mapping
+- Selection is independent of the order the node set is iterated in. Until v0.11.0 it was not:
+the implementation was a slice prefix over a slice built by ranging a map, so the same key
+reached a different node on each call, and a per-node cache could not hit (#131)
+- Requires an operation key. A keyless operation — a list with no elected leader, or a batch —
+falls back to round-robin, since hashing the empty key would send all of them to one node
+- See internal/distributed/hashring for the scheme, its bounds, and the lookup benchmark
 
 Latency Based (StrategyLatencyBased):
 - Routes to fastest responding nodes
