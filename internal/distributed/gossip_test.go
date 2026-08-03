@@ -442,17 +442,19 @@ func TestGossipProtocol_HandleSyncMessage_MergesNodes(t *testing.T) {
 	}
 }
 
-// TestGossipProtocol_HandleSyncMessage_SkipsSelf verifies that a sync message
-// does not overwrite the local node's own entry.
+// TestGossipProtocol_HandleSyncMessage_SkipsSelf verifies that a sync message does not overwrite
+// the local node's own state with a peer's opinion of it.
+//
+// A peer's entry for us is hearsay: it is what that peer last heard, routed through however many
+// other peers, and it can be arbitrarily stale. Adopting it would let one node with an old view
+// mark a healthy node dead in its own memberlist — after which it stops gossiping, since
+// performGossip and broadcastMessage both skip non-alive nodes, and the stale claim becomes true.
 func TestGossipProtocol_HandleSyncMessage_SkipsSelf(t *testing.T) {
 	t.Parallel()
 	cm, _ := NewClusterManager(testConfig(t, "sync-self"))
 	gp := cm.gossip
 
-	// Record the original self incarnation.
-	selfBefore := gp.GetMemberlist()["sync-self"].Incarnation
-
-	// Remote claims our node is at incarnation 999.
+	// Remote claims our node is dead at incarnation 999.
 	remoteNodes := map[string]*GossipNode{
 		"sync-self": {
 			Info:        &NodeInfo{ID: "sync-self", Metadata: map[string]string{}},
@@ -464,11 +466,17 @@ func TestGossipProtocol_HandleSyncMessage_SkipsSelf(t *testing.T) {
 	msg := makeGossipMsg(t, MessageTypeSync, &SyncMessage{Nodes: remoteNodes})
 	gp.handleSyncMessage(msg)
 
-	// Self entry should be unchanged.
-	selfAfter := gp.GetMemberlist()["sync-self"].Incarnation
-	if selfAfter != selfBefore {
-		t.Errorf("self incarnation changed from %d to %d; handleSyncMessage must skip self",
-			selfBefore, selfAfter)
+	self := gp.GetMemberlist()["sync-self"]
+	if self.State != StateAlive {
+		t.Errorf("self state = %v after a sync claiming we are dead, want StateAlive", self.State)
+	}
+
+	// The incarnation is asserted to be above the accusation, not merely unchanged. Refuting is the
+	// only way to stop that entry propagating back out, and a refutation the accuser's own
+	// strictly-greater guard would reject is not a refutation (#272).
+	if self.Incarnation <= 999 {
+		t.Errorf("self incarnation = %d after refuting an accusation at 999; want > 999, "+
+			"or the accuser will keep discarding our alive messages", self.Incarnation)
 	}
 }
 
@@ -534,6 +542,295 @@ func TestGossipProtocol_HandleHeartbeatMessage_ClearsSuspicion(t *testing.T) {
 	}
 	if ml["susp-hb-peer"].Suspicion != nil {
 		t.Error("Suspicion should be cleared after heartbeat")
+	}
+}
+
+// The tests below cover incarnation liveness (#272): the mechanism that lets a node contradict a
+// false report of its own failure, and the consequences of it never having advanced.
+//
+// Each of these fails on the pre-fix code, and the two most important ones — frozen stats and
+// resurrection — are exactly what a single-transition assertion cannot see. "Send an alive message,
+// assert the value arrived" passes on the bug, because the *first* message is applied; only a second
+// message carrying a *different* value distinguishes a live feed from a permanently stale one.
+
+// TestGossipProtocol_RefutesSuspicionAboutItself verifies that a suspect message naming this node
+// raises its incarnation rather than marking it suspect in its own memberlist.
+func TestGossipProtocol_RefutesSuspicionAboutItself(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "refuter"))
+	gp := cm.gossip
+
+	before := gp.GetMemberlist()["refuter"].Incarnation
+
+	msg := makeGossipMsg(t, MessageTypeSuspect, &SuspectMessage{
+		Node:        "refuter",
+		Incarnation: before,
+		From:        "confused-peer",
+	})
+	gp.handleSuspectMessage(msg)
+
+	self := gp.GetMemberlist()["refuter"]
+	if self.State != StateAlive {
+		t.Errorf("self state = %v after a suspect message about ourselves, want StateAlive", self.State)
+	}
+	if self.Incarnation <= before {
+		t.Errorf("self incarnation = %d, want > %d: a refutation that does not raise the "+
+			"incarnation is indistinguishable from silence", self.Incarnation, before)
+	}
+	if got := gp.GetStats().SuspicionRefutations; got != 1 {
+		t.Errorf("SuspicionRefutations = %d, want 1", got)
+	}
+}
+
+// TestGossipProtocol_RefutesDeathReportAboutItself verifies the same for a death report, which is
+// the more consequential of the two: nothing else in the protocol demotes a dead node.
+func TestGossipProtocol_RefutesDeathReportAboutItself(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "not-dead"))
+	gp := cm.gossip
+
+	before := gp.GetMemberlist()["not-dead"].Incarnation
+
+	msg := makeGossipMsg(t, MessageTypeDead, &DeadMessage{
+		Node:        "not-dead",
+		Incarnation: before,
+		From:        "mistaken-witness",
+	})
+	gp.handleDeadMessage(msg)
+
+	self := gp.GetMemberlist()["not-dead"]
+	if self.State != StateAlive {
+		t.Errorf("self state = %v after a death report about ourselves, want StateAlive: a node "+
+			"that agrees it is dead stops gossiping and the report becomes true", self.State)
+	}
+	if self.Incarnation <= before {
+		t.Errorf("self incarnation = %d, want > %d", self.Incarnation, before)
+	}
+	if got := gp.GetStats().DeathEvents; got != 0 {
+		t.Errorf("DeathEvents = %d, want 0: our own refuted death is not a death event", got)
+	}
+}
+
+// TestGossipProtocol_RefutationOutranksTheAccusation verifies that the new incarnation exceeds the
+// accused one even when the accusation names a number higher than ours.
+//
+// A peer should not hold a higher incarnation for us than we published, but a peer restored from an
+// old snapshot can. Refuting with self+1 would then produce a number that peer's own
+// strictly-greater guard rejects, and the disagreement would never resolve.
+func TestGossipProtocol_RefutationOutranksTheAccusation(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "outranked"))
+	gp := cm.gossip
+
+	const accused = 400
+
+	msg := makeGossipMsg(t, MessageTypeSuspect, &SuspectMessage{
+		Node:        "outranked",
+		Incarnation: accused,
+		From:        "peer-from-the-future",
+	})
+	gp.handleSuspectMessage(msg)
+
+	if got := gp.GetMemberlist()["outranked"].Incarnation; got <= accused {
+		t.Errorf("self incarnation = %d after an accusation at %d, want > %d", got, accused, accused)
+	}
+}
+
+// TestGossipProtocol_StaleAccusationAboutItselfIsIgnored verifies that an accusation naming an
+// incarnation we have already superseded does not raise ours again.
+//
+// This is what makes refutation converge. Without the guard, two nodes exchanging stale views would
+// each refute the other's refutation and the incarnation would climb without bound.
+func TestGossipProtocol_StaleAccusationAboutItselfIsIgnored(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "already-answered"))
+	gp := cm.gossip
+
+	gp.mu.Lock()
+	gp.memberlist["already-answered"].Incarnation = 9
+	gp.mu.Unlock()
+
+	msg := makeGossipMsg(t, MessageTypeSuspect, &SuspectMessage{
+		Node:        "already-answered",
+		Incarnation: 8, // predates the refutation that produced 9
+		From:        "lagging-peer",
+	})
+	gp.handleSuspectMessage(msg)
+
+	if got := gp.GetMemberlist()["already-answered"].Incarnation; got != 9 {
+		t.Errorf("self incarnation = %d, want 9: an accusation we have already answered must not "+
+			"be answered again, or refutation never converges", got)
+	}
+	if got := gp.GetStats().SuspicionRefutations; got != 0 {
+		t.Errorf("SuspicionRefutations = %d, want 0", got)
+	}
+}
+
+// TestGossipProtocol_AliveMessageResurrectsADeadNode verifies that a node written off as dead
+// returns to the memberlist and to the cluster manager on an alive message at a higher incarnation.
+//
+// Before #272 this was unreachable: no incarnation ever advanced, so the only alive message that
+// could clear a death was one that never arrived, and a node removed by a transient network problem
+// stayed removed for the life of the process — permanently absent from routing.
+func TestGossipProtocol_AliveMessageResurrectsADeadNode(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "resurrect-host"))
+	gp := cm.gossip
+
+	gp.mu.Lock()
+	gp.memberlist["revenant"] = &GossipNode{
+		Info:        &NodeInfo{ID: "revenant", Address: "10.0.0.9:9000", Status: NodeStatusDead, Metadata: map[string]string{}},
+		Incarnation: 3,
+		State:       StateDead,
+		StateChange: time.Now(),
+	}
+	gp.mu.Unlock()
+	cm.UpdateNodeInfo("revenant", &NodeInfo{
+		ID: "revenant", Address: "10.0.0.9:9000", Status: NodeStatusDead, Metadata: map[string]string{},
+	})
+
+	// The revenant refuted the death report and re-announced at a higher incarnation.
+	msg := makeGossipMsg(t, MessageTypeAlive, &AliveMessage{
+		Node:        &NodeInfo{ID: "revenant", Address: "10.0.0.9:9000", Metadata: map[string]string{}},
+		Incarnation: 4,
+	})
+	gp.handleAliveMessage(msg)
+
+	if got := gp.GetMemberlist()["revenant"].State; got != StateAlive {
+		t.Errorf("state = %v after an alive message at a higher incarnation, want StateAlive", got)
+	}
+
+	// Asserted through the cluster manager as well, because that — not the memberlist — is what
+	// SelectNodes reads. A node restored in gossip but still dead in the cluster manager is still
+	// absent from routing, which is the consequence that matters.
+	if got := cm.GetNodes()["revenant"].Status; got != NodeStatusAlive {
+		t.Errorf("cluster manager status = %v, want %v: a node restored only in the memberlist is "+
+			"still excluded from node selection", got, NodeStatusAlive)
+	}
+}
+
+// TestGossipProtocol_AliveMessageDoesNotResurrectAtTheSameIncarnation verifies that the
+// same-incarnation payload refresh does not quietly undo a death.
+//
+// The refresh exists so live stats are not frozen; it must not become a second, unguarded path back
+// to alive, or the incarnation would stop being the thing that decides liveness.
+func TestGossipProtocol_AliveMessageDoesNotResurrectAtTheSameIncarnation(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "no-quiet-revival"))
+	gp := cm.gossip
+
+	gp.mu.Lock()
+	gp.memberlist["corpse"] = &GossipNode{
+		Info:        &NodeInfo{ID: "corpse", Status: NodeStatusDead, MemoryUsage: 0.1, Metadata: map[string]string{}},
+		Incarnation: 7,
+		State:       StateDead,
+		StateChange: time.Now(),
+	}
+	gp.mu.Unlock()
+
+	msg := makeGossipMsg(t, MessageTypeAlive, &AliveMessage{
+		Node:        &NodeInfo{ID: "corpse", MemoryUsage: 0.9, Metadata: map[string]string{}},
+		Incarnation: 7,
+	})
+	gp.handleAliveMessage(msg)
+
+	ml := gp.GetMemberlist()
+	if got := ml["corpse"].State; got != StateDead {
+		t.Errorf("state = %v after a same-incarnation alive message, want StateDead: overturning a "+
+			"death requires a refutation, not a repeat", got)
+	}
+	if got := ml["corpse"].Info.MemoryUsage; got != 0.1 {
+		t.Errorf("MemoryUsage = %v, want 0.1: a dead node's payload must not be refreshed either", got)
+	}
+}
+
+// TestGossipProtocol_GossipedStatsAreNotFrozenAtTheFirstValue verifies that a *changed* stats value
+// on a subsequent alive message reaches the memberlist and the cluster manager.
+//
+// This is the test #132's stated acceptance criterion could not be. "Wait two heartbeats, assert
+// MemoryUsage > 0" passes on the frozen-stats bug, because the first message is applied and the
+// value is non-zero forever after. A green test over a permanently stale metric is worse than no
+// test: it certifies the thing it cannot see.
+func TestGossipProtocol_GossipedStatsAreNotFrozenAtTheFirstValue(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "stats-host"))
+	gp := cm.gossip
+
+	// First alive message: discovery. Applied even on the buggy code.
+	first := makeGossipMsg(t, MessageTypeAlive, &AliveMessage{
+		Node: &NodeInfo{
+			ID: "busy-peer", Address: "10.0.0.5:9000",
+			MemoryUsage: 0.1, CacheSize: 1024, CacheHitRate: 0.5, Operations: 10,
+			Metadata: map[string]string{},
+		},
+		Incarnation: 1,
+	})
+	gp.handleAliveMessage(first)
+
+	// Second alive message, same incarnation — which is what a healthy node sends, since it has
+	// nothing to refute and so never raises its incarnation — carrying new figures.
+	second := makeGossipMsg(t, MessageTypeAlive, &AliveMessage{
+		Node: &NodeInfo{
+			ID: "busy-peer", Address: "10.0.0.5:9000",
+			MemoryUsage: 0.9, CacheSize: 4096, CacheHitRate: 0.8, Operations: 99,
+			Metadata: map[string]string{},
+		},
+		Incarnation: 1,
+	})
+	gp.handleAliveMessage(second)
+
+	got := gp.GetMemberlist()["busy-peer"].Info
+	if got.MemoryUsage != 0.9 {
+		t.Errorf("MemoryUsage = %v, want 0.9: stats froze at the first value ever received", got.MemoryUsage)
+	}
+	if got.CacheSize != 4096 {
+		t.Errorf("CacheSize = %d, want 4096", got.CacheSize)
+	}
+	if got.CacheHitRate != 0.8 {
+		t.Errorf("CacheHitRate = %v, want 0.8", got.CacheHitRate)
+	}
+	if got.Operations != 99 {
+		t.Errorf("Operations = %d, want 99", got.Operations)
+	}
+
+	// And through the cluster manager, since that is what a load-aware strategy would read.
+	if cmGot := cm.GetNodes()["busy-peer"].MemoryUsage; cmGot != 0.9 {
+		t.Errorf("cluster manager MemoryUsage = %v, want 0.9", cmGot)
+	}
+}
+
+// TestGossipProtocol_PerformGossipStampsItsOwnLastSeen verifies that the LastSeen this node
+// broadcasts is current.
+//
+// UpdateNodeInfo copies LastSeen onto the receiver's record and performHealthChecks compares it
+// against HeartbeatInterval*3, so a node that announced the timestamp it was constructed with would
+// be evidence of its own absence. That was inert only while the incarnation guard discarded the
+// payload; once stats flow, it would make a healthy node flap.
+func TestGossipProtocol_PerformGossipStampsItsOwnLastSeen(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "stamp-host"))
+	gp := cm.gossip
+
+	stale := time.Now().Add(-time.Hour)
+	gp.mu.Lock()
+	gp.localNode.LastSeen = stale
+	// A peer is required, or performGossip returns before doing anything.
+	gp.memberlist["stamp-peer"] = &GossipNode{
+		Info:        &NodeInfo{ID: "stamp-peer", Address: "127.0.0.1:1", Metadata: map[string]string{}},
+		Incarnation: 1,
+		State:       StateAlive,
+	}
+	gp.mu.Unlock()
+
+	gp.performGossip()
+
+	gp.mu.RLock()
+	got := gp.localNode.LastSeen
+	gp.mu.RUnlock()
+
+	if !got.After(stale) {
+		t.Errorf("localNode.LastSeen = %v, unchanged from the stale value: every alive message this "+
+			"node sends would be evidence it has not been heard from", got)
 	}
 }
 

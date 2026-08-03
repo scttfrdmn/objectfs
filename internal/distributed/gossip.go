@@ -52,6 +52,22 @@ const (
 	StateLeft
 )
 
+// String returns the state's name, so that a log line reports "dead" rather than the integer 2.
+func (s GossipState) String() string {
+	switch s {
+	case StateAlive:
+		return "alive"
+	case StateSuspect:
+		return "suspect"
+	case StateDead:
+		return "dead"
+	case StateLeft:
+		return "left"
+	default:
+		return fmt.Sprintf("GossipState(%d)", int(s))
+	}
+}
+
 // Suspicion tracks suspicion about a node's liveness
 type Suspicion struct {
 	Incarnation uint32    `json:"incarnation"`
@@ -163,6 +179,12 @@ type GossipStats struct {
 	MessagesUnauthenticated int64 `json:"messages_unauthenticated"`
 	MessagesReplayed        int64 `json:"messages_replayed"`
 	MessagesWrongVersion    int64 `json:"messages_wrong_version"`
+
+	// SuspicionRefutations counts the times this node was reported suspect or dead and raised its
+	// own incarnation to say otherwise (#272). It is an operator signal, not a health signal: a
+	// node that refutes repeatedly is alive and being falsely accused, which points at packet loss
+	// or a heartbeat interval set below the network's actual latency — not at the node.
+	SuspicionRefutations int64 `json:"suspicion_refutations"`
 }
 
 // NewGossipProtocol creates a new gossip protocol instance.
@@ -200,7 +222,14 @@ func NewGossipProtocol(cluster *ClusterManager, config *ClusterConfig) (*GossipP
 		Metadata: make(map[string]string),
 	}
 
-	// Add self to member list
+	// Add self to member list.
+	//
+	// Incarnation 1 is the starting point, not a constant: refuteSuspicion raises it whenever a peer
+	// accuses this node of being suspect or dead. Until v0.11.0 nothing ever raised it, which made
+	// the strictly-greater guards in handleAliveMessage and handleSyncMessage permanently false for
+	// every message after the one that discovered a node — so gossiped node stats froze at their
+	// first observed value and a node marked dead by a transient network blip could never rejoin
+	// routing without a process restart (#272).
 	gp.memberlist[gp.localNode.ID] = &GossipNode{
 		Info:        gp.localNode,
 		Incarnation: 1,
@@ -518,15 +547,41 @@ func (gp *GossipProtocol) handleAliveMessage(msg *GossipMessage) {
 	nodeID := aliveMsg.Node.ID
 
 	if gossipNode, exists := gp.memberlist[nodeID]; exists {
-		// Update incarnation and state if newer
-		if aliveMsg.Incarnation > gossipNode.Incarnation {
+		switch {
+		case aliveMsg.Incarnation > gossipNode.Incarnation:
+			// A higher incarnation supersedes whatever we believed, including a death. This is the
+			// only path by which a node we wrote off can rejoin routing without restarting, and it
+			// is reachable because refuteSuspicion is what produces the higher number: a node we
+			// accused answers with an incarnation that postdates the accusation. Before v0.11.0 no
+			// incarnation ever advanced, so this arm was dead code after discovery and a node
+			// removed by one lost heartbeat stayed removed (#272).
+			if gossipNode.State == StateDead || gossipNode.State == StateSuspect {
+				slog.Info("node refuted its own suspicion; restoring to alive",
+					"node_id", nodeID, "incarnation", aliveMsg.Incarnation)
+			}
+
 			gossipNode.Incarnation = aliveMsg.Incarnation
 			gossipNode.State = StateAlive
 			gossipNode.StateChange = time.Now()
 			gossipNode.Info = aliveMsg.Node
 			gossipNode.Suspicion = nil // Clear any suspicion
 
-			// Update cluster manager
+			aliveMsg.Node.Status = NodeStatusAlive
+			gp.cluster.UpdateNodeInfo(nodeID, aliveMsg.Node)
+
+		case aliveMsg.Incarnation == gossipNode.Incarnation && gossipNode.State == StateAlive:
+			// Refresh the payload without touching the state machine. An incarnation orders claims
+			// about whether a node is alive; it says nothing about how fresh the load and cache
+			// figures riding along with the claim are. A healthy node never raises its incarnation —
+			// it has nothing to refute — so gating the payload on a strict increase froze every
+			// node's stats at the first value ever received from it, which is how a load balancer
+			// reading them came to route on numbers that were hours stale (#272, #132).
+			//
+			// Only for a node we already believe is alive: accepting a same-incarnation payload for
+			// a suspect or dead node would silently undo the accusation without the refutation that
+			// is supposed to be required to overturn it.
+			gossipNode.Info = aliveMsg.Node
+
 			aliveMsg.Node.Status = NodeStatusAlive
 			gp.cluster.UpdateNodeInfo(nodeID, aliveMsg.Node)
 		}
@@ -549,6 +604,64 @@ func (gp *GossipProtocol) handleAliveMessage(msg *GossipMessage) {
 	}
 }
 
+// refuteSuspicion raises this node's own incarnation and re-announces it as alive, superseding a
+// peer's claim that it is suspect or dead.
+//
+// This is what the incarnation number is for, and it is what makes the strictly-greater comparisons
+// elsewhere in this file mean anything. An accusation names the incarnation it was made about, so a
+// higher one is not a competing opinion — it is proof that the accusation is stale, published by the
+// only node in a position to know. Until v0.11.0 nothing incremented an incarnation anywhere, so
+// those comparisons were permanently false after the message that discovered a node, and a node
+// accused once stayed accused for the life of the process (#272).
+//
+// accusedIncarnation is the incarnation the accusation was made about. The new incarnation is one
+// past whichever is larger, ours or theirs — not simply ours plus one. A peer should never hold an
+// incarnation for us higher than the one we published, but if it does (a peer resurrected from an old
+// snapshot, or a node restarted with a lower number), refuting with self+1 would produce a number the
+// accuser's guards still reject, and the two would disagree forever with each message reinforcing
+// the other's position.
+//
+// Callers must hold gp.mu.
+func (gp *GossipProtocol) refuteSuspicion(accusation string, reporter string, accusedIncarnation uint32) {
+	self, exists := gp.memberlist[gp.localNode.ID]
+	if !exists {
+		return
+	}
+
+	self.Incarnation = max(self.Incarnation, accusedIncarnation) + 1
+	self.State = StateAlive
+	self.StateChange = time.Now()
+	self.Suspicion = nil
+
+	slog.Info("refuting accusation about this node",
+		"accusation", accusation, "reported_by", reporter, "new_incarnation", self.Incarnation)
+
+	gp.stats.mu.Lock()
+	gp.stats.SuspicionRefutations++
+	gp.stats.mu.Unlock()
+
+	// The refutation is only useful if it reaches the cluster, and the incarnation is read here
+	// under the lock we already hold rather than via getCurrentIncarnation, which would deadlock on
+	// re-entry. Sending happens in a goroutine for the same reason: broadcastMessage takes gp.mu for
+	// reading.
+	aliveMsg := &AliveMessage{Node: gp.localNode, Incarnation: self.Incarnation}
+	data, err := json.Marshal(aliveMsg)
+	if err != nil {
+		slog.Warn("failed to marshal refutation", "error", err)
+		return
+	}
+
+	msg := &GossipMessage{
+		Type:      MessageTypeAlive,
+		From:      gp.localNode.ID,
+		Timestamp: time.Now(),
+		MessageID: gp.generateMessageID(),
+		Data:      data,
+	}
+
+	go func() { _ = gp.broadcastMessage(msg) }()
+}
+
 func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 	var suspectMsg SuspectMessage
 	if err := json.Unmarshal(msg.Data, &suspectMsg); err != nil {
@@ -560,6 +673,16 @@ func (gp *GossipProtocol) handleSuspectMessage(msg *GossipMessage) {
 	defer gp.mu.Unlock()
 
 	nodeID := suspectMsg.Node
+
+	// An accusation about ourselves is answered, not recorded. Recording it would mark this node
+	// suspect in its own memberlist, and since performGossip and broadcastMessage both skip nodes
+	// that are not alive, a node could talk itself out of the cluster on one lost heartbeat (#272).
+	if nodeID == gp.localNode.ID {
+		if self, exists := gp.memberlist[nodeID]; exists && suspectMsg.Incarnation >= self.Incarnation {
+			gp.refuteSuspicion("suspect", suspectMsg.From, suspectMsg.Incarnation)
+		}
+		return
+	}
 
 	if gossipNode, exists := gp.memberlist[nodeID]; exists {
 		// Only process if incarnation matches and node has not already been
@@ -610,6 +733,16 @@ func (gp *GossipProtocol) handleDeadMessage(msg *GossipMessage) {
 
 	nodeID := deadMsg.Node
 
+	// Same reasoning as handleSuspectMessage: a node that accepted a death notice about itself would
+	// stop gossiping and would then genuinely be gone, having agreed with a report that was wrong
+	// when it was sent (#272).
+	if nodeID == gp.localNode.ID {
+		if self, exists := gp.memberlist[nodeID]; exists && deadMsg.Incarnation >= self.Incarnation {
+			gp.refuteSuspicion("dead", deadMsg.From, deadMsg.Incarnation)
+		}
+		return
+	}
+
 	if gossipNode, exists := gp.memberlist[nodeID]; exists {
 		// Only process if incarnation matches or is newer
 		if deadMsg.Incarnation >= gossipNode.Incarnation {
@@ -645,7 +778,20 @@ func (gp *GossipProtocol) handleSyncMessage(msg *GossipMessage) {
 	// Merge membership information
 	for nodeID, remoteNode := range syncMsg.Nodes {
 		if nodeID == gp.localNode.ID {
-			continue // Skip ourselves
+			// Never take a peer's word for our own state — but do answer it. A full sync is often
+			// the first thing a node receives after a partition heals, so it is often where a node
+			// learns it was written off while it was unreachable. Refuting here is what stops that
+			// entry from propagating back out through the next round of syncs (#272). The guard in
+			// refuteSuspicion's callers means a stale entry that predates an earlier refutation is
+			// ignored rather than refuted again, so this converges instead of ringing.
+			if remoteNode.State == StateSuspect || remoteNode.State == StateDead {
+				if self, ok := gp.memberlist[nodeID]; ok && remoteNode.Incarnation >= self.Incarnation {
+					gp.refuteSuspicion("stale "+remoteNode.State.String()+" entry in a membership sync",
+						msg.From, remoteNode.Incarnation)
+				}
+			}
+
+			continue
 		}
 
 		localNode, exists := gp.memberlist[nodeID]
@@ -731,7 +877,23 @@ func (gp *GossipProtocol) gossipLoop(ctx context.Context) {
 }
 
 func (gp *GossipProtocol) performGossip() {
-	gp.mu.RLock()
+	// Stamp our own LastSeen before announcing ourselves. UpdateNodeInfo copies this field onto the
+	// receiver's record, and performHealthChecks compares it against HeartbeatInterval*3 to decide
+	// suspicion — so broadcasting the value set at construction, as this did until v0.11.0, means
+	// every alive message we send is evidence that we have not been heard from. It was inert only
+	// because the incarnation guard discarded our payload entirely; with that guard fixed it would
+	// make a healthy node suspect itself into a flap (#272).
+	// One critical section, because the incarnation must be the one that goes out with this payload:
+	// taking the write lock to stamp, dropping it, and then calling getCurrentIncarnation would let a
+	// refutation land in between and publish the old number with the new stats.
+	gp.mu.Lock()
+	gp.localNode.LastSeen = time.Now()
+
+	incarnation := uint32(1)
+	if self, exists := gp.memberlist[gp.localNode.ID]; exists {
+		incarnation = self.Incarnation
+	}
+
 	nodes := make([]*GossipNode, 0, len(gp.memberlist))
 	for _, node := range gp.memberlist {
 		// Guard against nodes whose Info was never populated (e.g. added via a
@@ -743,7 +905,16 @@ func (gp *GossipProtocol) performGossip() {
 			nodes = append(nodes, node)
 		}
 	}
-	gp.mu.RUnlock()
+
+	// Marshal under the lock: gp.localNode is read here and written above, and refuteSuspicion
+	// marshals the same struct from a receive goroutine.
+	data, marshalErr := json.Marshal(&AliveMessage{Node: gp.localNode, Incarnation: incarnation})
+	gp.mu.Unlock()
+
+	if marshalErr != nil {
+		slog.Warn("failed to marshal alive message", "error", marshalErr)
+		return
+	}
 
 	if len(nodes) == 0 {
 		return
@@ -752,21 +923,13 @@ func (gp *GossipProtocol) performGossip() {
 	// Select random nodes to gossip with
 	fanout := min(gp.config.GossipFanout, len(nodes))
 
-	// Send alive message about ourselves
-	aliveMsg := &AliveMessage{
-		Node:        gp.localNode,
-		Incarnation: gp.getCurrentIncarnation(),
-	}
-
 	msg := &GossipMessage{
 		Type:      MessageTypeAlive,
 		From:      gp.localNode.ID,
 		Timestamp: time.Now(),
 		MessageID: gp.generateMessageID(),
+		Data:      data,
 	}
-
-	data, _ := json.Marshal(aliveMsg)
-	msg.Data = data
 
 	// Gossip to random subset of nodes
 	for i := range fanout {
@@ -776,11 +939,13 @@ func (gp *GossipProtocol) performGossip() {
 		}
 	}
 
-	// Send heartbeat
+	// Send heartbeat. Same incarnation as the alive message above, deliberately: the two describe one
+	// moment, and handleHeartbeatMessage clears suspicion on `>=`, so a heartbeat carrying a stale
+	// number would fail to clear a suspicion the accompanying alive message just refuted.
 	heartbeatMsg := &HeartbeatMessage{
 		Node:        gp.localNode.ID,
 		Timestamp:   time.Now(),
-		Incarnation: gp.getCurrentIncarnation(),
+		Incarnation: incarnation,
 	}
 
 	heartbeatGossipMsg := &GossipMessage{
@@ -1025,6 +1190,7 @@ func (gp *GossipProtocol) GetStats() *GossipStats {
 		MessagesUnauthenticated: gp.stats.MessagesUnauthenticated,
 		MessagesReplayed:        gp.stats.MessagesReplayed,
 		MessagesWrongVersion:    gp.stats.MessagesWrongVersion,
+		SuspicionRefutations:    gp.stats.SuspicionRefutations,
 	}
 	maps.Copy(stats.MessagesByType, gp.stats.MessagesByType)
 	gp.stats.mu.RUnlock()

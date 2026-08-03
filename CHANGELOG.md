@@ -124,9 +124,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior. A count assertion cannot tell a hash ring from a slice prefix, so it now asserts that
   permuting the input does not change the output, which the prefix fails.
 
+- **A node marked dead by one lost heartbeat could never rejoin, and every node's gossiped statistics
+  were frozen at the first value ever received** ([#272]). Both follow from one omission: incarnation
+  numbers were set to 1 at construction and nothing ever incremented them. An incarnation is how a
+  SWIM-style protocol lets an accused node contradict a false report of its own failure, and every
+  comparison that depends on one is strictly-greater — so with the number fixed at 1, all of them were
+  false for every message after the one that discovered a node.
+
+  What that cost is not a degraded metric, it is a lost node. `checkSuspicions` promotes suspect to
+  dead and nothing demoted it; the only path back to alive was `handleJoinMessage`, reachable solely
+  by a process restart. So a transient network problem — a few dropped datagrams, which is the normal
+  condition of UDP — removed a healthy node from routing permanently. Proven by execution before
+  fixing: a node discovered at state 0 was still at state 2 after an alive message from it arrived.
+
+  A node now refutes an accusation about itself rather than recording it, publishing an incarnation
+  above the accused one, which supersedes that accusation everywhere it has spread. Refusing to record
+  it matters as much as the refutation: `performGossip` and `broadcastMessage` both skip nodes that are
+  not alive, so a node that accepted a suspicion about itself would stop gossiping and make the report
+  true. The new number is one past the *higher* of ours and theirs, not ours plus one, or a peer
+  holding a stale higher incarnation would keep rejecting the refutation and the disagreement would
+  never resolve; an accusation naming an incarnation already superseded is ignored, which is what makes
+  the exchange converge instead of ring. Sync messages are answered too, since a full sync is often
+  where a node learns it was written off during a partition. `GossipStats.SuspicionRefutations` counts
+  these, because a cluster refuting steadily is healthy and misconfigured — a heartbeat interval below
+  the network's real latency — not failing.
+
+  The frozen statistics were the same guard seen from the other side. An incarnation orders claims
+  about whether a node is alive; it says nothing about the freshness of the load and cache figures
+  riding along with the claim, and a healthy node never raises its incarnation because it has nothing
+  to refute. So gating the payload on a strict increase pinned every peer's stats to the moment it was
+  discovered. An alive message at an equal incarnation now refreshes the payload without touching the
+  state machine — only for a node already believed alive, so the refresh cannot become a second,
+  unguarded path back from dead. `performGossip` also stamps its own `LastSeen` before announcing
+  itself; it had been broadcasting the timestamp set at construction, and since `UpdateNodeInfo` copies
+  that field and `performHealthChecks` compares it against three heartbeat intervals, every alive
+  message a node sent was evidence it had not been heard from. Inert only while the guard discarded the
+  payload, and a flap the moment it stopped.
+
+  The acceptance test [#132] proposes for the stats half — wait two heartbeats, assert `MemoryUsage >
+  0` — **passes on this bug**, because the first message is applied and the value stays non-zero
+  forever after. The tests here assert that a *changed* value arrives on a second message, and that
+  dead becomes alive; a single-transition assertion cannot distinguish a live feed from a permanently
+  stale one, and a green test over a stale metric is worse than no test because it certifies what it
+  cannot see. Nine mutations were checked, each reverting one part of the fix, and each fails a test
+  that names the consequence.
+
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
+[#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
+[#272]: https://github.com/scttfrdmn/objectfs/issues/272
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed

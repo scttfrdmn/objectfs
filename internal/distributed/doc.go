@@ -265,6 +265,24 @@ The gossip protocol implements:
 
 Failure Detection:
 
+A node that has not been heard from for three heartbeat intervals is marked suspect, and one that
+stays suspect is marked dead. Detection is a guess — a lost datagram and a lost node look identical
+from the outside — so the guess has to be reversible.
+
+That is what the incarnation number is for. Every accusation names the incarnation it was made
+about, and the accused answers by publishing a higher one, which supersedes the accusation
+everywhere it has spread. A node never accepts a suspect or dead report about itself; it refutes it.
+Recovery therefore needs no operator action and no restart: a node that was unreachable for a while
+rejoins on its next gossip round, and [GossipStats.SuspicionRefutations] counts how often that has
+happened — a number that climbs steadily means a healthy cluster whose heartbeat interval is set
+below the network's real latency.
+
+Until v0.11.0 none of that worked, because nothing ever incremented an incarnation. Every
+strictly-greater comparison in the protocol was permanently false after the message that discovered
+a node, with two consequences: a node marked dead by one lost heartbeat was gone from routing until
+its process restarted, and the node statistics riding along with each alive message were frozen at
+the first value ever received, so anything reading them was reading a snapshot of startup (#272).
+
 	// Nodes automatically detect failures via gossip protocol
 	// Failed nodes are marked as NodeStatusSuspect or NodeStatusDead
 
