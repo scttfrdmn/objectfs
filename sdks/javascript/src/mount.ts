@@ -21,10 +21,7 @@ const readdir = promisify(fs.readdir);
 const stat = promisify(fs.stat);
 
 export class MountManager {
-  constructor(
-    private binaryPath: string,
-    private config: Configuration
-  ) {}
+  constructor(private binaryPath: string, private config: Configuration) {}
 
   /**
    * Mount ObjectFS filesystem
@@ -57,15 +54,24 @@ export class MountManager {
       console.log(`Mounting ${storageUri} at ${mountPoint}`);
       console.log(`Mount command: ${cmd.join(' ')}`);
 
+      // Destructured rather than indexed: under `noUncheckedIndexedAccess` a bare `cmd[0]` is
+      // `string | undefined`, which matches no `spawn` overload — and because the call then had no
+      // return type, every `process.on(...)` below reported "Property 'on' does not exist on type
+      // 'never'". One index expression accounted for five of this file's errors.
+      const [command, ...commandArgs] = cmd;
+      if (command === undefined) {
+        throw new MountError('Mount command is empty');
+      }
+
       // Start mount process
-      const process = spawn(cmd[0], cmd.slice(1), {
+      const process = spawn(command, commandArgs, {
         stdio: options.foreground ? 'inherit' : 'pipe',
       });
 
       if (options.foreground) {
         // For foreground mounts, wait for completion
         return new Promise((resolve, reject) => {
-          process.on('close', code => {
+          process.on('close', (code) => {
             if (code === 0) {
               resolve(process);
             } else {
@@ -73,7 +79,7 @@ export class MountManager {
             }
           });
 
-          process.on('error', error => {
+          process.on('error', (error) => {
             reject(new MountError(`Mount process error: ${error}`));
           });
         });
@@ -118,7 +124,14 @@ export class MountManager {
 
       console.log(`Unmounting ${mountPoint}`);
 
-      const process = spawn(cmd[0], cmd.slice(1), {
+      // `cmd` is built literally above and always begins with 'fusermount', but the compiler cannot
+      // see that through the array index; the check is cheap and keeps the type honest.
+      const [command, ...commandArgs] = cmd;
+      if (command === undefined) {
+        throw new MountError('Unmount command is empty');
+      }
+
+      const process = spawn(command, commandArgs, {
         stdio: 'pipe',
       });
 
@@ -166,10 +179,16 @@ export class MountManager {
           const lines = mounts.split('\n');
 
           for (const line of lines) {
-            const parts = line.split(' ');
-            if (parts.length >= 3 && parts[1] === absolutePath) {
-              // Check if it's a FUSE mount (ObjectFS uses FUSE)
-              return parts[2] === 'fuse' || parts[0].includes('objectfs');
+            const [device, mountpoint, fstype] = line.split(' ');
+            if (mountpoint === absolutePath) {
+              // Check if it's a FUSE mount (ObjectFS uses FUSE). `fstype` also matches the
+              // `fuse.objectfs` form the kernel reports for a named FUSE filesystem, which the
+              // previous exact `=== 'fuse'` comparison missed.
+              return (
+                fstype === 'fuse' ||
+                fstype?.startsWith('fuse.') === true ||
+                device?.includes('objectfs') === true
+              );
             }
           }
         } catch (error) {
@@ -179,7 +198,9 @@ export class MountManager {
 
       // Check using mount command (cross-platform)
       try {
-        const { spawn } = require('child_process');
+        // `spawn` is imported at the top of this file; the local require() shadowed it with an
+        // untyped copy, which is why `process.stdout` below needed no narrowing and the callback
+        // parameters had to be annotated by hand.
         const process = spawn('mount', [], { stdio: 'pipe' });
 
         return new Promise<boolean>((resolve) => {
@@ -191,8 +212,10 @@ export class MountManager {
           process.on('close', () => {
             const lines = output.split('\n');
             for (const line of lines) {
-              if (line.includes(absolutePath) &&
-                  (line.includes('fuse') || line.includes('objectfs'))) {
+              if (
+                line.includes(absolutePath) &&
+                (line.includes('fuse') || line.includes('objectfs'))
+              ) {
                 resolve(true);
                 return;
               }
@@ -203,7 +226,9 @@ export class MountManager {
           process.on('error', () => resolve(false));
         });
       } catch (error) {
-        console.debug(`Error checking mount status for ${mountPoint}: ${error}`);
+        console.debug(
+          `Error checking mount status for ${mountPoint}: ${error}`
+        );
         return false;
       }
 
@@ -228,20 +253,32 @@ export class MountManager {
           const lines = mountsContent.split('\n');
 
           for (const line of lines) {
-            const parts = line.split(' ');
-            if (parts.length >= 4 &&
-                (parts[2] === 'fuse' || parts[0].includes('objectfs'))) {
-
+            const [device, mountpoint, fstype, opts] = line.split(' ');
+            if (
+              device === undefined ||
+              mountpoint === undefined ||
+              fstype === undefined ||
+              opts === undefined
+            ) {
+              continue;
+            }
+            // As in isMounted: ObjectFS mounts report `fuse.s3`, not bare `fuse`, because
+            // internal/fuse/mount.go sets Subtype: "s3".
+            if (
+              fstype === 'fuse' ||
+              fstype.startsWith('fuse.') ||
+              device.includes('objectfs')
+            ) {
               const mountInfo: MountInfo = {
-                device: parts[0],
-                mountpoint: parts[1],
-                fstype: parts[2],
-                opts: parts[3],
+                device,
+                mountpoint,
+                fstype,
+                opts,
               };
 
               // Add usage statistics if available
               try {
-                const stats = fs.statSync(parts[1]);
+                const stats = fs.statSync(mountpoint);
                 if (stats.isDirectory()) {
                   // Try to get disk usage (simplified)
                   mountInfo.total = 0;
@@ -264,7 +301,6 @@ export class MountManager {
       // Fallback: use mount command
       if (mounts.length === 0) {
         try {
-          const { spawn } = require('child_process');
           const process = spawn('mount', [], { stdio: 'pipe' });
 
           await new Promise<void>((resolve) => {
@@ -278,14 +314,17 @@ export class MountManager {
               for (const line of lines) {
                 if (line.includes('fuse') || line.includes('objectfs')) {
                   // Parse mount line: device on mountpoint type fstype (opts)
-                  const match = line.match(/^(.+?) on (.+?) type (.+?) \((.+?)\)$/);
-                  if (match) {
-                    mounts.push({
-                      device: match[1],
-                      mountpoint: match[2],
-                      fstype: match[3],
-                      opts: match[4],
-                    });
+                  const match = line.match(
+                    /^(.+?) on (.+?) type (.+?) \((.+?)\)$/
+                  );
+                  const [, device, mountpoint, fstype, opts] = match ?? [];
+                  if (
+                    device !== undefined &&
+                    mountpoint !== undefined &&
+                    fstype !== undefined &&
+                    opts !== undefined
+                  ) {
+                    mounts.push({ device, mountpoint, fstype, opts });
                   }
                 }
               }
@@ -312,7 +351,7 @@ export class MountManager {
     const absolutePath = path.resolve(mountPoint);
     const mounts = await this.listMounts();
 
-    return mounts.find(mount => mount.mountpoint === absolutePath) || null;
+    return mounts.find((mount) => mount.mountpoint === absolutePath) || null;
   }
 
   // Private helper methods
@@ -330,7 +369,9 @@ export class MountManager {
     // Validate mount point
     const parentDir = path.dirname(path.resolve(mountPoint));
     if (!fs.existsSync(parentDir)) {
-      throw new MountError(`Mount point parent directory does not exist: ${parentDir}`);
+      throw new MountError(
+        `Mount point parent directory does not exist: ${parentDir}`
+      );
     }
   }
 
@@ -355,11 +396,15 @@ export class MountManager {
       try {
         await access(absolutePath, fs.constants.R_OK | fs.constants.W_OK);
       } catch (error) {
-        throw new MountError(`Insufficient permissions for mount point: ${absolutePath}`);
+        throw new MountError(
+          `Insufficient permissions for mount point: ${absolutePath}`
+        );
       }
     } catch (error) {
       if (error instanceof MountError) throw error;
-      throw new MountError(`Failed to prepare mount point ${mountPoint}: ${error}`);
+      throw new MountError(
+        `Failed to prepare mount point ${mountPoint}: ${error}`
+      );
     }
   }
 
@@ -373,7 +418,9 @@ export class MountManager {
       await writeFile(configPath, config.toYAML(), 'utf8');
       return configPath;
     } catch (error) {
-      throw new ConfigurationError(`Failed to create configuration file: ${error}`);
+      throw new ConfigurationError(
+        `Failed to create configuration file: ${error}`
+      );
     }
   }
 
@@ -404,7 +451,10 @@ export class MountManager {
     return cmd;
   }
 
-  private async waitForMount(mountPoint: string, timeout: number): Promise<void> {
+  private async waitForMount(
+    mountPoint: string,
+    timeout: number
+  ): Promise<void> {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeout) {
@@ -418,20 +468,23 @@ export class MountManager {
         }
       }
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
     throw new MountError(`Mount timeout after ${timeout}ms`);
   }
 
-  private async waitForUnmount(mountPoint: string, timeout: number): Promise<void> {
+  private async waitForUnmount(
+    mountPoint: string,
+    timeout: number
+  ): Promise<void> {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeout) {
       if (!(await this.isMounted(mountPoint))) {
         return;
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
     throw new MountError(`Unmount timeout after ${timeout}ms`);

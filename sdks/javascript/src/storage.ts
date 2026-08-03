@@ -1,14 +1,32 @@
 /**
  * ObjectFS S3 Storage Adapter
  *
- * Optimized storage adapter for AWS S3.
+ * Every method in this class used to return invented data, and one of them wrote invented data to
+ * the caller's disk:
+ *
+ *   listObjects   → two hardcoded entries, test-file-1.txt and test-file-2.txt, keyed under the
+ *                   caller's own prefix so the result looked derived from the request
+ *   getObjectInfo → size 1024, etag '"abc123"', for any key, including keys that do not exist
+ *   downloadObject→ fs.writeFile(localPath, 'Simulated file content from S3'), then a
+ *                   progressCallback(30, 30) and a return value of 30 that agreed with it
+ *   uploadObject  → console.log and `return true`; nothing was uploaded
+ *   deleteObject  → console.log and `return true`; the object was still in S3
+ *
+ * They throw now. A caller who reaches one finds out at the call, which is the whole difference:
+ * `downloadObject` pointed at a real path destroyed what was there and reported a successful
+ * 30-byte transfer, and nothing in the SDK, its one test file, or CI would have said so.
+ *
+ * Implementing these for real means @aws-sdk/client-s3, which this package does not depend on, plus
+ * credential resolution, list pagination, and multipart upload. That is tracked as #325 along with
+ * the identical fabrication in the Python SDK. The signatures are kept so the break is a thrown
+ * error naming the issue rather than a TypeError on an undefined method.
+ *
+ * The pattern is the one internal/distributed/coordinator.go:547-602 and gossip.go:823-828 already
+ * use in the Go tree: decline to return a value you do not have, and say which issue covers it.
  */
 
-import axios, { AxiosInstance, AxiosResponse } from 'axios';
-import * as fs from 'fs';
 import * as path from 'path';
 import { URL } from 'url';
-import { StorageConfig } from './config';
 import { StorageError } from './errors';
 import {
   ListObjectsOptions,
@@ -17,41 +35,56 @@ import {
   UploadOptions,
   DownloadOptions,
 } from './types';
+import { StorageConfig } from './types';
+
+const NOT_IMPLEMENTED =
+  'is not implemented. The ObjectFS JavaScript SDK has no S3 client: this method previously ' +
+  'returned fabricated data (and downloadObject overwrote the local path with placeholder ' +
+  'content). See https://github.com/scttfrdmn/objectfs/issues/325. Use the AWS SDK directly, or ' +
+  'mount the bucket with ObjectFS and use ordinary filesystem calls.';
+
+function notImplemented(method: string): never {
+  throw new StorageError(
+    `S3StorageAdapter.${method} ${NOT_IMPLEMENTED}`,
+    'ENOTIMPLEMENTED'
+  );
+}
 
 export class S3StorageAdapter {
-  private client: AxiosInstance | null = null;
-
   constructor(private config: StorageConfig) {}
 
   /**
-   * List objects in S3 bucket
+   * List objects in S3 bucket.
+   *
+   * @throws StorageError always — see #325.
    */
   async listObjects(
     storageUri: string,
     options: ListObjectsOptions = {}
   ): Promise<ListObjectsResult> {
-    try {
-      const parsedUri = this.parseS3Uri(storageUri);
-      return await this.listS3Objects(parsedUri, options);
-    } catch (error) {
-      throw new StorageError(`Failed to list S3 objects: ${error}`);
-    }
+    // Validated before throwing so a caller with a malformed URI still learns that first; the URI
+    // parser below is the one part of this class that was ever real.
+    this.parseS3Uri(storageUri);
+    void options;
+    notImplemented('listObjects');
   }
 
   /**
-   * Get metadata information for a specific S3 object
+   * Get metadata information for a specific S3 object.
+   *
+   * @throws StorageError always — see #325.
    */
   async getObjectInfo(storageUri: string, key: string): Promise<ObjectInfo> {
-    try {
-      const parsedUri = this.parseS3Uri(storageUri);
-      return await this.getS3ObjectInfo(parsedUri, key);
-    } catch (error) {
-      throw new StorageError(`Failed to get S3 object info: ${error}`);
-    }
+    this.parseS3Uri(storageUri);
+    void key;
+    notImplemented('getObjectInfo');
   }
 
   /**
-   * Download object from S3 to local file
+   * Download object from S3 to local file.
+   *
+   * @throws StorageError always — see #325. This method used to write
+   * 'Simulated file content from S3' to `localPath`, destroying any file already there.
    */
   async downloadObject(
     storageUri: string,
@@ -59,22 +92,17 @@ export class S3StorageAdapter {
     localPath: string,
     options: DownloadOptions = {}
   ): Promise<number> {
-    try {
-      const parsedUri = this.parseS3Uri(storageUri);
-      const absolutePath = path.resolve(localPath);
-
-      // Ensure parent directory exists
-      const parentDir = path.dirname(absolutePath);
-      await fs.promises.mkdir(parentDir, { recursive: true });
-
-      return await this.downloadS3Object(parsedUri, key, absolutePath, options);
-    } catch (error) {
-      throw new StorageError(`Failed to download S3 object: ${error}`);
-    }
+    this.parseS3Uri(storageUri);
+    void key;
+    void path.resolve(localPath);
+    void options;
+    notImplemented('downloadObject');
   }
 
   /**
-   * Upload local file to S3
+   * Upload local file to S3.
+   *
+   * @throws StorageError always — see #325.
    */
   async uploadObject(
     storageUri: string,
@@ -82,30 +110,22 @@ export class S3StorageAdapter {
     localPath: string,
     options: UploadOptions = {}
   ): Promise<boolean> {
-    try {
-      const parsedUri = this.parseS3Uri(storageUri);
-      const absolutePath = path.resolve(localPath);
-
-      if (!fs.existsSync(absolutePath)) {
-        throw new StorageError(`Local file does not exist: ${absolutePath}`);
-      }
-
-      return await this.uploadS3Object(parsedUri, key, absolutePath, options);
-    } catch (error) {
-      throw new StorageError(`Failed to upload S3 object: ${error}`);
-    }
+    this.parseS3Uri(storageUri);
+    void key;
+    void path.resolve(localPath);
+    void options;
+    notImplemented('uploadObject');
   }
 
   /**
-   * Delete object from S3
+   * Delete object from S3.
+   *
+   * @throws StorageError always — see #325.
    */
   async deleteObject(storageUri: string, key: string): Promise<boolean> {
-    try {
-      const parsedUri = this.parseS3Uri(storageUri);
-      return await this.deleteS3Object(parsedUri, key);
-    } catch (error) {
-      throw new StorageError(`Failed to delete S3 object: ${error}`);
-    }
+    this.parseS3Uri(storageUri);
+    void key;
+    notImplemented('deleteObject');
   }
 
   private parseS3Uri(storageUri: string): {
@@ -114,110 +134,25 @@ export class S3StorageAdapter {
     path: string;
     fullUri: string;
   } {
+    let url: URL;
     try {
-      const url = new URL(storageUri);
-      if (url.protocol !== 's3:') {
-        throw new StorageError(`Only S3 URIs are supported. Got: ${url.protocol}`);
-      }
-      return {
-        scheme: 's3',
-        bucket: url.hostname,
-        path: url.pathname.substring(1), // Remove leading slash
-        fullUri: storageUri,
-      };
-    } catch (error) {
+      url = new URL(storageUri);
+    } catch {
+      // Only URL construction is guarded. The original wrapped the protocol check in the same try,
+      // so an http:// URI reported "Invalid S3 URI" instead of the specific "Only S3 URIs are
+      // supported" message it had raised one line earlier.
       throw new StorageError(`Invalid S3 URI: ${storageUri}`);
     }
-  }
-
-  // S3-specific methods
-
-  private async listS3Objects(
-    parsedUri: any,
-    options: ListObjectsOptions
-  ): Promise<ListObjectsResult> {
-    // Simulate S3 API response
-    // In production, would use AWS SDK or similar
-
-    const { prefix = '', maxKeys = 1000 } = options;
-
-    const objects = [
-      {
-        key: `${prefix}test-file-1.txt`,
-        size: 1024,
-        lastModified: '2024-01-01T00:00:00Z',
-        etag: '"abc123"',
-        storageClass: 'STANDARD',
-      },
-      {
-        key: `${prefix}test-file-2.txt`,
-        size: 2048,
-        lastModified: '2024-01-01T01:00:00Z',
-        etag: '"def456"',
-        storageClass: 'STANDARD',
-      },
-    ];
-
-    const limited = objects.slice(0, maxKeys);
-
-    return {
-      objects: limited,
-      truncated: objects.length > maxKeys,
-      nextContinuationToken: objects.length > maxKeys ? 'next-token' : undefined,
-      totalCount: objects.length,
-    };
-  }
-
-  private async getS3ObjectInfo(parsedUri: any, key: string): Promise<ObjectInfo> {
-    return {
-      key,
-      size: 1024,
-      lastModified: '2024-01-01T00:00:00Z',
-      etag: '"abc123"',
-      contentType: 'text/plain',
-      storageClass: 'STANDARD',
-      metadata: {},
-    };
-  }
-
-  private async downloadS3Object(
-    parsedUri: any,
-    key: string,
-    localPath: string,
-    options: DownloadOptions
-  ): Promise<number> {
-    // Simulate download
-    const content = Buffer.from('Simulated file content from S3');
-
-    await fs.promises.writeFile(localPath, content);
-
-    if (options.progressCallback) {
-      options.progressCallback(content.length, content.length);
+    if (url.protocol !== 's3:') {
+      throw new StorageError(
+        `Only S3 URIs are supported. Got: ${url.protocol}`
+      );
     }
-
-    return content.length;
-  }
-
-  private async uploadS3Object(
-    parsedUri: any,
-    key: string,
-    localPath: string,
-    options: UploadOptions
-  ): Promise<boolean> {
-    const stats = await fs.promises.stat(localPath);
-
-    // Simulate upload progress
-    if (options.progressCallback) {
-      options.progressCallback(stats.size, stats.size);
-    }
-
-    console.log(`Simulated upload of ${localPath} to s3://${parsedUri.bucket}/${key}`);
-    return true;
-  }
-
-  private async deleteS3Object(parsedUri: any, key: string): Promise<boolean> {
-    // In production, this would use AWS SDK to delete the object
-    console.log(`Deleting S3 object: s3://${parsedUri.bucket}/${key}`);
-    return true;
+    return {
+      scheme: 's3',
+      bucket: url.hostname,
+      path: url.pathname.substring(1), // Remove leading slash
+      fullUri: storageUri,
+    };
   }
 }

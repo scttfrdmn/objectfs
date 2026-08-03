@@ -81,7 +81,10 @@ export function parseSampleLine(line: string): PrometheusSample | null {
   const labels = parseLabels(line.substring(brace + 1, close));
   if (labels === null) return null;
 
-  const raw = line.substring(close + 1).trim().split(/\s+/)[0];
+  const raw = line
+    .substring(close + 1)
+    .trim()
+    .split(/\s+/)[0];
   if (!raw) return null;
 
   const value = Number(raw);
@@ -226,7 +229,9 @@ export function extractCacheStats(data: RawMetrics): CacheMetrics {
  * is the histogram's `_sum` over its count -- a mean across the mount's whole life, not a recent
  * window, since a rate needs two scrapes and this has one.
  */
-export function extractOperationStats(data: RawMetrics): OperationMetrics | null {
+export function extractOperationStats(
+  data: RawMetrics
+): OperationMetrics | null {
   const byOperation: Record<string, OperationDetail> = {};
   let total = 0;
   let successful = 0;
@@ -247,11 +252,15 @@ export function extractOperationStats(data: RawMetrics): OperationMetrics | null
     return null;
   }
 
-  for (const sample of samplesFor(data, 'objectfs_operation_duration_seconds_sum')) {
+  for (const sample of samplesFor(
+    data,
+    'objectfs_operation_duration_seconds_sum'
+  )) {
     const entry = byOperation[sample.labels['operation'] ?? ''];
     if (entry) {
       entry.durationSeconds = sample.value;
-      if (entry.count > 0) entry.avgDurationSeconds = sample.value / entry.count;
+      if (entry.count > 0)
+        entry.avgDurationSeconds = sample.value / entry.count;
     }
   }
 
@@ -320,7 +329,9 @@ export function extractErrorStats(data: RawMetrics): ErrorMetrics | null {
 }
 
 /** `objectfs_active_connections`, an unlabelled gauge. Null when absent. */
-export function extractConnectionStats(data: RawMetrics): ConnectionMetrics | null {
+export function extractConnectionStats(
+  data: RawMetrics
+): ConnectionMetrics | null {
   const first = samplesFor(data, 'objectfs_active_connections')[0];
 
   return first ? { active: first.value } : null;

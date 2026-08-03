@@ -4,21 +4,33 @@ ObjectFS Storage Adapter
 Storage backend abstraction for different cloud providers.
 """
 
-import asyncio
-import json
-import logging
-import os
+# Nothing here performs I/O, so nothing here imports a transport. `aiohttp`, `requests`, `asyncio`,
+# `json`, `os` and `logging` were all imported and all unused even before the fabricated methods were
+# removed -- the fabrications logged and returned literals; they never opened a socket. Keeping the
+# two HTTP clients in the import list of the module named `storage` implied otherwise.
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any, AsyncIterator
+from typing import Dict, Optional, Union, Any
 from urllib.parse import urlparse
 
-import aiohttp
-import requests
-
 from .config import StorageConfig
-from .exceptions import StorageError, ConfigurationError
+from .exceptions import StorageError
 
-logger = logging.getLogger(__name__)
+_NOT_IMPLEMENTED = (
+    "is not implemented. The ObjectFS Python SDK has no S3, GCS or Azure client: this "
+    "method previously returned fabricated data (and download_object overwrote the local "
+    "path with placeholder content). See "
+    "https://github.com/scttfrdmn/objectfs/issues/325. Use boto3 directly, or mount the "
+    "bucket with ObjectFS and use ordinary filesystem calls."
+)
+
+
+def _not_implemented(method: str) -> 'StorageError':
+    """Build the error every fabricated operation now raises.
+
+    Returned rather than raised so call sites read ``raise _not_implemented(...)``, which keeps
+    the traceback rooted at the method the caller actually invoked.
+    """
+    return StorageError(f"StorageAdapter.{method} {_NOT_IMPLEMENTED}")
 
 
 class StorageAdapter:
@@ -80,6 +92,12 @@ class StorageAdapter:
             else:
                 raise StorageError(f"Unsupported storage backend: {backend}")
 
+        except StorageError:
+            # Re-raised unchanged. The generic handler below wraps every exception in a new
+            # StorageError, which for a StorageError means the specific message -- an unsupported
+            # scheme, a malformed URI, or the not-implemented notice naming issue #325 -- arrives
+            # nested inside a vaguer one. The specific message is the useful one.
+            raise
         except Exception as e:
             raise StorageError(f"Failed to list objects: {e}") from e
 
@@ -114,6 +132,8 @@ class StorageAdapter:
             else:
                 raise StorageError(f"Unsupported storage backend: {backend}")
 
+        except StorageError:
+            raise  # Already specific; see the note on _parse_storage_uri.
         except Exception as e:
             raise StorageError(f"Failed to get object info: {e}") from e
 
@@ -144,7 +164,11 @@ class StorageAdapter:
             backend = parsed_uri['scheme']
             local_path = Path(local_path)
 
-            # Ensure parent directory exists
+            # Ensure parent directory exists. Note this still runs even though the backend method
+            # below raises, so a missing parent directory is created for a download that cannot
+            # happen; that is a stray empty directory, not lost data, and the line is where it
+            # belongs for when the download is real. What matters is that nothing opens
+            # ``local_path`` itself, so an existing file there is left byte-for-byte intact.
             local_path.parent.mkdir(parents=True, exist_ok=True)
 
             if backend == 's3':
@@ -162,6 +186,8 @@ class StorageAdapter:
             else:
                 raise StorageError(f"Unsupported storage backend: {backend}")
 
+        except StorageError:
+            raise  # Already specific; see the note on _parse_storage_uri.
         except Exception as e:
             raise StorageError(f"Failed to download object: {e}") from e
 
@@ -214,6 +240,8 @@ class StorageAdapter:
             else:
                 raise StorageError(f"Unsupported storage backend: {backend}")
 
+        except StorageError:
+            raise  # Already specific; see the note on _parse_storage_uri.
         except Exception as e:
             raise StorageError(f"Failed to upload object: {e}") from e
 
@@ -248,11 +276,19 @@ class StorageAdapter:
             else:
                 raise StorageError(f"Unsupported storage backend: {backend}")
 
+        except StorageError:
+            raise  # Already specific; see the note on _parse_storage_uri.
         except Exception as e:
             raise StorageError(f"Failed to delete object: {e}") from e
 
     def _parse_storage_uri(self, storage_uri: str) -> Dict[str, str]:
-        """Parse storage URI into components."""
+        """Parse storage URI into components.
+
+        Every public method re-raises ``StorageError`` unchanged before its generic
+        ``except Exception`` handler. Without that, the handler wraps the specific message this
+        function raises -- and the unsupported-scheme and not-implemented messages too -- inside a
+        vaguer "Failed to <verb>", so the useful text arrives nested one level down.
+        """
         parsed = urlparse(storage_uri)
 
         if not parsed.scheme:
@@ -265,7 +301,14 @@ class StorageAdapter:
             'full_uri': storage_uri
         }
 
-    # S3-specific methods
+    # Backend methods.
+    #
+    # There is one set, not three. The GCS and Azure methods that used to be here all delegated to
+    # their S3 counterpart, so `gs://` and `az://` URIs returned the same two invented S3 objects
+    # under a docstring claiming a "simplified implementation" of a different cloud. Nothing was
+    # simplified; nothing was implemented. The dispatch in the public methods above still names the
+    # three schemes, because rejecting an unsupported scheme is a real thing to do, and it now
+    # arrives at a single honest raise instead of three copies of a fabrication.
 
     async def _list_s3_objects(
         self,
@@ -274,49 +317,27 @@ class StorageAdapter:
         max_keys: int,
         continuation_token: Optional[str]
     ) -> Dict[str, Any]:
-        """List objects in S3 bucket."""
-        # Simulate S3 API response
-        # In production, would use boto3 or similar
+        """Not implemented; raises.
 
-        objects = [
-            {
-                'Key': f"{prefix or ''}test-file-1.txt",
-                'Size': 1024,
-                'LastModified': '2024-01-01T00:00:00Z',
-                'ETag': '"abc123"',
-                'StorageClass': 'STANDARD'
-            },
-            {
-                'Key': f"{prefix or ''}test-file-2.txt",
-                'Size': 2048,
-                'LastModified': '2024-01-01T01:00:00Z',
-                'ETag': '"def456"',
-                'StorageClass': 'STANDARD'
-            }
-        ]
-
-        return {
-            'objects': objects[:max_keys],
-            'truncated': len(objects) > max_keys,
-            'next_continuation_token': 'next-token' if len(objects) > max_keys else None,
-            'total_count': len(objects)
-        }
+        Returned two invented objects -- ``test-file-1.txt`` at 1024 bytes and
+        ``test-file-2.txt`` at 2048 -- keyed under the caller's own prefix, so the result looked
+        derived from the request. ``total_count`` was 2 for every bucket in the world, including
+        empty ones and ones that do not exist.
+        """
+        raise _not_implemented('list_objects')
 
     async def _get_s3_object_info(
         self,
         parsed_uri: Dict[str, str],
         key: str
     ) -> Dict[str, Any]:
-        """Get S3 object metadata."""
-        return {
-            'key': key,
-            'size': 1024,
-            'last_modified': '2024-01-01T00:00:00Z',
-            'etag': '"abc123"',
-            'content_type': 'text/plain',
-            'storage_class': 'STANDARD',
-            'metadata': {}
-        }
+        """Not implemented; raises.
+
+        Returned ``size: 1024``, ``etag: '"abc123"'`` and ``content_type: 'text/plain'`` for any
+        key, whether or not it existed -- so it could not report a missing object, which is most
+        of what a caller asks this for.
+        """
+        raise _not_implemented('get_object_info')
 
     async def _download_s3_object(
         self,
@@ -325,17 +346,18 @@ class StorageAdapter:
         local_path: Path,
         progress_callback: Optional[callable]
     ) -> int:
-        """Download object from S3."""
-        # Simulate download
-        content = b"Simulated file content from S3"
+        """Not implemented; raises.
 
-        with open(local_path, 'wb') as f:
-            f.write(content)
+        This is the one that destroyed data. It did
+        ``open(local_path, 'wb').write(b"Simulated file content from S3")``, called
+        ``progress_callback(30, 30)``, and returned 30 -- so a caller following the README's own
+        example lost whatever file was at that path and was told the transfer succeeded, with a
+        completed progress bar. Verified by execution against a file containing other content.
 
-        if progress_callback:
-            progress_callback(len(content), len(content))
-
-        return len(content)
+        The raise happens before anything is opened, so an existing file at ``local_path`` is left
+        exactly as it was.
+        """
+        raise _not_implemented('download_object')
 
     async def _upload_s3_object(
         self,
@@ -346,65 +368,30 @@ class StorageAdapter:
         content_type: Optional[str],
         progress_callback: Optional[callable]
     ) -> bool:
-        """Upload object to S3."""
-        file_size = local_path.stat().st_size
+        """Not implemented; raises.
 
-        # Simulate upload progress
-        if progress_callback:
-            progress_callback(file_size, file_size)
-
-        logger.info(f"Simulated upload of {local_path} to s3://{parsed_uri['bucket']}/{key}")
-        return True
+        Called ``progress_callback(file_size, file_size)``, logged "Simulated upload", and returned
+        True. The progress callback completing is what makes this worse than returning None: a
+        caller with a progress bar watched it fill.
+        """
+        raise _not_implemented('upload_object')
 
     async def _delete_s3_object(
         self,
         parsed_uri: Dict[str, str],
         key: str
     ) -> bool:
-        """Delete object from S3."""
-        logger.info(f"Simulated deletion of s3://{parsed_uri['bucket']}/{key}")
-        return True
+        """Not implemented; raises.
 
-    # GCS-specific methods (simplified implementations)
+        Logged "Simulated deletion" and returned True while the object remained in S3. A caller
+        deleting on a retention or privacy obligation was told it was done.
+        """
+        raise _not_implemented('delete_object')
 
-    async def _list_gcs_objects(self, parsed_uri, prefix, max_keys, continuation_token):
-        """List objects in GCS bucket."""
-        return await self._list_s3_objects(parsed_uri, prefix, max_keys, continuation_token)
+    # GCS and Azure use the same raises: see the note above.
 
-    async def _get_gcs_object_info(self, parsed_uri, key):
-        """Get GCS object metadata."""
-        return await self._get_s3_object_info(parsed_uri, key)
-
-    async def _download_gcs_object(self, parsed_uri, key, local_path, progress_callback):
-        """Download object from GCS."""
-        return await self._download_s3_object(parsed_uri, key, local_path, progress_callback)
-
-    async def _upload_gcs_object(self, parsed_uri, key, local_path, metadata, content_type, progress_callback):
-        """Upload object to GCS."""
-        return await self._upload_s3_object(parsed_uri, key, local_path, metadata, content_type, progress_callback)
-
-    async def _delete_gcs_object(self, parsed_uri, key):
-        """Delete object from GCS."""
-        return await self._delete_s3_object(parsed_uri, key)
-
-    # Azure-specific methods (simplified implementations)
-
-    async def _list_azure_objects(self, parsed_uri, prefix, max_keys, continuation_token):
-        """List objects in Azure container."""
-        return await self._list_s3_objects(parsed_uri, prefix, max_keys, continuation_token)
-
-    async def _get_azure_object_info(self, parsed_uri, key):
-        """Get Azure blob metadata."""
-        return await self._get_s3_object_info(parsed_uri, key)
-
-    async def _download_azure_object(self, parsed_uri, key, local_path, progress_callback):
-        """Download blob from Azure."""
-        return await self._download_s3_object(parsed_uri, key, local_path, progress_callback)
-
-    async def _upload_azure_object(self, parsed_uri, key, local_path, metadata, content_type, progress_callback):
-        """Upload blob to Azure."""
-        return await self._upload_s3_object(parsed_uri, key, local_path, metadata, content_type, progress_callback)
-
-    async def _delete_azure_object(self, parsed_uri, key):
-        """Delete blob from Azure."""
-        return await self._delete_s3_object(parsed_uri, key)
+    _list_gcs_objects = _list_azure_objects = _list_s3_objects
+    _get_gcs_object_info = _get_azure_object_info = _get_s3_object_info
+    _download_gcs_object = _download_azure_object = _download_s3_object
+    _upload_gcs_object = _upload_azure_object = _upload_s3_object
+    _delete_gcs_object = _delete_azure_object = _delete_s3_object

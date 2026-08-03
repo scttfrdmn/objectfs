@@ -67,9 +67,23 @@ var (
 	globalErrStr *C.char
 )
 
+// freedHandleStr is the string objectfs_last_error returns for a handle that is non-NULL but has no
+// entry — freed, or never issued. Allocated once, at init, and never freed.
+//
+// It has to be a single owned allocation because objectfs.h:133-135 promises the returned pointer is
+// "valid until the next call on the same handle. Do NOT free it." That arm used to return
+// C.CString("invalid or freed handle"), a fresh malloc on every call: the caller cannot free it
+// without contradicting the documented contract, and the library never freed it either, so every
+// call leaked 24 bytes. Verified by calling it three times on a bogus handle and printing the
+// pointers — three distinct addresses. Use-after-free error handling is exactly the path a program
+// takes when it is already going wrong, and often in a loop.
+var freedHandleStr *C.char
+
 func init() {
-	// Pre-allocate empty strings so we never return nil from objectfs_last_error.
+	// Pre-allocate the fixed strings so we never return nil from objectfs_last_error, and never
+	// allocate inside it.
 	globalErrStr = C.CString("")
+	freedHandleStr = C.CString("invalid or freed handle")
 }
 
 // main is required for buildmode=c-shared but is never called.
@@ -154,21 +168,21 @@ func codeFromErr(err error) C.int {
 	}
 }
 
-// bytesToCacheString converts a byte count to a human-readable cache size string
-// that objectfssdk.WithCacheSize accepts (e.g. "512MB", "2GB").
+// bytesToCacheString renders a byte count in the spelling objectfssdk.WithCacheSize accepts.
+//
+// A bare byte count, not a unit-scaled one. This used to divide by 1 GiB or 1 MiB and format the
+// integer quotient, which discards the remainder: objectfs_new(bucket, region, 1610612736) — the
+// 1.5 GiB that objectfs.h documents as "memory cache size in bytes" — became "1GB", so the caller
+// got 1 GiB and lost half of what it asked for, silently. 2047 MiB became "1GB", losing 1023 MiB.
+// The rounding was invisible from C: nothing echoes the size back, and a cache that is half the
+// requested size still works, just with a worse hit rate than the caller provisioned for.
+//
+// utils.ParseBytes, which is what consumes this, accepts a plain count with a "B" suffix and
+// multiplies by 1, so "1610612736B" round-trips exactly. Verified across the range, including
+// math.MaxInt64. (Its float64 multiply means a *unit-scaled* spelling can be inexact above 2^53;
+// with multiplier 1 there is no multiply to lose precision in.)
 func bytesToCacheString(n int64) string {
-	const (
-		mb = 1024 * 1024
-		gb = 1024 * 1024 * 1024
-	)
-	switch {
-	case n >= gb:
-		return fmt.Sprintf("%dGB", n/gb)
-	case n >= mb:
-		return fmt.Sprintf("%dMB", n/mb)
-	default:
-		return fmt.Sprintf("%dB", n)
-	}
+	return fmt.Sprintf("%dB", n)
 }
 
 // fillCStr copies src into the C char array starting at dst, leaving room for
@@ -191,13 +205,19 @@ func fillCStr(dst unsafe.Pointer, src string, capacity int) {
 }
 
 // fillInfo copies fields from a types.ObjectInfo into a C objectfs_info_t.
+//
+// Each capacity is taken from the array it describes with unsafe.Sizeof rather than written as a
+// literal. The literals were 1024/128/128 and objectfs_types.h is what decides those numbers, so
+// widening key from 1024 to 1025 there would have left this file still truncating at 1023 — the
+// declaration and its one writer silently disagreeing, which is the shape of the bug that made the
+// widening necessary. Derived, they cannot drift.
 func fillInfo(dst *C.objectfs_info_t, key, etag, contentType string, size, mtimeSec int64) {
 	C.memset(unsafe.Pointer(dst), 0, C.size_t(unsafe.Sizeof(*dst)))
-	fillCStr(unsafe.Pointer(&dst.key), key, 1024)
+	fillCStr(unsafe.Pointer(&dst.key), key, int(unsafe.Sizeof(dst.key)))
 	dst.size = C.int64_t(size)
 	dst.mtime_sec = C.int64_t(mtimeSec)
-	fillCStr(unsafe.Pointer(&dst.etag), etag, 128)
-	fillCStr(unsafe.Pointer(&dst.content_type), contentType, 128)
+	fillCStr(unsafe.Pointer(&dst.etag), etag, int(unsafe.Sizeof(dst.etag)))
+	fillCStr(unsafe.Pointer(&dst.content_type), contentType, int(unsafe.Sizeof(dst.content_type)))
 }
 
 // --- Exported functions -------------------------------------------------
@@ -428,8 +448,9 @@ func objectfs_last_error(handle C.objectfs_client_t) *C.char {
 	}
 	e := getEntry(handle)
 	if e == nil {
-		// Handle ID was valid once but has been freed.
-		return C.CString("invalid or freed handle")
+		// Handle ID was valid once but has been freed. Returns the shared allocation rather than a
+		// fresh C.CString; see the note on freedHandleStr.
+		return freedHandleStr
 	}
 	return e.getErrCStr()
 }

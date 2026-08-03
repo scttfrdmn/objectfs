@@ -61,6 +61,12 @@ dist/
 build/
 bin/
 
+# Maven's output directory, for sdks/java. Nothing had ever run `mvn` in this repository — that is
+# why the Java SDK shipped four compile errors — so nothing had ever produced this directory to
+# notice it was untracked. `target/` and not `sdks/java/target/`, matching the unanchored style of
+# the three above.
+target/
+
 # Coverage reports
 coverage.txt
 coverage.html

@@ -5,15 +5,20 @@ JavaScript/TypeScript API support.
 
 ## Features
 
-- **TypeScript First**: Full TypeScript support with comprehensive type definitions
-- **Easy Integration**: Simple, intuitive API for mounting and managing
-  ObjectFS instances
-- **Promise-based**: Modern async/await support for all operations
-- **AWS S3 Deep Integration**: Optimized specifically for AWS S3 with intelligent tiering and cost management
-- **Distributed Operations**: Built-in support for distributed clusters and replication
-- **Monitoring & Metrics**: Comprehensive health checking and metrics collection
-- **Event-driven**: EventEmitter-based architecture for real-time updates
-- **Configuration Management**: Flexible configuration with presets and validation
+What this SDK does is drive the `objectfs` binary and read what a running mount reports. It has no
+S3 client of its own and no control-plane client.
+
+- **Mount management**: spawn, unmount, enumerate and check ObjectFS mounts
+- **Configuration management**: build, merge, validate and emit the daemon's YAML, with presets
+- **Monitoring**: health checks and metrics scraped from the mount's Prometheus endpoint
+- **Event-driven**: EventEmitter-based, for mount/unmount and monitoring events
+- **TypeScript first**: type definitions for the whole surface, compiled by `npm run build`
+
+Not implemented, and throwing rather than pretending: storage operations, cluster membership, and
+cache control. See [#325](https://github.com/scttfrdmn/objectfs/issues/325) and the API reference
+below — this list previously advertised "AWS S3 deep integration with intelligent tiering and cost
+management" and "built-in support for distributed clusters and replication", neither of which any
+code here has ever done.
 
 ## Installation
 
@@ -114,46 +119,36 @@ const client = new ObjectFSClient({ config });
 
 ### Storage Operations
 
+**Not implemented.** `listObjects`, `getObjectInfo`, `downloadObject`, `uploadObject` and
+`deleteObject` throw a `StorageError`. They used to return fabricated data — two invented objects
+from `listObjects`, a fixed size and etag from `getObjectInfo`, `true` from `uploadObject` and
+`deleteObject` for uploads and deletions that never happened — and `downloadObject` wrote
+`Simulated file content from S3` over whatever file was at the local path it was given, then
+reported a successful 30-byte transfer. This section documented all of it as working.
+
+Tracked as [#325](https://github.com/scttfrdmn/objectfs/issues/325), which also covers the identical
+code in the Python SDK. Until it lands, use the AWS SDK directly:
+
 ```javascript
-async function storageExample() {
-  const client = new ObjectFSClient();
-
-  // List objects
-  const result = await client.listObjects('s3://my-bucket', {
-    prefix: 'data/',
-    maxKeys: 100,
-  });
-
-  console.log(`Found ${result.objects.length} objects`);
-
-  // Download object
-  const bytes = await client.downloadObject(
-    's3://my-bucket',
-    'data/file.txt',
-    '/tmp/downloaded-file.txt',
-    {
-      progressCallback: (downloaded, total) => {
-        console.log(`Downloaded ${downloaded}/${total} bytes`);
-      },
-    }
-  );
-
-  // Upload object
-  const success = await client.uploadObject(
-    's3://my-bucket',
-    'data/new-file.txt',
-    '/tmp/local-file.txt',
-    {
-      metadata: { author: 'javascript-sdk' },
-      progressCallback: (uploaded, total) => {
-        console.log(`Uploaded ${uploaded}/${total} bytes`);
-      },
-    }
-  );
-
-  await client.close();
-}
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 ```
+
+or mount the bucket and use ordinary filesystem calls, which is what ObjectFS is for:
+
+```javascript
+const client = new ObjectFSClient();
+await client.mount('s3://my-bucket', '/mnt/data');
+const contents = await fs.promises.readFile('/mnt/data/data/file.txt');
+await client.unmount('/mnt/data');
+```
+
+### Cluster and Cache Operations
+
+**Not implemented**, same as above and same issue. `joinCluster`, `leaveCluster`,
+`getClusterStatus`, `clearCache` and `warmCache` throw. `getClusterStatus` previously reported
+`{nodeCount: 1, leader: 'self', status: 'healthy'}` for any configuration without querying
+anything. Cluster membership is configured on the daemon, in the `cluster` section of the YAML
+config; this SDK has no control-plane client.
 
 ### Event Handling
 
@@ -185,6 +180,11 @@ await client.startMonitoring(5000); // Check every 5 seconds
 
 ### Distributed Clusters
 
+What this SDK can do is *describe* a cluster — the config section is real and reaches the daemon
+through the generated YAML. Membership operations (`joinCluster`, `getClusterStatus`) are not
+implemented, and the `cluster_change` event is never emitted, so the last three statements of the
+example that used to be here could not work:
+
 ```javascript
 const { Configuration } = require('@objectfs/sdk');
 
@@ -198,20 +198,14 @@ const config = new Configuration({
   },
 });
 
+// Written out, this is what the daemon reads. Mounting with it is how a node joins.
+config.saveToFile('objectfs-cluster.yaml');
 const client = new ObjectFSClient({ config });
-
-// Join cluster
-await client.joinCluster(['node1.example.com:8080', 'node2.example.com:8080']);
-
-// Monitor cluster changes
-client.on('cluster_change', (data) => {
-  console.log(`Cluster change: ${data.action}`);
-});
-
-// Get cluster status
-const status = await client.getClusterStatus();
-console.log(`Cluster has ${status.nodeCount} nodes, leader: ${status.leader}`);
+await client.mount('s3://my-bucket', '/mnt/objectfs');
 ```
+
+ObjectFS's own distributed layer is experimental (`internal/distributed`); see the top-level
+README before depending on it for anything.
 
 ## API Reference
 
@@ -262,14 +256,18 @@ generateConfig(preset?: string, outputPath?: string): string
 
 #### Storage Methods
 
+**All four throw `StorageError` — not implemented ([#325][i325]).** The signatures are what they
+will have if they are implemented; nothing behind them talks to S3.
+
 ```typescript
-// List objects
+// Not implemented; throws. Returned two invented objects, 'file1.txt' and 'file2.txt'.
 listObjects(storageUri: string, options?: ListObjectsOptions): Promise<ListObjectsResult>
 
-// Get object information
+// Not implemented; throws. Returned a fixed size and etag for any key, existing or not.
 getObjectInfo(storageUri: string, key: string): Promise<ObjectInfo>
 
-// Download object
+// Not implemented; throws. Wrote 'Simulated file content from S3' over localPath, called
+// progressCallback(30, 30), and returned 30 -- destroying an existing file and reporting success.
 downloadObject(
   storageUri: string,
   key: string,
@@ -277,7 +275,7 @@ downloadObject(
   options?: DownloadOptions
 ): Promise<number>
 
-// Upload object
+// Not implemented; throws. Returned true without transferring anything.
 uploadObject(
   storageUri: string,
   key: string,
@@ -285,6 +283,11 @@ uploadObject(
   options?: UploadOptions
 ): Promise<boolean>
 ```
+
+`S3StorageAdapter` additionally has `deleteObject(storageUri, key)`, which the client does not
+expose; it throws too, and previously returned `true` without deleting anything.
+
+[i325]: https://github.com/scttfrdmn/objectfs/issues/325
 
 #### Monitoring
 
@@ -308,24 +311,30 @@ startMonitoring(interval?: number): Promise<void>
 
 #### Distributed Operations
 
+**All three throw `DistributedError` — not implemented ([#325][i325]).** Cluster membership is
+configured on the daemon; this SDK has no control-plane client.
+
 ```typescript
-// Join cluster
+// Not implemented; throws. Returned true without contacting any node.
 joinCluster(seedNodes: string[], options?: JoinClusterOptions): Promise<boolean>
 
-// Leave cluster
+// Not implemented; throws. Same.
 leaveCluster(): Promise<boolean>
 
-// Get cluster status
+// Not implemented; throws. Reported {nodeCount: 1, leader: 'self', status: 'healthy'} for any
+// configuration, without querying anything.
 getClusterStatus(): Promise<ClusterStatus>
 ```
 
 #### Cache Management
 
+**Both throw `CacheError` — not implemented ([#325][i325]).**
+
 ```typescript
-// Clear cache
+// Not implemented; throws. Returned {success: true} after a console.log.
 clearCache(options?: CacheOptions): Promise<CacheClearResult>
 
-// Warm cache
+// Not implemented; throws. Reported success for every path given, warming nothing.
 warmCache(paths: string[], options?: WarmCacheOptions): Promise<WarmCacheResult>
 ```
 
@@ -342,8 +351,10 @@ static fromObject(data: any): Configuration
 static fromPreset(preset: ConfigurationPreset): Configuration
 static fromEnv(prefix?: string): Configuration
 
-// Instance methods
-merge(overrides: Partial<Configuration>): Configuration
+// Instance methods. `merge` and the constructor take DeepPartial, and merge deeply: naming
+// storage.s3.region leaves the rest of storage.s3 at its default rather than replacing the
+// section. A one-level spread here is what made two presets fail their own validate().
+merge(overrides: DeepPartial<Configuration>): Configuration
 toObject(): any
 toYAML(): string
 saveToFile(filePath: string): void
@@ -363,11 +374,14 @@ validate(): void
 The client emits the following events:
 
 - `mount` - Filesystem mounted
-- `unmount` - Filesystem unmounted  
-- `health_change` - Health status changed
-- `metrics_updated` - Metrics updated
-- `cluster_change` - Cluster membership changed
+- `unmount` - Filesystem unmounted
+- `health_change` - Health status changed; emitted by `startMonitoring`, which needs `apiEndpoint`
+- `metrics_updated` - Metrics updated; same
 - `error` - Error occurred
+
+`cluster_change` is declared in `EventType` but nothing emits it: the only `emit('cluster_change')`
+was in `joinCluster`, which now throws (see above). It is listed in the type for when cluster
+operations are implemented.
 
 ### Error Handling
 
@@ -447,7 +461,6 @@ written — the runnable examples are the inline ones above:
 - [Basic mounting](#basic-usage)
 - [TypeScript usage](#typescript-usage)
 - [Configuration management](#configuration-management)
-- [Storage operations](#storage-operations)
 - [Event handling](#event-handling)
 - [Distributed clusters](#distributed-clusters) — note that multi-node coordination is
   experimental and not reachable from a mount today
@@ -489,8 +502,9 @@ npm run docs          # Generate documentation
 # Run all tests
 npm test
 
-# Run specific test file
-npm test -- mount.test.js
+# Run specific test file. The suites are src/config.test.ts, src/prometheus.test.ts and
+# src/storage.test.ts; there is no mount.test.js, which is what this line used to name.
+npm test -- src/config.test.ts
 
 # Run with coverage
 npm run test:coverage

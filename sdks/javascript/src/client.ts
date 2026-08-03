@@ -4,6 +4,7 @@
  * Main client class for interacting with ObjectFS instances.
  */
 
+import { execSync } from 'child_process';
 import { EventEmitter } from 'eventemitter3';
 import { Configuration } from './config';
 import { MountManager } from './mount';
@@ -15,6 +16,7 @@ import {
   ConfigurationError,
   StorageError,
   DistributedError,
+  CacheError,
 } from './errors';
 import {
   ClientOptions,
@@ -35,14 +37,14 @@ import {
   WarmCacheOptions,
   CacheClearResult,
   WarmCacheResult,
-  EventType,
-  EventData,
 } from './types';
 
 export class ObjectFSClient extends EventEmitter {
   private config: Configuration;
   private binaryPath: string;
-  private apiEndpoint?: string;
+  // Assigned unconditionally in the constructor, so `string | undefined` rather than `?:` —
+  // see the note on ObjectFSError.code in errors.ts.
+  private apiEndpoint: string | undefined;
   private timeout: number;
   private retries: number;
 
@@ -86,19 +88,20 @@ export class ObjectFSClient extends EventEmitter {
     } else if (typeof config === 'object') {
       return Configuration.fromObject(config);
     } else {
-      throw new ConfigurationError(`Invalid configuration type: ${typeof config}`);
+      throw new ConfigurationError(
+        `Invalid configuration type: ${typeof config}`
+      );
     }
   }
 
   private findBinary(): string {
-    const { execSync } = require('child_process');
     try {
       const result = execSync('which objectfs', { encoding: 'utf8' });
       return result.trim();
     } catch (error) {
       throw new ObjectFSError(
         'ObjectFS binary not found in PATH. Please install ObjectFS or ' +
-        'specify binaryPath in options.'
+          'specify binaryPath in options.'
       );
     }
   }
@@ -152,7 +155,7 @@ export class ObjectFSClient extends EventEmitter {
       const result = await this.mountManager.unmount(mountPoint, options);
 
       // Remove from tracked processes
-      for (const [mountId, _process] of this.processes) {
+      for (const mountId of this.processes.keys()) {
         if (mountId.includes(mountPoint)) {
           this.processes.delete(mountId);
           break;
@@ -203,10 +206,7 @@ export class ObjectFSClient extends EventEmitter {
   /**
    * Generate configuration from preset
    */
-  generateConfig(
-    preset = 'production',
-    outputPath?: string
-  ): string {
+  generateConfig(preset = 'production', outputPath?: string): string {
     const config = Configuration.fromPreset(preset as any);
     const yamlContent = config.toYAML();
 
@@ -341,91 +341,81 @@ export class ObjectFSClient extends EventEmitter {
     seedNodes: string[],
     options: JoinClusterOptions = {}
   ): Promise<boolean> {
-    if (!this.config.cluster.enabled) {
-      throw new DistributedError('Cluster mode not enabled in configuration');
-    }
-
-    try {
-      // Update configuration with cluster settings
-      let clusterConfig = this.config.cluster;
-      if (options.nodeConfig) {
-        clusterConfig = { ...clusterConfig, ...options.nodeConfig };
-      }
-
-      // Implementation would interact with cluster management API
-      console.log(`Joining cluster with seed nodes: ${seedNodes.join(', ')}`);
-      this.emit('cluster_change', { action: 'join', seedNodes });
-      return true;
-    } catch (error) {
-      throw new DistributedError(`Failed to join cluster: ${error}`);
-    }
+    // Reported success for work it never did: it merged options.nodeConfig into a local variable,
+    // discarded it, console.log'd, emitted a 'cluster_change' event, and returned true. A caller
+    // was told the node had joined a cluster it had never contacted. There is no cluster management
+    // API in this SDK to contact -- see #325 for the same pattern in the storage adapter.
+    void seedNodes;
+    void options;
+    throw new DistributedError(
+      'joinCluster is not implemented. It previously returned true without contacting any node. ' +
+        'ObjectFS cluster membership is configured on the daemon (see the cluster section of the ' +
+        'YAML config); this SDK has no control-plane client. ' +
+        'https://github.com/scttfrdmn/objectfs/issues/325'
+    );
   }
 
   /**
-   * Leave distributed cluster
+   * Leave distributed cluster.
+   *
+   * @throws DistributedError always — see joinCluster.
    */
   async leaveCluster(): Promise<boolean> {
-    try {
-      console.log('Leaving cluster');
-      this.emit('cluster_change', { action: 'leave' });
-      return true;
-    } catch (error) {
-      throw new DistributedError(`Failed to leave cluster: ${error}`);
-    }
+    throw new DistributedError(
+      'leaveCluster is not implemented. It previously returned true without contacting any node. ' +
+        'https://github.com/scttfrdmn/objectfs/issues/325'
+    );
   }
 
   /**
-   * Get cluster status information
+   * Get cluster status information.
+   *
+   * @throws DistributedError always — see joinCluster.
    */
   async getClusterStatus(): Promise<ClusterStatus> {
-    if (!this.config.cluster.enabled) {
-      throw new DistributedError('Cluster mode not enabled');
-    }
-
-    // Implementation would query cluster status
-    return {
-      nodeCount: 1,
-      leader: 'self',
-      status: 'healthy',
-      nodes: [],
-    };
+    // Returned `{nodeCount: 1, leader: 'self', status: 'healthy', nodes: []}` unconditionally --
+    // a healthy single-node cluster with no nodes in it, for any configuration, with no query
+    // performed. 'healthy' from a function that cannot observe health is the worst of the four.
+    throw new DistributedError(
+      'getClusterStatus is not implemented. It previously reported a healthy single-node cluster ' +
+        'without querying anything. https://github.com/scttfrdmn/objectfs/issues/325'
+    );
   }
 
   // Cache Management
 
   /**
-   * Clear filesystem cache
+   * Clear filesystem cache.
+   *
+   * @throws CacheError always — see #325.
    */
   async clearCache(options: CacheOptions = {}): Promise<CacheClearResult> {
-    try {
-      console.log(`Clearing cache - type: ${options.cacheType}, keys: ${options.keys}`);
-      return { success: true };
-    } catch (error) {
-      console.error(`Failed to clear cache: ${error}`);
-      return { success: false, message: String(error) };
-    }
+    // `return {success: true}` after a console.log. The try/catch around it could not fail, so the
+    // documented `{success: false, message}` branch was unreachable.
+    void options;
+    throw new CacheError(
+      'clearCache is not implemented. It previously returned {success: true} after logging, ' +
+        'without clearing anything. https://github.com/scttfrdmn/objectfs/issues/325'
+    );
   }
 
   /**
-   * Warm cache with specified paths
+   * Warm cache with specified paths.
+   *
+   * @throws CacheError always — see #325.
    */
   async warmCache(
     paths: string[],
     options: WarmCacheOptions = {}
   ): Promise<WarmCacheResult> {
-    try {
-      const results: WarmCacheResult = {};
-      for (const path of paths) {
-        results[path] = true;
-        console.log(
-          `Cache warming ${options.recursive ? 'started' : 'queued'} for ${path}`
-        );
-      }
-      return results;
-    } catch (error) {
-      console.error(`Failed to warm cache: ${error}`);
-      return Object.fromEntries(paths.map(path => [path, false]));
-    }
+    // Set `results[path] = true` for every path given, so the result was a function of the input
+    // alone and every path always succeeded.
+    void paths;
+    void options;
+    throw new CacheError(
+      'warmCache is not implemented. It previously reported success for every path given, ' +
+        'without warming anything. https://github.com/scttfrdmn/objectfs/issues/325'
+    );
   }
 
   // Event Management
@@ -478,7 +468,7 @@ export class ObjectFSClient extends EventEmitter {
       try {
         process.kill('SIGTERM');
         // Wait for graceful shutdown
-        await new Promise(resolve => {
+        await new Promise((resolve) => {
           const timeout = setTimeout(() => {
             process.kill('SIGKILL');
             resolve(undefined);
@@ -500,12 +490,11 @@ export class ObjectFSClient extends EventEmitter {
 
   private cleanup(): void {
     if (!this.closed) {
-      this.close().catch(error => {
+      this.close().catch((error) => {
         console.error('Error during cleanup:', error);
       });
     }
   }
-
 }
 
 // Convenience functions
@@ -513,9 +502,21 @@ export class ObjectFSClient extends EventEmitter {
 /**
  * Create ObjectFS client with optional configuration file
  */
-export function createClient(configPath?: string, options: Partial<ClientOptions> = {}): ObjectFSClient {
-  const config = configPath ? Configuration.fromFile(configPath) : undefined;
-  return new ObjectFSClient({ ...options, config });
+export function createClient(
+  configPath?: string,
+  options: Partial<ClientOptions> = {}
+): ObjectFSClient {
+  // `{...options, config}` with config possibly undefined would *set* config to undefined and so
+  // override a config the caller passed in options. Omitting the key when there is no path both
+  // satisfies exactOptionalPropertyTypes and preserves options.config, which is what a caller
+  // passing both a file and an options object would expect.
+  if (configPath === undefined) {
+    return new ObjectFSClient(options);
+  }
+  return new ObjectFSClient({
+    ...options,
+    config: Configuration.fromFile(configPath),
+  });
 }
 
 /**
@@ -528,6 +529,11 @@ export async function mountStorage(
   options: MountOptions = {}
 ): Promise<ObjectFSClient> {
   const client = new ObjectFSClient();
-  await client.mount(storageUri, mountPoint, { ...options, configOverrides: config });
+  // As in createClient: omit configOverrides rather than assign undefined to it.
+  await client.mount(
+    storageUri,
+    mountPoint,
+    config === undefined ? options : { ...options, configOverrides: config }
+  );
   return client;
 }

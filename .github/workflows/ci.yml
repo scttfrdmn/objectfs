@@ -278,7 +278,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Python SDK metrics parsing
+      # `pytest tests/` rather than the one metrics file, so tests/test_storage.py,
+      # tests/test_config.py and tests/test_client.py are covered by this step as they land —
+      # including the assertion that download_object leaves an existing local file intact.
+      - name: Python SDK tests
         working-directory: sdks/python
         run: |
           # The package rather than a hand-listed subset of its requirements. The tests exercise
@@ -296,14 +299,87 @@ jobs:
         with:
           node-version: '22'
 
-      - name: TypeScript SDK metrics parsing
+      - name: TypeScript SDK install
         working-directory: sdks/javascript
-        run: |
-          # No lockfile is committed, so `npm install` rather than `npm ci`. ts-jest typechecks the
-          # suite as it runs it, which is the only place prometheus.test.ts gets typechecked at all:
-          # tsconfig.json excludes **/*.test.ts from the build.
-          npm install --no-audit --no-fund
-          npm test
+        # `npm ci` now that package-lock.json is committed. Without a lockfile this job resolved the
+        # manifest ranges fresh on every run, so what CI tested was not what anyone had installed
+        # locally, and a Dependabot alert against a transitive dependency tracked the range rather
+        # than the nested copy actually in the tree — which is how one alert closed with no fix.
+        run: npm ci --no-audit --no-fund
+
+      # This step is the one that was missing, and its absence is why the SDK shipped 48 type
+      # errors: `npm test` runs jest, which through ts-jest only typechecks the files a test
+      # imports. src/mount.ts imports nothing testable and was never compiled by anything, so
+      # src/index.ts could export `StorageAdapter` — a name that has never existed in
+      # ./storage — through a release without one job noticing. `tsc` compiles src/**/*.ts
+      # whether or not a test reaches it.
+      #
+      # Ordered before `npm test` deliberately: a type error is a clearer failure than whatever
+      # a test does when the code does not typecheck.
+      - name: TypeScript SDK build
+        working-directory: sdks/javascript
+        run: npm run build
+
+      - name: TypeScript SDK tests
+        working-directory: sdks/javascript
+        # ts-jest typechecks the suite as it runs it, which is the only place *.test.ts gets
+        # typechecked at all: tsconfig.json excludes **/*.test.ts from the build above.
+        run: npm test
+
+      # `npm run lint` had never run successfully anywhere: the eslintConfig in package.json
+      # extended "@typescript-eslint/recommended" instead of "plugin:@typescript-eslint/recommended",
+      # so eslint exited with "couldn't find the config ... to extend from" before linting a line.
+      # A script that always errors and is never invoked is indistinguishable from one that passes.
+      #
+      # 23 no-explicit-any warnings remain and are not failures; the config sets that rule to "warn"
+      # deliberately, since the SDK's public surface takes `Record<string, any>` in several places.
+      # Errors are zero and this step holds that.
+      - name: TypeScript SDK lint
+        working-directory: sdks/javascript
+        run: npm run lint
+
+      # Java, for the same reason as the `tsc` step above and with the same history: nothing in this
+      # repository had ever run Maven, and `mvn compile` failed with four errors — an import of
+      # com.fasterxml.jackson.datatype.jsr310 that pom.xml did not declare, and two
+      # `catch (NotFoundException | ObjectFSException e)` clauses, which is illegal because the first
+      # is a subclass of the second. So the SDK had never built and its 17 tests had never run; one
+      # of them was asserting a wire format okhttp does not produce.
+      #
+      # `mvn -B test` rather than `compile`: the tests use MockWebServer, so they need no network
+      # beyond Maven's own dependency resolution and no credentials.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Java SDK build and test
+        working-directory: sdks/java
+        run: mvn -B test
+
+      # C, the fourth SDK and the last one nothing in CI touched. Unlike the JavaScript and Java
+      # cases, it does build — `go build ./...` compiles the cgo Go side because sdks/c is a package
+      # of the main module. What no job did was link a C program against the shared library and run
+      # it, so objectfs.h, objectfs_types.h and the 21 assertions in tests/test_basic.c were
+      # unverified: the header could declare a prototype the library does not export, or a struct
+      # field too narrow for the value written into it, and every job would stay green.
+      #
+      # Which is what had happened. objectfs_info_t.key was char[1024] against an S3 key limit of
+      # 1024 bytes — one byte short of holding a legal maximum-length key with its terminator — and
+      # objectfs_last_error's freed-handle arm returned a fresh malloc under a header that promises
+      # the caller must not free it.
+      #
+      # `make test` builds the library, compiles tests/test_basic.c against the public header, and
+      # runs both that binary and the Python ctypes smoke test. The integration halves of both skip
+      # themselves without OBJECTFS_TEST_BUCKET, so this needs no credentials and reaches no network.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: C SDK build and test
+        working-directory: sdks/c
+        run: make test
 
   # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must

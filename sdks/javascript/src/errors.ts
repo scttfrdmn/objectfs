@@ -5,7 +5,11 @@
  */
 
 export class ObjectFSError extends Error {
-  public readonly code?: string;
+  // `string | undefined` rather than `code?:`. Under `exactOptionalPropertyTypes` an optional
+  // property may be absent but may not be *assigned* undefined, and the constructor assigns it
+  // unconditionally. Declaring the undefined says what actually happens: the property is always
+  // present, and holds undefined when no code was given.
+  public readonly code: string | undefined;
 
   constructor(message: string, code?: string) {
     super(message);

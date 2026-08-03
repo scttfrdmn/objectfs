@@ -145,8 +145,20 @@ public class ObjectFSClientTest {
         client.list("my/prefix", 5);
 
         RecordedRequest req = server.takeRequest();
-        assertTrue(req.getPath().contains("prefix=my/prefix"));
+        // The prefix is percent-encoded on the wire: okhttp's addQueryParameter escapes `/` in a
+        // query *value*, so the path carries `prefix=my%2Fprefix`. This asserted
+        // `contains("prefix=my/prefix")` and failed -- the first time anyone could see it fail,
+        // since this SDK did not compile and so its tests had never run. The implementation is
+        // right; the expectation was written against a wire format okhttp does not produce.
+        assertTrue(
+                "unexpected query: " + req.getPath(),
+                req.getPath().contains("prefix=my%2Fprefix"));
         assertTrue(req.getPath().contains("limit=5"));
+
+        // Assert the value the server will decode as well as the bytes on the wire, so this test
+        // still means "the prefix arrives intact" and not merely "okhttp escapes slashes".
+        assertEquals("my/prefix", req.getRequestUrl().queryParameter("prefix"));
+        assertEquals("5", req.getRequestUrl().queryParameter("limit"));
     }
 
     // ── head ─────────────────────────────────────────────────────────────────

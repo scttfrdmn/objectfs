@@ -4,7 +4,7 @@
  * Health checking and metrics collection for ObjectFS instances.
  */
 
-import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import axios, { AxiosInstance } from 'axios';
 import { NetworkError, TimeoutError } from './errors';
 import { HealthStatus, Metrics, RawMetrics, PerformanceStats } from './types';
 import {
@@ -42,15 +42,21 @@ export class HealthChecker {
         } else {
           console.warn(
             `Health check failed with status ${response.status} ` +
-            `(attempt ${attempt + 1}/${this.retries})`
+              `(attempt ${attempt + 1}/${this.retries})`
           );
         }
       } catch (error) {
         if (axios.isAxiosError(error)) {
           if (error.code === 'ECONNABORTED') {
-            console.warn(`Health check timeout (attempt ${attempt + 1}/${this.retries})`);
+            console.warn(
+              `Health check timeout (attempt ${attempt + 1}/${this.retries})`
+            );
           } else {
-            console.warn(`Health check client error: ${error.message} (attempt ${attempt + 1}/${this.retries})`);
+            console.warn(
+              `Health check client error: ${error.message} (attempt ${
+                attempt + 1
+              }/${this.retries})`
+            );
           }
         } else {
           console.error(`Unexpected health check error: ${error}`);
@@ -58,7 +64,9 @@ export class HealthChecker {
         }
 
         if (attempt < this.retries - 1) {
-          await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.pow(2, attempt) * 1000)
+          );
         }
       }
     }
@@ -96,7 +104,7 @@ export class HealthChecker {
         return true;
       }
 
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 
     return false;
@@ -151,18 +159,29 @@ export class MetricsCollector {
         // format. A JSON body means this endpoint is something else -- a reverse proxy's error
         // page, an API gateway, the wrong port -- and parsing it as metrics would report an
         // empty but successful scrape. The old code took a JSON body as metrics directly.
-        if (response.headers['content-type']?.includes('application/json')) {
+        // Axios types a header value as string | number | boolean | string[] | AxiosHeaders, so
+        // `.includes` is not available on it without narrowing. Content-Type is a single-value
+        // header in practice; String() covers the array case rather than dropping it.
+        const contentType = response.headers['content-type'];
+        if (
+          contentType !== undefined &&
+          String(contentType).includes('application/json')
+        ) {
           throw new NetworkError(
             `${metricsUrl} returned JSON, not the Prometheus text format ObjectFS serves. ` +
-            `Check that this is an ObjectFS metrics endpoint (monitoring.metrics.addr, default 127.0.0.1:8080).`
+              `Check that this is an ObjectFS metrics endpoint (monitoring.metrics.addr, default 127.0.0.1:8080).`
           );
         }
 
-        const processedData = this.processMetrics(this.parsePrometheusMetrics(response.data));
+        const processedData = this.processMetrics(
+          this.parsePrometheusMetrics(response.data)
+        );
         this.cacheMetrics(cacheKey, processedData);
         return processedData;
       } else {
-        throw new NetworkError(`Metrics request failed with status ${response.status}`);
+        throw new NetworkError(
+          `Metrics request failed with status ${response.status}`
+        );
       }
     } catch (error) {
       // Ahead of the catch-all: these were thrown deliberately just above, and re-wrapping
@@ -237,8 +256,15 @@ export class MetricsCollector {
       },
     };
 
-    endpoints.forEach((endpoint, i) => {
-      const result = results[i];
+    // Zipped rather than indexed by position: `results[i]` is `Metrics | {error} | undefined` under
+    // `noUncheckedIndexedAccess`, and every use of it below then needed a non-null assertion. The
+    // lengths do match — `results` comes from `Promise.all` over `endpoints.map` — so pairing the
+    // two arrays states that invariant instead of asserting past it.
+    results.forEach((result, i) => {
+      const endpoint = endpoints[i];
+      if (endpoint === undefined) {
+        return;
+      }
       clusterMetrics.nodes[endpoint] = result;
 
       if (!('error' in result)) {
@@ -246,7 +272,8 @@ export class MetricsCollector {
 
         // Aggregate key metrics
         if (result.operations) {
-          clusterMetrics.aggregate.totalOperations += result.operations.total || 0;
+          clusterMetrics.aggregate.totalOperations +=
+            result.operations.total || 0;
         }
         if (result.cache) {
           clusterMetrics.aggregate.totalCacheHits += result.cache.hits || 0;

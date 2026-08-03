@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`build` and `lint` steps in CI for the JavaScript SDK, which is the gate whose absence let 48 type
+  errors ship** ([#314]). The `sdk-metrics` job ran `npm ci && npm test` as a single step; `tsc` was
+  never invoked by anything, in any job, ever. It now runs as its own step, so a type error fails the
+  build rather than waiting for someone to run the compiler by hand.
+
+- **A `mvn -B test` step for the Java SDK, the same gate for the same reason** ([#325]). Nothing in
+  this repository had ever run Maven, and the SDK did not compile; see the `Fixed` entry below for the
+  four errors that had been sitting there. The tests need no credentials and no network beyond
+  dependency resolution — they use `MockWebServer` — so there is nothing here for a flake to come
+  from, and `continue-on-error` is deliberately absent.
+
+- **A `make test` step for the C SDK, closing the last of the four** ([#325]). This SDK differs from
+  the JavaScript and Java ones in that it *did* build: `sdks/c` is a package of the main module, so
+  `go build ./...` compiled its cgo Go side all along. What no job did was link a C program against the
+  shared library and run it — so `objectfs.h`, `objectfs_types.h` and the assertions in
+  `tests/test_basic.c` were unverified, and a header could declare a prototype the library does not
+  export, or a struct field too narrow for the value written into it, with every job staying green.
+  Which is what had happened; see the two `Fixed` entries below. Both suites skip their integration
+  halves without `OBJECTFS_TEST_BUCKET`, so the step needs no credentials and reaches no network.
+
+- **Go tests for the C SDK's Go side** (`sdks/c/main_test.go`), which had none — only
+  `tests/test_basic.c` and `tests/test_smoke.py`, both of which reach the library through the C ABI and
+  therefore cannot see a helper that never crosses it. `bytesToCacheString` was such a helper and was
+  discarding up to half the requested cache size. The file cannot use cgo — `go test` rejects
+  `import "C"` in a test file — so the return codes are pinned by parsing `objectfs_types.h` and
+  comparing it against constants written out independently, which is strictly stronger than comparing
+  `C.OBJECTFS_OK` to itself: it catches the header and the library disagreeing about what a code means,
+  which nothing previously could, since the C test binary uses the macros on both sides of its own
+  assertions. Field widths are checked the same way, against the longest value each field can receive.
+
+  Two assertions live in `tests/test_basic.c` instead, because they are only observable from C: that a
+  1024-byte key round-trips through `objectfs_head` and `objectfs_list` byte-for-byte, and that
+  `objectfs_last_error` returns the same pointer on repeated calls. The first is in the
+  credentials-gated section; the second is not, since a never-issued handle reaches the arm that
+  leaked. Each fix was confirmed by reverting it and watching the specific assertions fail — the
+  key-width revert reported `char[1024] ... holds 1023 bytes ... but must hold 1024`, and the leak
+  revert failed exactly the two pointer-identity checks.
+
+- **Tests for the JavaScript SDK's configuration and storage layers** (`src/config.test.ts`,
+  `src/storage.test.ts`; 61 tests across three suites, up from one). The configuration assertions come
+  in pairs — the override applied *and* its siblings survived — because a one-level spread passes any
+  test that only checks the override, which is how the merge bug lived through a release. A loop
+  asserting that every shipped preset passes `validate()` is what found the third broken preset after
+  a hand-written probe had found two. The load-bearing storage test writes a real file, calls
+  `downloadObject` against it, and asserts the file's contents are unchanged.
+
+  `src/index.test.ts` covers the entry point, which nothing checked: it asserts that every class
+  `src/errors.ts` declares is re-exported — as a loop, so a class added later is covered by existing
+  code — that the re-exported binding is *the same* binding, since a re-export that diverged would
+  silently break `instanceof` in a caller's `catch`, and that `LICENSE`/`VERSION` match
+  `package.json`. The names are looked up dynamically rather than written as `index.CacheError`
+  because a missing export is a TS2339 that fails the whole suite's compile, which would report a
+  type error instead of the missing name and take every other assertion in the file down with it.
+
+- **Tests for the Python SDK's storage, configuration and client layers** (`tests/test_storage.py`,
+  `tests/test_config.py`, `tests/test_client.py`; 71 tests and 25 subtests, up from a single metrics
+  suite). Same three shapes as the JavaScript tests, for the same reasons: a loop over every preset
+  name asserting `validate()` passes, which is what found the `cluster` defect; paired merge assertions
+  checking the override applied *and* its siblings survived; and a test that writes `REAL USER DATA` to
+  a real file, calls `download_object` against that path, and asserts the bytes are still there. The
+  client suite additionally asserts the not-implemented message reaches the caller unwrapped, since
+  that fix has no other guard.
+
+  Every one of these was verified by mutation rather than by inspection: restoring the fabricating
+  `_download_s3_object` and the preset's `tls_enabled = True` produced exactly the five expected
+  failures — including `test_existing_file_survives` and the `cluster` subtest — and restoring the
+  double-wrap failed exactly the two assertions written for it. The CI step that runs them is renamed
+  from "Python SDK metrics parsing" to "Python SDK tests", because it invokes `pytest tests/` and had
+  been picking up more than its name claimed.
+
 - **A written evaluation of S3 conditional writes as a replacement for Raft coordination**
   ([#169]), at `docs/design/conditional-writes-vs-raft.md`. The recommendation is to adopt per-key
   compare-and-swap for coordination, keep gossip for membership, and stop building toward a
@@ -127,6 +197,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#317]: https://github.com/scttfrdmn/objectfs/issues/317
 
 ### Fixed
+
+- **Two comments in `.github/dependabot.yml` that this release made false** ([#328]). They said the
+  `sdk-metrics` job runs `npm install && npm test`, and that "nothing in CI runs `tsc`" — both true
+  when written, neither true once the `npm ci`, build and lint steps above landed. These comments are
+  load-bearing rather than decorative: they are what explains why the `typescript-toolchain` group
+  exists and stops the next person from ungrouping it into bumps that cannot install. The same block
+  now also records what the TypeScript 6 bump needs, measured rather than predicted, because one
+  finding reads as its own opposite: `moduleResolution: "node"` raises `TS5107` under 6.0, and that
+  is a *config-level* error, so `tsc` exits before typechecking any source and reports 1 error while
+  63 wait behind it. The 63 are `@types/node` no longer being auto-included; `"types": ["node"]`
+  takes them to zero.
+
+- **The JavaScript SDK compiles, and two of its five configuration presets no longer fail their own
+  validation** ([#314], [#325]). `npx tsc` reported 48 errors across seven files, and had done since
+  before the SDK's first release; `npm run build` had therefore never succeeded and `dist/` had never
+  existed. The reason it went unnoticed for that long is structural and is fixed separately below:
+  `npm test` runs jest, and ts-jest only typechecks the files a test imports, so `src/mount.ts` — which
+  no test reaches — was compiled by nothing at all, and `src/index.ts` could ship
+  `export { StorageAdapter } from './storage'`, a name that has never existed in that module.
+
+  Three of the errors were real defects rather than annotations:
+
+  - `Configuration`'s constructor merged with a one-level object spread —
+    `{ s3: {...defaults, ...cfg?.storage?.s3}, ...cfg?.storage }` — which puts the caller's whole
+    `storage` last and discards the `s3` it had just merged. So every preset silently lost the
+    defaults it did not itself name, and two could not pass `validate()` at all:
+    `fromPreset('cost-optimized')` produced an `S3Config` with **no region**, and
+    `fromPreset('cluster')` set `tlsEnabled: true`, which `validate()` rejects without certificate
+    paths a preset cannot know. Both threw on a preset the SDK ships. Replaced with a shared deep
+    merge; the constructor and `merge()` now take `DeepPartial<Configuration>`, which is what the
+    preset table always meant — `Partial<T>` is one level deep, and the eleven TS2739 "is missing the
+    following properties" errors were reporting exactly that. `cluster` no longer presets
+    `tlsEnabled`, since the caller is the one holding the certificates.
+  - `MountManager.isMounted` tested `/proc/mounts` for `fstype === 'fuse'` exactly, and ObjectFS
+    mounts report `fuse.s3` — `internal/fuse/mount.go` sets `Subtype: "s3"`. Only the
+    `device.includes('objectfs')` fallback was saving it. Both `isMounted` and `listMounts` now accept
+    the `fuse.*` form.
+  - `createClient(configPath, options)` built `{...options, config}` with `config` possibly
+    `undefined`, which *sets* the key and so overrode a configuration the caller had passed in
+    `options`. It now omits the key instead, which is both type-correct under
+    `exactOptionalPropertyTypes` and what a caller passing both would expect.
+
+  `npm run lint` also ran for the first time: `eslintConfig.extends` said
+  `"@typescript-eslint/recommended"` without the required `plugin:` prefix, so eslint exited with
+  "couldn't find the config to extend from" before reading a line of source. Zero errors once it
+  could run, with 23 pre-existing `no-explicit-any` warnings left standing.
+
+- **The Java SDK compiles, and its 17 tests run** ([#325]). `mvn compile` failed with four errors and
+  had presumably always done, because nothing in this repository has ever invoked Maven — the same
+  structural gap that let 48 `tsc` errors ship in the JavaScript SDK, found by going looking for it
+  in the third SDK rather than by anyone reporting it:
+
+  - `ObjectFSClient` imported `com.fasterxml.jackson.datatype.jsr310.JavaTimeModule` and registers it
+    in its constructor, but `pom.xml` declared only `jackson-databind` — so
+    `package com.fasterxml.jackson.datatype.jsr310 does not exist`. `jackson-datatype-jsr310` is now
+    declared, on the same `${jackson.version}`.
+  - Two `catch (NotFoundException | ObjectFSException e)` clauses, which javac rejects:
+    *"Alternatives in a multi-catch statement cannot be related by subclassing."* `NotFoundException`
+    extends `ObjectFSException`, so catching the supertype alone is both legal and exactly equivalent.
+
+  With it building, the tests ran for the first time and one failed — a real expectation error, not a
+  flake. `list_includesPrefixAndLimitParams` asserted the request path contains `prefix=my/prefix`,
+  and okhttp percent-encodes `/` in a query *value*, so it carries `prefix=my%2Fprefix`. Verified by
+  probing okhttp directly rather than by reading its documentation. The implementation was right; the
+  test now asserts the encoded form **and** that the server decodes it back to `my/prefix`, so it
+  still means "the prefix arrives intact" rather than "okhttp escapes slashes."
+
+  The compiler plugin also moves from `source`+`target` 17 to `release` 17, which is what its own
+  build warning asked for on every run: compiling on a newer JDK with `-source`/`-target` accepts
+  calls to APIs that did not exist in 17, producing a jar that compiles clean and throws
+  `NoSuchMethodError` on the version it claims to target.
+
+- **A maximum-length S3 key came back from the C SDK one byte short** ([#325]). `objectfs_info_t.key`
+  was `char[1024]` and an S3 key may be 1024 bytes when UTF-8 encoded, so the array could hold 1023 of
+  them plus the terminator and `fillInfo` truncated the rest without returning an error. It is now
+  `char[1025]`.
+
+  The consequence is worst in `objectfs_list`, where the key is the *result* rather than something the
+  caller passed in and so cannot be compared against anything: a truncated key names a different
+  object or none at all, and handing it back to `objectfs_get` or `objectfs_delete` acts on the wrong
+  key. Reachable with an ordinary long key, not only a hostile one.
+
+  `fillInfo`'s capacity arguments were the literals `1024`/`128`/`128`; they now derive from the arrays
+  themselves with `unsafe.Sizeof`, because widening the declaration alone would have left the one
+  function that writes to it still truncating at 1023 — a declaration and its only writer silently
+  disagreeing, which is the shape of the original bug.
+
+- **`objectfs_last_error` leaked memory on every call for a freed handle** ([#325]). `objectfs.h`
+  documents the returned pointer as *"valid until the next call on the same handle. Do NOT free it"*,
+  which makes it the library's allocation — but the freed-or-never-issued arm returned
+  `C.CString("invalid or freed handle")`, a fresh `malloc` each time. The caller must not free it and
+  the library never did, so every call leaked. Verified by calling it three times and printing the
+  pointers: three distinct addresses, now one. Error reporting is the path a program takes when it is
+  already going wrong, frequently inside a retry loop.
+
+- **The C SDK's `cache_bytes` argument silently lost up to half of the requested size** ([#325]).
+  `objectfs.h` documents it as "memory cache size in bytes", and `bytesToCacheString` rendered it by
+  integer-dividing by 1 GiB or 1 MiB and formatting the quotient — so 1.5 GiB became `"1GB"` and
+  2047 MiB became `"1GB"`, losing 1023 MiB. It now emits a bare byte count, which `utils.ParseBytes`
+  multiplies by 1 and therefore round-trips exactly. Invisible from C: nothing echoes the size back,
+  and a cache half the requested size still works, just with a worse hit rate than was provisioned.
+
+- **The JavaScript SDK's entry point exports the error its own client throws, and reports the right
+  license** ([#325]). Two defects found by carrying the Python fixes back across:
+
+  - `src/index.ts` re-exported 7 of the 11 classes `src/errors.ts` declares. `CacheError` was one of
+    the four missing, and `clearCache`/`warmCache` throw it — so a caller could not name it in a
+    `catch` and had no way to distinguish that failure from any other. All eleven are exported now.
+  - `export const LICENSE = 'MIT'` — ObjectFS is Apache-2.0, as `package.json`'s own `license` field,
+    the repository `LICENSE`, and every source header say. A consumer reading that constant to build
+    an attribution list got a wrong answer from the SDK's public API. `src/index.test.ts` now asserts
+    `LICENSE` and `VERSION` against `package.json`, so the two cannot drift apart again.
+
+- **The Python SDK's `cluster` preset passes its own validation, and six of its exceptions can be
+  imported** ([#325]). Two defects, both found the same way as their JavaScript counterparts:
+
+  - `Configuration.from_preset('cluster')` set `security.tls_enabled = True`, and
+    `SecurityConfig.validate()` requires `tls_cert_path` and `tls_key_path` whenever TLS is on — paths
+    a preset cannot know. So one of the five shipped presets raised
+    `ConfigurationError: TLS certificate and key paths required` on any caller that validated it, and
+    `objectfs-python config generate --preset cluster` was one. The preset no longer sets the flag;
+    enabling TLS is the caller's, with the paths, and the `merge()` call that does it is written out
+    next to the line that used to set it. This was found by a test that loops over the preset names
+    rather than by inspection — a hand-written probe of two presets would have missed it, which is
+    exactly what happened on the JavaScript side before the same loop went in.
+  - `from objectfs import NetworkError` was an `ImportError`. `NetworkError`, `CacheError`,
+    `AuthenticationError`, `AuthorizationError`, `TimeoutError` and `ValidationError` were declared in
+    `objectfs/exceptions.py` and re-exported by nothing, so the README's own error-handling example —
+    which imports `NetworkError` from the package — could not run. All six are now in `__init__.py` and
+    `__all__`. `CacheError` matters twice over: it is what `clear_cache` and `warm_cache` now raise, so
+    a caller has to be able to name it in an `except`.
+
+  A third, smaller one: both `StorageAdapter` and `ObjectFSClient` wrapped every exception from the
+  layer below in `StorageError(f"Failed to <verb>: {e}")`, including the `StorageError`s the adapter
+  raises deliberately. A caller saw `Failed to list objects: Failed to list objects: <the actual
+  reason>` — and the CLI prints that string. Each of the nine handlers now re-raises `StorageError`
+  unchanged before its generic arm, so an unsupported scheme, a malformed URI, or the not-implemented
+  notice and its issue link arrive as themselves.
 
 - **Dependabot auto-merge, cause five: GitHub Actions cannot approve pull requests** ([#305]). Fixing
   [#288] made `.github/dependabot.yml` valid, Dependabot re-evaluated it within minutes, and the
@@ -593,9 +801,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#275]: https://github.com/scttfrdmn/objectfs/issues/275
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
+[#325]: https://github.com/scttfrdmn/objectfs/issues/325
+[#328]: https://github.com/scttfrdmn/objectfs/issues/328
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **The JavaScript SDK's fabricated operations throw instead of returning invented data, and its
+  README documents what the code does** ([#325]). Ten methods reported success for work they never
+  performed. The worst wrote to disk: `S3StorageAdapter.downloadObject` did
+  `fs.writeFile(localPath, 'Simulated file content from S3')`, called `progressCallback(30, 30)`, and
+  returned `30` — so a caller following the README's own example, which passed
+  `/tmp/downloaded-file.txt`, **destroyed whatever was at that path and was told the transfer
+  succeeded.** `listObjects` returned two invented objects, `getObjectInfo` a fixed size and etag for
+  any key whether or not it existed, and `uploadObject`/`deleteObject` `true` for transfers and
+  deletions that never happened. On the client, `joinCluster`/`leaveCluster` returned `true` without
+  contacting a node, `getClusterStatus` reported a healthy single-node cluster for any configuration
+  without querying anything, and `clearCache`/`warmCache` reported success for every path given.
+
+  All of them now throw a typed error naming [#325], following the precedent already set in this
+  repository by `getPerformanceStats`, `internal/distributed/coordinator.go` and
+  `internal/fuse/filesystem.go`'s EROFS stubs. This SDK has no S3 client and no control-plane client;
+  until it has one, use the AWS SDK directly or mount the bucket, which is what ObjectFS is for. The
+  README's feature list, storage section, cluster example, API reference and event list are corrected
+  to match — it had been advertising "AWS S3 deep integration with intelligent tiering and cost
+  management" and "built-in support for distributed clusters and replication" against code that did
+  neither.
+
+- **The Python SDK's fabricated operations raise instead of returning invented data** ([#325]), which
+  closes the other half of the issue. The same ten operations were fabricated here, in the same
+  shapes, and `StorageAdapter._download_s3_object` did the same damage —
+  `open(local_path, 'wb').write(b"Simulated file content from S3")`, `progress_callback(30, 30)`,
+  `return 30`. Proven by execution before it was touched: run against a file containing other text, it
+  printed `returned 30 bytes; file now contains: 'Simulated file content from S3'`. The raise now
+  happens before anything opens `local_path`, and a test writes `REAL USER DATA` to a real file and
+  asserts it is still there afterwards.
+
+  There were fifteen fabricating methods, not five, because the GCS and Azure backends were copies:
+  `_list_gcs_objects`, `_list_azure_objects` and their eight siblings each called the S3 method, so a
+  `gs://` or `az://` URI returned the same two invented *S3* objects under a docstring describing a
+  "simplified implementation" of a different cloud. There is now one set of methods with the other ten
+  names aliased onto it at class level, so the three schemes reach one honest raise rather than three
+  copies of a fabrication. The scheme dispatch stays, because rejecting an unsupported scheme is a
+  real thing to do.
+
+  On the client, `join_cluster`/`leave_cluster`/`get_cluster_status` raise `DistributedError` and
+  `clear_cache`/`warm_cache` raise `CacheError`, following `get_performance_stats`, which was already
+  written this way in the same file. `objectfs-python storage list|download|upload` still exist so
+  that they fail naming the reason rather than as an unrecognized-argument error, but `--help` now
+  says `NOT IMPLEMENTED` on all three; it previously described them as working, and the README showed
+  `storage download s3://my-bucket file.txt ./local-file.txt` as an example, which overwrote
+  `./local-file.txt` and printed `Successfully downloaded 30 bytes`.
 
 - **Every GitHub Action is on its current major, and CI no longer downloads a Go toolchain mid-build.**
   Eight actions moved: `setup-go` 5 → 7, `setup-node` 4 → 7, `setup-python` 5 → 7,

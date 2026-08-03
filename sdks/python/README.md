@@ -106,57 +106,63 @@ client = ObjectFSClient(config=config)
 
 ### Storage Operations
 
+**Not implemented.** `list_objects`, `get_object_info`, `download_object`, `upload_object` and
+`delete_object` raise `StorageError`. They used to return fabricated data — two invented objects
+from `list_objects`, a fixed size and etag from `get_object_info`, `True` from `upload_object` and
+`delete_object` for transfers and deletions that never happened — and `download_object` wrote
+`Simulated file content from S3` over whatever file was at the local path it was given, called the
+progress callback to completion, and returned 30. This section documented all of it as working, with
+`/tmp/downloaded-file.txt` as the download target.
+
+Tracked as [#325](https://github.com/scttfrdmn/objectfs/issues/325), which also covers the identical
+code in the JavaScript SDK. Until it lands, use boto3:
+
 ```python
-async def storage_example():
+import boto3
+boto3.client('s3').download_file('my-bucket', 'data/file.txt', '/tmp/file.txt')
+```
+
+or mount the bucket and use ordinary file operations, which is what ObjectFS is for:
+
+```python
+async def read_through_a_mount():
     async with ObjectFSClient() as client:
-        # List objects
-        objects = await client.list_objects(
-            's3://my-bucket',
-            prefix='data/',
-            max_keys=100
-        )
-
-        # Download object
-        bytes_downloaded = await client.download_object(
-            's3://my-bucket',
-            'data/file.txt',
-            '/tmp/downloaded-file.txt'
-        )
-
-        # Upload object  
-        success = await client.upload_object(
-            's3://my-bucket',
-            'data/new-file.txt',
-            '/tmp/local-file.txt',
-            metadata={'author': 'python-sdk'}
-        )
-
-asyncio.run(storage_example())
+        await client.mount('s3://my-bucket', '/mnt/data')
+        with open('/mnt/data/data/file.txt', 'rb') as handle:
+            return handle.read()
 ```
 
 ### Distributed Clusters
 
+What this SDK can do is *describe* a cluster — the config section is real and reaches the daemon
+through the generated YAML. Membership operations are not implemented: `join_cluster`,
+`leave_cluster` and `get_cluster_status` raise `DistributedError`, so the last four statements of
+the example that used to be here could not work. `get_cluster_status` in particular returned
+`{'node_count': 1, 'leader': 'self', 'status': 'healthy', 'nodes': []}` for any configuration,
+without querying anything.
+
 ```python
 from objectfs import Configuration, ObjectFSClient
 
-# Configure cluster
 config = Configuration()
 config.cluster.enabled = True
 config.cluster.listen_addr = '0.0.0.0:8080'
 config.cluster.seed_nodes = ['node1.example.com:8080', 'node2.example.com:8080']
 
+# Written out, this is what the daemon reads. Mounting with it is how a node joins.
+config.save_to_file('objectfs-cluster.yaml')
+
 async def cluster_example():
     async with ObjectFSClient(config=config) as client:
-        # Join cluster
-        await client.join_cluster(config.cluster.seed_nodes)
-
-        # Get cluster status
-        status = await client.get_cluster_status()
-        print(f"Cluster nodes: {status['node_count']}")
-        print(f"Leader: {status['leader']}")
-
-asyncio.run(cluster_example())
+        await client.mount('s3://my-bucket', '/mnt/objectfs')
 ```
+
+ObjectFS's own distributed layer is experimental; see the top-level README before depending on it.
+
+### Cache Operations
+
+**Not implemented**, same issue. `clear_cache` and `warm_cache` raise `CacheError`; the first
+returned `True` after a log line, and the second reported success for every path it was given.
 
 ## CLI Usage
 
@@ -178,13 +184,14 @@ objectfs-python metrics --endpoint http://localhost:8080 --format table
 # Generate configuration
 objectfs-python config generate --preset production --output config.yaml
 
-# Storage operations
-objectfs-python storage list s3://my-bucket --prefix data/
-objectfs-python storage download s3://my-bucket file.txt ./local-file.txt
-
 # Unmount filesystem
 objectfs-python unmount /mnt/objectfs
 ```
+
+`objectfs-python storage list|download|upload` exist but are **not implemented** — each exits 1
+with the `StorageError` message. `--help` says so. This section previously showed
+`storage download s3://my-bucket file.txt ./local-file.txt` as a working command; it wrote
+placeholder bytes over `./local-file.txt` and printed `Successfully downloaded 30 bytes`.
 
 ## Configuration Reference
 
@@ -273,13 +280,28 @@ Main client class for interacting with ObjectFS.
   when the mount has not recorded that family -- absent is not zero
 - `get_performance_stats()`: **Not implemented; raises `NotImplementedError`.** It returned
   fixed constants that looked like measurements. Use `get_metrics()`
-- `list_objects(storage_uri, prefix=None, max_keys=1000)`: List objects
-- `download_object(storage_uri, key, local_path)`: Download object
-- `upload_object(storage_uri, key, local_path, metadata=None)`: Upload object
-- `join_cluster(seed_nodes, node_config=None)`: Join distributed cluster
-- `get_cluster_status()`: Get cluster status
-- `clear_cache(cache_type=None, keys=None)`: Clear filesystem cache
-- `warm_cache(paths, recursive=False)`: Pre-load cache
+The rest raise, and did not always ([#325]). The signatures are what they will have if they are
+implemented; nothing behind them talks to S3 or to another node:
+
+- `list_objects(storage_uri, prefix=None, max_keys=1000)`: raises `StorageError`. Returned two
+  invented objects, `test-file-1.txt` and `test-file-2.txt`
+- `get_object_info(storage_uri, key)`: raises `StorageError`. Returned a fixed size and etag for any
+  key, existing or not
+- `download_object(storage_uri, key, local_path)`: raises `StorageError`. **Wrote
+  `Simulated file content from S3` over `local_path`**, called the progress callback to completion,
+  and returned 30 — destroying an existing file and reporting success
+- `upload_object(storage_uri, key, local_path, metadata=None)`: raises `StorageError`. Returned
+  `True` without transferring anything
+- `delete_object(storage_uri, key)`: on `StorageAdapter`, not the client. Raises `StorageError`;
+  returned `True` while the object remained in S3
+- `join_cluster(seed_nodes, node_config=None)` / `leave_cluster()`: raise `DistributedError`.
+  Returned `True` without contacting any node
+- `get_cluster_status()`: raises `DistributedError`. Reported a healthy single-node cluster for any
+  configuration, without querying anything
+- `clear_cache(cache_type=None, keys=None)`: raises `CacheError`. Returned `True` after a log line
+- `warm_cache(paths, recursive=False)`: raises `CacheError`. Reported success for every path given
+
+[#325]: https://github.com/scttfrdmn/objectfs/issues/325
 
 ### Configuration Classes
 
