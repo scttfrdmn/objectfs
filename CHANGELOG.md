@@ -89,6 +89,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two JavaScript SDK dev-dependency bumps could not install, because Dependabot proposed half of a
+  peer-coupled pair** ([#306]). `npm` enforces peer ranges, so these fail at `npm install` rather than
+  at test time — the `sdk-metrics` job's `ERESOLVE`, not a test failure:
+
+  - `typescript` 5.9.3 → 7.0.2 alone: `peer typescript@">=4.3 <7" from ts-jest@29.4.12`
+  - `@typescript-eslint/eslint-plugin` 5.62.0 → 8.65.0 alone: the plugin wants
+    `peer @typescript-eslint/parser@"^8.66.0"` while `parser` is still pinned `^5.59.0`
+
+  Both are the right target version proposed in an order that cannot resolve. `groups:` on the
+  `/sdks/javascript` npm entry now moves each set in one PR, which is the only form that installs. It
+  does not make them automatic — they are still majors, so `dependabot-automerge.yml` comments and
+  waits for a human, which is right for a TypeScript 5 → 7 jump.
+
+  The `gomod` entry has had groups all along; neither npm entry did, which is why this surfaced only on
+  the JavaScript side — and only now, since before [#288] the whole config was ignored and these were
+  never proposed at all. `/docs-platform` was checked and is not affected: it has `jest` and
+  `typescript` but no `ts-jest`, so nothing there declares a peer range on the TypeScript version.
+
+  Recorded on [#306] while looking: the three `vite` alerts need a **`vitepress` major**, not a `vite`
+  bump. `vitepress@1.6.4` depends on `vite: ^5.4.14`, so `vite` cannot reach the patched 6.4.3 while
+  `vitepress` is on 1.x — the missing lockfile ([#214]) is a second blocker, not the only one.
+
+[#306]: https://github.com/scttfrdmn/objectfs/issues/306
+[#214]: https://github.com/scttfrdmn/objectfs/issues/214
+
 - **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
   unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
   requires a string: *"The property '#/updates/0/schedule/time' of type integer did not match the
