@@ -83,7 +83,7 @@ func TestValidateRejectsUnusableS3Settings(t *testing.T) {
 				c.Storage.S3.Multipart.Threshold = "32 megabytes"
 			},
 			wantText: "storage.s3.multipart.threshold",
-			why:      "parseOptionalSize is strict; the old parser would have substituted 1 GiB",
+			why:      "utils.ParseOptionalBytes is strict; the old parser would have substituted 1 GiB",
 		},
 		{
 			name: "an unparseable multipart chunk size",
@@ -137,6 +137,44 @@ func TestValidateRejectsUnusableS3Settings(t *testing.T) {
 			wantText: "brotli",
 			why: "this is audit finding C1's shape — the shipped default named an algorithm the " +
 				"codec factory rejected, so the binary exited on its own default configuration",
+		},
+
+		// The three min_size rows below are the cases internal/compression's own parseSize got wrong
+		// before #159 consolidated on utils.ParseBytes. Each is a compression floor that silently
+		// disables or silently bypasses compression, which is why they are worth naming individually
+		// rather than trusting one malformed-input row to stand for all of them: a floor is a number
+		// nothing reports, so the only place a mistake in it can surface is here.
+		{
+			name: "a min_size unit the old parser did not know",
+			mutate: func(c *Configuration) {
+				c.Storage.S3.Compression.Enabled = true
+				c.Storage.S3.Compression.MinSize = "4MG"
+			},
+			wantText: "min_size",
+			why: "the typo this issue was filed about (#159). It is accepted by nothing now, but the " +
+				"adapter's parser turned it into a 1 GiB floor — compression off for every object " +
+				"with no message anywhere",
+		},
+		{
+			name: "a negative min_size",
+			mutate: func(c *Configuration) {
+				c.Storage.S3.Compression.Enabled = true
+				c.Storage.S3.Compression.MinSize = "-1MB"
+			},
+			wantText: "min_size",
+			why: "internal/compression's parser accepted this as -1048576, a floor below every " +
+				"object, so the floor was ignored and everything was compressed including what the " +
+				"operator excluded",
+		},
+		{
+			name: "a min_size that overflows",
+			mutate: func(c *Configuration) {
+				c.Storage.S3.Compression.Enabled = true
+				c.Storage.S3.Compression.MinSize = "99999999999GB"
+			},
+			wantText: "min_size",
+			why: "internal/compression's parser overflowed this to math.MaxInt64 — a floor no object " +
+				"can reach, so compression was silently off while the config said it was on",
 		},
 	}
 

@@ -1408,12 +1408,12 @@ func (c *Configuration) validateS3Config() error {
 
 	// Ordering matters and is asserted by a test: a chunk size above the threshold means the first
 	// part of every multipart upload is the whole object, so multipart never engages at all.
-	threshold, err := parseOptionalSize(s3cfg.Multipart.Threshold)
+	threshold, err := utils.ParseOptionalBytes(s3cfg.Multipart.Threshold)
 	if err != nil {
 		return fmt.Errorf("storage.s3.multipart.threshold is invalid: %w", err)
 	}
 
-	chunk, err := parseOptionalSize(s3cfg.Multipart.ChunkSize)
+	chunk, err := utils.ParseOptionalBytes(s3cfg.Multipart.ChunkSize)
 	if err != nil {
 		return fmt.Errorf("storage.s3.multipart.chunk_size is invalid: %w", err)
 	}
@@ -1580,19 +1580,6 @@ func (c *Configuration) validateDurations() error {
 	}
 
 	return nil
-}
-
-// parseOptionalSize parses a size that may be empty, where empty means zero.
-//
-// Zero is the caller's signal to fall back to a built-in default, which is distinct from a size of
-// literally zero bytes — "0" parses to 0 and is accepted, and no caller of this distinguishes them
-// because a zero-byte threshold and an absent one both mean "use the default".
-func parseOptionalSize(s string) (int64, error) {
-	if s == "" {
-		return 0, nil
-	}
-
-	return utils.ParseBytes(s)
 }
 
 // validateReadAheadConfig rejects a read-ahead configuration the manager cannot run with.

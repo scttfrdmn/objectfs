@@ -793,3 +793,155 @@ func TestGetattrReportsPendingSize(t *testing.T) {
 		t.Errorf("reading at offset %d returned %q, want %q", len(original), got, appended)
 	}
 }
+
+// TestUnclaimedStartAdvancesPastEveryCoveringFetch drives the prefetch-trim arithmetic directly.
+//
+// It is a unit test on an in-package helper, which the rest of this file avoids on principle — every
+// other assertion here is on observed HTTP requests. The reason for the exception is that these
+// statements were previously reached only by winning a race: `performPrefetch` trims against whatever
+// reads happen to be in flight at that instant, so on an idle machine the branch ran and under
+// full-repo test contention it did not. Coverage of it moved by a point depending on load, which means
+// no test owned it — and a branch nothing owns is a branch a refactor may delete silently. The
+// chaining case is the one that cannot be arranged by a real reader on demand at all.
+//
+// The chain is the property worth pinning: skipping past one fetch can land inside a second, so the
+// loop advances repeatedly. A single-pass implementation returns the wrong offset for exactly the
+// shape a reader one step ahead of the prefetcher produces.
+func TestUnclaimedStartAdvancesPastEveryCoveringFetch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		flights [][2]int64 // {off, length} of each fetch registered, in order
+		off     int64
+		want    int64
+		why     string
+	}{
+		{
+			name: "no fetch in flight leaves the offset alone",
+			off:  4096,
+			want: 4096,
+			why:  "an unclaimed range must not be trimmed; this is the ordinary case",
+		},
+		{
+			name:    "an offset inside a fetch advances to its end",
+			flights: [][2]int64{{0, 1024}},
+			off:     512,
+			want:    1024,
+			why:     "the bytes from 512 to 1024 are already being fetched and would be paid for twice",
+		},
+		{
+			name:    "a chain of adjoining fetches is followed to the end",
+			flights: [][2]int64{{0, 1024}, {1024, 1024}, {2048, 1024}},
+			off:     0,
+			want:    3072,
+			why: "advancing past the first lands inside the second, which is why the loop repeats; a " +
+				"single pass would return 1024 and re-fetch 1024-3072",
+		},
+		{
+			name:    "a chain given out of order is still followed",
+			flights: [][2]int64{{2048, 1024}, {0, 1024}, {1024, 1024}},
+			off:     0,
+			want:    3072,
+			why:     "registration order is arrival order and says nothing about offsets",
+		},
+		{
+			name:    "a fetch starting after the offset is ignored",
+			flights: [][2]int64{{8192, 1024}},
+			off:     4096,
+			want:    4096,
+			why: "trimming the front is the only safe move — cutting the window short at a small read " +
+				"in the middle would give up the whole tail to avoid duplicating a kilobyte",
+		},
+		{
+			name:    "a fetch ending exactly at the offset is not covering",
+			flights: [][2]int64{{0, 4096}},
+			off:     4096,
+			want:    4096,
+			why:     "the range is half-open, so byte 4096 is not among the bytes [0,4096) is fetching",
+		},
+		{
+			name:    "a fetch for another object does not trim this one",
+			flights: nil,
+			off:     512,
+			want:    512,
+			why:     "containment is only meaningful within one object; byPath is keyed for that reason",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var fetches inflightFetches
+
+			for _, fl := range tc.flights {
+				fetches.start("obj.dat", fl[0], fl[1])
+			}
+
+			// Registered under a different key in every case, so the last case above has something to
+			// be ignored and the others prove a foreign object cannot interfere either.
+			fetches.start("other.dat", 0, 1<<20)
+
+			if got := fetches.unclaimedStart("obj.dat", tc.off); got != tc.want {
+				t.Errorf("unclaimedStart(%d) = %d, want %d: %s", tc.off, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// TestPrefetchDropsARangeAlreadyEntirelyInFlight covers the arm that returns without fetching.
+//
+// The trim can consume the whole prefetch: a reader that has the entire predicted window outstanding
+// leaves nothing to read ahead for. Issuing the GET anyway is the 17,408-bytes-for-a-16,384-byte-file
+// case in performPrefetch's comment, and it is invisible in any assertion on returned data because a
+// prefetch returns nothing to anyone.
+//
+// The fetch is registered and deliberately never finished, which is what a reader mid-GET looks like
+// and what makes this deterministic rather than a race the test hopes to win.
+func TestPrefetchDropsARangeAlreadyEntirelyInFlight(t *testing.T) {
+	t.Parallel()
+
+	f := newReadPathFixture(t)
+	f.srv.SeedRandom("inflight.dat", 64<<10)
+
+	// Warm the size lookup through the write path before counting, since FileSize issues a HEAD.
+	if _, err := f.fs.buffer.FileSize(context.Background(), "inflight.dat"); err != nil {
+		t.Fatalf("FileSize: %v", err)
+	}
+
+	// A read of the whole file is outstanding. Never finished: this is a reader mid-GET.
+	self, _ := f.fs.fetches.start("inflight.dat", 0, 64<<10)
+	t.Cleanup(func() { f.fs.fetches.finish("inflight.dat", self, nil, nil) })
+
+	before := len(f.srv.GETs("inflight.dat"))
+
+	// A prefetch wholly inside the outstanding read. Called directly rather than queued, so there is no
+	// worker scheduling to wait on and no timing for the assertion to depend on.
+	//
+	// Bounded, and the bound is an assertion rather than a convenience. Trimming without dropping leaves
+	// a non-positive length, and a prefetch that reaches the shared fetch path with one waits on the
+	// in-flight read it was trimmed against — so the arm's absence presents as a prefetch worker parked
+	// on a channel, not as a wrong byte count. Parked workers are the failure this reports; a bare call
+	// here would have made that a test-suite timeout with no message.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.fs.readAhead.performPrefetch(&PrefetchRequest{path: "inflight.dat", offset: 1024, size: 4096})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("performPrefetch did not return while a read covering its whole range was in flight. " +
+			"A prefetch has no caller waiting on it, so one that blocks consumes a prefetch worker " +
+			"until the read completes; with every worker parked the read-ahead stops entirely and " +
+			"nothing reports it.")
+	}
+
+	if after := len(f.srv.GETs("inflight.dat")); after != before {
+		t.Errorf("a prefetch entirely inside an in-flight read issued %d GET(s); every byte it asked "+
+			"for was already being fetched, so the object's bytes would be paid for twice",
+			after-before)
+	}
+}

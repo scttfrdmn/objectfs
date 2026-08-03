@@ -3,8 +3,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/scttfrdmn/objectfs/internal/config"
 	"github.com/scttfrdmn/objectfs/internal/metrics"
 	"github.com/scttfrdmn/objectfs/internal/vfs"
+	"github.com/scttfrdmn/objectfs/pkg/utils"
 )
 
 // Unit tests for cache system
@@ -207,37 +206,16 @@ func TestMetricsCollectorUnit(t *testing.T) {
 	assert.NotNil(t, metricsAfterReset)
 }
 
-// Helper function for parsing sizes (since it's not in the config package)
-func parseSize(sizeStr string) (int64, error) {
-	sizeStr = strings.TrimSpace(sizeStr)
-	if sizeStr == "" {
-		return 0, fmt.Errorf("empty size string")
-	}
-
-	// Handle plain numbers
-	if val, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
-		return val, nil
-	}
-
-	// Handle sizes with units
-	units := map[string]int64{
-		"B":  1,
-		"KB": 1024,
-		"MB": 1024 * 1024,
-		"GB": 1024 * 1024 * 1024,
-	}
-
-	for unit, multiplier := range units {
-		if before, ok := strings.CutSuffix(strings.ToUpper(sizeStr), unit); ok {
-			numStr := before
-			if val, err := strconv.ParseFloat(numStr, 64); err == nil {
-				return int64(val * float64(multiplier)), nil
-			}
-		}
-	}
-
-	return 0, fmt.Errorf("invalid size format: %s", sizeStr)
-}
+// The parseSize helper that used to be here is gone. Its comment said "since it's not in the config
+// package", and it never was: [utils.ParseBytes] has been the parser this whole time, and a copy in a
+// test file is the worst of the four places one can live (#159). A test that reimplements the function
+// it exercises asserts that two implementations agree, which is exactly what does not need asserting.
+//
+// Verified rather than assumed, by running the deleted copy: it read "InfMB" as math.MaxInt64 and
+// "1e3MB" as 1000 MB, because it handed the number to strconv.ParseFloat, which accepts Go float
+// syntax. It also rejected "1TB", since its unit map stopped at GB. utils.ParseBytes refuses all
+// three — so this file's local parser disagreed with the one every mount uses, in both directions, for
+// as long as it existed.
 
 // Unit tests for configuration system
 func TestConfigUnit(t *testing.T) {
@@ -298,32 +276,14 @@ func TestConfigUnit(t *testing.T) {
 	err = validConfig.Validate()
 	assert.NoError(t, err)
 
-	// Test size parsing
-	size, err := parseSize(validConfig.Performance.CacheSize)
+	// A size written in a configuration this test declares valid parses under the parser the mount
+	// itself uses. That is the property worth asserting here, and it is the only one: the units, the
+	// malformed inputs, and the boundary cases belong to TestParseBytes and FuzzParseBytes in
+	// pkg/utils, which is where the function is. Re-testing them through a local copy is what let this
+	// file's copy disagree with the real parser without failing anything.
+	size, err := utils.ParseBytes(validConfig.Performance.CacheSize)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(100*1024*1024), size)
-
-	// Test invalid size parsing
-	_, err = parseSize("invalid-size")
-	assert.Error(t, err)
-
-	// Test various size formats
-	testCases := []struct {
-		input    string
-		expected int64
-	}{
-		{"1024", 1024},
-		{"1KB", 1024},
-		{"1MB", 1024 * 1024},
-		{"1GB", 1024 * 1024 * 1024},
-		{"1.5MB", int64(1.5 * 1024 * 1024)},
-	}
-
-	for _, tc := range testCases {
-		size, err := parseSize(tc.input)
-		assert.NoError(t, err, "Failed to parse size: %s", tc.input)
-		assert.Equal(t, tc.expected, size, "Unexpected size for: %s", tc.input)
-	}
 }
 
 // Unit tests for utility functions and edge cases
