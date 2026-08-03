@@ -161,6 +161,25 @@ type ClusterStats struct {
 	NetworkErrors    int64 `json:"network_errors"`
 }
 
+// defaultMaxGossipPacket is the largest gossip datagram this node will send or accept, in bytes.
+//
+// 8 KiB, chosen against measurement rather than round numbers. A sealed sync message costs ~200 bytes
+// of envelope plus ~415 bytes per member, so this carries about 19 members in a single datagram and
+// larger memberlists in chunks — see [GossipProtocol.marshalSyncChunksLocked].
+//
+// The old default was 1024, which holds *two* members. A three-node cluster's sync did not fit, the
+// datagram was truncated by the receive buffer, and the truncated JSON then failed the authentication
+// envelope parse — so cluster formation stalled and reported it as a wrong cluster secret. No CI job
+// builds -tags=distributed, so the one test that would have caught it had been failing unobserved
+// (#277, #240).
+//
+// Why not 65507, the maximum UDP payload: a datagram over the path MTU is fragmented by IP, and a
+// single lost fragment loses the whole datagram, so the effective loss rate rises with size. 8 KiB
+// exceeds a 1500-byte MTU and will fragment, which is a deliberate trade — six fragments for a sync
+// that runs once per join is worth more than chunking every small cluster's membership across several
+// round trips. Per-round alive messages are ~483 bytes sealed and never fragment.
+const defaultMaxGossipPacket = 8192
+
 // applyConfigDefaults applies default values for zero-valued configuration fields
 func applyConfigDefaults(config *ClusterConfig) {
 	if config.ListenAddr == "" {
@@ -188,7 +207,7 @@ func applyConfigDefaults(config *ClusterConfig) {
 		config.GossipFanout = 3
 	}
 	if config.MaxGossipPacket == 0 {
-		config.MaxGossipPacket = 1024
+		config.MaxGossipPacket = defaultMaxGossipPacket
 	}
 	if config.ReplicationFactor == 0 {
 		config.ReplicationFactor = 3
@@ -213,24 +232,17 @@ func applyConfigDefaults(config *ClusterConfig) {
 // NewClusterManager creates a new cluster manager
 func NewClusterManager(config *ClusterConfig) (*ClusterManager, error) {
 	if config == nil {
-		config = &ClusterConfig{
-			ListenAddr:        "0.0.0.0:8080",
-			AdvertiseAddr:     "127.0.0.1:8080",
-			JoinTimeout:       30 * time.Second,
-			ElectionTimeout:   5 * time.Second,
-			HeartbeatInterval: 1 * time.Second,
-			LeadershipTTL:     10 * time.Second,
-			GossipInterval:    500 * time.Millisecond,
-			GossipFanout:      3,
-			MaxGossipPacket:   1024,
-			CacheReplication:  true,
-			ReplicationFactor: 3,
-			ConsistencyLevel:  "eventual",
-			MaxConcurrentOps:  100,
-			OperationTimeout:  30 * time.Second,
-			RetryAttempts:     3,
-			RetryBackoff:      time.Second,
-		}
+		// CacheReplication only, and then applyConfigDefaults below fills the rest.
+		//
+		// This used to restate all sixteen fields, every one of which applyConfigDefaults sets to the
+		// same value two lines later — so the literal was dead except for this one field, and the
+		// duplication was live: MaxGossipPacket appeared here as 1024 and had to be changed in two
+		// places, which is how a stale copy of a default survives a fix to the default (#277).
+		//
+		// CacheReplication is the exception because it is a bool whose default is true, and a bool's
+		// zero value is indistinguishable from "not set" — so applyConfigDefaults cannot express it and
+		// a caller passing nil is the only case where the intent is known.
+		config = &ClusterConfig{CacheReplication: true}
 	}
 
 	// Apply defaults for zero-valued fields
