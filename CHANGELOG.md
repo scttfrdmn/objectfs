@@ -198,6 +198,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two comments in `.github/dependabot.yml` that this release made false** ([#328]). They said the
+  `sdk-metrics` job runs `npm install && npm test`, and that "nothing in CI runs `tsc`" — both true
+  when written, neither true once the `npm ci`, build and lint steps above landed. These comments are
+  load-bearing rather than decorative: they are what explains why the `typescript-toolchain` group
+  exists and stops the next person from ungrouping it into bumps that cannot install. The same block
+  now also records what the TypeScript 6 bump needs, measured rather than predicted, because one
+  finding reads as its own opposite: `moduleResolution: "node"` raises `TS5107` under 6.0, and that
+  is a *config-level* error, so `tsc` exits before typechecking any source and reports 1 error while
+  63 wait behind it. The 63 are `@types/node` no longer being auto-included; `"types": ["node"]`
+  takes them to zero.
+
 - **The JavaScript SDK compiles, and two of its five configuration presets no longer fail their own
   validation** ([#314], [#325]). `npx tsc` reported 48 errors across seven files, and had done since
   before the SDK's first release; `npm run build` had therefore never succeeded and `dist/` had never
@@ -791,6 +802,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
+[#328]: https://github.com/scttfrdmn/objectfs/issues/328
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
