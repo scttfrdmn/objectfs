@@ -278,7 +278,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Python SDK metrics parsing
+      # `pytest tests/` rather than the one metrics file, so tests/test_storage.py,
+      # tests/test_config.py and tests/test_client.py are covered by this step as they land —
+      # including the assertion that download_object leaves an existing local file intact.
+      - name: Python SDK tests
         working-directory: sdks/python
         run: |
           # The package rather than a hand-listed subset of its requirements. The tests exercise

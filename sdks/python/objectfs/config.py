@@ -405,5 +405,15 @@ class Configuration:
         config.cluster.consistency_level = "strong"
         config.monitoring.enabled = True
         config.security.enabled = True
-        config.security.tls_enabled = True
+        # No `tls_enabled = True` here, deliberately. SecurityConfig.validate() requires
+        # tls_cert_path and tls_key_path whenever TLS is on, and a preset cannot know where a
+        # deployment keeps its certificates -- so setting the flag made this the one preset that
+        # could not pass its own validate(). Verified: from_preset('cluster').validate() raised
+        # "TLS certificate and key paths required". TLS is the caller's to enable, with the paths:
+        #
+        #     Configuration.from_preset('cluster').merge({'security': {
+        #         'tls_enabled': True,
+        #         'tls_cert_path': '/etc/objectfs/tls.crt',
+        #         'tls_key_path': '/etc/objectfs/tls.key',
+        #     }})
         return config

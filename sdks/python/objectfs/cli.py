@@ -101,25 +101,36 @@ Examples:
     val_config = config_subparsers.add_parser('validate', help='Validate configuration')
     val_config.add_argument('config_file', help='Configuration file to validate')
 
-    # Storage operations
-    storage_parser = subparsers.add_parser('storage', help='Storage operations')
+    # Storage operations.
+    #
+    # Every one of these raises StorageError -- see objectfs/storage.py and issue #325. The
+    # subcommands stay so that `storage download` fails naming the reason rather than as an
+    # unrecognized-argument error, but `--help` has to say so: it used to describe all three as
+    # though they worked, and `storage download` in particular overwrote its local_path with
+    # placeholder bytes and reported the transfer as successful.
+    _NOT_IMPL = ' (NOT IMPLEMENTED -- raises; see issue #325)'
+    storage_parser = subparsers.add_parser(
+        'storage', help='Storage operations' + _NOT_IMPL)
     storage_subparsers = storage_parser.add_subparsers(dest='storage_command')
 
     # List objects
-    list_parser = storage_subparsers.add_parser('list', help='List storage objects')
+    list_parser = storage_subparsers.add_parser(
+        'list', help='List storage objects' + _NOT_IMPL)
     list_parser.add_argument('storage_uri', help='Storage URI')
     list_parser.add_argument('--prefix', help='Object prefix filter')
     list_parser.add_argument('--max-keys', type=int, default=100,
                            help='Maximum objects to list')
 
     # Download object
-    download_parser = storage_subparsers.add_parser('download', help='Download object')
+    download_parser = storage_subparsers.add_parser(
+        'download', help='Download object' + _NOT_IMPL)
     download_parser.add_argument('storage_uri', help='Storage URI')
     download_parser.add_argument('key', help='Object key')
     download_parser.add_argument('local_path', help='Local destination path')
 
     # Upload object
-    upload_parser = storage_subparsers.add_parser('upload', help='Upload object')
+    upload_parser = storage_subparsers.add_parser(
+        'upload', help='Upload object' + _NOT_IMPL)
     upload_parser.add_argument('local_path', help='Local file path')
     upload_parser.add_argument('storage_uri', help='Storage URI')
     upload_parser.add_argument('key', help='Object key')

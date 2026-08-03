@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a hand-written probe had found two. The load-bearing storage test writes a real file, calls
   `downloadObject` against it, and asserts the file's contents are unchanged.
 
+- **Tests for the Python SDK's storage, configuration and client layers** (`tests/test_storage.py`,
+  `tests/test_config.py`, `tests/test_client.py`; 71 tests and 25 subtests, up from a single metrics
+  suite). Same three shapes as the JavaScript tests, for the same reasons: a loop over every preset
+  name asserting `validate()` passes, which is what found the `cluster` defect; paired merge assertions
+  checking the override applied *and* its siblings survived; and a test that writes `REAL USER DATA` to
+  a real file, calls `download_object` against that path, and asserts the bytes are still there. The
+  client suite additionally asserts the not-implemented message reaches the caller unwrapped, since
+  that fix has no other guard.
+
+  Every one of these was verified by mutation rather than by inspection: restoring the fabricating
+  `_download_s3_object` and the preset's `tls_enabled = True` produced exactly the five expected
+  failures — including `test_existing_file_survives` and the `cluster` subtest — and restoring the
+  double-wrap failed exactly the two assertions written for it. The CI step that runs them is renamed
+  from "Python SDK metrics parsing" to "Python SDK tests", because it invokes `pytest tests/` and had
+  been picking up more than its name claimed.
+
 - **A written evaluation of S3 conditional writes as a replacement for Raft coordination**
   ([#169]), at `docs/design/conditional-writes-vs-raft.md`. The recommendation is to adopt per-key
   compare-and-swap for coordination, keep gossip for membership, and stop building toward a
@@ -175,6 +191,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"@typescript-eslint/recommended"` without the required `plugin:` prefix, so eslint exited with
   "couldn't find the config to extend from" before reading a line of source. Zero errors once it
   could run, with 23 pre-existing `no-explicit-any` warnings left standing.
+
+- **The Python SDK's `cluster` preset passes its own validation, and six of its exceptions can be
+  imported** ([#325]). Two defects, both found the same way as their JavaScript counterparts:
+
+  - `Configuration.from_preset('cluster')` set `security.tls_enabled = True`, and
+    `SecurityConfig.validate()` requires `tls_cert_path` and `tls_key_path` whenever TLS is on — paths
+    a preset cannot know. So one of the five shipped presets raised
+    `ConfigurationError: TLS certificate and key paths required` on any caller that validated it, and
+    `objectfs-python config generate --preset cluster` was one. The preset no longer sets the flag;
+    enabling TLS is the caller's, with the paths, and the `merge()` call that does it is written out
+    next to the line that used to set it. This was found by a test that loops over the preset names
+    rather than by inspection — a hand-written probe of two presets would have missed it, which is
+    exactly what happened on the JavaScript side before the same loop went in.
+  - `from objectfs import NetworkError` was an `ImportError`. `NetworkError`, `CacheError`,
+    `AuthenticationError`, `AuthorizationError`, `TimeoutError` and `ValidationError` were declared in
+    `objectfs/exceptions.py` and re-exported by nothing, so the README's own error-handling example —
+    which imports `NetworkError` from the package — could not run. All six are now in `__init__.py` and
+    `__all__`. `CacheError` matters twice over: it is what `clear_cache` and `warm_cache` now raise, so
+    a caller has to be able to name it in an `except`.
+
+  A third, smaller one: both `StorageAdapter` and `ObjectFSClient` wrapped every exception from the
+  layer below in `StorageError(f"Failed to <verb>: {e}")`, including the `StorageError`s the adapter
+  raises deliberately. A caller saw `Failed to list objects: Failed to list objects: <the actual
+  reason>` — and the CLI prints that string. Each of the nine handlers now re-raises `StorageError`
+  unchanged before its generic arm, so an unsupported scheme, a malformed URI, or the not-implemented
+  notice and its issue link arrive as themselves.
 
 - **Dependabot auto-merge, cause five: GitHub Actions cannot approve pull requests** ([#305]). Fixing
   [#288] made `.github/dependabot.yml` valid, Dependabot re-evaluated it within minutes, and the
@@ -665,8 +707,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   README's feature list, storage section, cluster example, API reference and event list are corrected
   to match — it had been advertising "AWS S3 deep integration with intelligent tiering and cost
   management" and "built-in support for distributed clusters and replication" against code that did
-  neither. The identical fabrications in the Python SDK are open on [#325]; that SDK's
-  `download_object` still overwrites local files.
+  neither.
+
+- **The Python SDK's fabricated operations raise instead of returning invented data** ([#325]), which
+  closes the other half of the issue. The same ten operations were fabricated here, in the same
+  shapes, and `StorageAdapter._download_s3_object` did the same damage —
+  `open(local_path, 'wb').write(b"Simulated file content from S3")`, `progress_callback(30, 30)`,
+  `return 30`. Proven by execution before it was touched: run against a file containing other text, it
+  printed `returned 30 bytes; file now contains: 'Simulated file content from S3'`. The raise now
+  happens before anything opens `local_path`, and a test writes `REAL USER DATA` to a real file and
+  asserts it is still there afterwards.
+
+  There were fifteen fabricating methods, not five, because the GCS and Azure backends were copies:
+  `_list_gcs_objects`, `_list_azure_objects` and their eight siblings each called the S3 method, so a
+  `gs://` or `az://` URI returned the same two invented *S3* objects under a docstring describing a
+  "simplified implementation" of a different cloud. There is now one set of methods with the other ten
+  names aliased onto it at class level, so the three schemes reach one honest raise rather than three
+  copies of a fabrication. The scheme dispatch stays, because rejecting an unsupported scheme is a
+  real thing to do.
+
+  On the client, `join_cluster`/`leave_cluster`/`get_cluster_status` raise `DistributedError` and
+  `clear_cache`/`warm_cache` raise `CacheError`, following `get_performance_stats`, which was already
+  written this way in the same file. `objectfs-python storage list|download|upload` still exist so
+  that they fail naming the reason rather than as an unrecognized-argument error, but `--help` now
+  says `NOT IMPLEMENTED` on all three; it previously described them as working, and the README showed
+  `storage download s3://my-bucket file.txt ./local-file.txt` as an example, which overwrote
+  `./local-file.txt` and printed `Successfully downloaded 30 bytes`.
 
 - **Every GitHub Action is on its current major, and CI no longer downloads a Go toolchain mid-build.**
   Eight actions moved: `setup-go` 5 → 7, `setup-node` 4 → 7, `setup-python` 5 → 7,

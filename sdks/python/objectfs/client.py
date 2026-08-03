@@ -17,7 +17,7 @@ import requests
 from .config import Configuration
 from .exceptions import (
     ObjectFSError, MountError, ConfigurationError,
-    StorageError, DistributedError
+    StorageError, DistributedError, CacheError
 )
 from .mount import MountManager
 from .monitoring import MetricsCollector, HealthChecker
@@ -281,6 +281,13 @@ class ObjectFSClient:
             return await self.storage_adapter.list_objects(
                 storage_uri, prefix, max_keys
             )
+        except StorageError:
+            # Re-raised unchanged. StorageAdapter already produces a specific StorageError -- a
+            # malformed URI, an unsupported scheme, or the not-implemented notice -- and the handler
+            # below would nest it inside a second "Failed to list objects:", which the adapter's own
+            # handler has already prefixed once. The CLI prints the result, so the user saw the same
+            # phrase twice with the useful text buried two levels down.
+            raise
         except Exception as e:
             raise StorageError(f"Failed to list objects: {e}") from e
 
@@ -301,6 +308,8 @@ class ObjectFSClient:
         """
         try:
             return await self.storage_adapter.get_object_info(storage_uri, key)
+        except StorageError:
+            raise  # Already specific; see the note on list_objects.
         except Exception as e:
             raise StorageError(f"Failed to get object info: {e}") from e
 
@@ -325,6 +334,8 @@ class ObjectFSClient:
             return await self.storage_adapter.download_object(
                 storage_uri, key, local_path
             )
+        except StorageError:
+            raise  # Already specific; see the note on list_objects.
         except Exception as e:
             raise StorageError(f"Failed to download object: {e}") from e
 
@@ -351,6 +362,8 @@ class ObjectFSClient:
             return await self.storage_adapter.upload_object(
                 storage_uri, key, local_path, metadata
             )
+        except StorageError:
+            raise  # Already specific; see the note on list_objects.
         except Exception as e:
             raise StorageError(f"Failed to upload object: {e}") from e
 
@@ -419,62 +432,54 @@ class ObjectFSClient:
         node_config: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Join a distributed cluster.
+        Not implemented. Raises DistributedError.
 
-        Args:
-            seed_nodes: List of seed node addresses
-            node_config: Node-specific configuration
+        Reported success for work it never did: it merged ``node_config`` into a local variable,
+        discarded it, logged, and returned True. A caller was told the node had joined a cluster it
+        had never contacted.
 
-        Returns:
-            True if successfully joined
+        ObjectFS cluster membership is configured on the daemon -- the ``cluster`` section of the
+        YAML config, which this SDK does generate. This SDK has no control-plane client to call.
+
+        Raises:
+            DistributedError: always.
         """
-        if not self.config.cluster.enabled:
-            raise DistributedError("Cluster mode not enabled in configuration")
-
-        try:
-            # Update configuration with cluster settings
-            cluster_config = self.config.cluster
-            if node_config:
-                cluster_config = cluster_config.merge(node_config)
-
-            # Implementation would interact with cluster management API
-            # For now, simulate the operation
-            logger.info(f"Joining cluster with seed nodes: {seed_nodes}")
-            return True
-
-        except Exception as e:
-            raise DistributedError(f"Failed to join cluster: {e}") from e
+        raise DistributedError(
+            "join_cluster is not implemented. It previously returned True without contacting "
+            "any node. ObjectFS cluster membership is configured on the daemon (see the cluster "
+            "section of the YAML config); this SDK has no control-plane client. "
+            "https://github.com/scttfrdmn/objectfs/issues/325"
+        )
 
     async def leave_cluster(self) -> bool:
         """
-        Leave distributed cluster.
+        Not implemented. Raises DistributedError -- see :meth:`join_cluster`.
 
-        Returns:
-            True if successfully left cluster
+        Raises:
+            DistributedError: always.
         """
-        try:
-            logger.info("Leaving cluster")
-            return True
-        except Exception as e:
-            raise DistributedError(f"Failed to leave cluster: {e}") from e
+        raise DistributedError(
+            "leave_cluster is not implemented. It previously returned True without contacting "
+            "any node. https://github.com/scttfrdmn/objectfs/issues/325"
+        )
 
     async def get_cluster_status(self) -> Dict[str, Any]:
         """
-        Get cluster status information.
+        Not implemented. Raises DistributedError -- see :meth:`join_cluster`.
 
-        Returns:
-            Cluster status data
+        Returned ``{'node_count': 1, 'leader': 'self', 'status': 'healthy', 'nodes': []}``
+        unconditionally: a healthy single-node cluster with no nodes in it, for any configuration,
+        with no query performed. Of the four keys, ``'healthy'`` from a function that cannot
+        observe health is the one that would have done the damage.
+
+        Raises:
+            DistributedError: always.
         """
-        if not self.config.cluster.enabled:
-            raise DistributedError("Cluster mode not enabled")
-
-        # Implementation would query cluster status
-        return {
-            'node_count': 1,
-            'leader': 'self',
-            'status': 'healthy',
-            'nodes': []
-        }
+        raise DistributedError(
+            "get_cluster_status is not implemented. It previously reported a healthy single-node "
+            "cluster without querying anything. "
+            "https://github.com/scttfrdmn/objectfs/issues/325"
+        )
 
     # Cache Management
 
@@ -484,22 +489,18 @@ class ObjectFSClient:
         keys: Optional[List[str]] = None
     ) -> bool:
         """
-        Clear filesystem cache.
+        Not implemented. Raises CacheError.
 
-        Args:
-            cache_type: Type of cache to clear (None for all)
-            keys: Specific keys to clear (None for all)
+        ``return True`` after a log line. The ``try``/``except`` around it could not fail, so the
+        ``return False`` branch was unreachable and the method had exactly one outcome.
 
-        Returns:
-            True if successful
+        Raises:
+            CacheError: always.
         """
-        try:
-            # Implementation would interact with cache management API
-            logger.info(f"Clearing cache - type: {cache_type}, keys: {keys}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to clear cache: {e}")
-            return False
+        raise CacheError(
+            "clear_cache is not implemented. It previously returned True after logging, without "
+            "clearing anything. https://github.com/scttfrdmn/objectfs/issues/325"
+        )
 
     async def warm_cache(
         self,
@@ -507,25 +508,18 @@ class ObjectFSClient:
         recursive: bool = False
     ) -> Dict[str, bool]:
         """
-        Warm cache with specified paths.
+        Not implemented. Raises CacheError.
 
-        Args:
-            paths: List of paths to pre-load
-            recursive: Whether to recurse into directories
+        Set ``results[path] = True`` for every path given, so the return value was a function of
+        the argument alone: every path always succeeded, including paths that do not exist.
 
-        Returns:
-            Dictionary mapping paths to success status
+        Raises:
+            CacheError: always.
         """
-        try:
-            results = {}
-            for path in paths:
-                # Implementation would trigger cache warming
-                results[path] = True
-                logger.info(f"Cache warming {'started' if recursive else 'queued'} for {path}")
-            return results
-        except Exception as e:
-            logger.error(f"Failed to warm cache: {e}")
-            return {path: False for path in paths}
+        raise CacheError(
+            "warm_cache is not implemented. It previously reported success for every path given, "
+            "without warming anything. https://github.com/scttfrdmn/objectfs/issues/325"
+        )
 
     # Private helper methods
 
