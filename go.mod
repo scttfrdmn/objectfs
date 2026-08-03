@@ -25,7 +25,7 @@ require (
 	github.com/aws/smithy-go v1.24.2
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/klauspost/compress v1.18.7
-	github.com/pierrec/lz4/v4 v4.1.22
+	github.com/pierrec/lz4/v4 v4.1.27
 	github.com/prometheus/client_golang v1.22.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/redis/go-redis/v9 v9.18.0
