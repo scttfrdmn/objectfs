@@ -39,7 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **The recommendation has been adopted.** The Raft build-out is closed as not-the-direction — [#128]
   (`ConsensusLog`), [#130] (`PersistentState`, the only one labeled `priority: critical`), [#133]
-  (real proposal broadcast) and [#151] (log compaction) — and the work is filed as [#282]
+  (real proposal broadcast), [#151] (log compaction) and [#150] (the bbolt implementations of the two
+  interfaces #128 and #130 defined, which the design doc's own closure list had missed) — and the work
+  is filed as [#282]
   (`Backend.PutObjectIf`, the sentinel errors, and a capability probe that detects by attempt rather
   than by configuration), [#283] (a lease whose every guarded action re-asserts the CAS), [#284]
   (replacing `executeStrongConsistency`'s N-identical-PUT fan-out and fixing the consistency
@@ -409,6 +411,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#133]: https://github.com/scttfrdmn/objectfs/issues/133
+[#150]: https://github.com/scttfrdmn/objectfs/issues/150
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#240]: https://github.com/scttfrdmn/objectfs/issues/240

@@ -282,14 +282,16 @@ corrections to what is below. Both are recorded here rather than silently edited
 because a plan that turns out to have been slightly wrong is more useful with the correction visible
 than with the seam smoothed over.
 
-1. **The closure list of four below is incomplete — it should have named
+1. **The closure list of four below was incomplete — it should have named
    [#150](https://github.com/scttfrdmn/objectfs/issues/150)** (`BboltPersistentState` /
    `BboltConsensusLog`). That issue's own premise is *"the `ConsensusLog` and `PersistentState`
    interfaces were defined in A1-1 and A1-3"* — i.e. #128 and #130, both closed here — so nothing
-   remains for it to implement. It would also have added `go.etcd.io/bbolt` and a
+   remained for it to implement. It would also have added `go.etcd.io/bbolt` and a
    `/var/lib/objectfs` data path for durable Raft storage, neither of which CAS needs, since
-   coordination state lives in S3 objects guarded by `If-Match`. It is **still open**, flagged rather
-   than closed, because it was outside the approved set.
+   coordination state lives in S3 objects guarded by `If-Match`. **Closed 2026-08-03**, after being
+   flagged separately rather than swept in with the other four, because it was outside the set the
+   decision authorized. So the closure list is five, and the list below reads as it was written plus
+   this correction.
 2. **The `doc.go` correction below was already done** before adoption. Grep for `Linearizable`
    returns nothing.
 
