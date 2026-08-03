@@ -79,6 +79,18 @@ type Backend struct {
 
 	// Transparent object compression
 	compressor *compression.Compressor
+
+	// singlePartCopyLimit is the size above which CopyObject switches to a multipart copy, and
+	// copyPartSize the size of each part it then copies. They are [maxSinglePartCopy] and
+	// [defaultCopyPartSize] on every constructed backend, and only a test lowers them — see
+	// SetCopyThresholdsForTest.
+	//
+	// Fields rather than bare uses of the constants because the multipart copy path is otherwise
+	// reachable only with an object above 5 GiB. Creating one costs real money and hours, so in
+	// practice it stays untested — and it is the branch where a mistake is most expensive, since the
+	// parts of an abandoned upload are billed while invisible to ListObjects.
+	singlePartCopyLimit int64
+	copyPartSize        int64
 }
 
 // NewBackend creates a new S3 backend instance
@@ -186,14 +198,16 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 	tierInfo := tierValidator.GetTierInfo()
 
 	backend := &Backend{
-		bucket:           bucket,
-		clientManager:    clientManager,
-		metricsCollector: metricsCollector,
-		logger:           logger,
-		config:           cfg,
-		currentTier:      cfg.StorageTier,
-		tierInfo:         tierInfo,
-		tierValidator:    tierValidator,
+		bucket:              bucket,
+		clientManager:       clientManager,
+		metricsCollector:    metricsCollector,
+		logger:              logger,
+		config:              cfg,
+		currentTier:         cfg.StorageTier,
+		tierInfo:            tierInfo,
+		tierValidator:       tierValidator,
+		singlePartCopyLimit: maxSinglePartCopy,
+		copyPartSize:        defaultCopyPartSize,
 	}
 
 	// Initialize pricing manager
@@ -1000,8 +1014,7 @@ func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[st
 	}
 	defer b.clientManager.ReturnPooledClient(client)
 
-	// The source must be URL-escaped: S3 reads x-amz-copy-source as a path, so an unescaped key
-	// containing a space, a "+", or a "?" names a different object or fails outright.
+	// See [Backend.copySource] for why the escaping is not just url.PathEscape.
 	//
 	// StorageClass is copied through as-is, including empty: HeadObject omits the header for STANDARD,
 	// and an empty StorageClass on the request means STANDARD too, so the round-trip is faithful at
@@ -1009,7 +1022,7 @@ func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[st
 	input := &s3.CopyObjectInput{
 		Bucket:            aws.String(b.bucket),
 		Key:               aws.String(key),
-		CopySource:        aws.String(url.PathEscape(b.bucket + "/" + key)),
+		CopySource:        aws.String(b.copySource(key)),
 		MetadataDirective: s3types.MetadataDirectiveReplace,
 		Metadata:          merged,
 		StorageClass:      head.StorageClass,
@@ -1040,6 +1053,275 @@ func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[st
 		return translated
 	}
 
+	b.healthTracker.RecordSuccess("s3-writes")
+
+	return nil
+}
+
+// copySource builds the x-amz-copy-source value for key in this backend's bucket.
+//
+// S3 reads the header as a URL path, so it has to be escaped — an unescaped key containing a space
+// names a different object or fails outright. url.PathEscape alone is not enough, and this is not a
+// theoretical gap: it leaves "+" as itself, and S3 decodes "+" in this header as a space, so copying
+// "a+b.txt" asks for "a b.txt" and returns 404 NoSuchKey. Verified against real S3 in us-west-2 — both
+// url.PathEscape and (&url.URL{Path: …}).EscapedPath() fail on a key with a "+", and escaping it to
+// %2B is what makes the copy succeed. Every other character url.PathEscape passes through — ~ * ( ) $
+// & = @ : — was probed on the same endpoint and copies correctly.
+//
+// It matters because a "+" in a filename is ordinary: version numbers, C++ sources, and dates written
+// as 2026-08-01T00:00+00:00 all produce one. Both callers are operations a user expects to be
+// invisible, so the failure mode was a chmod or a rename returning ENOENT for a file that plainly
+// exists.
+func (b *Backend) copySource(key string) string {
+	// The "/" between bucket and key is escaped to %2F along with any in the key itself. S3 accepts a
+	// fully-escaped source, verified on the same endpoint, and keeping one rule for the whole string
+	// avoids a second place to get the bucket/key boundary wrong.
+	return strings.ReplaceAll(url.PathEscape(b.bucket+"/"+key), "+", "%2B")
+}
+
+// defaultCopyPartSize is the part size used when an object is too large for a single-part copy.
+//
+// 1 GiB, chosen so the part count cannot be what fails. S3 allows 10,000 parts per upload and its
+// largest object is 5 TiB, which needs 5,120 parts at this size — half the budget. The arithmetic is
+// worth stating because getting it wrong fails late and expensively: at 512 MiB a 5 TiB object needs
+// 10,240 parts, so the copy would run for hours, upload 10,000 billed parts, and only then be rejected.
+//
+// A large part size costs nothing here. UploadPartCopy is server-side, so no part passes through this
+// process and the part size is not a memory bound — which is what makes it free to pick a size with
+// room to spare rather than one tuned against a transfer buffer. It stays well under S3's own 5 GiB
+// per-part copy limit.
+const defaultCopyPartSize int64 = 1 << 30
+
+// maxSinglePartCopy is S3's hard limit on CopyObject: 5 GiB.
+//
+// Above it the request fails with InvalidRequest, so the size has to be known before the copy is
+// attempted rather than discovered from the error. That is why [Backend.CopyObject] heads the source
+// first even though the copy itself would not otherwise need it.
+const maxSinglePartCopy int64 = 5 << 30
+
+// CopyObject copies src to dst server-side, preserving the properties that make the destination
+// readable and correctly billed.
+//
+// # Why the source is headed first
+//
+// Two reasons, and both are requirements rather than optimizations. S3's CopyObject fails outright
+// above 5 GiB, so the size decides whether this is one request or a multipart copy — and discovering
+// that from an InvalidRequest response would mean guessing, since InvalidRequest is also what several
+// unrelated mistakes return. And the properties this must restate are only available from the source
+// object: a copy does not inherit Content-Encoding, Content-Type, storage class, or metadata unless
+// the request carries them.
+//
+// # What must survive the copy, and why each one
+//
+// Content-Encoding, because the read path dispatches decoding on the stored encoding and fails closed
+// on one it cannot handle. A rename that dropped it would leave a compressed object permanently
+// unreadable — its bytes intact and no code able to interpret them.
+//
+// Storage class, because the default is STANDARD. Omitting it silently promotes the object out of the
+// tier the user is paying for, which is audit finding L26, observed where CopyObject was already used
+// for tier transitions.
+//
+// User metadata, because POSIX mode, ownership, and mtime live there and nowhere else. A rename that
+// lost them would reset a file's permissions, which is not a thing rename does.
+//
+// Encryption is applied from this backend's configuration rather than copied from the source, for the
+// reason [Backend.SetObjectMetadata] states at length: a copy does not inherit the source's encryption,
+// S3 encrypts the destination per the request, and a request that says nothing gets the bucket default.
+// Using the configured value means a key rotation takes effect on renamed objects; preserving the
+// source's key would mean it never did.
+func (b *Backend) CopyObject(ctx context.Context, src, dst string) error {
+	start := time.Now()
+	defer func() {
+		b.metricsCollector.RecordMetrics(time.Since(start), false)
+	}()
+
+	if !b.healthTracker.CanWrite("s3-writes") {
+		state := b.healthTracker.GetState("s3-writes")
+		return errors.NewError(errors.ErrCodeServiceUnavailable, "S3 write operations are unavailable").
+			WithComponent("s3-backend").
+			WithOperation("CopyObject").
+			WithContext("health_state", state.String()).
+			WithContext("bucket", b.bucket).
+			WithContext("source", src).
+			WithContext("destination", dst)
+	}
+
+	head, err := b.headRaw(ctx, src)
+	if err != nil {
+		return err
+	}
+
+	limit := b.singlePartCopyLimit
+	if limit <= 0 {
+		// A zero limit would route every copy, including a 1-byte one, through multipart — where S3's
+		// 5 MB non-final-part minimum then rejects it. Fail closed to the real limit rather than to
+		// "always multipart", so a Backend built by some path that skips NewBackend still copies.
+		limit = maxSinglePartCopy
+	}
+
+	if aws.ToInt64(head.ContentLength) > limit {
+		return b.copyObjectMultipart(ctx, src, dst, head)
+	}
+
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return fmt.Errorf("copy %q to %q: %w", src, dst, err)
+	}
+	defer b.clientManager.ReturnPooledClient(client)
+
+	// COPY rather than REPLACE for the metadata directive: the source's metadata carries the integrity
+	// keys and the POSIX attributes, and there is nothing here to change about them. REPLACE would
+	// require restating the whole map and would silently drop anything not restated.
+	input := &s3.CopyObjectInput{
+		Bucket:            aws.String(b.bucket),
+		Key:               aws.String(dst),
+		CopySource:        aws.String(b.copySource(src)),
+		MetadataDirective: s3types.MetadataDirectiveCopy,
+		StorageClass:      head.StorageClass,
+	}
+	if enc := aws.ToString(head.ContentEncoding); enc != "" {
+		input.ContentEncoding = aws.String(enc)
+	}
+	if ct := aws.ToString(head.ContentType); ct != "" {
+		input.ContentType = aws.String(ct)
+	}
+
+	applyEncryptionCopy(input, b.config.Encryption)
+
+	if _, err := client.CopyObject(ctx, input); err != nil {
+		b.metricsCollector.RecordError(err)
+		translated := b.translateError(err, "CopyObject", src)
+		b.healthTracker.RecordError("s3-writes", translated)
+
+		return translated
+	}
+
+	b.healthTracker.RecordSuccess("s3-writes")
+
+	return nil
+}
+
+// copyObjectMultipart copies an object above S3's 5 GiB single-part copy limit using UploadPartCopy.
+//
+// Unlike the single-part path this cannot use MetadataDirective=COPY — a multipart upload's metadata is
+// set when it is created, from the CreateMultipartUpload request, so the source's map has to be carried
+// across explicitly. Same for every other property.
+//
+// An upload that fails partway is aborted. Parts of an incomplete multipart upload are stored and
+// billed while remaining invisible to ListObjects, so abandoning one leaks storage the operator cannot
+// see — audit finding H10, on this same mechanism.
+func (b *Backend) copyObjectMultipart(
+	ctx context.Context, src, dst string, head *s3.HeadObjectOutput,
+) error {
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return fmt.Errorf("copy %q to %q: %w", src, dst, err)
+	}
+	defer b.clientManager.ReturnPooledClient(client)
+
+	create := &s3.CreateMultipartUploadInput{
+		Bucket:       aws.String(b.bucket),
+		Key:          aws.String(dst),
+		Metadata:     head.Metadata,
+		StorageClass: head.StorageClass,
+	}
+	if enc := aws.ToString(head.ContentEncoding); enc != "" {
+		create.ContentEncoding = aws.String(enc)
+	}
+	if ct := aws.ToString(head.ContentType); ct != "" {
+		create.ContentType = aws.String(ct)
+	}
+	applyEncryptionCreateMultipart(create, b.config.Encryption)
+
+	created, err := client.CreateMultipartUpload(ctx, create)
+	if err != nil {
+		b.metricsCollector.RecordError(err)
+		return b.translateError(err, "CopyObject", src)
+	}
+
+	uploadID := aws.ToString(created.UploadId)
+	completed := false
+
+	// One deferred abort covering every failure path, rather than an abort at each. H10 was exactly the
+	// shape where one path had it and the Complete-failure path did not — and that is the path where
+	// *all* the parts have already been uploaded, so it leaks the most.
+	//
+	// The abort runs on a context of its own: the usual reason a copy fails is that ctx was canceled,
+	// and an abort issued on a canceled context does not reach S3, which would leak the parts precisely
+	// when the leak is most likely.
+	defer func() {
+		if completed {
+			return
+		}
+
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+
+		if _, abortErr := client.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(b.bucket),
+			Key:      aws.String(dst),
+			UploadId: aws.String(uploadID),
+		}); abortErr != nil {
+			// Logged rather than returned: the copy's own error is what the caller needs, and a failed
+			// abort is an operator problem — billed parts that no listing shows. Naming the upload ID is
+			// the only way to find them afterwards.
+			slog.Error("could not abort the multipart copy; its parts are billed until a lifecycle rule "+
+				"removes them",
+				"bucket", b.bucket, "key", dst, "upload_id", uploadID, "error", abortErr)
+		}
+	}()
+
+	size := aws.ToInt64(head.ContentLength)
+	source := b.copySource(src)
+
+	partSize := b.copyPartSize
+	if partSize <= 0 {
+		// Zero would make the loop below advance by nothing and spin forever, so this is a liveness
+		// guard rather than a tidiness one.
+		partSize = defaultCopyPartSize
+	}
+
+	parts := make([]s3types.CompletedPart, 0, (size+partSize-1)/partSize)
+
+	for offset := int64(0); offset < size; offset += partSize {
+		end := min(offset+partSize, size) - 1
+		partNum := int32(len(parts) + 1) //nolint:gosec // bounded by size/partSize, far below int32
+
+		out, copyErr := client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+			Bucket:          aws.String(b.bucket),
+			Key:             aws.String(dst),
+			UploadId:        aws.String(uploadID),
+			PartNumber:      aws.Int32(partNum),
+			CopySource:      aws.String(source),
+			CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", offset, end)),
+		})
+		if copyErr != nil {
+			b.metricsCollector.RecordError(copyErr)
+			return b.translateError(copyErr, "CopyObject", src)
+		}
+
+		parts = append(parts, s3types.CompletedPart{
+			ETag:       out.CopyPartResult.ETag,
+			PartNumber: aws.Int32(partNum),
+		})
+	}
+
+	if _, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(b.bucket),
+		Key:             aws.String(dst),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
+	}); err != nil {
+		b.metricsCollector.RecordError(err)
+		translated := b.translateError(err, "CopyObject", src)
+		b.healthTracker.RecordError("s3-writes", translated)
+
+		return translated
+	}
+
+	completed = true
 	b.healthTracker.RecordSuccess("s3-writes")
 
 	return nil

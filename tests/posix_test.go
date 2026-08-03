@@ -461,6 +461,23 @@ func (m *MockBackend) SetObjectMetadata(ctx context.Context, key string, meta ma
 	return nil
 }
 
+// CopyObject copies the bytes and the metadata together, which is the property rename depends on: the
+// stored mode, ownership, and content encoding have to arrive at the destination or the renamed file
+// comes back with a different mode, or — if it was compressed — unreadable.
+func (m *MockBackend) CopyObject(ctx context.Context, src, dst string) error {
+	data, exists := m.files[src]
+	if !exists {
+		return os.ErrNotExist
+	}
+
+	m.files[dst] = append([]byte(nil), data...)
+	if m.meta == nil {
+		m.meta = make(map[string]map[string]string)
+	}
+	m.meta[dst] = copyMeta(m.meta[src])
+	return nil
+}
+
 func (m *MockBackend) DeleteObject(ctx context.Context, key string) error {
 	delete(m.files, key)
 	return nil

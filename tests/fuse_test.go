@@ -127,6 +127,23 @@ func (b *MockBackend) ListObjects(ctx context.Context, prefix string, maxKeys in
 	return objects, nil
 }
 
+// CopyObject copies the bytes and the metadata together, which is the property rename depends on: the
+// stored mode, ownership, and content encoding have to arrive at the destination or the renamed file
+// comes back with a different mode, or — if it was compressed — unreadable.
+func (b *MockBackend) CopyObject(ctx context.Context, src, dst string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, exists := b.objects[src]
+	if !exists {
+		return os.ErrNotExist
+	}
+
+	b.objects[dst] = append([]byte(nil), data...)
+	b.meta[dst] = copyMeta(b.meta[src])
+	return nil
+}
+
 func (b *MockBackend) DeleteObject(ctx context.Context, key string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

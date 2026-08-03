@@ -4,6 +4,7 @@ package fuse
 
 import (
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -256,5 +257,51 @@ func TestMountManager_checkMount_InvertedBooleanFixed(t *testing.T) {
 	if expectedMounted != actuallyMounted {
 		t.Errorf("IsMounted()=%v but isAlreadyMounted()=%v — inverted boolean bug may have been re-introduced",
 			expectedMounted, actuallyMounted)
+	}
+}
+
+// TestGetStatsReportsEveryCounter guards a whole class of quiet defect: a counter that is incremented
+// faithfully and then dropped on its way out.
+//
+// GetStats copies field by field, so a field added to Stats and not added there is not a compile error
+// and not a test failure — it is a number that reads zero forever while the operation it counts happens
+// thousands of times. Six were exactly that when this test was written: Creates, Deletes, and Renames,
+// each bumped by its own operation, and the three latency averages, each maintained as an exponential
+// moving average by recordReadTime and its siblings. All six were live and none reached the snapshot.
+//
+// Reflection rather than an enumeration of names, because an enumeration has the same failure mode as
+// the code it checks. It sets every int64 counter to a distinct non-zero value — distinct so that a
+// copy assigning the right field from the wrong source is caught too, which naming them all 1 would
+// not be. time.Duration's Kind is Int64, so the latency fields are covered by the same pass; that is
+// how they were found.
+func TestGetStatsReportsEveryCounter(t *testing.T) {
+	t.Parallel()
+
+	filesystem := NewFileSystem(nil, nil, nil, nil, nil)
+
+	// Written directly rather than by performing operations: the point is the snapshot, and driving a
+	// dozen real operations would need a backend and would still not prove the copy is complete.
+	source := reflect.ValueOf(filesystem.stats).Elem()
+	for i := range source.NumField() {
+		if source.Field(i).Kind() == reflect.Int64 && source.Field(i).CanSet() {
+			source.Field(i).SetInt(int64(i) + 1)
+		}
+	}
+
+	snapshot := reflect.ValueOf(filesystem.GetStats()).Elem()
+	statsType := snapshot.Type()
+
+	for i := range snapshot.NumField() {
+		if snapshot.Field(i).Kind() != reflect.Int64 {
+			continue
+		}
+
+		want := int64(i) + 1
+		if got := snapshot.Field(i).Int(); got != want {
+			t.Errorf("GetStats reports %s = %d, want %d. The counter is incremented by the operation "+
+				"and dropped by the snapshot, so `objectfs stats` reports zero of them no matter how "+
+				"many happen. Add the field to GetStats's copy.",
+				statsType.Field(i).Name, got, want)
+		}
 	}
 }

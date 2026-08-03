@@ -37,6 +37,10 @@ func (m *mockBackend) SetObjectMetadata(ctx context.Context, key string, meta ma
 	return nil
 }
 
+func (m *mockBackend) CopyObject(ctx context.Context, src, dst string) error {
+	return nil
+}
+
 func (m *mockBackend) DeleteObject(ctx context.Context, key string) error {
 	return nil
 }

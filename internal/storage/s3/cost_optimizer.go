@@ -437,10 +437,13 @@ func (co *CostOptimizer) applyOptimization(ctx context.Context, opt TierOptimiza
 	}
 	defer co.backend.clientManager.ReturnPooledClient(client)
 
-	copySource := fmt.Sprintf("%s/%s", co.backend.bucket, opt.ObjectKey)
+	// [Backend.copySource] rather than a bare bucket/key: S3 reads x-amz-copy-source as a URL path, so an
+	// unescaped key containing a space or a "+" names a different object and the transition fails with
+	// NoSuchKey — silently leaving the object in the tier it was supposed to leave, since nothing surfaces
+	// this error to a user.
 	input := &s3.CopyObjectInput{
 		Bucket:            aws.String(co.backend.bucket),
-		CopySource:        aws.String(copySource),
+		CopySource:        aws.String(co.backend.copySource(opt.ObjectKey)),
 		Key:               aws.String(opt.ObjectKey),
 		StorageClass:      s3types.StorageClass(opt.ToTier),
 		MetadataDirective: s3types.MetadataDirectiveCopy,

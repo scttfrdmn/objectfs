@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/scttfrdmn/objectfs/pkg/types"
@@ -539,6 +540,87 @@ func (w *Writer) Discard(key string) error {
 	delete(w.nodes, key)
 
 	return nil
+}
+
+// FlushPrefix makes every buffered key at or under prefix durable, and reports how many it flushed.
+//
+// It exists for rename. A rename is a server-side copy, which acts on objects — so a key whose only
+// content is dirty ranges in memory is invisible to it, and `echo hi > a; mv a b` would copy an object
+// that does not exist yet, then delete the source, then flush the pending ranges back to the *old*
+// key. The file would end up at neither name the user asked for and at the one they renamed away from.
+//
+// Flushing first is the fix rather than moving the pending ranges to the new key, because moving them
+// solves only half of it: a file can be part flushed and part dirty, so the copy needs the object to
+// hold everything before it runs. Making the write path durable up front means the copy sees the whole
+// file, which is also what makes a directory rename tractable — it is a prefix scan over objects, and
+// after this call there is nothing under the prefix that a listing would miss.
+//
+// The prefix is matched on a path boundary, not as a string prefix. "dir" must not match "dir2/f", and
+// treating it as a bare prefix is the defect keyMatches had in the cache layer. An empty prefix matches
+// every key, which is what a rename of the root would need and no caller asks for.
+func (w *Writer) FlushPrefix(ctx context.Context, prefix string) (int, error) {
+	w.mu.Lock()
+	keys := make([]string, 0, len(w.nodes))
+	for k := range w.nodes {
+		if underPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	w.mu.Unlock()
+
+	// Sorted so a failure reports a deterministic key. The map iteration order otherwise makes the
+	// error message differ run to run for the same fault, which is the kind of thing that turns a
+	// reproducible bug report into an unreproducible one.
+	sort.Strings(keys)
+
+	flushed := 0
+	for _, k := range keys {
+		if err := w.FlushContext(ctx, k); err != nil {
+			// Stopping at the first failure, unlike FlushAll. FlushAll is the unmount path, where every
+			// key not attempted is data lost for good, so it presses on. Here the caller is about to copy
+			// and then *delete* these keys, and continuing would hand it a namespace it believes is fully
+			// durable when one file is not — so the rename must not proceed.
+			return flushed, fmt.Errorf("flush %q before renaming %q: %w", k, prefix, err)
+		}
+		flushed++
+	}
+
+	return flushed, nil
+}
+
+// DiscardPrefix drops everything buffered at or under prefix without storing it.
+//
+// The delete-side counterpart to [Writer.FlushPrefix], on the reasoning [Writer.Discard] gives for a
+// single key: a rename's source keys are deleted, and a pending write surviving that delete is PUT back
+// by the next flush, resurrecting the file at the name it was moved away from. A directory rename needs
+// this over a prefix because it deletes a prefix.
+func (w *Writer) DiscardPrefix(prefix string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for k := range w.nodes {
+		if underPrefix(k, prefix) {
+			delete(w.nodes, k)
+		}
+	}
+}
+
+// underPrefix reports whether key is prefix itself or lies beneath it.
+//
+// The boundary check is the point. A bare strings.HasPrefix makes "dir" match "dir2/file", so renaming
+// dir would move dir2's contents — and that is not a hypothetical spelling mistake, it is exactly the
+// bug the cache's keyMatches had, found in the same audit.
+func underPrefix(key, prefix string) bool {
+	switch {
+	case prefix == "":
+		return true
+	case key == prefix:
+		return true
+	default:
+		trimmed := strings.TrimSuffix(prefix, "/")
+
+		return strings.HasPrefix(key, trimmed+"/")
+	}
 }
 
 // Size returns the total number of dirty bytes buffered across every key. It implements

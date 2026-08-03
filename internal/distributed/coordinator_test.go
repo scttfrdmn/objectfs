@@ -54,7 +54,8 @@ func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[str
 func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return nil
 }
-func (m *mockBackend) DeleteObject(_ context.Context, _ string) error { return nil }
+func (m *mockBackend) CopyObject(_ context.Context, _, _ string) error { return nil }
+func (m *mockBackend) DeleteObject(_ context.Context, _ string) error  { return nil }
 func (m *mockBackend) HeadObject(_ context.Context, key string) (*types.ObjectInfo, error) {
 	return &types.ObjectInfo{Key: key}, nil
 }
@@ -83,7 +84,8 @@ func (e *errBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[stri
 func (e *errBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return e.err
 }
-func (e *errBackend) DeleteObject(_ context.Context, _ string) error { return e.err }
+func (e *errBackend) CopyObject(_ context.Context, _, _ string) error { return e.err }
+func (e *errBackend) DeleteObject(_ context.Context, _ string) error  { return e.err }
 func (e *errBackend) HeadObject(_ context.Context, _ string) (*types.ObjectInfo, error) {
 	return nil, e.err
 }

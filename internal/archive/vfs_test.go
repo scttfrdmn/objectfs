@@ -34,6 +34,18 @@ func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[str
 func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return nil
 }
+
+// CopyObject copies the stored bytes rather than no-opping, because this mock's reads come out of the
+// same map: a copy that recorded nothing would leave dst absent while reporting success, and a caller
+// checking whether the copy landed would read a not-found as a copy bug.
+func (m *mockBackend) CopyObject(_ context.Context, src, dst string) error {
+	data, ok := m.objects[src]
+	if !ok {
+		return fmt.Errorf("mockBackend: not found: %q", src)
+	}
+	m.objects[dst] = data
+	return nil
+}
 func (m *mockBackend) DeleteObject(_ context.Context, _ string) error { return nil }
 func (m *mockBackend) HeadObject(_ context.Context, _ string) (*types.ObjectInfo, error) {
 	return nil, nil

@@ -260,6 +260,7 @@ type Stats struct {
 	Writes  int64 `json:"writes"`
 	Creates int64 `json:"creates"`
 	Deletes int64 `json:"deletes"`
+	Renames int64 `json:"renames"`
 
 	// Data transfer
 	BytesRead    int64 `json:"bytes_read"`
@@ -351,6 +352,17 @@ func (fs *FileSystem) countCacheMiss() {
 }
 
 // GetStats returns current filesystem statistics
+// GetStats returns a snapshot of the counters.
+//
+// Every field of [Stats] is copied, and that is the whole reason this comment exists: the field list
+// named nine of fifteen. Creates, Deletes, and Renames were incremented by their operations and
+// reported as zero, and the three latency averages were computed by [FileSystem.recordReadTime] and its
+// siblings — an exponential moving average per operation — and then dropped on the way out. The
+// counters existed, the operations maintained them, and `objectfs stats` said nothing had happened.
+//
+// A field added to Stats and not added here fails in exactly that way: not a compile error, not a test
+// failure, just a number that is always zero. TestGetStatsReportsEveryCounter is what catches it, by
+// reflection rather than by a second list that could go stale the same way.
 func (fs *FileSystem) GetStats() *Stats {
 	fs.stats.mu.RLock()
 	defer fs.stats.mu.RUnlock()
@@ -360,19 +372,57 @@ func (fs *FileSystem) GetStats() *Stats {
 		Opens:        fs.stats.Opens,
 		Reads:        fs.stats.Reads,
 		Writes:       fs.stats.Writes,
+		Creates:      fs.stats.Creates,
+		Deletes:      fs.stats.Deletes,
+		Renames:      fs.stats.Renames,
 		BytesRead:    fs.stats.BytesRead,
 		BytesWritten: fs.stats.BytesWritten,
 		CacheHits:    fs.stats.CacheHits,
 		CacheMisses:  fs.stats.CacheMisses,
 		Errors:       fs.stats.Errors,
+
+		AvgReadTime:   fs.stats.AvgReadTime,
+		AvgWriteTime:  fs.stats.AvgWriteTime,
+		AvgLookupTime: fs.stats.AvgLookupTime,
 	}
 }
 
 // DirectoryNode represents a directory in the filesystem
 type DirectoryNode struct {
 	fs.Inode
-	fs   *FileSystem
-	path string
+	fs *FileSystem
+
+	// path is the key prefix this directory stands for, and it is mutable — see [DirectoryNode.key].
+	pathMu sync.RWMutex
+	path   string
+}
+
+// key returns the object key prefix this node currently stands for.
+//
+// # Why this is not a plain field read
+//
+// A rename moves the node rather than replacing it. go-fuse's bridge, on a Rename that returns success,
+// calls Inode.MvChild (fs/inode.go), which re-parents *the same* *Inode — so the DirectoryNode or
+// FileNode it carries survives the rename with whatever path it was constructed with. Every operation
+// afterwards on the moved dentry would address the key the file was moved *away* from: `mv a b` followed
+// by a write to b would flush to a, recreating the source and leaving b as the user found it.
+//
+// So the path has to be updated in place, which makes it mutable, which makes it shared state — the
+// kernel issues concurrent operations against the same node, so a rename storing a new path while a read
+// takes the old one is a data race in the literal -race sense. Hence the lock rather than a bare
+// assignment.
+func (n *DirectoryNode) key() string {
+	n.pathMu.RLock()
+	defer n.pathMu.RUnlock()
+
+	return n.path
+}
+
+// setKey repoints this node at a new prefix. See [DirectoryNode.key] for why it exists.
+func (n *DirectoryNode) setKey(path string) {
+	n.pathMu.Lock()
+	defer n.pathMu.Unlock()
+	n.path = path
 }
 
 // Lookup resolves one path component.
@@ -470,7 +520,10 @@ func (n *DirectoryNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 // Dot entries are not emitted. go-fuse synthesizes "." and ".." in readDirMaybeLookup, and a stream
 // that supplies its own gets them twice.
 func (n *DirectoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	prefix := n.path
+	// Read once. Taking it twice would let a concurrent rename list one prefix and report another.
+	dirPath := n.key()
+
+	prefix := dirPath
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
@@ -478,7 +531,7 @@ func (n *DirectoryNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 	objects, err := n.fs.backend.ListObjects(ctx, prefix, 0)
 	if err != nil {
 		n.fs.countError()
-		slog.Error("readdir failed", "path", n.path, "error", err)
+		slog.Error("readdir failed", "path", dirPath, "error", err)
 
 		return nil, toErrno(err)
 	}
@@ -774,8 +827,26 @@ func (n *DirectoryNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 // [FileNode.attr] for where the answer comes from instead.
 type FileNode struct {
 	fs.Inode
-	fs   *FileSystem
-	path string
+	fs *FileSystem
+
+	// path is the object key this file stands for, mutable for the reason [DirectoryNode.key] gives.
+	pathMu sync.RWMutex
+	path   string
+}
+
+// key returns the object key this node currently stands for. See [DirectoryNode.key].
+func (f *FileNode) key() string {
+	f.pathMu.RLock()
+	defer f.pathMu.RUnlock()
+
+	return f.path
+}
+
+// setKey repoints this node at a new key. See [DirectoryNode.key].
+func (f *FileNode) setKey(path string) {
+	f.pathMu.Lock()
+	defer f.pathMu.Unlock()
+	f.path = path
 }
 
 // Open opens a file.
@@ -793,7 +864,7 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 	}
 
 	openFile := &OpenFile{
-		path:        f.path,
+		path:        f.key(),
 		lastAccess:  time.Now(),
 		accessCount: 1,
 	}
@@ -1219,10 +1290,11 @@ func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
 // Helper methods for DirectoryNode
 
 func (n *DirectoryNode) joinPath(name string) string {
-	if n.path == "" {
+	dirPath := n.key()
+	if dirPath == "" {
 		return name
 	}
-	return filepath.Join(n.path, name)
+	return filepath.Join(dirPath, name)
 }
 
 // newFileEntry builds the inode and the kernel entry for a regular file found under this directory.

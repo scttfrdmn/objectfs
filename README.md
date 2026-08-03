@@ -43,7 +43,7 @@
 > | **C4** | Read amplification was keyed off the compression *config*, not the object, so a ranged read fetched the whole object | A 4 KiB read of a 10 GiB object transferred 10 GiB. Measured 216× penalty on a 256 MiB object |
 > | **C2** | Reading an object whose stored `Content-Encoding` did not match the configured codec returned raw compressed bytes with exit status 0 | Corruption presented as success. The `objectfs-sha256` the write path recorded was never read |
 > | **H5/H6** | The read cache was keyed on request *length* and never invalidated on write | Structurally could not hit; read-after-write on one descriptor returned pre-write bytes |
-> | **D11** | `rm` reported success while the S3 object survived | go-fuse's default for an unimplemented `Unlink` is *success*. Deletion now fails loudly (#163) |
+> | **D11** | `rm` reported success while the S3 object survived | go-fuse's default for an unimplemented `Unlink` is *success*, so v0.10.0 answered every `rm` with exit 0 and deleted nothing. `Unlink` and `Rmdir` are implemented now (#163) |
 >
 > To check a bucket written by v0.10.0: compare each object's `objectfs-sha256` user-metadata against
 > its content, and check that `HeadObject`'s `ContentLength` matches the size your application wrote.
@@ -67,9 +67,10 @@ sequential reads of reference data, multi-terabyte datasets that will not fit on
 shared buckets read by many nodes.
 
 It is **not** a general-purpose POSIX filesystem, and the gap is not small — see
-[Supported filesystem operations](#supported-filesystem-operations). S3 has no rename, no hard
-links, no partial object write, and no atomic anything, and where a POSIX operation cannot be
-implemented honestly on top of that, ObjectFS returns an error rather than pretending.
+[Supported filesystem operations](#supported-filesystem-operations). S3 has no atomic rename, no
+hard links, no partial object write, and no atomic anything across more than one object, and where a
+POSIX operation cannot be implemented honestly on top of that, ObjectFS either returns an error
+rather than pretending, or documents exactly how far short of the POSIX guarantee it falls.
 
 **Platforms:** Linux and macOS (macOS needs [macFUSE](https://macfuse.io)). **Windows is not
 supported** — there is no WinFsp binding, and none is claimed until one exists and runs in CI.
@@ -97,6 +98,40 @@ or "slow".
 | chmod / chown | `chmod`, `chown` | On **files** only, stored as object metadata. Permission bits only |
 | utimes (mtime) | `touch`, `utimensat` | mtime is stored; an atime-only update is accepted and not stored |
 | statfs | `df` | Reports a fixed synthetic capacity — S3 has no size to report |
+| Unlink | `unlink`, `rm` | Deletes the object. A missing file is `ENOENT`, not a silent success |
+| Rmdir | `rmdir`, `rm -d` | Removes the marker object. A non-empty prefix is `ENOTEMPTY` — it will not orphan the objects under it |
+| Rename / move | `rename`, `mv` | Server-side copy then delete, per object; a directory moves everything under its prefix. **Not atomic** — see [Rename is not atomic](#rename-is-not-atomic). `renameat2`'s `RENAME_EXCHANGE` and `RENAME_NOREPLACE` are refused with `EINVAL` |
+
+#### Rename is not atomic
+
+POSIX `rename` is atomic: an observer sees the old name or the new one, never both and never
+neither. S3 offers nothing that can implement that. There is no atomic rename operation — the 2026
+`RenameObject` API is directory-bucket (S3 Express) only, and object annotations, which ObjectFS
+needs for attributes, are unsupported on directory buckets, so the two features are mutually
+exclusive. A rename is therefore a server-side copy followed by a delete, per object.
+
+What that means in practice:
+
+- **A concurrent reader can see both names**, for as long as the copy-then-delete takes. It can also
+  see the source after the destination already exists.
+- **An interruption — crash, `SIGKILL`, lost network — leaves the data at the old name, the new
+  name, or both. Never at neither.** Each source object is deleted only after its own copy has
+  succeeded. Duplicated data is an operator's cleanup problem; missing data is not recoverable, so
+  the ordering is fixed in that direction deliberately.
+- **A partial directory move is resumable.** Re-running the same `mv` copies whatever is still at the
+  source and deletes it, and objects already moved are simply absent from the source listing.
+- **`renameat2` flags are refused rather than approximated.** `RENAME_EXCHANGE` and
+  `RENAME_NOREPLACE` are atomicity promises — swap two names with no observable intermediate state,
+  fail if the destination exists with no race — and copy-then-delete cannot keep either. They return
+  `EINVAL`, which is what the kernel and libc expect for an unsupported flag, and `mv` and Git fall
+  back correctly on it.
+- **Renaming a directory costs one copy and one delete per object beneath it**, charged and rate-
+  limited as such. It is not a metadata operation.
+- **Renaming across mounts is `EXDEV`**, so `mv` falls back to copy-and-unlink through user space.
+
+Anything that depends on rename atomicity — the write-temp-then-rename idiom used by editors, `git`,
+and lockfile schemes — is therefore not safe here between concurrent writers. Single-writer use is
+fine.
 
 ### Errors by design
 
@@ -114,11 +149,8 @@ These fail, and the failure is the correct answer rather than a missing feature.
 
 | Operation | Current behaviour | Tracked |
 |---|---|---|
-| `unlink` / `rm` | **`EROFS`** — fails loudly rather than reporting a delete that did not happen | [#163](https://github.com/scttfrdmn/objectfs/issues/163) |
-| `rmdir` | **`EROFS`**, same reason | [#163](https://github.com/scttfrdmn/objectfs/issues/163) |
 | `chmod` / `chown` on a **directory** | **`ENOTSUP`** — the marker object could carry the metadata, but `Getattr` does not read it back, so accepting the call would report a mode the next `stat` contradicts | [#165](https://github.com/scttfrdmn/objectfs/issues/165) |
-| `rename` / `mv` | **`ENOTSUP`** — go-fuse's default for an absent `NodeRenamer` | S3 has no rename; it must be implemented as copy-then-delete, which is neither atomic nor free |
-| Symlinks (`symlink`, `readlink`) | **`ENOTSUP`** | Same: no `NodeSymlinker`/`NodeReadlinker` |
+| Symlinks (`symlink`, `readlink`) | **`ENOTSUP`** | No `NodeSymlinker`/`NodeReadlinker` |
 | Extended attributes (`getxattr`, `setxattr`, `listxattr`) | **`ENODATA`** on Linux / **`ENOATTR`** on macOS for get and remove; `listxattr` returns an empty list | go-fuse's defaults. An empty list is the accurate answer — there are no xattrs — but note that `setxattr` reports "no such attribute" rather than "unsupported" |
 | `mknod` (devices, FIFOs, sockets) | **`ENOTSUP`** | |
 | `fallocate` | **`ENOTSUP`** | |
@@ -128,11 +160,11 @@ These fail, and the failure is the correct answer rather than a missing feature.
 
 Not because of a bug, but because of the semantics above. Verified, not assumed:
 
-- **`rm`, `rm -rf`, and anything that unlinks** — `EROFS` until [#163](https://github.com/scttfrdmn/objectfs/issues/163). This includes `git checkout` of a branch that deletes files, and any build system that cleans. `mv` within the mount fails earlier, with `ENOTSUP`, because there is no rename.
 - **SQLite, and anything using POSIX record locks** — locks are not forwarded to the filesystem, so they are host-local and invisible to any other mount of the same bucket. Two hosts will both believe they hold the same exclusive lock. A single writer with no concurrent readers may work; do not rely on it.
-- **`git` on a repository inside the mount** — needs rename, unlink, and locking.
-- **`tar -x` and `rsync --delete`** — both unlink.
+- **`git` on a repository inside the mount** — locking is host-local, and Git's index and lockfile updates rely on rename being atomic, which it is not. A single-writer clone will mostly work; two hosts against one bucket will corrupt the repository, and no error will say so.
+- **Anything using the write-temp-then-rename idiom for atomic replacement** — editors that save that way, and lockfile schemes built on `RENAME_NOREPLACE`. The replacement happens, it just is not atomic; `RENAME_NOREPLACE` is refused outright with `EINVAL`. See [Rename is not atomic](#rename-is-not-atomic).
 - **Anything expecting `mmap` writeback to be atomic or ordered.**
+- **`rsync --delete` and `tar -x` over an existing tree** work now that unlink and rename do, but note that both make a directory rename cost one copy plus one delete per object underneath rather than a single metadata write.
 
 Large sequential reads, `cp` into the mount, and read-only traversal of a dataset are the paths that
 are tested hardest and the ones ObjectFS is for.
@@ -173,6 +205,10 @@ guaranteed and — more usefully — what is not.
 - **There is no atomicity across a write.** A crash mid-flush leaves the object as it was, or as it
   will be — S3 PUTs are atomic per object — but a multi-object operation has no transaction, and
   nothing is journaled.
+- **Rename is not atomic, and a directory rename is not even single-object.** An interruption leaves
+  the data at the old name, the new name, or both — never at neither, because each source is deleted
+  only after its own copy succeeds. See [Rename is not atomic](#rename-is-not-atomic) for what a
+  concurrent reader can observe.
 - **There is no concurrent-writer safety.** Two nodes writing the same object will produce one
   winner and no error. Nothing detects the conflict, because `PutObject` carries no precondition
   today.

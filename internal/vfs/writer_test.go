@@ -45,6 +45,12 @@ type fakeBackend struct {
 	// setMetaErr fails SetObjectMetadata, which is the attribute-only write path.
 	setMetaErr error
 
+	// copyErr and deleteErr fail CopyObject and DeleteObject. Rename is a copy then a delete, and the
+	// two failures are not interchangeable: a failed copy leaves the source alone, while a failed delete
+	// after a successful copy leaves the file at both paths.
+	copyErr   error
+	deleteErr error
+
 	// setMetaSilentlyIgnores makes SetObjectMetadata return success and store nothing. This is not a
 	// hypothetical: S3 has no metadata-update operation, so the real implementation is a self-copy with
 	// MetadataDirective=REPLACE, and an endpoint that does not implement the directive answers 200 while
@@ -223,11 +229,48 @@ func (f *fakeBackend) HeadObject(_ context.Context, key string) (*types.ObjectIn
 	}, nil
 }
 
+// CopyObject moves the metadata with the bytes. A fake that copied only the content would let a rename
+// pass while the destination came back with default attributes — or, for a compressed object, with no
+// Content-Encoding and so unreadable. That is audit finding L26, and a fake that cannot express it
+// cannot catch it.
+//
+// copyErr, when set, fails the copy: rename has to be able to tell a failed copy from a failed delete,
+// because the two leave the filesystem in different states.
+func (f *fakeBackend) CopyObject(_ context.Context, src, dst string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.record("CopyObject(%q -> %q)", src, dst)
+	if f.copyErr != nil {
+		return f.copyErr
+	}
+
+	data, ok := f.objects[src]
+	if !ok {
+		return errNotFound
+	}
+
+	f.objects[dst] = append([]byte(nil), data...)
+	f.meta[dst] = copyMetaMap(f.meta[src])
+	return nil
+}
+
 func (f *fakeBackend) DeleteObject(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.record("DeleteObject(%q)", key)
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.objects, key)
 	return nil
+}
+
+// copyMetaMap returns a copy of m, so the source and destination of a copy do not share a map.
+func copyMetaMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	maps.Copy(out, m)
+	return out
 }
 
 func (f *fakeBackend) GetObjects(context.Context, []string) (map[string][]byte, error) {

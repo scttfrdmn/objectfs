@@ -37,6 +37,24 @@ func SeedAccessPatternForTest(b *Backend, pattern AccessPattern) {
 	b.costOptimizer.putPattern(pattern)
 }
 
+// SetCopyThresholdsForTest lowers the size at which CopyObject switches to a multipart copy, and the
+// size of each part it then copies.
+//
+// Without it the multipart copy path needs an object larger than S3's 5 GiB single-part copy limit.
+// Creating one costs real storage and hours of transfer, so that branch would go untested — and a
+// mutation removing the routing entirely produced no test failure, which is exactly what "untested"
+// looks like from the inside. Scaling the thresholds down instead exercises the same code with a few
+// kilobytes: the part loop, the CopySourceRange arithmetic, the metadata that has to be restated
+// because MetadataDirective=COPY is unavailable on a multipart upload, and the deferred abort.
+//
+// What it does not test is S3's 5 MB minimum for a non-final part, which a scaled-down part size
+// violates. Real S3 answers EntityTooSmall at Complete; the emulator does not enforce it below the
+// threshold, so this is a known limit of the scaled test rather than something it verifies.
+func SetCopyThresholdsForTest(b *Backend, singlePartLimit, partSize int64) {
+	b.singlePartCopyLimit = singlePartLimit
+	b.copyPartSize = partSize
+}
+
 // ReadyToTripForTest exposes the CircuitBreakerConfig → predicate translation.
 //
 // A nil return is meaningful, not an absence: it is how the mapping says "use circuit's proportional
