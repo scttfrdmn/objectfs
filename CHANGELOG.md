@@ -269,7 +269,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`pricing.region` selected nothing, so every cost figure was us-east-1's, labelled with whatever
+- **The compressed-upload bypass is pinned by a test that asserts the routing, not just its result**
+  ([#153]). The corruption itself was fixed in 0.10.1 — a compressed object no longer goes through the
+  CargoShip transporter, which cannot set `Content-Encoding` — but the test covering it asserted only
+  that the stored object carried the header. That is the property users need and it is one step removed
+  from the mechanism: it would also pass if the transporter had acquired header support, and it would
+  keep passing if the bypass were replaced by anything else that happened to produce a correct object.
+
+  The new test asserts which upload path ran, using the `cargoship-created-by` metadata the transporter
+  stamps on everything it uploads. It has a control half that is equally load-bearing: a 1 KiB object,
+  below the compression threshold, **must** carry the stamp. Without that half the test would pass on a
+  build where the transporter never runs at all, silently measuring a disabled feature instead of the
+  bypass. Both halves were verified by mutation — removing the bypass fails the assertion, and disabling
+  CargoShip fails the control.
+
+  Filed upstream as [scttfrdmn/cargoship#353]: `Archive` has no field that maps to `Content-Encoding`,
+  and neither transporter sets the header, still true in v0.20.0. `CompressionType` looks like the field
+  and is not — `buildMetadata` puts it in user metadata. Until that lands, ObjectFS gives up CargoShip's
+  throughput for exactly the objects that compressed.
+
+- **`pricing.region` selected nothing, so every cost figure was us-east-1's, labeled with whatever
   region the operator configured** ([#161]). The rates lived in a map built at package init, and package
   init cannot see a configuration. `PricingConfig.Region` was read at exactly one line in
   `internal/storage/s3` — a summary field — while every number came from the region-blind map, and the
@@ -794,6 +813,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a region to `ForRegion`.
 
 [scttfrdmn/cargoship#352]: https://github.com/scttfrdmn/cargoship/issues/352
+[scttfrdmn/cargoship#353]: https://github.com/scttfrdmn/cargoship/issues/353
+[#153]: https://github.com/scttfrdmn/objectfs/issues/153
 [#154]: https://github.com/scttfrdmn/objectfs/issues/154
 [#134]: https://github.com/scttfrdmn/objectfs/issues/134
 [#135]: https://github.com/scttfrdmn/objectfs/issues/135
