@@ -84,8 +84,8 @@ go build ./...      # verify compilation
 Nothing to set. This section told you to export `GOPRIVATE` and `GONOSUMDB` for
 `github.com/scttfrdmn/*` because the module was private; objectfs, cargoship, and substrate are all
 public now, and `go get github.com/scttfrdmn/objectfs` resolves through the module proxy with both
-variables explicitly empty — verified, not assumed. `sdks/c/Makefile` still sets them, which is
-harmless and no longer necessary.
+variables explicitly empty — verified, not assumed. `sdks/c/Makefile` was the last place still
+setting them; that has been removed too, so no copy of the claim survives to go stale.
 
 ### AWS Credentials
 
