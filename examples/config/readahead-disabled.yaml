@@ -1,0 +1,32 @@
+# ObjectFS Configuration - Read-ahead Off
+# Best for: Random-access workloads, databases on the mount, egress you want to account for exactly
+#
+# This file was readahead-simple.yaml, a preset for `strategy: simple` — one of three values a
+# `strategy` key took. No strategy selector was ever implemented: there is one prefetcher, a sequential
+# detector, and the key was decoded into a field nothing read
+# (https://github.com/scttfrdmn/objectfs/issues/176). The honest form of "no pattern detection, no
+# prefetching", which is what that preset described, is read-ahead off.
+#
+# readahead-ml.yaml was deleted rather than rewritten for the same reason. It set `strategy: ml`,
+# `enable_ml_prediction: true` and an `ml_model_path` pointing at a model file; there is no model loader
+# on this path, and a preset cannot be corrected into configuring a feature that does not exist.
+
+performance:
+  cache_size: 2GB
+  write_buffer_size: 16MB
+  max_concurrency: 150
+
+  read_ahead:
+    # Off. Every read fetches exactly what was asked for and nothing else, which is what a random reader
+    # wants: a prefetch behind a random read is pure egress. It also makes bytes-transferred equal to
+    # bytes-read, which is the property you want when measuring, or when billing back.
+    #
+    # `enabled: false` is the only way to turn this off. The settings below are still parsed for
+    # syntax — a value that is not a size is reported as a typo whichever way this flag is set — but
+    # their semantics are not checked and none of them reaches the prefetcher.
+    enabled: false
+
+    window_size: 64KB
+    min_sequential: 6
+    concurrent_reads: 4
+    ttl: 5m

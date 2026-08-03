@@ -17,7 +17,6 @@ func newTestRAM(minSeq int, ttl time.Duration) *ReadAheadManager {
 	cfg := &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 * 1024,
-		MaxDistance:     1024 * 1024,
 		MinSequential:   minSeq,
 		ConcurrentReads: 0, // no prefetch workers → nil fs is safe
 		TTL:             ttl,
@@ -33,7 +32,6 @@ func TestReadAheadManager_DefaultConfig(t *testing.T) {
 	cfg := &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 * 1024,
-		MaxDistance:     1024 * 1024,
 		MinSequential:   3,
 		ConcurrentReads: 0,
 		TTL:             5 * time.Minute,
@@ -297,6 +295,12 @@ func TestStats_AllCounters(t *testing.T) {
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
+// TestReadAheadConfig_DefaultValues pins the values a nil config falls back to.
+//
+// Written as a literal rather than a comparison against [DefaultReadAheadConfig] on purpose: this test
+// exists to catch a change to those defaults, and comparing the function against itself would pass
+// through any edit. internal/config's TestReadAheadDefaultsAreTheManagersOwn asserts the same numbers
+// from the other side, so a change here without a change there fails there.
 func TestReadAheadConfig_DefaultValues(t *testing.T) {
 	t.Parallel()
 
@@ -304,23 +308,87 @@ func TestReadAheadConfig_DefaultValues(t *testing.T) {
 	ram := NewReadAheadManager(nil, nil)
 	defer ram.Stop()
 
-	cfg := ram.config
-	if !cfg.Enabled {
-		t.Error("expected Enabled=true")
+	want := ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      64 * 1024,
+		MinSequential:   3,
+		ConcurrentReads: 4,
+		TTL:             5 * time.Minute,
 	}
-	if cfg.WindowSize != 64*1024 {
-		t.Errorf("WindowSize: want %d, got %d", 64*1024, cfg.WindowSize)
+
+	if ram.config == nil {
+		t.Fatal("a nil config left the manager with no config at all")
 	}
-	if cfg.MaxDistance != 1024*1024 {
-		t.Errorf("MaxDistance: want %d, got %d", 1024*1024, cfg.MaxDistance)
+
+	if *ram.config != want {
+		t.Errorf("a nil config did not fall back to the documented defaults:\n got: %+v\nwant: %+v",
+			*ram.config, want)
 	}
-	if cfg.MinSequential != 3 {
-		t.Errorf("MinSequential: want 3, got %d", cfg.MinSequential)
+
+	if got := DefaultReadAheadConfig(); got != want {
+		t.Errorf("DefaultReadAheadConfig has drifted from the nil-config fallback, so a mount "+
+			"(which goes through config) and a directly-constructed manager would prefetch "+
+			"differently:\n got: %+v\nwant: %+v", got, want)
 	}
-	if cfg.ConcurrentReads != 4 {
-		t.Errorf("ConcurrentReads: want 4, got %d", cfg.ConcurrentReads)
+}
+
+// TestNewFileSystemPassesTheConfiguredReadAhead asserts the plumbed value reaches the manager.
+//
+// This is #176's seam. performance.read_ahead was decoded, validated, documented in five shipped preset
+// files and read by nothing, because NewFileSystem constructed the manager with a literal nil. Deleting
+// `config.ReadAhead` from that call — the mutation that reintroduces the defect — fails this test on
+// every field.
+func TestNewFileSystemPassesTheConfiguredReadAhead(t *testing.T) {
+	t.Parallel()
+
+	// Nothing here is a default: every value differs from DefaultReadAheadConfig, so a manager running
+	// on the defaults fails on each field rather than coincidentally matching.
+	want := ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      256 * 1024,
+		MinSequential:   7,
+		ConcurrentReads: 0, // no prefetch workers: the nil backend below is never dereferenced
+		TTL:             90 * time.Second,
 	}
-	if cfg.TTL != 5*time.Minute {
-		t.Errorf("TTL: want 5m, got %v", cfg.TTL)
+
+	fs := NewFileSystem(nil, nil, nil, nil, &Config{
+		MountPoint: t.TempDir(),
+		ReadAhead:  &want,
+	})
+	t.Cleanup(fs.readAhead.Stop)
+
+	if fs.readAhead == nil {
+		t.Fatal("no read-ahead manager was constructed")
+	}
+
+	if fs.readAhead.config == nil {
+		t.Fatal("the configured read-ahead settings did not reach the manager: its config is nil, " +
+			"which is the state that made performance.read_ahead inert (#176)")
+	}
+
+	if *fs.readAhead.config != want {
+		t.Errorf("the read-ahead manager is not running the configured settings, so every "+
+			"performance.read_ahead key in a user's config file is ignored:\n got: %+v\nwant: %+v",
+			*fs.readAhead.config, want)
+	}
+}
+
+// TestNewFileSystemFallsBackWhenReadAheadIsUnset covers the other arm.
+//
+// Nil is a real state on this path — an internal caller that builds a [Config] by hand, and every
+// mount before #176 — and it must mean "the manager's own defaults", not "no prefetching".
+func TestNewFileSystemFallsBackWhenReadAheadIsUnset(t *testing.T) {
+	t.Parallel()
+
+	fs := NewFileSystem(nil, nil, nil, nil, &Config{MountPoint: t.TempDir()})
+	t.Cleanup(fs.readAhead.Stop)
+
+	if fs.readAhead == nil || fs.readAhead.config == nil {
+		t.Fatal("a Config with no ReadAhead left the filesystem with no read-ahead manager")
+	}
+
+	if got := *fs.readAhead.config; got != DefaultReadAheadConfig() {
+		t.Errorf("a Config with no ReadAhead did not fall back to DefaultReadAheadConfig:\n"+
+			" got: %+v\nwant: %+v", got, DefaultReadAheadConfig())
 	}
 }

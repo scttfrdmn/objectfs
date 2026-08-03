@@ -188,6 +188,13 @@ type Config struct {
 
 	// CacheTTL is how long the kernel may cache an attribute set, as returned by Getattr and Setattr.
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+
+	// ReadAhead configures the sequential-read prefetcher; nil takes [DefaultReadAheadConfig].
+	//
+	// No yaml tag, unlike its neighbors, because it would be the fourth name for one setting: the
+	// operator-facing names are config.ReadAheadConfig's, and nothing decodes YAML into this type
+	// anyway. The tags above are kept only because they predate that discovery.
+	ReadAhead *ReadAheadConfig
 }
 
 // OpenFile is the per-descriptor state one open(2) produced.
@@ -316,7 +323,10 @@ func NewFileSystem(backend types.Backend, cache types.Cache, buffer *vfs.Writer,
 	// holding OLD left the file reading OLD. It also discarded the buffer's write errors. The write
 	// path now coalesces adjacent and overlapping ranges itself, last-writer-wins, in the one place
 	// that owns the dirty state; see internal/vfs.ExtentList.Add.
-	filesystem.readAhead = NewReadAheadManager(filesystem, nil)
+	//
+	// config.ReadAhead, not nil. This argument was nil, which meant performance.read_ahead was decoded,
+	// validated, documented in five shipped preset files, and read by nothing (#176).
+	filesystem.readAhead = NewReadAheadManager(filesystem, config.ReadAhead)
 
 	return filesystem
 }

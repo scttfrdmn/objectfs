@@ -188,6 +188,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 			MaxWrite: 128 * 1024,
 			Debug:    false,
 		},
+		ReadAhead: a.buildReadAheadConfig(),
 	}
 
 	a.mountMgr = fuse.CreatePlatformMountManager(a.backend, a.cache, a.writeBuffer, a.metrics, mountConfig)
@@ -531,6 +532,32 @@ func (a *Adapter) buildS3Config() *s3.Config {
 	//     on EC2 and for anyone using AWS_PROFILE. A YAML key for a long-lived secret invites it
 	//     into version control.
 	return cfg
+}
+
+// buildReadAheadConfig maps performance.read_ahead onto the read-ahead manager's configuration.
+//
+// This mapping is the whole of #176. The block was decoded, validated key by key, shipped in five
+// preset files under examples/config/, and never reached the manager: NewFileSystem passed nil, so
+// every mount ran the manager's own defaults no matter what the file said. The two structs also
+// disagreed about what read-ahead was — twenty keys describing a strategy selector with ML hooks
+// against six fields implementing a sequential detector — so the config block shrank to the
+// implementation's knobs rather than the mapping growing to invent the rest.
+//
+// A disabled block returns a config with Enabled false rather than nil, because nil means "use the
+// defaults" and the defaults have read-ahead on. Returning nil for `enabled: false` would turn
+// read-ahead off in the configuration and leave it running.
+func (a *Adapter) buildReadAheadConfig() *fuse.ReadAheadConfig {
+	ra := a.config.Performance.ReadAhead
+	defaults := fuse.DefaultReadAheadConfig()
+
+	return &fuse.ReadAheadConfig{
+		Enabled: ra.Enabled,
+		WindowSize: a.sizeOrDefault("performance.read_ahead.window_size",
+			ra.WindowSize, defaults.WindowSize),
+		MinSequential:   ra.MinSequential,
+		ConcurrentReads: ra.ConcurrentReads,
+		TTL:             ra.TTL,
+	}
 }
 
 // buildRetryConfig maps network.retry onto the retryer's configuration.

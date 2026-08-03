@@ -1,501 +1,272 @@
 package config
 
 import (
-	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
-// TestReadAheadConfig_Defaults tests the default read-ahead configuration
-func TestReadAheadConfig_Defaults(t *testing.T) {
+// TestReadAheadDefaultsAreTheManagersOwn asserts the mount and the manager agree on the defaults.
+//
+// These two default sets were unequal for four releases and it did not show, because the mount path
+// constructed the manager with nil and the config block reached nothing (#176). config said a 64 MB
+// read-ahead with a "predictive" strategy; the manager ran a 64 KiB window with a sequential detector;
+// mounts ran the manager's. Now that the block is wired, a divergence would mean a mount and a
+// directly-constructed manager behave differently on the same defaults, so it is asserted rather than
+// maintained by eye.
+//
+// Deliberately not comparing against fuse.DefaultReadAheadConfig by import: internal/fuse is
+// linux||darwin-tagged and importing it here would tie this package's tests to a build tag. The values
+// are duplicated with the source named instead, and TestBuildReadAheadConfigMapsEveryConfiguredValue in
+// internal/adapter closes the loop by asserting the mapped output against the manager's own type.
+func TestReadAheadDefaultsAreTheManagersOwn(t *testing.T) {
+	t.Parallel()
+
+	ra := NewDefault().Performance.ReadAhead
+
+	// fuse.DefaultReadAheadConfig, internal/fuse/optimizations.go.
+	want := ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      "64KB",
+		MinSequential:   3,
+		ConcurrentReads: 4,
+		TTL:             5 * time.Minute,
+	}
+
+	if ra != want {
+		t.Errorf("the mount default and the read-ahead manager's own default disagree, so a mount and a "+
+			"directly-constructed manager would prefetch differently with no configuration at all:\n"+
+			" config.NewDefault: %+v\n fuse.DefaultReadAheadConfig: %+v", ra, want)
+	}
+}
+
+// TestValidateRejectsEachWayReadAheadCanBeWrong covers the values the manager cannot run with.
+//
+// Every case here is a value that reaches code. That is the change: validation used to range-check
+// sequential_threshold, learning_rate, pattern_depth, prefetch_bandwidth_mbs and five more, none of
+// which any code read — so a mount could be refused over a setting that would have done nothing had it
+// been accepted, and a user whose file was rejected for an out-of-range learning_rate reasonably
+// concluded the accepted values did something.
+func TestValidateRejectsEachWayReadAheadCanBeWrong(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*ReadAheadConfig)
+		mustSay string
+	}{
+		{
+			name:    "no prefetch workers",
+			mutate:  func(ra *ReadAheadConfig) { ra.ConcurrentReads = 0 },
+			mustSay: "concurrent_reads",
+		},
+		{
+			name:    "negative prefetch workers",
+			mutate:  func(ra *ReadAheadConfig) { ra.ConcurrentReads = -1 },
+			mustSay: "concurrent_reads",
+		},
+		{
+			name:    "prefetching before any sequential read",
+			mutate:  func(ra *ReadAheadConfig) { ra.MinSequential = 0 },
+			mustSay: "min_sequential",
+		},
+		{
+			name:    "patterns expire immediately",
+			mutate:  func(ra *ReadAheadConfig) { ra.TTL = 0 },
+			mustSay: "ttl",
+		},
+		{
+			name:    "no prefetch floor",
+			mutate:  func(ra *ReadAheadConfig) { ra.WindowSize = "" },
+			mustSay: "window_size",
+		},
+		{
+			name:    "unparseable prefetch floor",
+			mutate:  func(ra *ReadAheadConfig) { ra.WindowSize = "64 kilobytes" },
+			mustSay: "window_size",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := NewDefault()
+			tc.mutate(&cfg.Performance.ReadAhead)
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("this configuration validated, so a mount would come up with read-ahead in a "+
+					"state the manager cannot run: %+v", cfg.Performance.ReadAhead)
+			}
+
+			if !strings.Contains(err.Error(), tc.mustSay) {
+				t.Errorf("the error does not name the key to edit; want it to mention %q, got: %v",
+					tc.mustSay, err)
+			}
+		})
+	}
+}
+
+// TestValidateIgnoresADisabledReadAheadBlock asserts the requirements lift when read-ahead is off.
+//
+// Same reasoning as a disabled listener's address: refusing to start over a value nothing will read is
+// the defect this change fixed, pointing the other way. An operator who turned read-ahead off should not
+// have to also supply a worker count and a TTL for a prefetcher that will not run.
+//
+// window_size is left syntactically valid and empty-tested separately below, because the two checks over
+// it are different questions and only one of them is conditional. validateSizes asks "is this a size",
+// which is a typo either way and is reported whether the feature is on or off; validateReadAheadConfig
+// asks "is a floor required here", and that is what enabled governs.
+func TestValidateIgnoresADisabledReadAheadBlock(t *testing.T) {
+	t.Parallel()
+
+	for _, windowSize := range []string{"", "64KB"} {
+		t.Run("window_size="+windowSize, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := NewDefault()
+			cfg.Performance.ReadAhead = ReadAheadConfig{
+				Enabled:         false,
+				WindowSize:      windowSize,
+				MinSequential:   -5,
+				ConcurrentReads: 0,
+				TTL:             0,
+			}
+
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("a disabled read-ahead block failed validation, so a mount is refused over "+
+					"settings that will not be read: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateReportsAnUnparseableWindowSizeEvenWhenDisabled pins the unconditional half.
+//
+// A value that is not a size at all is a typo, and reporting it only when the feature happens to be
+// enabled means an operator fixes it once, turns read-ahead on months later, and is met with a
+// validation failure over a line they have not touched. This is the one read-ahead check that does not
+// respect `enabled`, and it is deliberate rather than an oversight in the test above.
+func TestValidateReportsAnUnparseableWindowSizeEvenWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewDefault()
+	cfg.Performance.ReadAhead.Enabled = false
+	cfg.Performance.ReadAhead.WindowSize = "not a size"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("an unparseable window_size was accepted because read-ahead was disabled, so the typo " +
+			"is only reported when the operator later turns the feature on")
+	}
+
+	if !strings.Contains(err.Error(), "window_size") {
+		t.Errorf("the error does not name the key to fix; got: %v", err)
+	}
+}
+
+// TestValidateReportsAUnitlessReadAheadTTLEvenWhenDisabled pins the other unconditional check.
+//
+// `ttl: 5` is 5 nanoseconds, because yaml.v2 reads a bare integer into a time.Duration as a raw
+// nanosecond count and reports nothing. That is the same trap as an unparseable window_size — a typo,
+// not a setting — so it is caught whether the block is enabled or not, and by validateDurations rather
+// than validateReadAheadConfig, which returns early on a disabled block.
+//
+// TestEveryDurationInTheSchemaIsValidated already fails if this key leaves the list, by walking the
+// schema with reflection; that is how the omission was found when #176 gave read-ahead a duration.
+// This test is here because the walk sets the field on a default (enabled) config and so proves only
+// the enabled half.
+func TestValidateReportsAUnitlessReadAheadTTLEvenWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewDefault()
+	cfg.Performance.ReadAhead.Enabled = false
+	cfg.Performance.ReadAhead.TTL = 5 // "ttl: 5" in YAML: five nanoseconds.
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("a 5ns read-ahead ttl was accepted because read-ahead was disabled, so the missing unit " +
+			"is only reported once the operator turns the feature on — in a release that changed nothing " +
+			"about the line")
+	}
+
+	if !strings.Contains(err.Error(), "read_ahead.ttl") {
+		t.Errorf("the error does not name the key to fix; got: %v", err)
+	}
+}
+
+// TestLoadFromEnvGovernsReadAhead asserts each read-ahead variable reaches its field.
+//
+// Not parallel: t.Setenv forbids it.
+//
+// The three variables this replaces — OBJECTFS_READAHEAD_STRATEGY, _PATTERN_DETECTION and
+// _ML_PREDICTION — are gone with the fields they assigned to. So is OBJECTFS_READ_AHEAD_SIZE, whose
+// target performance.read_ahead_size was a second, separately-defaulted name for the same quantity as
+// performance.read_ahead.size, and both were read by nothing.
+func TestLoadFromEnvGovernsReadAhead(t *testing.T) {
+	t.Setenv("OBJECTFS_READAHEAD_ENABLED", "false")
+	t.Setenv("OBJECTFS_READAHEAD_WINDOW_SIZE", "256KB")
+	t.Setenv("OBJECTFS_READAHEAD_MIN_SEQUENTIAL", "9")
+	t.Setenv("OBJECTFS_READAHEAD_CONCURRENT_READS", "2")
+
 	cfg := NewDefault()
 
+	// Asserting false against a default of true only means something if the default is true.
 	if !cfg.Performance.ReadAhead.Enabled {
-		t.Error("Expected read-ahead to be enabled by default")
+		t.Fatal("read-ahead must default to enabled for the assertion below to distinguish " +
+			"'the variable was applied' from 'the field was already false'")
 	}
 
-	if cfg.Performance.ReadAhead.Size != "64MB" {
-		t.Errorf("Expected default read-ahead size to be 64MB, got %s", cfg.Performance.ReadAhead.Size)
+	if err := cfg.LoadFromEnv(); err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
 	}
 
-	if cfg.Performance.ReadAhead.Strategy != "predictive" {
-		t.Errorf("Expected default strategy to be 'predictive', got %s", cfg.Performance.ReadAhead.Strategy)
+	ra := cfg.Performance.ReadAhead
+
+	if ra.Enabled {
+		t.Error("OBJECTFS_READAHEAD_ENABLED=false did not turn read-ahead off, so an operator who " +
+			"exported it to stop prefetch traffic and its egress is still paying for it")
 	}
 
-	if !cfg.Performance.ReadAhead.EnablePatternDetection {
-		t.Error("Expected pattern detection to be enabled by default")
+	if ra.WindowSize != "256KB" {
+		t.Errorf("OBJECTFS_READAHEAD_WINDOW_SIZE did not reach the prefetch floor: got %q", ra.WindowSize)
 	}
 
-	if cfg.Performance.ReadAhead.SequentialThreshold != 0.7 {
-		t.Errorf("Expected default sequential threshold to be 0.7, got %f", cfg.Performance.ReadAhead.SequentialThreshold)
+	if ra.MinSequential != 9 {
+		t.Errorf("OBJECTFS_READAHEAD_MIN_SEQUENTIAL did not reach the field: got %d", ra.MinSequential)
 	}
 
-	if !cfg.Performance.ReadAhead.EnablePrefetch {
-		t.Error("Expected prefetch to be enabled by default")
-	}
-
-	if cfg.Performance.ReadAhead.MaxConcurrentFetch != 4 {
-		t.Errorf("Expected default max concurrent fetch to be 4, got %d", cfg.Performance.ReadAhead.MaxConcurrentFetch)
-	}
-
-	if cfg.Performance.ReadAhead.PrefetchAhead != 3 {
-		t.Errorf("Expected default prefetch ahead to be 3, got %d", cfg.Performance.ReadAhead.PrefetchAhead)
-	}
-
-	if cfg.Performance.ReadAhead.PrefetchBandwidthMBs != 10 {
-		t.Errorf("Expected default prefetch bandwidth to be 10 MB/s, got %d", cfg.Performance.ReadAhead.PrefetchBandwidthMBs)
-	}
-
-	if cfg.Performance.ReadAhead.ConfidenceThreshold != 0.7 {
-		t.Errorf("Expected default confidence threshold to be 0.7, got %f", cfg.Performance.ReadAhead.ConfidenceThreshold)
-	}
-
-	if cfg.Performance.ReadAhead.EnableMLPrediction {
-		t.Error("Expected ML prediction to be disabled by default")
-	}
-
-	if cfg.Performance.ReadAhead.LearningRate != 0.01 {
-		t.Errorf("Expected default learning rate to be 0.01, got %f", cfg.Performance.ReadAhead.LearningRate)
-	}
-
-	if !cfg.Performance.ReadAhead.MetricsEnabled {
-		t.Error("Expected metrics to be enabled by default")
+	if ra.ConcurrentReads != 2 {
+		t.Errorf("OBJECTFS_READAHEAD_CONCURRENT_READS did not reach the worker count: got %d",
+			ra.ConcurrentReads)
 	}
 }
 
-// TestReadAheadConfig_Validation tests validation of read-ahead configuration
-func TestReadAheadConfig_Validation(t *testing.T) {
-	tests := []struct {
-		name        string
-		modifier    func(*Configuration)
-		expectError bool
-	}{
-		{
-			name: "valid configuration",
-			modifier: func(c *Configuration) {
-				// Default config is valid
-			},
-			expectError: false,
-		},
-		{
-			name: "invalid strategy",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.Strategy = "invalid"
-			},
-			expectError: true,
-		},
-		{
-			name: "sequential threshold too low",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.SequentialThreshold = -0.1
-			},
-			expectError: true,
-		},
-		{
-			name: "sequential threshold too high",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.SequentialThreshold = 1.5
-			},
-			expectError: true,
-		},
-		{
-			name: "confidence threshold too low",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.ConfidenceThreshold = -0.1
-			},
-			expectError: true,
-		},
-		{
-			name: "confidence threshold too high",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.ConfidenceThreshold = 1.5
-			},
-			expectError: true,
-		},
-		{
-			name: "learning rate too low",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.LearningRate = -0.1
-			},
-			expectError: true,
-		},
-		{
-			name: "learning rate too high",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.LearningRate = 1.5
-			},
-			expectError: true,
-		},
-		{
-			name: "negative prediction window",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PredictionWindow = -1
-			},
-			expectError: true,
-		},
-		{
-			name: "zero max concurrent fetch",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.MaxConcurrentFetch = 0
-			},
-			expectError: true,
-		},
-		{
-			name: "negative max concurrent fetch",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.MaxConcurrentFetch = -1
-			},
-			expectError: true,
-		},
-		{
-			name: "negative prefetch ahead",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PrefetchAhead = -1
-			},
-			expectError: true,
-		},
-		{
-			name: "negative prefetch bandwidth",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PrefetchBandwidthMBs = -1
-			},
-			expectError: true,
-		},
-		{
-			name: "negative pattern depth",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PatternDepth = -1
-			},
-			expectError: true,
-		},
-		{
-			name: "ML prediction enabled without model path",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.EnableMLPrediction = true
-				c.Performance.ReadAhead.MLModelPath = ""
-			},
-			expectError: true,
-		},
-		{
-			name: "ML prediction enabled with model path",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.EnableMLPrediction = true
-				c.Performance.ReadAhead.MLModelPath = "/path/to/model"
-			},
-			expectError: false,
-		},
-	}
+// TestLoadFromEnvRefusesANonNumericReadAheadCount asserts the integer variables report a bad value.
+//
+// Not parallel: t.Setenv forbids it.
+//
+// These two return their error rather than ignoring it, unlike OBJECTFS_MAX_CONCURRENCY beside them,
+// which discards a parse failure and leaves the default in place. Both of these are counts whose
+// silent default is a different behavior an operator did not ask for — a worker count especially,
+// where the value governs how much prefetch traffic a mount generates.
+func TestLoadFromEnvRefusesANonNumericReadAheadCount(t *testing.T) {
+	for _, envVar := range []string{
+		"OBJECTFS_READAHEAD_MIN_SEQUENTIAL",
+		"OBJECTFS_READAHEAD_CONCURRENT_READS",
+	} {
+		t.Run(envVar, func(t *testing.T) {
+			t.Setenv(envVar, "several")
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewDefault()
-			tt.modifier(cfg)
-
-			err := cfg.Validate()
-			if tt.expectError && err == nil {
-				t.Error("Expected validation error, got nil")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Expected no validation error, got: %v", err)
-			}
-		})
-	}
-}
-
-// TestReadAheadConfig_EnvironmentVariables tests environment variable loading
-func TestReadAheadConfig_EnvironmentVariables(t *testing.T) {
-	// Save original environment and restore after test
-	originalEnv := map[string]string{
-		"OBJECTFS_READAHEAD_ENABLED":           os.Getenv("OBJECTFS_READAHEAD_ENABLED"),
-		"OBJECTFS_READAHEAD_SIZE":              os.Getenv("OBJECTFS_READAHEAD_SIZE"),
-		"OBJECTFS_READAHEAD_STRATEGY":          os.Getenv("OBJECTFS_READAHEAD_STRATEGY"),
-		"OBJECTFS_READAHEAD_PATTERN_DETECTION": os.Getenv("OBJECTFS_READAHEAD_PATTERN_DETECTION"),
-		"OBJECTFS_READAHEAD_PREFETCH":          os.Getenv("OBJECTFS_READAHEAD_PREFETCH"),
-		"OBJECTFS_READAHEAD_ML_PREDICTION":     os.Getenv("OBJECTFS_READAHEAD_ML_PREDICTION"),
-	}
-	defer func() {
-		for key, val := range originalEnv {
-			if val != "" {
-				if err := os.Setenv(key, val); err != nil {
-					t.Errorf("Failed to restore env var %s: %v", key, err)
-				}
-			} else {
-				if err := os.Unsetenv(key); err != nil {
-					t.Errorf("Failed to unset env var %s: %v", key, err)
-				}
-			}
-		}
-	}()
-
-	tests := []struct {
-		name     string
-		envVars  map[string]string
-		validate func(*testing.T, *Configuration)
-	}{
-		{
-			name: "enabled via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_ENABLED": "true",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if !cfg.Performance.ReadAhead.Enabled {
-					t.Error("Expected read-ahead to be enabled via environment variable")
-				}
-			},
-		},
-		{
-			name: "disabled via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_ENABLED": "false",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if cfg.Performance.ReadAhead.Enabled {
-					t.Error("Expected read-ahead to be disabled via environment variable")
-				}
-			},
-		},
-		{
-			name: "custom size via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_SIZE": "128MB",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if cfg.Performance.ReadAhead.Size != "128MB" {
-					t.Errorf("Expected read-ahead size to be 128MB, got %s", cfg.Performance.ReadAhead.Size)
-				}
-			},
-		},
-		{
-			name: "strategy via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_STRATEGY": "ml",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if cfg.Performance.ReadAhead.Strategy != "ml" {
-					t.Errorf("Expected strategy to be 'ml', got %s", cfg.Performance.ReadAhead.Strategy)
-				}
-			},
-		},
-		{
-			name: "pattern detection disabled via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_PATTERN_DETECTION": "false",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if cfg.Performance.ReadAhead.EnablePatternDetection {
-					t.Error("Expected pattern detection to be disabled via environment variable")
-				}
-			},
-		},
-		{
-			name: "prefetch disabled via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_PREFETCH": "false",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if cfg.Performance.ReadAhead.EnablePrefetch {
-					t.Error("Expected prefetch to be disabled via environment variable")
-				}
-			},
-		},
-		{
-			name: "ML prediction enabled via environment",
-			envVars: map[string]string{
-				"OBJECTFS_READAHEAD_ML_PREDICTION": "true",
-			},
-			validate: func(t *testing.T, cfg *Configuration) {
-				if !cfg.Performance.ReadAhead.EnableMLPrediction {
-					t.Error("Expected ML prediction to be enabled via environment variable")
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Clear environment
-			for key := range originalEnv {
-				if err := os.Unsetenv(key); err != nil {
-					t.Fatalf("Failed to unset env var %s: %v", key, err)
-				}
+			err := NewDefault().LoadFromEnv()
+			if err == nil {
+				t.Fatalf("%s=several was accepted, so the value was silently discarded and the mount "+
+					"runs a count the operator did not choose", envVar)
 			}
 
-			// Set test environment variables
-			for key, val := range tt.envVars {
-				if err := os.Setenv(key, val); err != nil {
-					t.Fatalf("Failed to set env var %s: %v", key, err)
-				}
-			}
-
-			cfg := NewDefault()
-			if err := cfg.LoadFromEnv(); err != nil {
-				t.Fatalf("Failed to load from environment: %v", err)
-			}
-
-			tt.validate(t, cfg)
-		})
-	}
-}
-
-// TestReadAheadConfig_Strategies tests different strategy configurations
-func TestReadAheadConfig_Strategies(t *testing.T) {
-	tests := []struct {
-		name                string
-		strategy            string
-		enablePrediction    bool
-		enableML            bool
-		mlModelPath         string
-		expectValidationErr bool
-	}{
-		{
-			name:                "simple strategy",
-			strategy:            "simple",
-			enablePrediction:    false,
-			enableML:            false,
-			mlModelPath:         "",
-			expectValidationErr: false,
-		},
-		{
-			name:                "predictive strategy",
-			strategy:            "predictive",
-			enablePrediction:    true,
-			enableML:            false,
-			mlModelPath:         "",
-			expectValidationErr: false,
-		},
-		{
-			name:                "ml strategy with model",
-			strategy:            "ml",
-			enablePrediction:    true,
-			enableML:            true,
-			mlModelPath:         "/path/to/model",
-			expectValidationErr: false,
-		},
-		{
-			name:                "ml strategy without model",
-			strategy:            "ml",
-			enablePrediction:    true,
-			enableML:            true,
-			mlModelPath:         "",
-			expectValidationErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewDefault()
-			cfg.Performance.ReadAhead.Strategy = tt.strategy
-			cfg.Performance.ReadAhead.EnablePatternDetection = tt.enablePrediction
-			cfg.Performance.ReadAhead.EnableMLPrediction = tt.enableML
-			cfg.Performance.ReadAhead.MLModelPath = tt.mlModelPath
-
-			err := cfg.Validate()
-			if tt.expectValidationErr && err == nil {
-				t.Error("Expected validation error, got nil")
-			}
-			if !tt.expectValidationErr && err != nil {
-				t.Errorf("Expected no validation error, got: %v", err)
-			}
-		})
-	}
-}
-
-// TestReadAheadConfig_BoundaryValues tests boundary value conditions
-func TestReadAheadConfig_BoundaryValues(t *testing.T) {
-	tests := []struct {
-		name     string
-		modifier func(*Configuration)
-		valid    bool
-	}{
-		{
-			name: "sequential threshold at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.SequentialThreshold = 0.0
-			},
-			valid: true,
-		},
-		{
-			name: "sequential threshold at 1",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.SequentialThreshold = 1.0
-			},
-			valid: true,
-		},
-		{
-			name: "confidence threshold at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.ConfidenceThreshold = 0.0
-			},
-			valid: true,
-		},
-		{
-			name: "confidence threshold at 1",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.ConfidenceThreshold = 1.0
-			},
-			valid: true,
-		},
-		{
-			name: "learning rate at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.LearningRate = 0.0
-			},
-			valid: true,
-		},
-		{
-			name: "learning rate at 1",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.LearningRate = 1.0
-			},
-			valid: true,
-		},
-		{
-			name: "prediction window at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PredictionWindow = 0
-			},
-			valid: true,
-		},
-		{
-			name: "max concurrent fetch at 1",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.MaxConcurrentFetch = 1
-			},
-			valid: true,
-		},
-		{
-			name: "prefetch ahead at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PrefetchAhead = 0
-			},
-			valid: true,
-		},
-		{
-			name: "prefetch bandwidth at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PrefetchBandwidthMBs = 0
-			},
-			valid: true,
-		},
-		{
-			name: "pattern depth at 0",
-			modifier: func(c *Configuration) {
-				c.Performance.ReadAhead.PatternDepth = 0
-			},
-			valid: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewDefault()
-			tt.modifier(cfg)
-
-			err := cfg.Validate()
-			if tt.valid && err != nil {
-				t.Errorf("Expected validation to pass, got error: %v", err)
-			}
-			if !tt.valid && err == nil {
-				t.Error("Expected validation to fail, got nil")
+			if !strings.Contains(err.Error(), envVar) {
+				t.Errorf("the error does not name the variable to fix; got: %v", err)
 			}
 		})
 	}

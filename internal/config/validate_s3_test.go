@@ -168,15 +168,17 @@ func TestValidateRejectsUnusableS3Settings(t *testing.T) {
 // including "" — would make a partial config file impossible. Overriding one key would require
 // supplying every size in the schema, which is the opposite of how these files are meant to work
 // and would have broken every existing deployment on upgrade.
+//
+// performance.read_ahead.window_size is deliberately absent from this list: it is the one size that
+// must be set when its feature is enabled, because empty is a prefetch floor of zero rather than the
+// documented default, and validateReadAheadConfig rejects it by name.
+// TestValidateRejectsEachWayReadAheadCanBeWrong covers that direction.
 func TestValidateAcceptsAbsentOptionalSizes(t *testing.T) {
 	t.Parallel()
 
 	cfg := NewDefault()
 
 	cfg.Performance.WriteBufferSize = ""
-	cfg.Performance.ReadAheadSize = ""
-	cfg.Performance.ReadAhead.Size = ""
-	cfg.Performance.ReadAhead.SequentialMinSize = ""
 	cfg.Performance.ParallelRead.Threshold = ""
 	cfg.Performance.ParallelRead.ChunkSize = ""
 	cfg.Cache.PersistentCache.MaxSize = ""

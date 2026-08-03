@@ -47,6 +47,11 @@ type MountConfig struct {
 	MountPoint  string        `yaml:"mount_point"`
 	Options     *MountOptions `yaml:"options"`
 	Permissions *Permissions  `yaml:"permissions"`
+
+	// ReadAhead configures the sequential-read prefetcher. Nil takes
+	// [DefaultReadAheadConfig], which is what every caller got unconditionally before
+	// performance.read_ahead was wired (#176).
+	ReadAhead *ReadAheadConfig
 }
 
 // MountOptions contains FUSE mount options.

@@ -526,8 +526,13 @@ network:
 		yaml: `performance:
   cache_size: 3GB
   write_buffer_size: 24MB
-  read_ahead_size: 2MB
   connection_pool_size: 12
+  read_ahead:
+    enabled: true
+    window_size: 2MB
+    min_sequential: 8
+    concurrent_reads: 3
+    ttl: 2m
   parallel_read:
     enabled: true
     threshold: 48MB

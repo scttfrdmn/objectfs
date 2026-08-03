@@ -1,46 +1,36 @@
-# NOT YET WIRED — see https://github.com/scttfrdmn/objectfs/issues/176
-#
-# The performance.read_ahead block below is validated at load and read by nothing: ObjectFS
-# constructs its read-ahead manager with a nil config and uses that manager's own built-in
-# defaults (64 KB window, 1 MB max distance, 3 sequential reads, 4 concurrent). Copying this file
-# will not change read-ahead behavior. It is kept as a record of the intended shape of the
-# setting, not as a working preset.
-#
 # ObjectFS Configuration - Low Bandwidth / Conservative
-# Best for: Limited bandwidth, mobile, cost-sensitive environments
+# Best for: Limited or metered bandwidth, cost-sensitive deployments, egress-billed links
+#
+# See the header of readahead-streaming.yaml for why this block has five keys and not twenty
+# (https://github.com/scttfrdmn/objectfs/issues/176).
+#
+# Read-ahead is left *on* here rather than disabled, which is the point of a conservative preset:
+# prefetching only ever happens after several consecutive sequential reads, so on a random workload it
+# does nothing at all and there is nothing to save by turning it off. What costs money on a metered link
+# is a wrong prefetch, and the settings below make each one small and rare.
 
 performance:
-  cache_size: 1GB                         # Smaller cache
-  write_buffer_size: 8MB                  # Smaller buffers
+  cache_size: 1GB
+  write_buffer_size: 8MB
   max_concurrency: 100
-  read_ahead_size: 32MB                   # Smaller read-ahead
 
-  # Conservative read-ahead configuration
   read_ahead:
     enabled: true
-    size: 16MB                            # Small buffer to save bandwidth
-    strategy: predictive
-    sequential_min_size: 2MB              # Higher threshold for detection
 
-    # Conservative pattern detection
-    enable_pattern_detection: true
-    sequential_threshold: 0.8             # High confidence required (80%)
-    prediction_window: 150                # Larger window for better confidence
+    # The smallest useful floor: one 128KB kernel read. The prefetch length is always at least the
+    # reader's own last read, so this never reads ahead further than the reader is already going. A
+    # wasted prefetch costs one read's worth of egress, not eight.
+    window_size: 128KB
 
-    # Limited prefetching
-    enable_prefetch: true
-    max_concurrent_fetch: 2               # Minimal parallelism
-    prefetch_ahead: 2                     # Fetch less ahead
-    prefetch_bandwidth_mbs: 5             # Limited bandwidth (5 MB/s)
-    confidence_threshold: 0.8             # High confidence required
+    # Wait for a longer run before believing the reader is sequential. This is the knob that decides how
+    # often a prefetch is wasted; 12 consecutive sequential reads is a strong signal. Above 6 this is
+    # the only threshold in play — below it a separate confidence floor governs instead (#247).
+    min_sequential: 12
 
-    # ML disabled to save resources
-    enable_ml_prediction: false
-    ml_model_path: ''
-    learning_rate: 0.01
-    pattern_depth: 500                    # Shallower analysis
+    # One prefetch in flight. Prefetches compete with real reads for the connection pool and for
+    # bandwidth, and on a constrained link that competition is the latency an interactive read sees.
+    concurrent_reads: 1
 
-    # Minimal metrics overhead
-    metrics_enabled: true
-    statistics_interval: 60s              # Less frequent monitoring
-    model_update_interval: 10m
+    # Forget an idle pattern quickly. A stale pattern is how a reader that has moved on gets one more
+    # prefetch charged to it.
+    ttl: 1m

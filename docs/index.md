@@ -35,7 +35,10 @@ which names them rather than leaving them mixed in with the list above.
 - **TCP congestion control selection**: `congestion_algorithm: bbr` sets `TCP_CONGESTION` per socket
   on Linux ≥ 4.9; ignored on macOS, which has no per-socket equivalent
 - **Parallel I/O**: Concurrent read/write operations
-- **Prefetching**: Smart data prefetching for sequential workloads
+- **Read-ahead**: prefetches ahead of a sequential reader, configured by `performance.read_ahead` —
+  five keys, all of which now reach the prefetcher. The block previously had twenty, describing a
+  strategy selector and an ML predictor, and reached no code at all
+  ([read-ahead](features/read-ahead.md))
 - **Write buffering**: Asynchronous writes with configurable flush policies
 
 ### 💾 S3 Integration
