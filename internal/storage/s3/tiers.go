@@ -291,24 +291,46 @@ func NewTierValidator(tier string, constraints TierConstraints, logger *slog.Log
 
 // ValidateWrite validates a write operation against tier constraints.
 //
-// Note what the minimum check does and does not mean. AWS accepts an object below a tier's minimum
-// billable size and bills it as though it were that size; it does not reject the write. So refusing
-// here is ObjectFS's policy, not S3's behavior, and #154 is about downgrading it to a warning. What
-// #229 fixed is the input: this gate previously refused writes under 40 KB to GLACIER and
-// DEEP_ARCHIVE and under 128 KB to INTELLIGENT_TIERING, and AWS publishes no minimum billable size
-// for any of those three — so it was rejecting writes on the strength of numbers that were not
-// minimums at all. Those three now have no minimum, and the two archive classes warn about their
-// per-object overhead instead, which is the real cost and points the other way.
+// Two different things are checked against a size here, and only one of them can refuse the write.
+//
+// AWS's per-tier minimum is a *billing* floor: S3 accepts a 1-byte STANDARD_IA object and bills it
+// as 128 KiB. It never rejects the write. Refusing it here was therefore ObjectFS policy dressed as
+// S3 behavior, and it made the filesystem unusable rather than expensive — `internal/fuse` creates
+// both directory markers and new files by PUTting zero bytes, so on any tier with a minimum every
+// `mkdir` and every `touch` failed, including the ones an IA-tier test needs to set itself up. It is
+// a warning now, reporting the size that will be billed alongside the size that was written (#154).
+//
+// `TierConstraints.MinObjectSize` is the one that still errors. An operator who sets it has asked
+// for a floor that is not AWS's, and a policy nobody configured is the only kind worth removing.
+// Note the consequence of that split, because it is easy to configure by accident: setting the
+// constraint to the tier's own published minimum restores the old behavior in full, zero-byte
+// directory markers included.
+//
+// What #229 fixed is the input to all of this: the gate previously refused writes under 40 KB to
+// GLACIER and DEEP_ARCHIVE and under 128 KB to INTELLIGENT_TIERING, and AWS publishes no minimum
+// billable size for any of those three — so it was rejecting writes on the strength of numbers that
+// were not minimums at all. Those three now have no minimum, and the two archive classes warn about
+// their per-object overhead instead, which is the real cost and points the other way.
 func (tv *TierValidator) ValidateWrite(key string, dataSize int64) error {
-	// Check minimum object size constraint
-	minSize := tv.tierInfo.MinObjectSize
-	if tv.constraints.MinObjectSize > 0 {
-		minSize = tv.constraints.MinObjectSize
+	// The operator's floor, if there is one: a deliberate policy, still enforced.
+	if minSize := tv.constraints.MinObjectSize; minSize > 0 && dataSize < minSize {
+		return fmt.Errorf("object size %d bytes is below the configured minimum of %d bytes for the "+
+			"%s tier (tier_constraints.min_object_size); AWS would accept this write and bill it as "+
+			"%d bytes, so this refusal is ObjectFS policy — unset that key to allow it",
+			dataSize, minSize, tv.tier, minSize)
 	}
 
-	if dataSize < minSize {
-		return fmt.Errorf("object size %d bytes is below minimum %d bytes for %s tier",
-			dataSize, minSize, tv.tier)
+	// AWS's billing floor: not a reason to refuse, but worth saying out loud, because the object
+	// costs a multiple of what its size suggests and nothing downstream will mention it again.
+	if minBillable := tv.tierInfo.MinObjectSize; minBillable > 0 && dataSize < minBillable {
+		tv.logger.Warn("object is smaller than this tier's minimum billable size",
+			"tier", tv.tier,
+			"key", key,
+			"size", dataSize,
+			"billed_size", minBillable,
+			"note", "AWS accepts the write and bills it as the minimum; a smaller object on this "+
+				"tier costs the same as one at the minimum, so many small objects here are more "+
+				"expensive than the same bytes on STANDARD")
 	}
 
 	// The archive classes bill 40 KB of metadata per object regardless of its size, so a small object

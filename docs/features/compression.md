@@ -155,9 +155,12 @@ minimum for `GLACIER` and `DEEP_ARCHIVE` and a 128 KB minimum for `INTELLIGENT_T
 AWS publishes. Corrected in [#229](https://github.com/scttfrdmn/objectfs/issues/229), which gave the
 40 KB and the 128 KB fields named for what they are — `PerObjectOverheadBytes` and
 `MonitoringEligibilityBytes` — and pinned all eight classes against the AWS pages linked above in
-`TestTierSizeThresholdsMatchWhatAWSPublishes`. That the table is a *write gate* rather than a billing
-hint remains its own defect ([#154](https://github.com/scttfrdmn/objectfs/issues/154)). The AWS pages
-are the authority, not this page and not that table.
+`TestTierSizeThresholdsMatchWhatAWSPublishes`. The minimum is also no longer a *write gate*: through
+v0.11.0 a write below a tier's minimum was refused, which is not what a billing floor is, and it made
+`mkdir` and `touch` fail on all three of those classes because both create a zero-byte object. It
+warns now, naming the written size and the size that will be billed
+([#154](https://github.com/scttfrdmn/objectfs/issues/154)). The AWS pages are the authority, not this
+page and not that table.
 
 ---
 

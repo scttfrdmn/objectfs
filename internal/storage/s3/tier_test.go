@@ -284,10 +284,15 @@ func TestTierValidator(t *testing.T) {
 	t.Run("Standard-IA Tier Validation", func(t *testing.T) {
 		validator := NewTierValidator(TierStandardIA, TierConstraints{}, logger)
 
-		// Should reject small objects
-		err := validator.ValidateWrite("small.txt", 1024) // 1KB < 128KB minimum
-		if err == nil {
-			t.Error("Standard-IA tier should reject objects smaller than 128KB")
+		// Allowed, and this assertion is the reverse of what it used to be. AWS's 128 KiB minimum is a
+		// billing floor, not an API restriction: S3 stores a 1 KiB STANDARD_IA object and bills it as
+		// 128 KiB. Refusing it here made every mkdir and every touch fail on this tier, because both
+		// PUT zero bytes (#154).
+		err := validator.ValidateWrite("small.txt", 1024)
+		if err != nil {
+			t.Errorf("Standard-IA rejected a 1 KiB write: %v.\nAWS accepts it and bills it as 128 KiB. "+
+				"Refusing it here means a mount on this tier cannot create a directory or an empty "+
+				"file, since both are zero-byte PUTs", err)
 		}
 
 		// Should allow objects >= 128KB

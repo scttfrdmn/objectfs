@@ -92,6 +92,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A mount on `STANDARD_IA`, `ONEZONE_IA`, or `GLACIER_IR` could not create anything at all.**
+  `mkdir` and `touch` both failed, and so did writing any file smaller than 128 KiB ([#154]). AWS's
+  per-tier minimum object size is a *billing* floor — S3 stores a zero-byte `STANDARD_IA` object and
+  bills it as 128 KiB — but `TierValidator.ValidateWrite` enforced it as though S3 would reject the
+  write, and it is called before anything else in `PutObject`. Both of the ways this filesystem
+  brings a name into existence go under that floor: `Mkdir` writes a zero-byte marker object so an
+  empty directory is distinguishable from a prefix that never existed, and a `Create` followed by a
+  small write flushes a small object. So the three tiers most of the cost documentation recommends
+  were the three a filesystem could not be used on, and an IA-tier integration test could not get
+  past its own setup.
+
+  It is a warning now, naming the size written alongside the size that will be billed — which is the
+  actionable fact, since a tier that bills every object as 128 KiB is more expensive than `STANDARD`
+  for a workload of small files, and nothing downstream would have mentioned it. What still refuses
+  a write is `tier_constraints.min_object_size`: an operator who sets that has asked for a floor that
+  is not AWS's, and a policy someone chose is the only kind worth enforcing. Note the consequence of
+  the split, which is tested rather than left to be rediscovered — setting that key to the tier's own
+  published minimum reinstates exactly the old gate, zero-byte directory markers included.
+
+  The gate is enforced two layers below the operation that trips it, so it is pinned at both: the
+  validator's own tests assert a zero-byte write is accepted *and* that the billing warning carries
+  both numbers, and a test in `internal/fuse` drives real `Mkdir` and `Create` calls against a real
+  endpoint on every tier that has a minimum, reading the tier list from `StorageTiers` so a class
+  that gains one later is covered without editing the test. Only the second layer establishes that a
+  `mkdir` is a zero-byte PUT, which is the step that turned a billing gate into an unusable mount.
 - **`chmod` and automatic tier transitions worked on every key except the ones containing a `+`.**
   `x-amz-copy-source` is read by S3 as a URL path, and `url.PathEscape` leaves `+` as itself while S3
   decodes `+` in that header as a space — so a self-copy of `a+b.txt` asked for `a b.txt` and came
@@ -185,6 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   succeeds and that the resulting object is whole, so a lossy reclaim fails rather than passing
   quietly.
 
+[#154]: https://github.com/scttfrdmn/objectfs/issues/154
 [#162]: https://github.com/scttfrdmn/objectfs/issues/162
 [#163]: https://github.com/scttfrdmn/objectfs/issues/163
 [#164]: https://github.com/scttfrdmn/objectfs/issues/164

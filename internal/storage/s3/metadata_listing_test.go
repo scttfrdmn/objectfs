@@ -195,8 +195,9 @@ func TestSetObjectMetadataPreservesStorageClass(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	// Above STANDARD_IA's 128 KiB billing minimum, which the tier's own ValidateWrite enforces on the
-	// way in — a smaller object is refused before there is any metadata to preserve.
+	// Above STANDARD_IA's 128 KiB billing minimum, so the write is not one ValidateWrite warns about.
+	// The size is not load-bearing since #154 — a smaller object is stored, not refused — but keeping
+	// it above the minimum keeps the log clean and the test about metadata.
 	const (
 		key  = "attrs/tiered"
 		size = 192 * 1024
