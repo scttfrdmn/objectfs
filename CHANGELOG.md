@@ -89,6 +89,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dependabot auto-merge, cause five: GitHub Actions cannot approve pull requests** ([#305]). Fixing
+  [#288] made `.github/dependabot.yml` valid, Dependabot re-evaluated it within minutes, and the
+  `automerge` label arrived on all 14 PRs it then opened — the label plumbing works. And still nothing
+  merged, because the step finally *ran* and failed: *"GitHub Actions is not permitted to approve pull
+  requests"* (`can_approve_pull_request_reviews` is false at the repository level). The step body was
+  `gh pr review --approve` followed by `gh pr merge --auto --squash`, under `bash -e` — so the failing
+  first line aborted before the line that does the work.
+
+  The approval was never needed. Branch protection on `main` requires status checks and has
+  `required_pull_request_reviews: null`, so nothing waits on a review. The line is deleted rather than
+  the permission enabled: allowing Actions to approve would let *every* workflow in the repository
+  satisfy a review requirement, to buy something no rule asks for.
+
+  That makes five independent causes for one symptom — 46 PRs opened, 0 merged — and the shape of it is
+  the part worth keeping. Causes 1 and 4 both left the `if:` condition false, so the step was *skipped*
+  and cause 5 could not produce a symptom at all; it became visible minutes after the config fix
+  landed. All five are now enumerated in the workflow header, in the order they were found, with why
+  each hid the next. A fix that should have worked and didn't usually means another cause, not a wrong
+  diagnosis.
+
+[#305]: https://github.com/scttfrdmn/objectfs/issues/305
+
 - **`.github/dependabot.yml` was invalid, so none of it applied** ([#288]). `schedule.time: 09:00` was
   unquoted, and Dependabot's YAML 1.1 parser reads that as a sexagesimal integer where its schema
   requires a string: *"The property '#/updates/0/schedule/time' of type integer did not match the
