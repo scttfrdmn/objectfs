@@ -131,6 +131,10 @@ internal/config          88
 internal/cost            98
 internal/difftest        75
 internal/distributed     67
+# 100, and it can hold there: the package is one type with five methods and two free functions, no
+# I/O, no clock, and no error paths — so there is no code in it that is expensive to reach. A floor
+# below 100 here would only be permission to add an untested branch.
+internal/distributed/hashring 100
 internal/filesystem      88
 # 45 → 48: the previous floor was not a stable measurement. Eight tests started a Monitor whose
 # default Config enables the health endpoint on the fixed port 8081, so each Start raced its siblings

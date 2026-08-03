@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/scttfrdmn/objectfs/internal/distributed/hashring"
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
@@ -319,31 +321,37 @@ func (c *Coordinator) selectTargetNodes(op *DistributedOperation) ([]string, err
 		return nil, fmt.Errorf("no alive nodes available")
 	}
 
+	// GetNodes returns a map, and Go randomizes map iteration order, so aliveNodes arrives in a
+	// different order on every call. Sorting it makes selection a function of the membership set
+	// rather than of the iteration that observed it — which the hash ring guarantees for itself, but
+	// round-robin and the least-load tiebreak do not (#131).
+	sort.Strings(aliveNodes)
+
 	// Select nodes based on operation type and consistency requirements
 	switch op.Type {
 	case OpTypeGet:
 		// For reads, select based on load balancing strategy
-		return c.loadBalancer.SelectNodes(aliveNodes, 1)
+		return c.loadBalancer.SelectNodes(op.Key, aliveNodes, 1)
 
 	case OpTypePut, OpTypeDelete:
 		// For writes, select based on replication factor
 		replicationFactor := min(c.config.ReplicationFactor, len(aliveNodes))
-		return c.loadBalancer.SelectNodes(aliveNodes, replicationFactor)
+		return c.loadBalancer.SelectNodes(op.Key, aliveNodes, replicationFactor)
 
 	case OpTypeList:
 		// For list operations, use the leader or a random node
 		if leader := c.cluster.GetLeader(); leader != "" {
 			return []string{leader}, nil
 		}
-		return c.loadBalancer.SelectNodes(aliveNodes, 1)
+		return c.loadBalancer.SelectNodes(op.Key, aliveNodes, 1)
 
 	case OpTypeBatch:
 		// For batch operations, distribute across multiple nodes
 		nodeCount := min(len(aliveNodes), 3)
-		return c.loadBalancer.SelectNodes(aliveNodes, nodeCount)
+		return c.loadBalancer.SelectNodes(op.Key, aliveNodes, nodeCount)
 
 	default:
-		return c.loadBalancer.SelectNodes(aliveNodes, 1)
+		return c.loadBalancer.SelectNodes(op.Key, aliveNodes, 1)
 	}
 }
 
@@ -852,13 +860,22 @@ func (c *Coordinator) calculateLoadBalancerStats() {
 
 // LoadBalancer methods
 
-// SelectNodes selects nodes based on the load balancing strategy
-func (lb *LoadBalancer) SelectNodes(availableNodes []string, count int) ([]string, error) {
+// SelectNodes selects count nodes to execute an operation on the given key.
+//
+// key is the object key the operation addresses. It is a parameter rather than something the
+// strategies look up because StrategyConsistentHash cannot function without it: the whole point of
+// consistent hashing is that the node is a function of the key, and this method previously took only
+// the node set and the count (#131). Every strategy takes it so that adding a key-dependent strategy
+// is not another signature change, and the strategies that ignore it say so.
+//
+// The returned slice is in preference order: element 0 is the primary. Callers rely on that —
+// Session consistency executes on targetNodes[0] first.
+func (lb *LoadBalancer) SelectNodes(key string, availableNodes []string, count int) ([]string, error) {
 	if count > len(availableNodes) {
 		count = len(availableNodes)
 	}
 
-	if count == 0 {
+	if count <= 0 {
 		return []string{}, nil
 	}
 
@@ -868,7 +885,7 @@ func (lb *LoadBalancer) SelectNodes(availableNodes []string, count int) ([]strin
 	case StrategyLeastLoad:
 		return lb.selectLeastLoad(availableNodes, count)
 	case StrategyConsistentHash:
-		return lb.selectConsistentHash(availableNodes, count)
+		return lb.selectConsistentHash(key, availableNodes, count)
 	default:
 		return availableNodes[:count], nil
 	}
@@ -915,14 +932,27 @@ func (lb *LoadBalancer) selectLeastLoad(nodes []string, count int) ([]string, er
 	return selected, nil
 }
 
-func (lb *LoadBalancer) selectConsistentHash(nodes []string, count int) ([]string, error) {
-	// Simple consistent hash implementation
-	// In practice, you'd use a proper consistent hash ring
-	if len(nodes) <= count {
-		return nodes, nil
+// selectConsistentHash maps key onto nodes with a rendezvous hash ring, so that the same key reaches
+// the same node for as long as that node is alive.
+//
+// This used to be `return nodes[:count]` under a comment saying a real ring belonged here (#131).
+// Since nodes arrives from a map iteration, that returned a different answer on each call for the
+// same key — which is the one property consistent hashing exists to provide, and the property a
+// cache needs in order to hit. See internal/distributed/hashring for the scheme and its bounds.
+//
+// The ring is built per call rather than kept as state on the LoadBalancer. Building it is a sorted
+// insert per node, and the alternative is a ring that has to be kept in step with gossip membership
+// — a second copy of the node set that can disagree with the first. At the node counts here the
+// build is cheaper than being wrong; hashring's benchmarks are what that claim rests on.
+func (lb *LoadBalancer) selectConsistentHash(key string, nodes []string, count int) ([]string, error) {
+	if key == "" {
+		// A keyless operation has nothing to hash. Round-robin is the honest fallback: it does not
+		// pretend to affinity it cannot provide, and it does not silently return nodes[:count],
+		// which would concentrate every keyless operation on whichever node sorted first.
+		return lb.selectRoundRobin(nodes, count)
 	}
 
-	return nodes[:count], nil
+	return hashring.New(nodes...).LookupN(key, count), nil
 }
 
 // GetStats returns coordinator statistics

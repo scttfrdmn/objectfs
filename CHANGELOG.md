@@ -97,6 +97,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LocalStack, and the sprint it named is long past; it now names the specific gap, which is that the
   consensus engine elects leaders and replicates nothing.
 
+- **`StrategyConsistentHash` was not consistent, and could not have been** ([#131]).
+  `selectConsistentHash` was `return nodes[:count]` under a comment saying a real ring belonged there,
+  and its node slice is built by ranging a map — so the same key reached a different node on each
+  call, which is the one property consistent hashing exists to provide. A per-node cache keyed on an
+  assignment that changes per call cannot hit.
+
+  It is now a rendezvous (highest-random-weight) ring in `internal/distributed/hashring`: score every
+  node against the key, take the highest. Removing a node moves only the keys that node owned —
+  measured at about 1/n, and asserted with that bound — rather than remapping everything. Lookup is
+  O(n) in nodes, which the benchmark settles rather than argues: 1555 ns at 100 nodes and 125 ns at 8,
+  zero allocations, three orders of magnitude below the S3 round trip it precedes, so a sorted ring
+  with virtual nodes would be complexity spent on nothing.
+
+  The fix needed a signature change the issue did not mention: `LoadBalancer.SelectNodes` never
+  received the operation key, so no implementation behind it could have hashed by key. It now takes
+  one, which makes the key mandatory at all five call sites instead of something a strategy could
+  silently do without. `selectTargetNodes` also sorts its alive-node slice, because the ring sorts
+  internally but round-robin and the least-load tiebreak index positionally — for those, the order the
+  map happened to be iterated in *was* the decision. A keyless operation (a list with no elected
+  leader, a batch) falls back to round-robin rather than hashing the empty string, which would
+  concentrate every such operation on one node.
+
+  The existing test for this strategy asserted only the returned count, and its own comment described
+  the defect — "returns the requested number of nodes from the front of the list" — as the intended
+  behavior. A count assertion cannot tell a hash ring from a slice prefix, so it now asserts that
+  permuting the input does not change the output, which the prefix fails.
+
+[#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
