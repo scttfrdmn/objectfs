@@ -152,6 +152,7 @@ nav:
   - Architecture:
     - Overview: architecture/overview.md
     - Concurrency Patterns: concurrency-patterns.md
+    - Coordination — Conditional Writes vs Raft: design/conditional-writes-vs-raft.md
     - Vision: VISION.md
     - Design Principles: DESIGN_PRINCIPLES.md
 
