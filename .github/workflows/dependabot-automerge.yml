@@ -62,8 +62,8 @@ jobs:
     # It used to be the first line of this step, and it failed every time: "GitHub Actions is not
     # permitted to approve pull requests" (GraphQL addPullRequestReview), because
     # `can_approve_pull_request_reviews` is false at the repository level. The step runs under
-    # `bash -e`, so that failure aborted before `gh pr merge --auto` was reached — cause 4 of the
-    # 46-PR problem, and the one that only became visible after causes 1 and 3 were fixed and the
+    # `bash -e`, so that failure aborted before `gh pr merge --auto` was reached — cause 5 of the
+    # 46-PR problem, and the one that only became visible after causes 1 and 4 were fixed and the
     # step finally started executing instead of being skipped.
     #
     # The approval was never needed. Branch protection on `main` requires status checks and
