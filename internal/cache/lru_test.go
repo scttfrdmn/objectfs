@@ -237,11 +237,18 @@ func TestLRUCache_EvictionBySize(t *testing.T) {
 	}
 }
 
-// TestLRUCache_TTLExpiration tests TTL-based expiration
+// TestLRUCache_TTLExpiration tests TTL-based expiration.
+//
+// 2s TTL, matching TestPersistentCache_TTLExpiration, which has the full reasoning. This cache is
+// in-memory so the window is far less likely to be missed than the persistent one's — but the shape
+// of the bug is identical, and a test that only usually passes is worth the same as one that
+// usually fails.
 func TestLRUCache_TTLExpiration(t *testing.T) {
+	const ttl = 2 * time.Second
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
-		TTL:     100 * time.Millisecond, // Very short TTL
+		TTL:     ttl,
 	})
 
 	key := "test"
@@ -254,8 +261,7 @@ func TestLRUCache_TTLExpiration(t *testing.T) {
 		t.Error("item should exist immediately after Put")
 	}
 
-	// Wait for TTL to expire
-	time.Sleep(150 * time.Millisecond)
+	expiryWait(ttl)
 
 	// Should be expired
 	retrieved := cache.Get(key, 0, int64(len(data)))
