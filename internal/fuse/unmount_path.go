@@ -83,8 +83,11 @@ func UnmountPath(ctx context.Context, mountPoint string) error {
 		// is spawned, so the path is one argv element and cannot become a second command however it is
 		// punctuated — and the program name comes from the platform table above rather than from input.
 		// What is left is that this unmounts the path it was given, which is the function.
+		// Suppressed twice because there are two gosec runs reading different directives: golangci-lint
+		// honors //nolint:gosec, and the standalone gosec whose SARIF feeds GitHub code scanning honors
+		// only #nosec. One without the other passes the lint job and fails the security check.
 		//nolint:gosec // no shell; the program is from a fixed table and the path is a single argv element
-		out, err := exec.CommandContext(attemptCtx, c.name, c.args...).CombinedOutput()
+		out, err := exec.CommandContext(attemptCtx, c.name, c.args...).CombinedOutput() // #nosec G204 -- no shell; fixed program table, path is one argv element
 		cancel()
 
 		if err == nil {

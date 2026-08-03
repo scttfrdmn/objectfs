@@ -106,10 +106,15 @@ func run(f *offerfile.Fetcher, out string, dryRun bool, timeout time.Duration) e
 	// 0o644, and written whole rather than in place: a partial write here leaves the package
 	// unbuildable, and this file is the only source of every price ObjectFS reports.
 	//
+	// Suppressed twice because there are two gosec runs and they read different directives. golangci-lint
+	// honors //nolint:gosec; the standalone gosec in .github/workflows/security.yml, whose SARIF feeds
+	// GitHub code scanning, honors only #nosec. A finding suppressed in one and not the other passes the
+	// lint job and fails the security check, which is how this line was found.
+	//
 	//nolint:gosec // G306 wants 0o600. The output is Go source that gets committed and compiled into
 	// every build; it holds published AWS list prices and nothing secret, and a file mode narrower
 	// than the rest of the tree's .go files would make it the one source file a reader cannot read.
-	if err := os.WriteFile(out, src, 0o644); err != nil {
+	if err := os.WriteFile(out, src, 0o644); err != nil { // #nosec G306 -- committed Go source, no secrets
 		return fmt.Errorf("write %s: %w", out, err)
 	}
 
