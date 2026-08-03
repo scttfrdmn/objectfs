@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -205,16 +206,38 @@ func closePartialStart(t *testing.T, a *Adapter) {
 	}
 }
 
+// TestMain supplies credentials for the whole package before any test runs.
+//
+// It has to be here rather than in a helper, and the reason is the seam this file is about.
+// buildS3Config deliberately maps no credential fields — a YAML key for a long-lived secret invites it
+// into version control — so an adapter built from a Configuration gets its credentials from the AWS
+// default chain, exactly as a real mount does. With nothing in the environment that chain reaches EC2
+// IMDS and fails, which is what CI does: no credentials, no instance role, and
+// `NewBackend`'s closing HealthCheck fails before the cache is ever built.
+//
+// A developer machine with an AWS profile hides this completely — these tests passed locally with no
+// credentials of their own, because the chain found the ambient ones. So the values are set here, once,
+// for the whole test binary. Not with t.Setenv, which cannot be used from a parallel test and mutates
+// process-wide state that other parallel tests in this package read.
+//
+// The substrate emulator does not verify signatures, so any non-empty pair would do; using testaws's
+// keeps one source for them.
+func TestMain(m *testing.M) {
+	// Errors are impossible for a well-formed name and there is no test scope to report one in.
+	_ = os.Setenv("AWS_ACCESS_KEY_ID", testaws.AccessKeyID)
+	_ = os.Setenv("AWS_SECRET_ACCESS_KEY", testaws.SecretAccessKey)
+
+	os.Exit(m.Run())
+}
+
 // configForSubstrate returns a default config pointed at the in-process substrate endpoint.
 //
 // Defaults except for the endpoint and the two listeners: NewDefault is what a mount with no config
 // file runs, so starting from it is what makes this a test of the shipped path. The listeners are off
 // because both default to fixed ports, and two Starts on fixed ports cannot coexist under t.Parallel.
 //
-// No credentials are set, and none are needed: buildS3Config deliberately leaves the credential fields
-// empty so the AWS default chain applies (see the note at the end of that function), and the substrate
-// emulator does not verify signatures. Verified — NewBackend, HealthCheck included, succeeds against
-// this endpoint with both credential fields blank.
+// Credentials come from the environment, set in TestMain — see there for why they cannot come from the
+// Configuration.
 func configForSubstrate(t *testing.T) *config.Configuration {
 	t.Helper()
 
