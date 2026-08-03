@@ -296,14 +296,44 @@ jobs:
         with:
           node-version: '22'
 
-      - name: TypeScript SDK metrics parsing
+      - name: TypeScript SDK install
         working-directory: sdks/javascript
-        run: |
-          # No lockfile is committed, so `npm install` rather than `npm ci`. ts-jest typechecks the
-          # suite as it runs it, which is the only place prometheus.test.ts gets typechecked at all:
-          # tsconfig.json excludes **/*.test.ts from the build.
-          npm install --no-audit --no-fund
-          npm test
+        # `npm ci` now that package-lock.json is committed. Without a lockfile this job resolved the
+        # manifest ranges fresh on every run, so what CI tested was not what anyone had installed
+        # locally, and a Dependabot alert against a transitive dependency tracked the range rather
+        # than the nested copy actually in the tree — which is how one alert closed with no fix.
+        run: npm ci --no-audit --no-fund
+
+      # This step is the one that was missing, and its absence is why the SDK shipped 48 type
+      # errors: `npm test` runs jest, which through ts-jest only typechecks the files a test
+      # imports. src/mount.ts imports nothing testable and was never compiled by anything, so
+      # src/index.ts could export `StorageAdapter` — a name that has never existed in
+      # ./storage — through a release without one job noticing. `tsc` compiles src/**/*.ts
+      # whether or not a test reaches it.
+      #
+      # Ordered before `npm test` deliberately: a type error is a clearer failure than whatever
+      # a test does when the code does not typecheck.
+      - name: TypeScript SDK build
+        working-directory: sdks/javascript
+        run: npm run build
+
+      - name: TypeScript SDK tests
+        working-directory: sdks/javascript
+        # ts-jest typechecks the suite as it runs it, which is the only place *.test.ts gets
+        # typechecked at all: tsconfig.json excludes **/*.test.ts from the build above.
+        run: npm test
+
+      # `npm run lint` had never run successfully anywhere: the eslintConfig in package.json
+      # extended "@typescript-eslint/recommended" instead of "plugin:@typescript-eslint/recommended",
+      # so eslint exited with "couldn't find the config ... to extend from" before linting a line.
+      # A script that always errors and is never invoked is indistinguishable from one that passes.
+      #
+      # 23 no-explicit-any warnings remain and are not failures; the config sets that rule to "warn"
+      # deliberately, since the SDK's public surface takes `Record<string, any>` in several places.
+      # Errors are zero and this step holds that.
+      - name: TypeScript SDK lint
+        working-directory: sdks/javascript
+        run: npm run lint
 
   # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must

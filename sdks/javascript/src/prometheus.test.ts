@@ -66,7 +66,9 @@ describe('parseSampleLine', () => {
   test('parses scientific notation', () => {
     // Prometheus writes large float values this way: cache_size_bytes is a float gauge, so
     // 1 MiB is exported as 1.048576e+06, not 1048576.
-    const sample = parseSampleLine('objectfs_cache_size_bytes{level="L1"} 1.048576e+06');
+    const sample = parseSampleLine(
+      'objectfs_cache_size_bytes{level="L1"} 1.048576e+06'
+    );
 
     assert.equal(sample?.value, 1048576);
   });
@@ -83,21 +85,27 @@ describe('parseSampleLine', () => {
 
   test('a comma inside a label value is data, not a separator', () => {
     // Splitting the label block on ',' would produce two broken fragments and lose the sample.
-    const sample = parseSampleLine('objectfs_errors_total{operation="read",type="a, b"} 1');
+    const sample = parseSampleLine(
+      'objectfs_errors_total{operation="read",type="a, b"} 1'
+    );
 
     assert.deepEqual(sample?.labels, { operation: 'read', type: 'a, b' });
     assert.equal(sample?.value, 1);
   });
 
   test('an escaped quote inside a label value', () => {
-    const sample = parseSampleLine('objectfs_errors_total{type="say \\"hi\\""} 1');
+    const sample = parseSampleLine(
+      'objectfs_errors_total{type="say \\"hi\\""} 1'
+    );
 
     assert.deepEqual(sample?.labels, { type: 'say "hi"' });
   });
 
   test('a brace inside a label value does not truncate the block', () => {
     // lastIndexOf('}') rather than indexOf.
-    const sample = parseSampleLine('objectfs_errors_total{type="a}b",operation="read"} 7');
+    const sample = parseSampleLine(
+      'objectfs_errors_total{type="a}b",operation="read"} 7'
+    );
 
     assert.equal(sample?.name, 'objectfs_errors_total');
     assert.deepEqual(sample?.labels, { type: 'a}b', operation: 'read' });
@@ -118,14 +126,21 @@ describe('parseSampleLine', () => {
       'bad_value not_a_number',
       'objectfs_thing{unterminated="x" 5',
     ]) {
-      assert.equal(parseSampleLine(line), null, `${line} should not parse as a sample`);
+      assert.equal(
+        parseSampleLine(line),
+        null,
+        `${line} should not parse as a sample`
+      );
     }
   });
 });
 
 describe('parseScrape', () => {
   test('skips comments and finds samples', () => {
-    assert.ok(parsed.samples.length > 0, 'the fixture parsed to no samples at all');
+    assert.ok(
+      parsed.samples.length > 0,
+      'the fixture parsed to no samples at all'
+    );
     for (const sample of parsed.samples) {
       assert.ok(!sample.name.startsWith('#'));
       assert.ok(!sample.name.includes('{'));
@@ -134,7 +149,9 @@ describe('parseScrape', () => {
 
   test('keeps every sample of a repeated name', () => {
     // hit and miss are two samples of one name. A map keyed by name would keep one.
-    const requests = parsed.samples.filter((s) => s.name === 'objectfs_cache_requests_total');
+    const requests = parsed.samples.filter(
+      (s) => s.name === 'objectfs_cache_requests_total'
+    );
 
     assert.equal(requests.length, 2);
   });
@@ -201,7 +218,11 @@ describe('extractCacheStats', () => {
     // nothing at all.
     const stats = extractCacheStats({
       samples: [
-        { name: 'objectfs_cache_requests_total', labels: { type: 'miss' }, value: 9 },
+        {
+          name: 'objectfs_cache_requests_total',
+          labels: { type: 'miss' },
+          value: 9,
+        },
       ],
     });
 

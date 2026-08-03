@@ -6,7 +6,12 @@
  */
 
 export { ObjectFSClient } from './client';
-export { Configuration, StorageConfig, PerformanceConfig, ClusterConfig } from './config';
+export {
+  Configuration,
+  StorageConfig,
+  PerformanceConfig,
+  ClusterConfig,
+} from './config';
 export {
   ObjectFSError,
   ConfigurationError,
@@ -14,7 +19,7 @@ export {
   StorageError,
   DistributedError,
   NetworkError,
-  TimeoutError
+  TimeoutError,
 } from './errors';
 export { MountManager } from './mount';
 export { MetricsCollector, HealthChecker } from './monitoring';
@@ -29,7 +34,10 @@ export {
   extractErrorStats,
   extractConnectionStats,
 } from './prometheus';
-export { StorageAdapter } from './storage';
+// S3StorageAdapter, not StorageAdapter: the latter name has never existed in './storage', so this
+// line was a hard TS2724 and `npm run build` could not have produced a dist/ — which is how it
+// survived a release. There is no adapter interface to hide behind either; the class is the API.
+export { S3StorageAdapter } from './storage';
 export * from './types';
 
 // Version info

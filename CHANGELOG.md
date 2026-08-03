@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`build` and `lint` steps in CI for the JavaScript SDK, which is the gate whose absence let 48 type
+  errors ship** ([#314]). The `sdk-metrics` job ran `npm ci && npm test` as a single step; `tsc` was
+  never invoked by anything, in any job, ever. It now runs as its own step, so a type error fails the
+  build rather than waiting for someone to run the compiler by hand.
+
+- **Tests for the JavaScript SDK's configuration and storage layers** (`src/config.test.ts`,
+  `src/storage.test.ts`; 61 tests across three suites, up from one). The configuration assertions come
+  in pairs — the override applied *and* its siblings survived — because a one-level spread passes any
+  test that only checks the override, which is how the merge bug lived through a release. A loop
+  asserting that every shipped preset passes `validate()` is what found the third broken preset after
+  a hand-written probe had found two. The load-bearing storage test writes a real file, calls
+  `downloadObject` against it, and asserts the file's contents are unchanged.
+
 - **A written evaluation of S3 conditional writes as a replacement for Raft coordination**
   ([#169]), at `docs/design/conditional-writes-vs-raft.md`. The recommendation is to adopt per-key
   compare-and-swap for coordination, keep gossip for membership, and stop building toward a
@@ -127,6 +140,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#317]: https://github.com/scttfrdmn/objectfs/issues/317
 
 ### Fixed
+
+- **The JavaScript SDK compiles, and two of its five configuration presets no longer fail their own
+  validation** ([#314], [#325]). `npx tsc` reported 48 errors across seven files, and had done since
+  before the SDK's first release; `npm run build` had therefore never succeeded and `dist/` had never
+  existed. The reason it went unnoticed for that long is structural and is fixed separately below:
+  `npm test` runs jest, and ts-jest only typechecks the files a test imports, so `src/mount.ts` — which
+  no test reaches — was compiled by nothing at all, and `src/index.ts` could ship
+  `export { StorageAdapter } from './storage'`, a name that has never existed in that module.
+
+  Three of the errors were real defects rather than annotations:
+
+  - `Configuration`'s constructor merged with a one-level object spread —
+    `{ s3: {...defaults, ...cfg?.storage?.s3}, ...cfg?.storage }` — which puts the caller's whole
+    `storage` last and discards the `s3` it had just merged. So every preset silently lost the
+    defaults it did not itself name, and two could not pass `validate()` at all:
+    `fromPreset('cost-optimized')` produced an `S3Config` with **no region**, and
+    `fromPreset('cluster')` set `tlsEnabled: true`, which `validate()` rejects without certificate
+    paths a preset cannot know. Both threw on a preset the SDK ships. Replaced with a shared deep
+    merge; the constructor and `merge()` now take `DeepPartial<Configuration>`, which is what the
+    preset table always meant — `Partial<T>` is one level deep, and the eleven TS2739 "is missing the
+    following properties" errors were reporting exactly that. `cluster` no longer presets
+    `tlsEnabled`, since the caller is the one holding the certificates.
+  - `MountManager.isMounted` tested `/proc/mounts` for `fstype === 'fuse'` exactly, and ObjectFS
+    mounts report `fuse.s3` — `internal/fuse/mount.go` sets `Subtype: "s3"`. Only the
+    `device.includes('objectfs')` fallback was saving it. Both `isMounted` and `listMounts` now accept
+    the `fuse.*` form.
+  - `createClient(configPath, options)` built `{...options, config}` with `config` possibly
+    `undefined`, which *sets* the key and so overrode a configuration the caller had passed in
+    `options`. It now omits the key instead, which is both type-correct under
+    `exactOptionalPropertyTypes` and what a caller passing both would expect.
+
+  `npm run lint` also ran for the first time: `eslintConfig.extends` said
+  `"@typescript-eslint/recommended"` without the required `plugin:` prefix, so eslint exited with
+  "couldn't find the config to extend from" before reading a line of source. Zero errors once it
+  could run, with 23 pre-existing `no-explicit-any` warnings left standing.
 
 - **Dependabot auto-merge, cause five: GitHub Actions cannot approve pull requests** ([#305]). Fixing
   [#288] made `.github/dependabot.yml` valid, Dependabot re-evaluated it within minutes, and the
@@ -593,9 +641,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#275]: https://github.com/scttfrdmn/objectfs/issues/275
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
+[#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **The JavaScript SDK's fabricated operations throw instead of returning invented data, and its
+  README documents what the code does** ([#325]). Ten methods reported success for work they never
+  performed. The worst wrote to disk: `S3StorageAdapter.downloadObject` did
+  `fs.writeFile(localPath, 'Simulated file content from S3')`, called `progressCallback(30, 30)`, and
+  returned `30` — so a caller following the README's own example, which passed
+  `/tmp/downloaded-file.txt`, **destroyed whatever was at that path and was told the transfer
+  succeeded.** `listObjects` returned two invented objects, `getObjectInfo` a fixed size and etag for
+  any key whether or not it existed, and `uploadObject`/`deleteObject` `true` for transfers and
+  deletions that never happened. On the client, `joinCluster`/`leaveCluster` returned `true` without
+  contacting a node, `getClusterStatus` reported a healthy single-node cluster for any configuration
+  without querying anything, and `clearCache`/`warmCache` reported success for every path given.
+
+  All of them now throw a typed error naming [#325], following the precedent already set in this
+  repository by `getPerformanceStats`, `internal/distributed/coordinator.go` and
+  `internal/fuse/filesystem.go`'s EROFS stubs. This SDK has no S3 client and no control-plane client;
+  until it has one, use the AWS SDK directly or mount the bucket, which is what ObjectFS is for. The
+  README's feature list, storage section, cluster example, API reference and event list are corrected
+  to match — it had been advertising "AWS S3 deep integration with intelligent tiering and cost
+  management" and "built-in support for distributed clusters and replication" against code that did
+  neither. The identical fabrications in the Python SDK are open on [#325]; that SDK's
+  `download_object` still overwrites local files.
 
 - **Every GitHub Action is on its current major, and CI no longer downloads a Go toolchain mid-build.**
   Eight actions moved: `setup-go` 5 → 7, `setup-node` 4 → 7, `setup-python` 5 → 7,

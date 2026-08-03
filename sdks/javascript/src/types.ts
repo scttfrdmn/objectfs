@@ -86,6 +86,27 @@ export interface FUSEConfig {
   umask: number;
 }
 
+/**
+ * Recursively-optional view of T.
+ *
+ * `Partial<Configuration>` only makes the *top-level* sections optional, so a preset that sets
+ * `storage: { s3: { region } }` had to satisfy the whole of `S3Config`. That is what the presets
+ * below could not do, and TypeScript said so — eleven TS2739 "is missing the following
+ * properties" errors, one per preset section. The errors were correct: the constructor merged
+ * these values with a one-level object spread, so a partial section silently *replaced* the
+ * defaults rather than layering onto them. `DeepPartial` is what the preset table always meant,
+ * and it pairs with the deep merge in `Configuration`'s constructor.
+ */
+export type DeepPartial<T> = {
+  // `readonly unknown[]` rather than `readonly (infer U)[]`: the element type is not needed, since
+  // arrays are passed through whole, and naming it trips no-unused-vars.
+  [K in keyof T]?: T[K] extends readonly unknown[]
+    ? T[K]
+    : T[K] extends object
+    ? DeepPartial<T[K]>
+    : T[K];
+};
+
 // Operation types
 export interface MountOptions {
   configOverrides?: Record<string, any>;
@@ -304,8 +325,19 @@ export interface ErrorInfo {
 }
 
 // Client options
+//
+// `config` was typed `Configuration | string | Record<string, any>`, naming a class that lives in
+// './config' and is not imported here — TS2304, "Cannot find name 'Configuration'". Importing it
+// would be a cycle: config.ts imports every interface above from this file. The structural type is
+// what the client actually needs, since `loadConfig` accepts an already-built Configuration, a path
+// to a YAML file, or a plain object; `ConfigurationLike` says that without the back-edge.
+export type ConfigurationLike =
+  | { toObject(): any }
+  | string
+  | Record<string, any>;
+
 export interface ClientOptions {
-  config?: Configuration | string | Record<string, any>;
+  config?: ConfigurationLike;
   binaryPath?: string;
   apiEndpoint?: string;
   timeout?: number;
