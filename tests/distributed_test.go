@@ -6,8 +6,10 @@ package tests
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -337,19 +339,44 @@ func TestGossipProtocol_BasicFunctionality(t *testing.T) {
 	}
 }
 
+// TestLoadBalancer_NodeSelection verifies that an operation routed through the coordinator selects a
+// target from the gossip membership and executes there.
+//
+// What this test can and cannot cover is worth stating, because it used to assert something it had not
+// arranged. The four peers registered below are addresses nothing listens on — UpdateNodeInfo is a
+// membership write, not a running node — so any operation routed to one of them can only time out.
+// The test nonetheless asserted that a strong-consistency PUT succeeded, which needs a majority of the
+// two selected replicas, i.e. the dead peer. It failed for 30 seconds and then reported the timeout as
+// a defect in the code under test. Same class as the missing backend in #269: a test that asserts an
+// operation succeeded has to be able to perform one.
+//
+// So the peers here exist to give selection a membership set of five to choose from, and the two halves
+// are asserted separately: the GET runs unpinned, so selection really does choose from all five, and the
+// PUT is pinned to the local node with TargetNodes because by then it has to be. Least-load routes the
+// second operation away from the node that served the first — which is the load balancer working
+// correctly, and the reason a test with one reachable node out of five can assert selection or repeated
+// execution but not both at once. Multi-replica execution against nodes that really exist is
+// TestMultiNodeCluster, which starts three real managers and does assert it.
 func TestLoadBalancer_NodeSelection(t *testing.T) {
 	config := &distributed.ClusterConfig{
-		NodeID:            "lb-test-1",
-		SecretFile:        writeClusterSecret(t),
-		MaxConcurrentOps:  5,
-		ConsistencyLevel:  "eventual",
-		ReplicationFactor: 2,
+		NodeID:           "lb-test-1",
+		SecretFile:       writeClusterSecret(t),
+		MaxConcurrentOps: 5,
+		ConsistencyLevel: "eventual",
+
+		// One replica, so the selected set is the primary alone. At 2 the second replica is one of the
+		// unreachable peers below, and strong consistency would require it.
+		ReplicationFactor: 1,
 	}
 
 	cm, err := distributed.NewClusterManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create cluster manager: %v", err)
 	}
+
+	// Without this every operation takes executeLocally's `backend == nil` arm and fails with "no
+	// backend configured" (#269).
+	srv := withBackend(t, cm)
 
 	ctx := context.Background()
 	err = cm.Start(ctx)
@@ -376,35 +403,81 @@ func TestLoadBalancer_NodeSelection(t *testing.T) {
 	// Test node selection for different operation types
 	coordinator := cm.GetCoordinator()
 
-	// Test GET operation (should select one node)
+	// A GET needs its key to exist. Seeded through the raw SDK rather than through the coordinator, so
+	// that a symmetric encoding bug cannot pass as correct behaviour.
+	const (
+		getKey  = "test-get-key"
+		getBody = "load-balanced-read-payload"
+	)
+	srv.PutObject(getKey, []byte(getBody))
+
 	getOp := &distributed.DistributedOperation{
 		Type:        distributed.OpTypeGet,
-		Key:         "test-get-key",
+		Key:         getKey,
 		Consistency: distributed.ConsistencyEventual,
+		Timeout:     5 * time.Second,
 	}
 
-	result, err := coordinator.ExecuteOperation(ctx, getOp)
+	raw, err := coordinator.ExecuteOperation(ctx, getOp)
 	if err != nil {
-		t.Errorf("Failed to execute GET operation: %v", err)
-	}
-	if result == nil {
-		t.Error("Expected non-nil result for GET operation")
+		t.Fatalf("Failed to execute GET operation: %v", err)
 	}
 
-	// Test PUT operation (should select multiple nodes based on replication factor)
+	// types.DistributedCoordinator.ExecuteOperation is declared as `(any, error)`, so the concrete
+	// result type is only reachable by assertion — and asserting it is itself worth doing, since a
+	// caller that cannot get at Success or Data has no way to tell an operation apart from a failure.
+	result, ok := raw.(*distributed.OperationResult)
+	if !ok {
+		t.Fatalf("GET returned %T, want *distributed.OperationResult", raw)
+	}
+	if !result.Success {
+		t.Errorf("GET operation reported failure: %s", result.Error)
+	}
+
+	// The bytes, not just the success flag: a GET reported successful that returned something else is
+	// the failure mode this suite exists to catch.
+	if got := string(result.Data); got != getBody {
+		t.Errorf("GET returned %q, want %q", got, getBody)
+	}
+
+	// The selected node has to be the one that could serve it. NodeResults is keyed by node, so it says
+	// where the operation ran — the assertion the test's name promises and never made.
+	if _, ok := result.NodeResults[config.NodeID]; !ok {
+		t.Errorf("GET executed on %v, want the local node %q to be among them",
+			slices.Sorted(maps.Keys(result.NodeResults)), config.NodeID)
+	}
+
 	putOp := &distributed.DistributedOperation{
 		Type:        distributed.OpTypePut,
 		Key:         "test-put-key",
 		Data:        []byte("test data"),
 		Consistency: distributed.ConsistencyStrong,
+		Timeout:     5 * time.Second,
+
+		// Pinned, because the GET above has just raised the local node's load and StrategyLeastLoad will
+		// therefore route this elsewhere — to one of the four peers that do not exist. That is the
+		// balancer being right, so the assertion to keep is the one about execution rather than about
+		// selection, and TargetNodes is how selectTargetNodes lets a caller say where.
+		TargetNodes: []string{config.NodeID},
 	}
 
-	result, err = coordinator.ExecuteOperation(ctx, putOp)
+	raw, err = coordinator.ExecuteOperation(ctx, putOp)
 	if err != nil {
-		t.Errorf("Failed to execute PUT operation: %v", err)
+		t.Fatalf("Failed to execute PUT operation: %v", err)
 	}
-	if result == nil {
-		t.Error("Expected non-nil result for PUT operation")
+	result, ok = raw.(*distributed.OperationResult)
+	if !ok {
+		t.Fatalf("PUT returned %T, want *distributed.OperationResult", raw)
+	}
+	if !result.Success {
+		t.Errorf("PUT operation reported failure: %s", result.Error)
+	}
+
+	// And the object is in storage, read back outside the coordinator. A PUT that reported success
+	// without the bytes reaching S3 is silent data loss, which is the whole reason this check is here
+	// rather than a look at result.Success.
+	if got := string(srv.GetObject("test-put-key")); got != "test data" {
+		t.Errorf("object in storage after PUT = %q, want %q", got, "test data")
 	}
 
 	// Verify coordinator stats
@@ -429,6 +502,14 @@ func TestMultiNodeCluster(t *testing.T) {
 	// which is the failure this test exists to distinguish from a working cluster.
 	secretFile := writeClusterSecret(t)
 
+	// Every node seeds from node 0, which is the only discovery mechanism there is: gossip learns of a
+	// peer from an inbound message, and the only thing that sends an unsolicited one is joinCluster,
+	// which runs only when SeedNodes is non-empty. This test set no seeds at all, so the three managers
+	// were three clusters of one that had never heard of each other — which is why it reported "Node i
+	// sees 1 nodes in cluster" three times and, once single-node elections started working (#275),
+	// three leaders instead of none.
+	seeds := []string{"127.0.0.1:18080"}
+
 	// Create and start multiple cluster nodes
 	for i := 0; i < nodeCount; i++ {
 		config := &distributed.ClusterConfig{
@@ -436,18 +517,31 @@ func TestMultiNodeCluster(t *testing.T) {
 			SecretFile:        secretFile,
 			ListenAddr:        fmt.Sprintf("127.0.0.1:1808%d", i),
 			AdvertiseAddr:     fmt.Sprintf("127.0.0.1:1808%d", i),
+			SeedNodes:         seeds,
 			ElectionTimeout:   time.Second + time.Duration(i)*100*time.Millisecond,
 			HeartbeatInterval: 200 * time.Millisecond,
 			GossipInterval:    100 * time.Millisecond,
 			GossipFanout:      2,
 			ConsistencyLevel:  "strong",
 			ReplicationFactor: 2,
+
+			// The default is 1024 bytes, and a sync message carries the entire memberlist in one
+			// datagram — three members exceeds it. The receive buffer is sized from this value, so the
+			// datagram is truncated mid-JSON and then fails the authentication envelope parse, which is
+			// what "gossip message failed authentication: unexpected end of JSON input" in this test's
+			// output was. Membership stalled at two nodes as a result. Raised here so this test measures
+			// leader election rather than that; the default itself is [#277].
+			MaxGossipPacket: 65507,
 		}
 
 		cm, err := distributed.NewClusterManager(config)
 		if err != nil {
 			t.Fatalf("Failed to create cluster manager %d: %v", i, err)
 		}
+
+		// Every node, not only the one that turns out to be leader: ConsistencyStrong fans the write out
+		// to peers, so a node without a backend fails the operation for the whole cluster (#269).
+		withBackend(t, cm)
 
 		clusters[i] = cm
 

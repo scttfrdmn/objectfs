@@ -834,6 +834,67 @@ func TestGossipProtocol_PerformGossipStampsItsOwnLastSeen(t *testing.T) {
 	}
 }
 
+// TestGossipProtocol_PerformGossipResolvesAddressesUnderTheLock is a race test: under -race it fails
+// on the defect and passes after it, and without -race it passes either way.
+//
+// performGossip used to collect *GossipNode out of the memberlist and read targetNode.Info.Address
+// after releasing gp.mu — a read of the field handleAliveMessage assigns from the receive goroutine
+// (#278). Resolving the address inside the critical section removes the aliasing rather than
+// synchronizing around it, so this test drives both sides at once: the gossip round and the inbound
+// alive message that reassigns Info.
+//
+// A send to 127.0.0.1:1 is expected to fail and its error is discarded by performGossip, which is
+// fine — the address is read whether or not anything is listening, and the read is what is under test.
+func TestGossipProtocol_PerformGossipResolvesAddressesUnderTheLock(t *testing.T) {
+	t.Parallel()
+	cm, _ := NewClusterManager(testConfig(t, "addr-race-host"))
+	gp := cm.gossip
+
+	gp.mu.Lock()
+	gp.memberlist["addr-race-peer"] = &GossipNode{
+		Info:        &NodeInfo{ID: "addr-race-peer", Address: "127.0.0.1:1", Metadata: map[string]string{}},
+		Incarnation: 1,
+		State:       StateAlive,
+	}
+	gp.mu.Unlock()
+
+	const rounds = 300
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range rounds {
+			// A rising incarnation, so the first arm of handleAliveMessage fires and reassigns
+			// gossipNode.Info — the write performGossip was reading through.
+			gp.handleAliveMessage(makeGossipMsg(t, MessageTypeAlive, AliveMessage{
+				Node: &NodeInfo{
+					ID:       "addr-race-peer",
+					Address:  "127.0.0.1:1",
+					LastSeen: time.Now(),
+					Metadata: map[string]string{},
+				},
+				Incarnation: uint32(i + 2), //nolint:gosec // loop bound is 300
+			}))
+		}
+	}()
+
+	for range rounds {
+		gp.performGossip()
+	}
+	<-done
+
+	// Sanity: the peer is still there and still alive, so a run that raced but dropped the member does
+	// not read as a pass.
+	gp.mu.RLock()
+	peer, exists := gp.memberlist["addr-race-peer"]
+	gp.mu.RUnlock()
+	if !exists {
+		t.Fatal("addr-race-peer is gone from the memberlist")
+	}
+	if peer.State != StateAlive {
+		t.Errorf("addr-race-peer state = %v, want %v", peer.State, StateAlive)
+	}
+}
+
 // TestGossipProtocol_StartStop verifies that Start and Stop complete without
 // error or panic.
 func TestGossipProtocol_StartStop(t *testing.T) {

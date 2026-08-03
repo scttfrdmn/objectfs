@@ -222,6 +222,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real operation. No CI job builds that tag, which is why the contradiction sat there unobserved — see
   [#240].
 
+- **A single-node cluster never elected a leader** ([#275]). The majority check lived only in
+  `handleVoteResponse`, which runs when a peer replies to a vote request. `startElection` casts this
+  node's vote for itself and sets the count to 1 — already a majority of one — but nothing evaluated
+  it, so with no peers the election timeout fired again, the term incremented, and the cycle repeated
+  for the life of the process while `IsLeader` stayed false. A cluster of one is not a corner case: it
+  is the first thing anyone runs, and the shape a deployment has while its second node is being
+  provisioned.
+
+  The count-and-check is now `checkVoteMajority`, called from both places where the vote count changes.
+  Extracting it rather than duplicating the comparison is the point — the defect was that a check
+  existed in one of the two places it belonged, and two copies would drift the same way. The
+  candidate-state guard moved with it, so a vote arriving after a higher-term heartbeat has demoted
+  this node cannot promote a follower on a stale count.
+
+  A membership view of one is only a majority if this node really is the whole cluster, so the check
+  now distinguishes the two cases that view cannot: a node whose `seed_nodes` names an address other
+  than its own waits to hear from a peer, and a node that names none proceeds. Without that, a probe of
+  three seeded nodes showed all three electing themselves at term 1, each on its own single vote, within
+  the first second — before any had heard of the others. Gossip learns of a peer only from an inbound
+  message and the election timer does not wait for one, so every node of a starting cluster spends its
+  first few hundred milliseconds looking exactly like a cluster of one.
+
+- **A deposed leader went on reporting itself as the leader** ([#275]). `becomeLeader` calls
+  `SetLeader`; no step-down path did. So `ClusterManager.IsLeader` was effectively write-once — a node
+  that saw a higher term became a follower inside the consensus engine while the accessor that callers
+  actually ask, and that the coordinator routes on, kept returning true for the life of the process.
+  That is what turned a momentary election race into a permanent two-leader state instead of something
+  the next heartbeat resolved. Both step-down paths now inform the cluster manager: a heartbeat names
+  the new leader, and a vote request at a higher term clears leadership without naming one, because a
+  candidate has not won anything yet and claiming it had would be worse than admitting there is no
+  leader.
+
+- **`GetStats` reported zero nodes for the first five seconds after `Start`** ([#275]). The cluster
+  statistics were computed only by a five-second ticker, so `GetStats().TotalNodes` was 0 while
+  `GetNodes()` over the same membership correctly returned 1 — two public accessors disagreeing, with
+  the one an operator, a health check, and a readiness probe reads being the wrong one. They are now
+  computed once during `Start`, so they are current when it returns. The regression test asserts with
+  no sleep, which is the whole of the test: one that slept first could not tell the fix from the
+  defect.
+
+  These were found by probe while fixing [#269], and they are why three tests in the
+  `-tags=distributed` suite had been failing unobserved — no CI job builds that tag ([#240]).
+
+- **Two more `-tags=distributed` tests were asserting against misconfigurations**, the same class as the
+  missing backend above. `TestMultiNodeCluster` set no `SeedNodes`, and gossip has no other discovery
+  mechanism — it learns of a peer from an inbound message, and the only unsolicited send is
+  `joinCluster`, which runs only when seeds are configured. So its three managers were three clusters of
+  one that had never heard of each other, which is what "Node *i* sees 1 nodes in cluster" three times
+  was saying. It now seeds all three from node 0, gives each a backend because strong consistency fans
+  the write out, and raises `MaxGossipPacket` past the default that would otherwise truncate the sync
+  ([#277]). `TestLoadBalancer_NodeSelection` registered four peers at addresses nothing listens on and
+  then asserted a strong-consistency PUT across two of them succeeded; it timed out for 30 seconds and
+  reported that as a defect. It now asserts what its name promises — that selection chooses from the
+  whole membership, and that the operation executes and the bytes reach storage — and says in a comment
+  why one reachable node out of five can carry one of those claims per operation but not both.
+
+- **Four data races on the membership maps, all one mistake made four times** ([#278]). `maps.Copy` on a
+  `map[string]*T` copies the pointers, so taking the lock, copying the map, dropping the lock and then
+  reading through the copy is not synchronization — it reads the same structs the gossip receive
+  goroutine is writing. `ClusterManager.calculateClusterStats` did this with `cm.nodes` against
+  `UpdateNodeInfo`, and `GossipProtocol.sendSyncMessage` did it with `gp.memberlist`, where this node's
+  own entry aliases `gp.localNode` itself. The same shape in pointer-slice form was in `performGossip`
+  and `broadcastMessage`, which collected `*GossipNode` and read `.Info.Address` after unlocking. The
+  fix in each case removes the aliasing rather than locking around it: tally, marshal, or resolve the
+  address inside the critical section, and carry out only values. `GetNodes` and `GetMemberlist` had
+  always done it correctly, twenty lines away in the same files.
+
+  The consequence was not merely a stale read. `calculateClusterStats` classifies a node by `Status`
+  and, in the same iteration, sums `CacheSize` and `CacheHitRate` from it — so a node counted alive on
+  a torn read contributes figures from a different moment into the number a size-aware balancer routes
+  on. And `handleSyncMessage` decides whether to merge an update by comparing incarnations, so an
+  inconsistently-marshaled memberlist decides whether membership converges at all.
+
+  The two regression tests are race tests, not assertion tests: each drives a gossip round and an
+  inbound alive message concurrently, and under `-race` fails on the defect and passes after it.
+  Without `-race` both pass either way, which is stated in their doc comments so nobody later reads a
+  green run without the flag as coverage.
+
+- **A three-node cluster now forms, elects a single leader, and does it race-free**, which is the thing
+  all of the above adds up to and which had never been observed. Verified by probe: membership converges
+  to 3 on every node and leadership settles on exactly one, stably, rather than the two or three
+  simultaneous leaders that the single-node fix alone produced. `TestMultiNodeCluster` now passes under
+  `-race`; the whole `-tags=distributed` suite is green for the first time.
+
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
@@ -229,6 +313,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
 [#269]: https://github.com/scttfrdmn/objectfs/issues/269
 [#272]: https://github.com/scttfrdmn/objectfs/issues/272
+[#275]: https://github.com/scttfrdmn/objectfs/issues/275
+[#277]: https://github.com/scttfrdmn/objectfs/issues/277
+[#278]: https://github.com/scttfrdmn/objectfs/issues/278
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed

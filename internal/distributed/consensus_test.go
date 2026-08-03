@@ -145,6 +145,295 @@ func TestConsensusEngine_TriggerElection_BecomesCandidate(t *testing.T) {
 	}
 }
 
+// ── Single-node leadership (#275) ─────────────────────────────────────────────
+
+// TestConsensusEngine_SingleNodeElectsItself verifies that a cluster of one becomes its own leader.
+//
+// It asserts on the state after TriggerElection returns, with no sleep and no polling, because there
+// is nothing to wait for: the majority of a one-node cluster is one vote, and the candidate casts it
+// itself before TriggerElection returns. Anything that needed a peer round-trip would not be this
+// test.
+//
+// Until v0.11.0 the majority comparison lived only in handleVoteResponse, which is reached only when a
+// peer replies. With no peer it was never evaluated, so a single-node cluster cycled candidate →
+// election timeout → candidate forever, incrementing its term, and IsLeader stayed false for the life
+// of the process (#275). TestConsensusEngine_TriggerElection_BecomesCandidate above accepted either
+// Candidate or Leader, which is why it passed throughout.
+func TestConsensusEngine_SingleNodeElectsItself(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "solo")
+	ce := cm.consensus
+
+	if err := ce.TriggerElection(t.Context()); err != nil {
+		t.Fatalf("TriggerElection: %v", err)
+	}
+
+	if got := ce.GetCurrentState(); got != StateLeader {
+		t.Errorf("state = %v after an election in a one-node cluster, want StateLeader", got)
+	}
+	if !ce.IsLeader() {
+		t.Error("ConsensusEngine.IsLeader() = false, want true")
+	}
+	// The cluster manager has to agree: it is what a caller asks, and what the coordinator routes on.
+	if !cm.IsLeader() {
+		t.Error("ClusterManager.IsLeader() = false, want true")
+	}
+	if got := cm.GetLeader(); got != "solo" {
+		t.Errorf("GetLeader() = %q, want %q", got, "solo")
+	}
+	if won := ce.GetStats().ElectionsWon; won != 1 {
+		t.Errorf("ElectionsWon = %d, want 1", won)
+	}
+}
+
+// TestConsensusEngine_SingleNodeLeadershipIsStable verifies that the elected leader stays elected and
+// its term stops climbing.
+//
+// The visible symptom of #275 was not only that IsLeader was false: electionLoop re-entered
+// startElection on every timeout, so currentTerm climbed without bound. A test that checked the state
+// once, immediately, would pass on a fix that elected the node and then let the timer unseat it. The
+// election timeout here is deliberately short so several would have fired.
+func TestConsensusEngine_SingleNodeLeadershipIsStable(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig(t, "solo-stable")
+	cfg.ElectionTimeout = 50 * time.Millisecond
+	cfg.HeartbeatInterval = 20 * time.Millisecond
+
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	if err := cm.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = cm.Stop() }()
+
+	// No TriggerElection: the election has to happen on its own, driven by electionLoop, which is how it
+	// happens in a real deployment. Several timeouts' worth of margin, since resetElectionTimer
+	// randomizes up to 2× ElectionTimeout.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !cm.consensus.IsLeader() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cm.consensus.IsLeader() {
+		t.Fatalf("no leader after 2s in a one-node cluster: state = %v, term = %d",
+			cm.consensus.GetCurrentState(), cm.consensus.GetCurrentTerm())
+	}
+
+	termAtElection := cm.consensus.GetCurrentTerm()
+
+	// Long enough for a handful of election timeouts to fire against a leader that should ignore them.
+	time.Sleep(300 * time.Millisecond)
+
+	if !cm.consensus.IsLeader() {
+		t.Errorf("leadership was lost: state = %v", cm.consensus.GetCurrentState())
+	}
+	if got := cm.consensus.GetCurrentTerm(); got != termAtElection {
+		t.Errorf("term climbed from %d to %d while leader; a leader must not start elections",
+			termAtElection, got)
+	}
+}
+
+// TestCheckVoteMajority_IgnoresANonCandidate verifies that the extracted check does nothing unless this
+// node is a candidate.
+//
+// startElection is not the only caller, and neither is handleVoteResponse the only path to a state
+// change: a heartbeat from a higher term makes this node a follower. Without the guard, a vote arriving
+// after that would promote a follower to leader on a stale count — the reason the state check was
+// inside handleVoteResponse before the extraction, and the thing an extraction is most likely to drop.
+func TestCheckVoteMajority_IgnoresANonCandidate(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "not-a-candidate")
+	ce := cm.consensus
+
+	ce.mu.Lock()
+	ce.state = StateFollower
+	ce.voteCount = 99 // far past any majority
+	ce.checkVoteMajority()
+	state := ce.state
+	ce.mu.Unlock()
+
+	if state != StateFollower {
+		t.Errorf("state = %v, want StateFollower: a follower must not be promoted by a vote count", state)
+	}
+	if ce.IsLeader() {
+		t.Error("IsLeader() = true, want false")
+	}
+}
+
+// TestCheckVoteMajority_WaitsForSeedsBeforeSelfElecting is the regression test for the split brain that
+// the single-node fix would otherwise introduce.
+//
+// Evaluating the majority in startElection is correct for a cluster of one and wrong for a cluster of
+// three that has not finished discovering itself: gossip learns of a peer from an inbound message, and
+// the election timer does not wait for it, so all three nodes hold a membership view of just themselves
+// for the first few hundred milliseconds. A probe of three seeded nodes confirmed the consequence
+// directly — each elected itself at term 1 on one vote, before any of them had heard of the others.
+//
+// The discriminator is configuration, not timing: a node that names seeds is joining a cluster and must
+// hear from a peer first; a node that names none is declaring itself the whole of one. This test sets
+// the seed and asserts the candidate stays a candidate.
+func TestCheckVoteMajority_WaitsForSeedsBeforeSelfElecting(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig(t, "joiner")
+	cfg.AdvertiseAddr = "127.0.0.1:19301"
+	cfg.SeedNodes = []string{"127.0.0.1:19300"} // a peer that this test never starts
+
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	cm.UpdateNodeInfo("joiner", nodeAlive("joiner"))
+	ce := cm.consensus
+
+	if err := ce.TriggerElection(t.Context()); err != nil {
+		t.Fatalf("TriggerElection: %v", err)
+	}
+
+	if got := ce.GetCurrentState(); got != StateCandidate {
+		t.Errorf("state = %v, want StateCandidate: a node that has not yet discovered its seed nodes "+
+			"must not decide it is a majority of one", got)
+	}
+	if ce.IsLeader() {
+		t.Error("ConsensusEngine.IsLeader() = true, want false")
+	}
+	if cm.IsLeader() {
+		t.Error("ClusterManager.IsLeader() = true, want false")
+	}
+}
+
+// TestExpectsPeers verifies the bootstrap-versus-join discriminator that checkVoteMajority turns on.
+//
+// The third case is the one worth having: a seed list naming only this node's own address is what a
+// uniform configuration file deployed to every node produces, and joinCluster already skips it for
+// exactly that reason. Reading it as "has peers" would stop a single-node deployment from ever electing
+// a leader — reintroducing #275 through the fix for its own regression.
+func TestExpectsPeers(t *testing.T) {
+	t.Parallel()
+
+	const self = "127.0.0.1:7946"
+	cases := []struct {
+		name  string
+		seeds []string
+		want  bool
+	}{
+		{"no seeds is a cluster of one", nil, false},
+		{"an empty seed list is a cluster of one", []string{}, false},
+		{"only ourselves is a cluster of one", []string{self}, false},
+		{"a peer is a cluster to join", []string{"127.0.0.1:7947"}, true},
+		{"ourselves and a peer is a cluster to join", []string{self, "127.0.0.1:7947"}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := testConfig(t, "peers")
+			cfg.AdvertiseAddr = self
+			cfg.SeedNodes = tc.seeds
+
+			cm, err := NewClusterManager(cfg)
+			if err != nil {
+				t.Fatalf("NewClusterManager: %v", err)
+			}
+			if got := cm.expectsPeers(); got != tc.want {
+				t.Errorf("expectsPeers() = %v, want %v for seeds %v", got, tc.want, tc.seeds)
+			}
+		})
+	}
+}
+
+// TestStepDown_ClearsClusterLeadership is the regression test for the half of the split brain that made
+// it permanent.
+//
+// becomeLeader calls ClusterManager.SetLeader; until v0.11.0 no step-down path did. So cm.isLeader was
+// effectively write-once: a node that had been leader and then saw a higher term became a follower in
+// ce.state while ClusterManager.IsLeader — which is what callers ask and what the coordinator routes on
+// — kept returning true for the life of the process. A transient election race therefore became a
+// durable two-leader state instead of resolving on the next heartbeat.
+//
+// Both step-down paths are covered, because they are separate code and only one of them has a new leader
+// to name. Driving the handlers directly rather than over UDP is what makes this deterministic; the
+// sender is not a known node, so the response send is skipped and no socket is needed.
+func TestStepDown_ClearsClusterLeadership(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		msg        func(t *testing.T) (*GossipMessage, func(*ConsensusEngine, *GossipMessage))
+		wantLeader string
+	}{
+		{
+			name: "a heartbeat from a higher term names the new leader",
+			msg: func(t *testing.T) (*GossipMessage, func(*ConsensusEngine, *GossipMessage)) {
+				t.Helper()
+				body, err := json.Marshal(&AppendEntriesMessage{Term: 99, LeaderID: "real-leader"})
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				return &GossipMessage{Type: MessageTypeAppendEntries, From: "real-leader", Data: body},
+					(*ConsensusEngine).handleNetworkAppendEntries
+			},
+			wantLeader: "real-leader",
+		},
+		{
+			name: "a vote request at a higher term clears leadership without naming one",
+			msg: func(t *testing.T) (*GossipMessage, func(*ConsensusEngine, *GossipMessage)) {
+				t.Helper()
+				body, err := json.Marshal(&RequestVoteMessage{Term: 99, CandidateID: "challenger"})
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				return &GossipMessage{Type: MessageTypeRequestVote, From: "challenger", Data: body},
+					(*ConsensusEngine).handleNetworkRequestVote
+			},
+			// A candidate has not won anything, so there is no leader to name — and claiming the
+			// challenger were one would be worse than admitting there is none.
+			wantLeader: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := testConfig(t, "incumbent")
+			cfg.ElectionTimeout = time.Hour // no election fires on its own during this test
+			cm, err := NewClusterManager(cfg)
+			if err != nil {
+				t.Fatalf("NewClusterManager: %v", err)
+			}
+			cm.UpdateNodeInfo("incumbent", nodeAlive("incumbent"))
+			ce := cm.consensus
+
+			if err := ce.TriggerElection(t.Context()); err != nil {
+				t.Fatalf("TriggerElection: %v", err)
+			}
+			if !cm.IsLeader() {
+				t.Fatalf("precondition: not leader before the step-down, state = %v", ce.GetCurrentState())
+			}
+
+			msg, handle := tc.msg(t)
+			handle(ce, msg)
+
+			if got := ce.GetCurrentState(); got != StateFollower {
+				t.Errorf("ce.state = %v after a message at a higher term, want StateFollower", got)
+			}
+			if cm.IsLeader() {
+				t.Error("ClusterManager.IsLeader() = true after stepping down; the consensus engine and " +
+					"the cluster manager must agree on who is leader")
+			}
+			if got := cm.GetLeader(); got != tc.wantLeader {
+				t.Errorf("GetLeader() = %q, want %q", got, tc.wantLeader)
+			}
+		})
+	}
+}
+
 // TestConsensusEngine_TriggerElection_WithPeer_BecomesLeader verifies that when
 // two ClusterManagers are connected over loopback UDP, triggering an election
 // causes the candidate to receive a real vote and become the leader.
