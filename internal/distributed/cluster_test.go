@@ -2,6 +2,8 @@ package distributed
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -581,5 +583,125 @@ func TestCalculateClusterStats_SumsCacheSizeAcrossAliveNodes(t *testing.T) {
 	}
 	if stats.CacheHitRate <= 0 {
 		t.Errorf("CacheHitRate = %v, want > 0", stats.CacheHitRate)
+	}
+}
+
+// ── Operation success accounting (#269) ───────────────────────────────────────
+//
+// These assert on the pair (err, result.Success) rather than on either alone. The defect they pin
+// was not that either value was wrong — each executor set result.Success correctly and every
+// executor returned a nil error — it was that the two disagreed, and DistributeOperation classified
+// on the one that carried no information. A test checking only result.Success passes on the defect,
+// and so does a test checking only that FailedOps is reachable.
+
+// TestDistributeOperation_FailedOperationCountsAsFailed is the counter the issue was filed about: an
+// operation that failed on every node must not be recorded as a success.
+func TestDistributeOperation_FailedOperationCountsAsFailed(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "acct-fail-node")
+	cm.SetBackend(&errBackend{err: errors.New("s3: AccessDenied")})
+
+	result, err := cm.DistributeOperation(context.Background(), &DistributedOperation{
+		Type:        OpTypeGet,
+		Key:         "k",
+		Consistency: ConsistencyEventual,
+	})
+
+	if err == nil {
+		t.Error("DistributeOperation returned a nil error for an operation that failed on every node")
+	}
+	if result == nil {
+		t.Fatal("result is nil; the failure detail is the only thing that says which node failed and why")
+	}
+	if result.Success {
+		t.Error("result.Success = true for a failed operation")
+	}
+
+	// The error must carry the cause. "operation failed" with the AccessDenied dropped sends an
+	// operator to the wrong place, which is the same defect one layer along.
+	if err != nil && !strings.Contains(err.Error(), "AccessDenied") {
+		t.Errorf("error %q should name the backend failure", err)
+	}
+
+	stats := cm.GetStats()
+	if stats.TotalOperations != 1 {
+		t.Errorf("TotalOperations = %d, want 1", stats.TotalOperations)
+	}
+	if stats.FailedOps != 1 {
+		t.Errorf("FailedOps = %d, want 1", stats.FailedOps)
+	}
+	if stats.SuccessfulOps != 0 {
+		t.Errorf("SuccessfulOps = %d, want 0: the operation failed on every node", stats.SuccessfulOps)
+	}
+}
+
+// TestDistributeOperation_SucceededOperationCountsAsSuccessful is the other half. Without it, a fix
+// that returned an error unconditionally would pass the test above.
+func TestDistributeOperation_SucceededOperationCountsAsSuccessful(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithBackend(t, "acct-ok-node")
+
+	result, err := cm.DistributeOperation(context.Background(), &DistributedOperation{
+		Type:        OpTypeGet,
+		Key:         "k",
+		Consistency: ConsistencyEventual,
+	})
+	if err != nil {
+		t.Fatalf("DistributeOperation: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("result.Success = false: %s", result.Error)
+	}
+
+	stats := cm.GetStats()
+	if stats.SuccessfulOps != 1 {
+		t.Errorf("SuccessfulOps = %d, want 1", stats.SuccessfulOps)
+	}
+	if stats.FailedOps != 0 {
+		t.Errorf("FailedOps = %d, want 0", stats.FailedOps)
+	}
+}
+
+// TestDistributeOperation_ErrorAndSuccessNeverDisagree checks the invariant itself across every
+// consistency level and both outcomes, rather than the two counters that happen to read it today.
+//
+// This is the assertion that would have caught the defect at any of the three executors: the fix is
+// at one choke point precisely so a fourth level cannot reintroduce the disagreement, and this is
+// what would notice if one did.
+func TestDistributeOperation_ErrorAndSuccessNeverDisagree(t *testing.T) {
+	t.Parallel()
+
+	levels := []ConsistencyLevel{ConsistencyEventual, ConsistencySession, ConsistencyStrong}
+
+	for _, level := range levels {
+		for _, failing := range []bool{false, true} {
+			name := fmt.Sprintf("%s/failing=%v", level, failing)
+
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				cm := makeClusterWithNode(t, fmt.Sprintf("agree-%s-%v", level, failing))
+				if failing {
+					cm.SetBackend(&errBackend{err: errors.New("s3: ServiceUnavailable")})
+				} else {
+					cm.SetBackend(&mockBackend{})
+				}
+
+				result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
+					Type:        OpTypeGet,
+					Key:         "k",
+					Consistency: level,
+				})
+				if result == nil {
+					t.Fatal("result is nil")
+				}
+				if result.Success == (err != nil) {
+					t.Errorf("result.Success = %v with err = %v: the two must agree", result.Success, err)
+				}
+				if result.Success == failing {
+					t.Errorf("result.Success = %v, want %v", result.Success, !failing)
+				}
+			})
+		}
 	}
 }

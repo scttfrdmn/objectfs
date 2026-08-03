@@ -201,10 +201,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarded every stats update after the first, so a live feed and a permanently stale one were
   indistinguishable from the outside.
 
+- **A distributed operation that failed on every node was counted as a success** ([#269]). The three
+  consistency executors each reported failure in `OperationResult.Success` and returned a nil error,
+  and `ClusterManager.DistributeOperation` classified on the error — the ordinary thing to do in Go —
+  so `SuccessfulOps` climbed for operations that did nothing. The counters are what an operator reads
+  to decide whether coordination is working, and a cluster where every operation fails while the
+  success count rises is worse than one with no metrics: it actively argues against investigating.
+
+  `ExecuteOperation` now returns an error whenever the result is unsuccessful, carrying the failure
+  text so the two representations cannot drift. Reconciled at that one choke point rather than in each
+  executor, because it is the single point every consistency level passes through: a fourth level added
+  later cannot reintroduce the disagreement, and no executor has to remember to report the same fact
+  twice.
+
+  The `-tags=distributed` suite that surfaced this was itself asserting against a misconfiguration —
+  it never injected a backend, so every operation failed with `no backend configured` and
+  `TestConcurrentOperations` printed "Failed 10 out of 10" and "Successful: 10, Failed: 0" in the same
+  run. Those tests now run against a real S3 backend on an in-process substrate endpoint, seed the keys
+  they read, and check the returned bytes rather than only the success flag, so the assertion covers a
+  real operation. No CI job builds that tag, which is why the contradiction sat there unobserved — see
+  [#240].
+
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
+[#240]: https://github.com/scttfrdmn/objectfs/issues/240
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
+[#269]: https://github.com/scttfrdmn/objectfs/issues/269
 [#272]: https://github.com/scttfrdmn/objectfs/issues/272
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
