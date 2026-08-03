@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A written evaluation of S3 conditional writes as a replacement for Raft coordination**
+  ([#169]), at `docs/design/conditional-writes-vs-raft.md`. The recommendation is to adopt per-key
+  compare-and-swap for coordination, keep gossip for membership, and stop building toward a
+  replicated log, on the grounds that there is nothing to replicate: Raft exists so that N nodes
+  agree on state they each hold a copy of, and ObjectFS nodes hold no such state — S3 does. Every
+  operation `internal/distributed` coordinates ends in a write to a key in one bucket that every
+  node can already read.
+
+  The CAS properties are verified by execution against a substrate endpoint over real HTTP rather
+  than asserted from AWS's documentation: exactly one of 32 concurrent `If-None-Match: *` PUTs wins,
+  a stale-ETag `If-Match` write gets `PreconditionFailed` and leaves the object unchanged, `If-Match`
+  against an absent key gets `NoSuchKey` rather than 412, and eight workers running a read-then-CAS
+  increment loop converge to exactly eight with no lost updates. `PutObject` also returns the *new*
+  ETag, which is what lets a CAS loop make progress without a HEAD between iterations — one request
+  per lease renewal rather than two.
+
+  Two findings the issue did not anticipate, both of which change what a caller must do. First, the
+  failure taxonomy is three-way, not two-way: `409 ConditionalRequestConflict` is distinct from `412`
+  and means a delete interleaved, and while a `PutObject` may simply be retried, a
+  `CompleteMultipartUpload` that gets a 409 has a dead upload ID and must be re-initiated from
+  `CreateMultipartUpload`. A loop treating 409 as a synonym for 412 spins until it gives up, and
+  substrate does not model 409, so the mistake is currently invisible in testing — filed as
+  [scttfrdmn/substrate#540]. Second, Ceph RADOS Gateway does not support conditional writes at all:
+  its PUT Object documents only `content-md5`, `content-type`, `x-amz-meta-*`, and `x-amz-acl`, and
+  conditional headers are documented for reads only. So the compatibility rule has to be to fail
+  closed — an unconditional fallback would turn "exactly one node performs this tier transition" into
+  "every node does," which is the failure the coordination exists to prevent, occurring silently.
+
+### Fixed
+
+- **`internal/distributed`'s package documentation described consistency guarantees the code does not
+  provide** ([#169]). The Strong Consistency section claimed "Linearizable operations across cluster";
+  what `executeStrongConsistency` does is fan N identical PUTs of the same bytes at the same key and
+  succeed on a majority, which is a signal that most nodes could reach S3. Session Consistency
+  claimed read-your-writes, which comes from reading through the write buffer — `internal/vfs` does
+  that per descriptor and this package is not involved.
+
+  Rewritten to say what each level does rather than what it is named after, with the structural reason
+  they cannot do more stated once: every node writes the same key in the same bucket, so S3 holds the
+  single copy and "replicate to the other nodes" means issuing the same PUT again. The levels differ
+  in how many redundant requests are issued and whether the caller waits. The package warning also
+  no longer points at "integration tests pending Sprint 4 (LocalStack)" — this project does not use
+  LocalStack, and the sprint it named is long past; it now names the specific gap, which is that the
+  consensus engine elects leaders and replicates nothing.
+
+[#169]: https://github.com/scttfrdmn/objectfs/issues/169
+[scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
+
 ## [0.11.0] - 2026-08-03
 
 POSIX completeness and write-path safety: the operations a user reaches for first — `rm`, `rmdir`,

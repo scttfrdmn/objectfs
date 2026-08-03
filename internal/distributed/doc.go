@@ -7,8 +7,14 @@ The distributed package implements a distributed system layer that enables Objec
 in a clustered configuration with data replication, load balancing, and consensus. It provides
 the coordination mechanisms needed for multi-node deployments.
 
-⚠️ WARNING: This package has known race conditions and is currently under active development.
-Integration tests pending Sprint 4 (LocalStack). Not recommended for production use yet.
+⚠️ WARNING: experimental, and narrower than this document's structure implies. Not for production.
+
+Read [#Consistency Levels] before relying on anything here. The short version is that the consensus
+engine elects leaders and replicates nothing — applyLogEntry has three empty arms and no caller
+appends an operation entry — and that the coordinator's data path calls the backend directly without
+consulting the log, the commit index, the term, or leadership. Whether that gets built out as Raft or
+replaced by per-key conditional writes is the open question in
+docs/design/conditional-writes-vs-raft.md (#169).
 
 Architecture
 
@@ -33,12 +39,17 @@ Architecture
 
 # Consistency Levels
 
-ObjectFS supports three consistency levels for distributed operations:
+Three levels are accepted, and this section says what each one does rather than what it is named
+after, because the names promise guarantees the code does not provide.
 
-Eventual Consistency (Default):
-- Fastest performance
-- Operations complete on one node and replicate asynchronously
-- Suitable for: cache operations, logs, non-critical data
+The reason they cannot provide them is structural, not a missing feature: every node in a cluster
+writes the same key in the same bucket. S3 is the single copy. So "replicate to the other nodes"
+means issuing the same PUT again from another node, and a majority of nodes reporting success means
+a majority could reach S3 — it says nothing about ordering, isolation, or what a subsequent read
+returns. The levels therefore differ in how many redundant identical requests are issued and whether
+the caller waits for them.
+
+Eventual (default) — one node executes; the others re-issue the same operation in the background.
 
 	op := &distributed.DistributedOperation{
 		Type:        distributed.OpTypePut,
@@ -48,10 +59,10 @@ Eventual Consistency (Default):
 	}
 	result, err := coordinator.ExecuteOperation(ctx, op)
 
-Session Consistency:
-- Moderate performance
-- Read-your-writes guarantee within a session
-- Suitable for: user sessions, temporary data
+Session — the first target node executes, then the rest re-issue in the background. Identical to
+Eventual except for preferring targetNodes[0], and it does not provide read-your-writes: the
+guarantee that name refers to comes from reading through the write buffer, which internal/vfs does
+per descriptor and this package is not involved in.
 
 	op := &distributed.DistributedOperation{
 		Type:        distributed.OpTypeGet,
@@ -59,10 +70,12 @@ Session Consistency:
 		Consistency: distributed.ConsistencySession,
 	}
 
-Strong Consistency:
-- Slowest performance (requires majority consensus)
-- Linearizable operations across cluster
-- Suitable for: configuration, metadata, critical state
+Strong — every target node executes concurrently and the call succeeds once a majority reports
+success. This is N identical PUTs of the same bytes to one key, so it is a reachability signal and
+not linearizability, which this document claimed until v0.11.0. What it buys over Eventual is that
+the caller learns of a failure synchronously; what it costs is N times the requests. A genuinely
+linearizable single-key write is available from S3 itself, via a conditional write — see
+docs/design/conditional-writes-vs-raft.md (#169).
 
 	op := &distributed.DistributedOperation{
 		Type:        distributed.OpTypePut,
