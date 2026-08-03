@@ -323,7 +323,7 @@ High Throughput (large sequential reads):
 	  connection_pool_size: 16
 	  read_ahead:
 	    window_size: "1MB"      # read far ahead of a sequential reader
-	    min_sequential: 6       # 6 is the effective floor whatever is set; see ReadAheadConfig
+	    min_sequential: 2       # commit to a prefetch early: these readers do not stop
 	    concurrent_reads: 8
 
 High Latency / Satellite (a round trip is the dominant cost):

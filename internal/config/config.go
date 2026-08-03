@@ -284,17 +284,15 @@ type ReadAheadConfig struct {
 	// 4,325,644 bytes with zero prefetch hits.
 	WindowSize string `yaml:"window_size"`
 
-	// MinSequential is how many consecutive sequential reads must be seen before prefetching starts.
+	// MinSequential is how many consecutive sequential reads must be seen before prefetching starts,
+	// and it is the only threshold: at the default of 3, the third sequential read triggers the first
+	// prefetch.
 	//
-	// The detector requires both this and a confidence above 0.5, and confidence is
-	// sequentialHits/10 — so a value below 6 is governed by the confidence floor rather than by this
-	// number. Set it above 6 to require a longer run than the confidence rule does.
-	//
-	// That the default is 3, and therefore in the inert range, is #247: two thresholds over the same
-	// counter, of which only one is configurable. The default is left where it is because it is what
-	// every mount has run since the prefetcher was written, and reconciling them changes prefetch
-	// behavior at the default configuration — a decision that wants measurement, not a default nudged
-	// in passing while a plumbing gap is closed.
+	// It did not used to be. The detector also required a confidence above 0.5, where confidence was
+	// sequentialHits/10 — the same counter in different units — so the effective gate was
+	// max(MinSequential, 6) and every value from 1 to 5 behaved identically, including the default.
+	// The confidence floor is gone (#247), which makes the default 3 mean what it says and prefetch
+	// from the third read rather than the sixth.
 	MinSequential int `yaml:"min_sequential"`
 
 	// ConcurrentReads is the number of prefetch workers, each of which performs one GET at a time.

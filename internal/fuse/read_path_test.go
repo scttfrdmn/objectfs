@@ -424,10 +424,11 @@ func TestPrefetchStopsAtEndOfFile(t *testing.T) {
 	t.Parallel()
 
 	// The file has to be long enough for the detector to reach its prefetch threshold and still have
-	// reads left to run off the end. A prefetch needs sequentialHits >= MinSequential (3) *and*
-	// confidence > 0.5, and confidence is sequentialHits/10 — so seven consecutive reads before the
-	// tail prefetch can even be scheduled. A 4 KiB file read in 1 KiB steps never gets there, which is
-	// how the first version of this test came to pass against the unfixed code.
+	// reads left to run off the end: a prefetch needs sequentialHits >= MinSequential, which is 3, so
+	// four consecutive reads. A 4 KiB file read in 1 KiB steps never gets there, which is how the first
+	// version of this test came to pass against the unfixed code. 16 steps leaves ample margin — and it
+	// needed to, because the threshold used to be an effective 6 whatever MinSequential said (#247), so
+	// a file sized against the documented 3 would have gone back to passing vacuously.
 	const (
 		step = 1024
 		size = 16 * step

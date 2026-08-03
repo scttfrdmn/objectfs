@@ -119,9 +119,6 @@ func TestReadAheadManager_NonSequential_ResetsPattern(t *testing.T) {
 	if p.sequentialHits != 0 {
 		t.Errorf("expected sequentialHits=0 after non-sequential read, got %d", p.sequentialHits)
 	}
-	if p.confidence != 0.1 {
-		t.Errorf("expected confidence=0.1 after reset, got %f", p.confidence)
-	}
 }
 
 func TestReadAheadManager_Disabled_NoPatterns(t *testing.T) {
@@ -147,34 +144,61 @@ func TestReadAheadManager_Disabled_NoPatterns(t *testing.T) {
 	}
 }
 
+// TestReadAheadManager_PrefetchScheduled_AfterEnoughHits pins the prefetch gate at MinSequential
+// exactly, in both directions: nothing on the read before it, a prefetch on the read at it.
+//
+// The "nothing before" half is the point. This test used to read six times at MinSequential=3 and
+// assert a prefetch, with a comment explaining that six was needed because of a confidence floor — so
+// it documented #247 rather than catching it, and it would have passed just as well if MinSequential
+// were ignored altogether. A gate test that only drives the satisfying case cannot tell a threshold
+// of 3 from a threshold of 6.
 func TestReadAheadManager_PrefetchScheduled_AfterEnoughHits(t *testing.T) {
 	t.Parallel()
 
-	// Prefetch requires sequentialHits >= MinSequential AND confidence > 0.5.
-	// confidence = sequentialHits / 10.0 → need sequentialHits >= 6 for both
-	// conditions to be met when MinSequential=3.
-	ram := newTestRAM(3, 5*time.Minute)
+	const (
+		blk    = int64(1024)
+		path   = "prefetch.bin"
+		minSeq = 3
+
+		// The threshold lands on read minSeq, not minSeq+1, because the first read of a file counts as
+		// sequential: a fresh ReadPattern has lastOffset and lastSize both zero, so `offset ==
+		// lastOffset+lastSize` holds for a read at offset 0. That makes "min_sequential: 3" mean the
+		// third read of a file, which is what the configuration documentation says. After a
+		// non-sequential read resets the counter to zero it takes three more sequential reads, which is
+		// the same rule counted from a different start.
+		hitRead = minSeq
+	)
+
+	ram := newTestRAM(minSeq, 5*time.Minute)
 	defer ram.Stop()
 
-	const blk = int64(1024)
-	const path = "prefetch.bin"
-	// 6 sequential reads puts sequentialHits=6, confidence=0.6.
-	for i := range 6 {
+	// Reads up to but not including the one that reaches the threshold.
+	for i := range hitRead - 1 {
 		ram.OnRead(path, int64(i)*blk, blk)
 	}
 
-	// The prefetchQueue channel is buffered (cap 100); at least one request
-	// must have been enqueued.
+	if n := len(ram.prefetchQueue); n != 0 {
+		t.Fatalf("%d prefetch(es) scheduled after %d sequential reads at min_sequential=%d, want 0. "+
+			"The gate must not fire before the threshold, or the setting does not bound anything.",
+			n, hitRead-1, minSeq)
+	}
+
+	// The read that reaches it.
+	ram.OnRead(path, int64(hitRead-1)*blk, blk)
+
 	select {
 	case req := <-ram.prefetchQueue:
 		if req.path != path {
 			t.Errorf("expected prefetch for %q, got %q", path, req.path)
 		}
-		if req.offset != 6*blk {
-			t.Errorf("expected prefetch offset=%d, got %d", 6*blk, req.offset)
+		if want := int64(hitRead) * blk; req.offset != want {
+			t.Errorf("prefetch offset=%d, want %d (one read past the last one performed)",
+				req.offset, want)
 		}
 	default:
-		t.Error("expected at least one prefetch request after 6 sequential reads")
+		t.Errorf("no prefetch scheduled on read %d at min_sequential=%d, want one. Before #247 the "+
+			"first prefetch came on the sixth read whatever this was set to, because a confidence "+
+			"floor over the same counter always won.", hitRead, minSeq)
 	}
 }
 
