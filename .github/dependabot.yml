@@ -139,13 +139,25 @@ updates:
   - java
   - automerge
 
-  # Documentation platform. Three open alerts against vite (one high).
+  # Documentation platform.
   #
-  # Note the ceiling on what this can do: no package-lock.json is committed, and for a *security*
-  # update Dependabot needs one — "can't update vulnerable dependencies for projects without a
-  # lockfile or pinned version requirement as the currently installed version of vite isn't known"
-  # is the verbatim reason the 2026-08-02 run failed. Version updates to the `^x.y.z` ranges in
-  # package.json do work. Committing a lockfile is what would close the alerts; that is #214.
+  # A package-lock.json is committed here as of #214, which removes the ceiling this comment used to
+  # describe: security updates need one, and without it the 2026-08-02 run failed with "can't update
+  # vulnerable dependencies for projects without a lockfile or pinned version requirement as the
+  # currently installed version of vite isn't known". Version updates to the `^x.y.z` ranges always
+  # worked; security updates could not apply at all.
+  #
+  # The three vite alerts this comment used to name closed on 2026-08-03, and not because of the
+  # lockfile — they closed before it was committed. They closed because `vite` is a direct
+  # devDependency at `^6.4.3` with an `overrides` entry forcing the same, and the advisories'
+  # vulnerable range is `<= 6.4.2` with `6.4.3` the first patched version. So the whole declared
+  # range is patched, which is the "pinned version requirement" half of the error above: Dependabot
+  # does not need an installed version when no version the manifest admits is vulnerable.
+  #
+  # Worth separating from the lockfile work rather than collapsing into it. `npm audit` against the
+  # new lockfile also reports 0 vulnerabilities, so both readings point the same way here — but a
+  # closed alert on a lockfile-less manifest is not by itself evidence that anything was installed
+  # or upgraded, which is the trap in #313.
 - package-ecosystem: npm
   directory: /docs-platform
   schedule:
