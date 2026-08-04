@@ -298,6 +298,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fuzz-smoke` no longer fails on Go's own fuzzing-coordinator shutdown race, and still fails on
+  every real find** ([#218]). The job failed roughly 1 run in 10 with `context deadline exceeded`
+  and **zero** new crashers — the surveyed failure was `FuzzSliceRange`, a pure-function target over
+  `sliceRange(data, offset, size)` whose test file contains no `context` at all, reported at 60.11s
+  against `-fuzztime=60s`. The uploaded artifact held only the already-committed corpus.
+
+  The cause is upstream, in `$GOROOT/src/internal/fuzz/fuzz.go`: the coordinator builds a timeout
+  context and a child of it, waits on the *parent*'s channel, calls `stop(ctx.Err())` with the
+  parent's error, and then suppresses that error only if it equals the *child*'s. Because
+  `cancelCtx.cancel` closes its own `done` before propagating into `c.children`, the child's `Err()`
+  can still be `nil` at that moment, the comparison misses, and a normal timeout is reported as a
+  failure. Reproduced standalone at 12 in 20,000 trials. The window is scheduling-dependent, which
+  is why CI saw it and a fast local machine did not — the runner managed 3,323 execs/sec against
+  36,819 locally.
+
+  The step now runs through `.github/scripts/fuzz-smoke.sh`, which keys on **the presence of a
+  counterexample** rather than on the exit status: a new file under `testdata/fuzz/<Target>/`, or
+  `Failing input written to` in the output, fails the job unconditionally — checked before the exit
+  status is consulted at all, because `go test` has reported a written input alongside a zero exit.
+  Only two shapes are tolerated, and only with no counterexample present: a lone
+  `--- FAIL: <Target>` whose one detail is `context deadline exceeded` *and* which ran for at least
+  90% of its budget, and SIGTERM/`The runner has received a shutdown signal` — the second failure
+  mode the survey found, runner preemption on `FuzzOperationSequence`. A panic, a data race, a
+  nested subtest failure (which is what a committed seed input failing looks like), a
+  hung-worker/OOM message, a non-zero exit with no `--- FAIL:` line, and a deadline message arriving
+  early are all still failures.
+
+  The elapsed check reads `go test`'s own `--- FAIL: <Target> (60.11s)` line rather than wall clock,
+  because wall clock includes compilation and would let a target that failed in 0.01s inside a slow
+  build clear the floor — which is precisely the case that check exists to reject.
+
+  `-fuzztime` is unchanged and the job stays blocking; the point was to make the gate readable, not
+  to remove it. `TestFuzzSmokeScriptDistinguishesCounterexamplesFromShutdownNoise` drives the script
+  against a stub `go` across ten cases, and each of its six checks was verified by mutation: deleting
+  any one of them makes a named case fail. `TestCIRunsFuzzTargetsThroughTheSmokeScript` fails if the
+  workflow goes back to calling `go test -fuzz` directly or drops the per-target artifact upload.
+
+  Worth reporting upstream: the suppression should compare against the context it just read, or use
+  `errors.Is(err, context.DeadlineExceeded)`. It is correct in intent and races in implementation.
+
+[#218]: https://github.com/scttfrdmn/objectfs/issues/218
+
 - **`docs-platform` commits a lockfile, so its dependency tree is reproducible and `npm audit` can
   run at all** ([#214]). 741 packages resolved into `docs-platform/package-lock.json`, and the
   `docs-site` job moves from `npm install` to `npm ci`. Before this the job resolved every `^x.y.z`

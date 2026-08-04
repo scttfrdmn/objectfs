@@ -181,6 +181,14 @@ jobs:
   # It is set for every target rather than just the one that died, because the cause is the
   # per-worker runtime's view of memory, which every target shares. A target that allocates less
   # simply never reaches the limit.
+  #
+  # The step runs through .github/scripts/fuzz-smoke.sh rather than calling `go test` directly,
+  # because `go test -fuzz` exits non-zero for two unrelated reasons and this job has to tell them
+  # apart: it found a counterexample (fail the build), or its own coordinator lost a shutdown race
+  # / the runner was preempted (neither is a property of the code under test). ~1 run in 10 was the
+  # latter — see #218 for the race in $GOROOT/src/internal/fuzz/fuzz.go and the standalone
+  # reproduction. The script keys on the presence of a counterexample, never on the exit status
+  # alone, and the reasoning for each tolerated shape is in its header.
   # ---------------------------------------------------------------------------------------------
   fuzz-smoke:
     runs-on: ubuntu-latest
@@ -208,7 +216,7 @@ jobs:
           cache: true
 
       - name: Fuzz ${{ matrix.target }}
-        run: go test ${{ matrix.pkg }} -run '^${{ matrix.target }}$' -fuzz '^${{ matrix.target }}$' -fuzztime=60s
+        run: .github/scripts/fuzz-smoke.sh '${{ matrix.pkg }}' '${{ matrix.target }}' 60
 
       # A counterexample is the whole point of the job, so it has to leave the machine.
       - uses: actions/upload-artifact@v7
