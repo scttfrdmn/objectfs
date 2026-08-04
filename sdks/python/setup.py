@@ -41,13 +41,32 @@ setup(
         'Topic :: Software Development :: Libraries :: Python Modules',
     ],
     python_requires='>=3.8',
+    # Ranges, deliberately, and not pins: a library that pins its transitive tree pins it for every
+    # consumer. The pinned tree lives in requirements.txt, which is what CI installs and what
+    # `trivy fs` scans — see the header there for why that split is the standard one, and why the
+    # filename cannot be changed.
+    #
+    # Two entries were removed rather than bumped, because neither was a dependency of this package:
+    #
+    #   asyncio — a *stdlib module* since Python 3.4. The PyPI distribution of that name is a
+    #   backport for 3.3, and `python_requires` here is >=3.8. Verified in a scratch venv: with the
+    #   package installed, `asyncio.__file__` still resolves to the stdlib, and asyncio 4.0.0 is now
+    #   a deliberate empty stub ("Deprecated backport of asyncio; use the stdlib package instead")
+    #   that ships dist-info and no modules. So it shadowed nothing — but it declared a dependency
+    #   the SDK does not have, and older resolutions of that range are not empty stubs.
+    #
+    #   typing-extensions — imported nowhere in this package. `grep -rn typing_extensions
+    #   sdks/python/` finds no hit outside egg-info. It still appears in requirements.txt because
+    #   pytest pulls it in transitively, which is the difference between "what CI installs" and
+    #   "what this package requires."
+    #
+    # The four that remain are each imported by name: requests, yaml (pyyaml), psutil, aiohttp. The
+    # suite's 71 tests pass with the two removals applied.
     install_requires=[
         'requests>=2.25.0',
         'pyyaml>=6.0',
         'psutil>=5.8.0',
         'aiohttp>=3.8.0',
-        'asyncio>=3.4.3',
-        'typing-extensions>=4.0.0',
     ],
     extras_require={
         'dev': [
