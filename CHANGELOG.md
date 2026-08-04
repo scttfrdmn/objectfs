@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A gate that fails when a `package.json` and its `package-lock.json` disagree, so `npm ci` cannot
+  refuse to install in a later job** ([#332]). `TestNPMLockfilesAgreeWithTheirManifests` compares
+  each manifest's four dependency tables against the same tables in the lockfile's `packages[""]`
+  entry — npm's own record of what the manifest said when the lock was generated — and reports the
+  directory and package name in seconds, in the `test` job, before anything installs.
+
+  The failure it replaces was real and badly phrased. `npm ci` refuses to run on a mismatch, so a
+  manifest edited without regenerating the lock surfaced as an npm error deep in whichever job
+  installed first: `` `npm ci` can only install packages when your package.json and
+  package-lock.json are in sync [...] Invalid: lock file's @types/node@18.19.130 does not satisfy
+  @types/node@26.1.2 ``. Nothing in that names the actual mistake.
+
+  Comparing the lockfile's own root entry, rather than diffing the two files a pull request touched,
+  is deliberate. A changed-files check needs a base ref, does not work under a plain `go test`, and
+  passes a hand edit that touches both files without regenerating the tree. This runs from a single
+  checkout and asks the question npm asks.
+
+  Both directions are checked — a range the lockfile does not record, a range recorded at a
+  different version, and a package the lockfile still records after the manifest dropped it — and
+  all three were mutation-checked against the real tree rather than predicted. A fourth subtest
+  globs `git ls-files` for tracked `package.json` files and fails on any directory not in the list,
+  so a third npm directory cannot be added without a lockfile gate; that one was mutation-checked
+  too. What this does *not* verify is the resolved tree below the root: whether the locked versions
+  satisfy the ranges, and whether every transitive dependency is present. Only `npm ci` answers
+  that, and `sdk-metrics` and `docs-site` both run it.
+
+[#332]: https://github.com/scttfrdmn/objectfs/issues/332
+
 - **`build` and `lint` steps in CI for the JavaScript SDK, which is the gate whose absence let 48 type
   errors ship** ([#314]). The `sdk-metrics` job ran `npm ci && npm test` as a single step; `tsc` was
   never invoked by anything, in any job, ever. It now runs as its own step, so a type error fails the

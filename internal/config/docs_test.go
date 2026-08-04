@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -174,33 +173,19 @@ var docsExemptFromConfigSchema = map[string]string{
 // brand-new markdown file is not checked until it is `git add`ed — which is the right boundary for
 // a gate on what the repository publishes, and is moot in CI, where every file is tracked by
 // definition.
+// The `git ls-files` call itself is trackedFiles, in lockfile_test.go — the npm lockfile gate needs
+// the same "tracked, not walked" set for a different pathspec, and the reasoning above is the
+// reasoning there.
 func markdownFiles(t *testing.T) []string {
 	t.Helper()
 
 	root := repoRoot(t)
 
-	cmd := exec.CommandContext(t.Context(), "git", "ls-files", "-z", "*.md")
-	cmd.Dir = root
+	rels := trackedFiles(t, "*.md")
 
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git ls-files in %s: %v", root, err)
-	}
-
-	var paths []string
-
-	// -z, so NUL-separated: a path may contain a newline, and `git ls-files` without -z quotes
-	// those rather than emitting them, which would need unquoting here to match the filesystem.
-	for rel := range strings.SplitSeq(string(out), "\x00") {
-		if rel == "" {
-			continue
-		}
-
+	paths := make([]string, 0, len(rels))
+	for _, rel := range rels {
 		paths = append(paths, filepath.Join(root, rel))
-	}
-
-	if len(paths) == 0 {
-		t.Fatalf("found no tracked markdown under %s, and an empty set passes every assertion below", root)
 	}
 
 	return paths
