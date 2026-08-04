@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	iofs "io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,22 +22,43 @@ import (
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
-// safeInt64ToUint64 safely converts int64 to uint64, preventing negative values
+// safeInt64ToUint64 clamps a negative int64 to zero so the conversion cannot wrap.
+//
+// Only the sign needs checking: int64 and uint64 are 64 bits wide on every platform Go targets, so
+// the only values int64 can hold that uint64 cannot are the negative ones. There is no upper bound
+// to test — unlike safeIntToUint32 below, where the widths genuinely differ.
 func safeInt64ToUint64(i int64) uint64 {
 	if i < 0 {
 		return 0
 	}
+
 	return uint64(i)
 }
 
-// safeIntToUint32 safely converts int to uint32, preventing overflow
+// safeIntToUint32 clamps an int into uint32's range.
+//
+// The upper bound is compared as uint64 rather than as int, because `int` is 32 bits on 32-bit
+// platforms and the guard's own limit does not fit in it. Written as `i > 0xFFFFFFFF` this function
+// did not compile for any 32-bit target — the overflow guard overflowed:
+//
+//	$ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build ./internal/fuse/
+//	internal/fuse/filesystem.go:37:9: 0xFFFFFFFF (untyped int constant 4294967295) overflows int
+//
+// That single error is why linux/armv7 was dropped from the release matrix in v0.10.1 rather than
+// fixed (#198). The negative check has to come first: uint64(-1) is 2^64-1, which would clamp to
+// MaxUint32 instead of to zero.
+//
+// On a 32-bit platform the upper branch is unreachable — math.MaxInt is 2^31-1 there, below
+// MaxUint32 — but it must still compile, which is the whole point.
 func safeIntToUint32(i int) uint32 {
 	if i < 0 {
 		return 0
 	}
-	if i > 0xFFFFFFFF {
-		return 0xFFFFFFFF
+
+	if uint64(i) > math.MaxUint32 {
+		return math.MaxUint32
 	}
+
 	return uint32(i)
 }
 

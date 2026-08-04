@@ -439,29 +439,49 @@ go tool trace trace.out
 # Build for current platform
 go build -o objectfs ./cmd/objectfs
 
-# Build with version info
-VERSION=$(git describe --tags --always --dirty)
-go build -ldflags "-X main.Version=$VERSION" -o objectfs ./cmd/objectfs
-
 # Run
 ./objectfs --version
 ```
 
+There is no version to inject. `cmd/objectfs/main.go` declares `version` inside a `const` block, and
+the linker cannot rewrite a constant — so the `-ldflags "-X main.Version=$VERSION"` line this section
+used to show did nothing, silently, and `--version` reported whatever was hardcoded. That constant is
+the single authority for the version; `release.yml` asserts the release tag matches it rather than
+overwriting it at link time.
+
 ### Cross-Platform Build
+
+These are the five platforms `.github/workflows/release.yml` publishes, and every one of them is
+compiled by `ci.yml`'s `cross-build` job on each PR — a coupling `TestEveryReleasePlatformIsCompiledInCI`
+enforces, because linux/armv7 was once shipped from a matrix nothing else built and left the matrix
+when it stopped compiling ([#198](https://github.com/scttfrdmn/objectfs/issues/198)).
 
 ```bash
 # Linux AMD64
 GOOS=linux GOARCH=amd64 go build -o objectfs-linux-amd64 ./cmd/objectfs
+
+# Linux ARM64
+GOOS=linux GOARCH=arm64 go build -o objectfs-linux-arm64 ./cmd/objectfs
+
+# Linux ARMv7 — Raspberry Pi and other 32-bit ARM. Set GOARM explicitly: armv6 and armv7
+# binaries are not interchangeable.
+GOOS=linux GOARCH=arm GOARM=7 go build -o objectfs-linux-armv7 ./cmd/objectfs
 
 # macOS AMD64
 GOOS=darwin GOARCH=amd64 go build -o objectfs-darwin-amd64 ./cmd/objectfs
 
 # macOS ARM64 (M1/M2/M3)
 GOOS=darwin GOARCH=arm64 go build -o objectfs-darwin-arm64 ./cmd/objectfs
-
-# Windows
-GOOS=windows GOARCH=amd64 go build -o objectfs-windows-amd64.exe ./cmd/objectfs
 ```
+
+There is no Windows target. `internal/fuse` carries `//go:build linux || darwin` and
+`platform_unsupported.go` fails the build on anything else deliberately, so
+`GOOS=windows go build ./cmd/objectfs` — which this section used to list — has never produced a
+binary. Windows needs a WinFsp binding first.
+
+`ci.yml` additionally compiles linux/386, which is not published. It is there as a second 32-bit
+word-width canary: `int` is 32 bits on both `arm` and `386`, and that is the width on which #198's
+guard did not compile.
 
 ### Release Process
 

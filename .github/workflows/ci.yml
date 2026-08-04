@@ -268,6 +268,19 @@ jobs:
   # no Windows FUSE binding, and a binary that cannot mount anything is not a supported target.
   # internal/fuse carries a build constraint that makes any other GOOS fail with a message naming
   # the reason.
+  #
+  # The 32-bit cells (linux/arm, linux/386) are here because a whole word width was missing from the
+  # matrix, and `int` is 32 bits wide on those targets. `safeIntToUint32` guarded its conversion with
+  # `i > 0xFFFFFFFF` — a constant that does not fit a 32-bit `int` — so `internal/fuse` did not
+  # compile for any of them. On this matrix as it stood, that was invisible: every cell was 64-bit,
+  # every cell was green, and no test on a 64-bit host can see the difference either, because the
+  # defect is a compile error rather than a wrong answer. linux/armv7 was dropped from the release
+  # matrix rather than fixed as a result (#198).
+  #
+  # The vet step is what covers _test.go files. `go build` does not compile them, so a width bug in a
+  # test — `int(math.MaxUint32)` is the same error in the same shape — would still slip through a
+  # green build cell. Scoped to the first-party non-cgo trees: `sdks/c` is cgo and cannot be vetted
+  # under CGO_ENABLED=0 for any target (#200 covers that surface separately).
   # ---------------------------------------------------------------------------------------------
   cross-build:
     runs-on: ubuntu-latest
@@ -277,11 +290,16 @@ jobs:
         include:
           - {goos: linux, goarch: amd64}
           - {goos: linux, goarch: arm64}
+          - {goos: linux, goarch: arm, goarm: '7'}
+          - {goos: linux, goarch: '386'}
           - {goos: darwin, goarch: amd64}
           - {goos: darwin, goarch: arm64}
     steps:
       - uses: actions/checkout@v7
 
+      # setup-go runs before GOOS/GOARCH are in scope, deliberately: those are set per step below
+      # rather than on the job, so nothing about the toolchain install or its cache keys is asked to
+      # reason about a cross-compilation target.
       - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ env.GO_VERSION_FILE }}
@@ -292,7 +310,17 @@ jobs:
           CGO_ENABLED: 0
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # Empty for every non-arm cell, which the toolchain ignores.
+          GOARM: ${{ matrix.goarm }}
         run: go build ./cmd/objectfs
+
+      - name: Type-check tests for ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: go vet ./internal/... ./pkg/... ./cmd/...
 
   # ---------------------------------------------------------------------------------------------
   # sdk-metrics — the two SDK suites that parse sdks/testdata/metrics-scrape.txt.
