@@ -93,13 +93,12 @@ repos:
     files: \.go$
     pass_filenames: false
 
-      # Integration tests with LocalStack check
-  - id: integration-ready-check
-    name: Integration Test Readiness
-    entry: sh -c 'if [ -n "${AWS_ENDPOINT_URL:-}" ]; then echo "🔧 LocalStack detected, running integration tests..."; go test -tags=integration -v ./tests/...; else echo "ℹ️  Integration tests skipped (no LocalStack)"; fi'
-    language: system
-    files: \.go$
-    pass_filenames: false
+      # There was an `integration-ready-check` hook here that ran `go test -tags=integration` when
+      # AWS_ENDPOINT_URL was set, on the premise that the variable meant LocalStack. The suite it
+      # ran was deleted in v0.15.0 (#240): it targeted LocalStack, which `CLAUDE.md` and
+      # `CONTRIBUTING.md` both rule out, and it had not compiled for several API generations
+      # because nothing ever built the tag. Real-AWS integration tests are the `aws_s3` tag, run
+      # deliberately with a profile and a bucket — not inferred from an environment variable.
 
       # NOTE: Performance benchmarks removed from pre-commit
       # Run manually with: go test -bench=. -benchtime=5s ./...

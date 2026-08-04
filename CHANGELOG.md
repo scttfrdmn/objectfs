@@ -270,6 +270,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`tests/posix_test.go`, `tests/integration/`, and `pkg/optimization` — three suites and a package
+  that had never compiled, run, or been imported** ([#197], [#240]).
+
+  `tests/posix_test.go` was 400 lines of POSIX conformance assertions behind the `posix` tag. It did
+  not fail; it was never built. Repairing it was tried first and abandoned on evidence: removing the
+  duplicate `MockBackend` yields `unknown field files`, fixing that yields `undefined: vfs`, adding
+  the import yields `not enough arguments in call to metrics.NewCollector`. Three API generations, one
+  after another. Its own `MockBackend` copy had meanwhile been half-edited by some later sweep — it
+  takes a `meta` argument and carries a rename-preserves-metadata comment — which is the clearest
+  evidence available that someone updated this file without ever compiling it.
+
+  What it asserted is now asserted elsewhere, and better. Its eight suite methods covered mount,
+  file create/read/stat/delete, mkdir/readdir/rmdir, permissions, seek, concurrent reads, and stats.
+  `internal/fuse` has 13 test files over Lookup, Readdir, Mkdir, Create, Unlink, Rmdir, Rename,
+  Chmod, Setattr, Fsync, Statfs, attributes, the read path, cache invalidation and errno mapping —
+  against a real in-process S3 endpoint rather than a map. `internal/difftest` runs write, read,
+  truncate, flush, reopen and stat sequences against ObjectFS *and* the local OS filesystem and
+  asserts they agree. `internal/fuse/kernel_options_live_test.go` covers what genuinely needs a
+  kernel, behind `fuse_mount`, and is compiled in CI. The deleted file's `assert.NoError` on
+  `manager.Mount` also meant it would have failed rather than skipped on any runner without
+  `/dev/fuse`, so it could not have been added to CI as written.
+
+  `tests/integration/` was a LocalStack suite. `CLAUDE.md`, `CONTRIBUTING.md` and `DEVELOPMENT.md`
+  all rule LocalStack out, and nothing in the repository set the `AWS_ENDPOINT_URL` it required — so
+  it never ran even in the era when it compiled. Its companion `mocks.go` existed to assert that
+  `pkg/optimization`'s interfaces are satisfied by mocks written for that assertion, and those two
+  files were `pkg/optimization`'s **only importers in the entire tree**, so the package went with
+  them. A 284-line interface set whose sole consumer was a test of its own self-consistency.
+
+  Two pieces of wiring went too, both broken independently of the deletions. The
+  `integration-ready-check` pre-commit hook ran `go test -tags=integration ./tests/...` whenever
+  `AWS_ENDPOINT_URL` was set, inferring LocalStack from an environment variable that means nothing of
+  the kind. And `make test-integration` ran `go test -tags=integration ./test/integration/...` — a
+  directory that has never existed, so the target failed with `lstat ./test/integration/: no such
+  file or directory` for as long as git records it. The `integration` tag itself survives: it marks
+  real-AWS tests inside `internal/awsrates` and `internal/storage/s3`, which `make test-aws` and the
+  commands in `CONTRIBUTING.md` run.
+
+[#197]: https://github.com/scttfrdmn/objectfs/issues/197
+
 - **`markdown-it`, `markdown-it-anchor` and `markdown-it-container` from `docs-platform`, none of
   which the site was using** ([#299]). Dependabot proposed the `markdown-it` 15 major, which is what
   prompted looking at it. The answer is that the dependency should not be there at all, and the
@@ -297,6 +337,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+
+- **Every build tag is compiled in CI, and the two tagged files that had stopped compiling now
+  compile** ([#240], [#197]).
+
+  A file behind a build tag is excluded from the default build, so `go build ./...`, `go vet ./...`
+  and `go test ./...` all pass without ever type-checking it. Not "untested" — unbuilt. Four of this
+  repository's tags had rotted through that gap. `tests/aws_s3_test.go` called `PutObject` with three
+  arguments at ten call sites after the method grew a fourth `map[string]string` parameter.
+  `test/benchmarks/cache_test.go` called `fmt.Itoa`, which has never existed in any release of Go, so
+  that file has not compiled since the day it was written. `tests/integration/` had the same
+  `PutObject` breakage and `tests/posix_test.go` was three generations stale; both were deleted (see
+  Removed). Each of the four was committed green.
+
+  The gate is a `build-tags` job with one `go vet -tags=<tag> ./...` matrix cell per tag: `aws_s3`,
+  `benchmark`, `distributed`, `e2e`, `integration`, `fuse_mount`. Vet rather than test, deliberately —
+  several of these suites need real credentials, a bucket, or a `/dev/fuse` device and correctly
+  refuse to run without one, but *compiling* them needs nothing, and compiling is what was missing.
+  The bespoke `Compile the fuse_mount tag` step in the `test` job folded into this matrix; it was the
+  one tag already handled correctly, and there is no reason for it to be handled differently.
+
+  **The tag list is checked against the tree rather than maintained by hand**, because a hand-kept
+  list of tags going stale is the defect this issue is about. `TestEveryBuildTagIsGated` walks every
+  `//go:build` line in the repository, strips the boolean operators, discards the tags the toolchain
+  selects on its own (GOOS, GOARCH, `cgo`, `race`), and fails if what remains is not in the matrix —
+  naming the file, so the failure says where to look. `TestGatedTagsStillExist` is the converse and is
+  not symmetric with it: a cell for a deleted tag does not fail, it *passes*, because
+  `go vet -tags=gone ./...` selects no files and reports success. A green cell named after a suite
+  that no longer exists is worse than a red one, so that is a failure too.
+
+  Verified by mutation, five ways. Removing `e2e` from the matrix, adding a cell for the
+  now-deleted `posix`, and introducing a new `//go:build sekrit` file each produce the intended
+  failure. Restoring the original `fmt.Itoa` defect fails the `benchmark` cell. And the decisive one:
+  a type error injected into `tests/e2e_test.go` passes `go build ./...` (exit 0), `go vet ./...`
+  (exit 0) and `go test ./tests/` (exit 0, `ok`) while `go vet -tags=e2e ./...` exits 1. That gap,
+  measured on this commit, is the whole issue.
+
+[#240]: https://github.com/scttfrdmn/objectfs/issues/240
 
 - **`fuzz-smoke` no longer fails on Go's own fuzzing-coordinator shutdown race, and still fails on
   every real find** ([#218]). The job failed roughly 1 run in 10 with `context deadline exceeded`
@@ -1071,7 +1148,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#150]: https://github.com/scttfrdmn/objectfs/issues/150
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
-[#240]: https://github.com/scttfrdmn/objectfs/issues/240
 [#282]: https://github.com/scttfrdmn/objectfs/issues/282
 [#283]: https://github.com/scttfrdmn/objectfs/issues/283
 [#284]: https://github.com/scttfrdmn/objectfs/issues/284

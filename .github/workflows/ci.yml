@@ -50,13 +50,47 @@ jobs:
       - name: Test
         run: go test -race -timeout 20m ./...
 
-      # The fuse_mount tag carries the tests that need a real kernel mount — whether the kernel
-      # re-reads under direct I/O, whether it keeps pages across open(2). They cannot run here:
-      # ubuntu-latest runners have no /dev/fuse. They are compiled anyway, because a build tag
-      # nothing compiles is exactly how four other tags in this repo came to carry code that does
-      # not build (#240). This catches that in one step; #240 generalizes it to the rest.
-      - name: Compile the fuse_mount tag
-        run: go vet -tags=fuse_mount ./internal/fuse/
+  # ---------------------------------------------------------------------------------------------
+  # build-tags — compile every build tag in the repo.
+  #
+  # A build tag is invisible to `go build ./...`, `go vet ./...`, and `go test ./...`: the files
+  # behind it are not in the default build, so nothing type-checks them. Four of this repo's
+  # tags had rotted through that gap by v0.15.0 (#240) — `aws_s3` and `integration` were calling
+  # a three-argument PutObject that had grown a fourth parameter, `benchmark` called a function
+  # that does not exist (`fmt.Itoa`), and `posix` was several API generations stale. Each was
+  # written to pass, committed green, and then silently stopped compiling as the code beneath it
+  # moved. No test failed, because no test was ever built.
+  #
+  # Vet rather than test, deliberately. Several of these suites need real AWS credentials, a
+  # bucket, or a /dev/fuse device, and they correctly refuse to run without one. *Compiling*
+  # them needs nothing — and compiling is the thing that was missing. This gate says only "the
+  # code behind this tag is still valid Go against today's APIs", which is exactly the claim
+  # that had quietly become false.
+  #
+  # The tag list must stay complete. `TestEveryBuildTagIsGated` in internal/config walks every
+  # //go:build line in the repo and fails if one names a tag absent from the matrix below, so a
+  # new tag cannot be introduced without a cell to compile it. That test is the reason this list
+  # can be trusted rather than merely hoped to be current.
+  # ---------------------------------------------------------------------------------------------
+  build-tags:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # fuse_mount carries the tests that need a real kernel mount — whether the kernel
+        # re-reads under direct I/O, whether it keeps pages across open(2). ubuntu-latest has no
+        # /dev/fuse, so they cannot run here; they are compiled here.
+        tag: [aws_s3, benchmark, distributed, e2e, integration, fuse_mount]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Compile the ${{ matrix.tag }} tag
+        run: go vet -tags=${{ matrix.tag }} ./...
 
   # ---------------------------------------------------------------------------------------------
   # coverage — a floor per package, ratcheting toward 80%.

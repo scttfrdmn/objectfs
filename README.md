@@ -501,6 +501,7 @@ mocks the neighbouring layer.
 - **`internal/difftest`** — a differential oracle: one operation sequence run against both ObjectFS and the local OS filesystem, asserting they agree on reads, sizes, and durable bytes.
 - **Fuzz targets** with committed corpora over the write path, the range/slice domain, config loading, and the compress→PUT→GET→decompress round trip.
 - **Live AWS integration tests** — `AWS_PROFILE=aws AWS_REGION=us-west-2 go test -race -tags=integration ./...`
+- **Every build tag is compiled in CI**, one job per tag. A file behind a build tag is excluded from `go build ./...` and `go test ./...`, so it can stop compiling without any check going red — which is how four tagged suites in this repository came to carry code that did not build ([#240](https://github.com/scttfrdmn/objectfs/issues/240)).
 
 Pre-commit hooks run formatting, `go build`, `golangci-lint`, and the test suite. Install them with
 `./scripts/setup-hooks.sh`.
