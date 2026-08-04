@@ -198,6 +198,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The documentation site builds, for the first time in its history** ([#214], [#323]). `vitepress
+  build` had never been run by anything, and three independent failures had accumulated behind that
+  silence — each only visible once the previous one was fixed, which is why the fix that matters is
+  the CI job rather than any of the three:
+
+  1. `.vitepress/theme/index.js` imported `InteractiveExample.vue`, `PerformanceChart.vue` and
+     `ConfigurationBuilder.vue`. **None of the three has ever existed** — not deleted, never written;
+     `git log --all` finds no history for any of them. A missing import is a hard rollup error, so
+     this alone made every page in the tree unbuildable. Two pages mounted the components anyway and
+     now say what they would have shown; `PerformanceChart` was imported and used nowhere, which fits
+     the hardcoded chart that was removed from `index.md` earlier in this release.
+  2. `README.md` nested a ` ```python ` fence inside a ` ```markdown ` fence of the same length, so
+     the inner fence *closed* the outer block and the `</CodeRunner>` below it reached the Vue
+     compiler as a stray tag. It reported as `Invalid end tag` at a line and column in the middle of
+     an unrelated heading, which points nowhere near the cause. The outer fence is four backticks now.
+  3. `[LICENSE](../LICENSE)` leaves the VitePress site root: correct for a reader on GitHub, a dead
+     link to the builder, and dead links fail the build. Anything outside `docs-platform/` has to be
+     an absolute URL, and the file now says so.
+
+  Each fix was confirmed by reverting it against the otherwise-fixed tree and watching the build fail
+  with that specific error — `Could not resolve "../components/PerformanceChart.vue"`, `Invalid end
+  tag`, `Found dead link ./../LICENSE` — rather than by trusting that three green fixes explain a red
+  build. The new `docs-site` job runs `npx vitepress build .`; it uses `npm install` rather than
+  `npm ci` because this directory still commits no lockfile, which is the rest of [#214] and the
+  reason its npm security updates cannot apply.
+
+- **`github/codeql-action` moves to v4** ([#323]), pinned to the floating major like every other
+  action in this repository. Dependabot proposed `@v4.37.4`, and `v4.37.5` had already shipped by the
+  time it was reviewed — a patch pin on three SARIF uploaders defers every fix to the next merge and
+  buys nothing, since `upload-sarif`'s inputs are unchanged across the major and v4's breaking changes
+  are all in the analysis actions. The one action pinned exactly, `trivy-action`, is exact only
+  because it publishes no major ref, and it needed a comment to say so; this one now carries the
+  inverse note.
+
 - **Two comments in `.github/dependabot.yml` that this release made false** ([#328]). They said the
   `sdk-metrics` job runs `npm install && npm test`, and that "nothing in CI runs `tsc`" — both true
   when written, neither true once the `npm ci`, build and lint steps above landed. These comments are
@@ -801,6 +835,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#275]: https://github.com/scttfrdmn/objectfs/issues/275
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
+[#323]: https://github.com/scttfrdmn/objectfs/pull/323
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [#328]: https://github.com/scttfrdmn/objectfs/issues/328
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540

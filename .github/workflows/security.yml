@@ -94,8 +94,19 @@ jobs:
           echo "gosec: $(jq '[.runs[].results[]] | length' gosec.sarif) results after filtering"
         fi
 
+    # `@v4`, the floating major, not a patch pin — which is the convention for every action in this
+    # repository except `trivy-action` below, and that one is pinned exactly only because it publishes
+    # no major ref for `@v0.36` to resolve to. `github/codeql-action` does publish `refs/tags/v4`.
+    #
+    # Worth stating because Dependabot proposed `@v4.37.4` (#323) and it was already stale by review
+    # time — v4.37.5 had shipped. A patch pin on three SARIF uploaders buys no safety and defers every
+    # fix to the next merge, so the exactness would have been churn that also reads as deliberate to
+    # the next person, the way trivy's genuinely is.
+    #
+    # v4's breaking changes are in the analysis actions (`init`/`analyze`) and the Node runtime;
+    # `upload-sarif`'s inputs are unchanged, and all three call sites here ran green under v4.
     - name: Upload Gosec SARIF file
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       if: always()
       with:
         sarif_file: gosec.sarif
@@ -125,7 +136,7 @@ jobs:
 
     - name: Upload Trivy repo scan results
       if: always()
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: trivy-repo.sarif
 

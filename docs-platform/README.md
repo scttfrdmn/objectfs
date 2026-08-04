@@ -61,11 +61,19 @@ docs-platform/
 
 ### Interactive Components
 
+Two exist:
+
 - **ApiPlayground** - Test API endpoints with live requests
 - **CodeRunner** - Execute code examples in sandboxed environments
-- **ConfigurationBuilder** - Visual configuration generator
-- **PerformanceChart** - Real-time performance visualization
-- **InteractiveExample** - Step-by-step tutorial components
+
+Both need `src/api-server.js` running alongside the site to do anything; without it they render but
+their execute buttons have nothing to call.
+
+This list also named **ConfigurationBuilder**, **PerformanceChart** and **InteractiveExample**.
+None of the three was ever written — `git log --all` finds no history for any of the `.vue` files —
+and because `.vitepress/theme/index.js` imported them anyway, `vitepress build` failed on every page
+in this tree with `Could not resolve "../components/PerformanceChart.vue"`. They are no longer
+imported, and the pages that used them now say what they would have shown.
 
 ### Backend Services
 
@@ -205,7 +213,12 @@ curl http://localhost:3001/api/code-runner/metrics
 
 ### Adding Interactive Examples
 
-```markdown
+Note the outer fence is four backticks. It has to be longer than the fence it contains: with three
+on both, the inner ` ```python ` closes the outer block instead of opening a nested one, and the
+`</CodeRunner>` below it then reaches the Vue compiler as a stray closing tag — which is what broke
+`vitepress build` on this whole tree.
+
+````markdown
 <CodeRunner language="python" :executable="true">
 ```python
 # Your executable Python code here
@@ -215,7 +228,7 @@ print("This runs in a sandbox!")
 </CodeRunner>
 
 <ApiPlayground />
-```
+````
 
 ### Adding Custom Components
 
@@ -365,4 +378,9 @@ netstat -tlnp | grep 8081
 
 ## License
 
-Apache License 2.0 - see [LICENSE](../LICENSE) for details.
+Apache License 2.0 - see
+[LICENSE](https://github.com/scttfrdmn/objectfs/blob/main/LICENSE) for details.
+
+The link is absolute rather than `../LICENSE` because this directory is a VitePress site root: a
+relative path that leaves it resolves for a reader on GitHub and is a dead link to the site builder,
+which fails the build over it. Anything outside `docs-platform/` has to be linked by URL.
