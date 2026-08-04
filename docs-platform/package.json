@@ -27,7 +27,7 @@
     "yaml": "^2.3.4",
     "prismjs": "^1.29.0",
     "socket.io": "^4.7.4",
-    "dockerode": "^4.0.0",
+    "dockerode": "^5.0.1",
     "axios": "^1.6.2",
     "dotenv": "^17.4.2"
   },
