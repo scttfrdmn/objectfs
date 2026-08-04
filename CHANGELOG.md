@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sdks/python/requirements.txt`, which is both the pinned tree CI installs and the only reason
+  anything scans this SDK's dependencies** ([#343]). 21 packages, transitives included, resolved on
+  Python 3.12 to match `actions/setup-python`. The `sdk-metrics` job installs `-r requirements.txt`
+  then the package with `--no-deps`, so what CI tests is a tree a reader can reproduce rather than a
+  fresh resolution of six `>=` floors on every run — the defect #337 fixed for `docs-site`, in a
+  different language.
+
+  The scanning half is the more serious one, and it was measured. `trivy fs` over this repository
+  reported four targets — `go.mod`, `sdks/java/pom.xml`, and the two `package-lock.json` files — and
+  `sdks/python` was absent, because Trivy detects Python from `requirements.txt`, `poetry.lock`,
+  `Pipfile.lock` or an installed `.dist-info`, and the only manifest here was `setup.py`. It now
+  reports five targets. That is #201's complaint about the JavaScript SDK, in the one directory that
+  closing #201 did not reach.
+
+  **The filename is load-bearing, which cost a rewrite to discover.** This was first written as
+  `requirements-ci.txt`, the more descriptive name — and Trivy does not detect that. Scanned in a
+  scratch directory it reported no targets at all, so the file would have read as the fix while
+  leaving the gap exactly where it was. `requirements-dev.txt`, `dev-requirements.txt` and
+  `requirements/ci.txt` are equally invisible; only the literal `requirements.txt` matches. A bare
+  `pyproject.toml` is not detected either, which is worth stating because it is the modern-practice
+  answer and it does not solve this problem.
+
+  `install_requires` deliberately stays as ranges: a library that pins its transitive tree pins it
+  for every consumer. `pip check` now runs between install and test, which catches the one thing that
+  split can get wrong — a pin here that does not satisfy a range there. Verified by mutation rather
+  than assumed: pinning `psutil==5.7.0` against a `>=5.8.0` floor gives
+  `objectfs 0.1.0 has requirement psutil>=5.8.0, but you have psutil 5.7.0` and exit 1.
+
+  Two dependencies were removed rather than pinned, because neither was one. **`asyncio`** has been a
+  stdlib module since Python 3.4 and this package requires >=3.8; the PyPI distribution is a 3.3-era
+  backport, now a deliberate empty stub whose own summary reads "Deprecated backport of asyncio; use
+  the stdlib package instead." Checked in a scratch venv: `asyncio.__file__` still resolves to the
+  stdlib with it installed, so it shadowed nothing — but it declared a dependency this SDK does not
+  have, and older resolutions of that range are not empty stubs. **`typing-extensions`** is imported
+  nowhere in the package. The suite's 71 tests pass with both gone.
+
+  A `pip` ecosystem entry for `/sdks/python` is added to `dependabot.yml`, which needed the pinned
+  tree to exist first for the same reason `docs-platform`'s security updates needed a lockfile. Its
+  `python` label was added to `.github/labels.yml` and synced from there rather than being created by
+  the first PR that applies it — which is how `java` got onto the repository, and is the drift that
+  file exists to prevent.
+
+[#343]: https://github.com/scttfrdmn/objectfs/issues/343
+
 - **A gate that fails when a `package.json` and its `package-lock.json` disagree, so `npm ci` cannot
   refuse to install in a later job** ([#332]). `TestNPMLockfilesAgreeWithTheirManifests` compares
   each manifest's four dependency tables against the same tables in the lockfile's `packages[""]`

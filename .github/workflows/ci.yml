@@ -284,12 +284,25 @@ jobs:
       - name: Python SDK tests
         working-directory: sdks/python
         run: |
-          # The package rather than a hand-listed subset of its requirements. The tests exercise
-          # parsing, which needs no transport, but they import objectfs.monitoring, and
-          # objectfs/__init__.py imports the client — so the whole install_requires set has to
-          # resolve. Installing `.` also means this job fails if setup.py stops being installable,
-          # which nothing else in CI checks.
-          pip install --quiet pytest .
+          # `-r requirements.txt` first, then the package with --no-deps, so the tree installed here
+          # is the frozen one and not a fresh resolution of six `>=` floors. Before this the job
+          # resolved every floor on every run, which is the defect #337 fixed for docs-site in a
+          # different language: a break could appear or vanish with no commit behind it.
+          #
+          # --no-deps on the second line is what makes the first line authoritative. Without it pip
+          # re-resolves install_requires and can move a version the requirements file pinned.
+          #
+          # setup.py is still installed rather than the sources being put on sys.path, and still
+          # matters: the tests import objectfs.monitoring, objectfs/__init__.py imports the client,
+          # and installing `.` means this job fails if setup.py stops being installable — which
+          # nothing else in CI checks.
+          #
+          # `pip check` afterwards catches the one thing this arrangement can get wrong: a pin in
+          # requirements.txt that does not satisfy install_requires. Cheap, and it fails with the
+          # conflicting package named.
+          pip install --quiet -r requirements.txt
+          pip install --quiet --no-deps .
+          pip check
           pytest tests/ -q
 
       # Node 22, not 20: 20 went end-of-life in April 2026, so it stops receiving security fixes

@@ -251,3 +251,40 @@ updates:
       patterns:
       - '@typescript-eslint/*'
       - eslint
+
+  # Python SDK.
+  #
+  # Added with #343, and it needed a requirements.txt to exist first. Dependabot's `pip` ecosystem
+  # reads requirements.txt, pyproject.toml, Pipfile and setup.py — so it *can* see setup.py's ranges,
+  # but with only ranges and no pinned tree its security updates hit the same wall the docs-platform
+  # comment above describes: no installed version is known, so a vulnerable dependency cannot be
+  # identified as vulnerable. requirements.txt is the pinned tree, and is also the only filename
+  # `trivy fs` detects — verified, including that `requirements-ci.txt` and `requirements-dev.txt`
+  # are both invisible to it.
+  #
+  # Two things this will propose that are worth expecting rather than being surprised by. The tree is
+  # frozen at 21 packages including transitives, so a bump to a transitive dependency arrives as a
+  # requirements.txt-only PR with no manifest change — which is correct here and is the opposite of
+  # the npm case, where a manifest change without a lockfile change is now a test failure (#332).
+  # And setup.py's `install_requires` stays as ranges on purpose, so Dependabot proposing a floor
+  # bump there is a separate, usually-declinable thing from proposing a pin bump here.
+  #
+  # Limit 4, not 3: the pinned tree has four direct dependencies (requests, pyyaml, psutil, aiohttp)
+  # plus pytest, and the gomod comment above explains why a limit at or below the number of things
+  # that can move means some of them can never be proposed.
+- package-ecosystem: pip
+  directory: /sdks/python
+  schedule:
+    interval: weekly
+    day: monday
+    time: "09:00"
+  open-pull-requests-limit: 4
+  reviewers:
+  - scttfrdmn
+  commit-message:
+    prefix: deps
+    include: scope
+  labels:
+  - dependencies
+  - python
+  - automerge

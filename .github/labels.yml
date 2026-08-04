@@ -359,6 +359,14 @@
   description: npm dependency (docs-platform, sdks/javascript)
   color: f1e05a
 
+# Added here first, deliberately, alongside the `pip` ecosystem entry for /sdks/python — not created
+# by the first Dependabot PR the way `java` above was. That is the drift this file exists to prevent,
+# and the comment on `java` records it happening; doing the same thing again with the note already
+# written would be hard to defend.
+- name: python
+  description: pip dependency (sdks/python)
+  color: 3572a5
+
 # Created by Dependabot itself, on the first maven PR after sdks/java gained an ecosystem entry —
 # which is the drift this file exists to prevent happening while the issue about it was open. Its
 # description is Dependabot's wording, not ours, because that is what exists on the repository and

@@ -30,6 +30,19 @@ pip install -e .
 For development and monitoring extras, `pip install -e '.[dev]'` and `pip install -e '.[monitoring]'`
 from that same directory.
 
+That installs the four runtime dependencies as ranges, which is what a library should declare. To
+reproduce the tree CI tests against instead — pinned exactly, transitives included — use
+`requirements.txt`:
+
+```bash
+pip install -r requirements.txt
+pip install --no-deps .
+```
+
+`--no-deps` on the second command is what keeps the first one authoritative; without it pip
+re-resolves the ranges and can move a pinned version. Reach for this when reproducing a CI failure
+or a bug report; use `pip install -e .` for ordinary development, where a range is what you want.
+
 ## Quick Start
 
 ### Basic Usage
