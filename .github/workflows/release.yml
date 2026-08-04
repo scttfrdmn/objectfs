@@ -270,7 +270,7 @@ jobs:
     # cutting the release with an exit code and no way to see what caused it.
     - name: Upload Trivy scan results
       if: always()
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@v4.37.4
       with:
         sarif_file: trivy-binary.sarif
 
