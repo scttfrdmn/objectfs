@@ -403,10 +403,8 @@ There is no troubleshooting guide and no API reference site; both were linked he
 exists. For the Go API, `go doc ./internal/adapter` is the authority, with the caveat that these
 packages are under `internal/` and importable only inside this module.
 
-<InteractiveExample>
-
-::: tip
-Try the interactive examples above to see ObjectFS in action! Each code block can be executed directly in your browser.
-:::
-
-</InteractiveExample>
+The tip that used to close this page said "try the interactive examples above ... each code block can
+be executed directly in your browser." Nothing on this page executes anything: the `CodeRunner`
+component needs the Docker-backed `src/api-server.js` running alongside the site, and the
+`InteractiveExample` wrapper this tip sat inside had never been written at all. The code blocks above
+are ordinary code blocks — copy them into a shell.
