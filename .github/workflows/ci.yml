@@ -399,11 +399,11 @@ jobs:
   #   3. `[LICENSE](../LICENSE)` leaves the site root. Correct on GitHub, a dead link to the
   #      builder, and dead links fail the build.
   #
-  # `npm install`, not `npm ci`: docs-platform commits no package-lock.json. That is #214 and the
-  # reason its npm *security* updates cannot apply — Dependabot cannot determine an installed
-  # version without one. So this job resolves the manifest ranges fresh each run, which makes it a
-  # weaker gate than the SDK one above; it will still catch a broken page, a missing component, and
-  # a dead link, which is what it is here for.
+  # `npm ci`, against the package-lock.json this directory now commits (#214). It used to be
+  # `npm install`, which resolved the manifest ranges fresh on every run — so the job tested a
+  # dependency tree no reader could reproduce, and a break could appear or vanish with no commit
+  # behind it. The lockfile is also what Dependabot needs to determine an installed version, which
+  # is why the npm *security* updates for this directory could not apply before it existed.
   #
   # The site is not published by anything, so this gates content rather than a deploy. It earns its
   # place anyway: these pages are read on GitHub whether or not the site renders, and a tree that
@@ -420,7 +420,7 @@ jobs:
 
       - name: Install docs-platform dependencies
         working-directory: docs-platform
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Build documentation site
         working-directory: docs-platform

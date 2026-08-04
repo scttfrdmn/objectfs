@@ -226,6 +226,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docs-platform` commits a lockfile, so its dependency tree is reproducible and `npm audit` can
+  run at all** ([#214]). 741 packages resolved into `docs-platform/package-lock.json`, and the
+  `docs-site` job moves from `npm install` to `npm ci`. Before this the job resolved every `^x.y.z`
+  range fresh on each run, which means it was gating a tree no reader could reproduce and a break
+  could appear or vanish with no commit behind it.
+
+  Two things this makes possible that were not possible before, both verified rather than assumed.
+  `npm ci` into an empty `node_modules` builds the site (`build complete in 1.45s`, six pages),
+  where `npm ci` against this directory previously failed outright, reporting that it can only
+  install with an existing `package-lock.json`. And `npm audit` reports 0 vulnerabilities; with no
+  lockfile it had no tree to audit.
+
+  One correction to the record, because the tempting reading is wrong. This is *not* what closed the
+  three `vite` alerts against this manifest — they closed earlier the same day, before the lockfile
+  existed. `vite` is a direct devDependency at `^6.4.3` with an `overrides` entry forcing the same,
+  and the advisories' vulnerable range is `<= 6.4.2` with `6.4.3` first patched, so every version
+  the manifest admits is already patched. That is the "or pinned version requirement" half of
+  Dependabot's own error message, and it is a different mechanism from the lockfile. Both are true
+  here, which is exactly the situation in which one gets credited for the other.
+
 - **The JavaScript SDK's lint configuration is read by the linter again, and two swallowed error
   causes are reported** ([#309]). The `eslint` 10 major could not be taken as Dependabot opened it,
   because eslint 10 does not read `package.json`'s `eslintConfig` block at all — it requires a flat
