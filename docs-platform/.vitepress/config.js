@@ -136,14 +136,17 @@ export default defineConfig({
     }
   },
 
+  // No `config` hook. It used to register `markdown-it-container` for 'tip', 'warning' and
+  // 'danger', which was three kinds of redundant: VitePress ships those three containers built in,
+  // no page in this tree uses `:::` syntax at all, and the `md` handed to this hook is VitePress's
+  // own bundled markdown-it instance — so the top-level `markdown-it` dependency the hook appeared
+  // to justify was never the one being extended.
+  //
+  // Verified by removing all three packages from node_modules and rebuilding: the site builds, and
+  // the rendered HTML is byte-identical once asset content hashes are normalized. The dependencies
+  // are gone from package.json with the hook.
   markdown: {
-    lineNumbers: true,
-    config: (md) => {
-      // Add custom markdown plugins
-      md.use(require('markdown-it-container'), 'tip')
-      md.use(require('markdown-it-container'), 'warning')
-      md.use(require('markdown-it-container'), 'danger')
-    }
+    lineNumbers: true
   },
 
   vite: {

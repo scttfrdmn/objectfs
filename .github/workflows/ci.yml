@@ -382,6 +382,51 @@ jobs:
         run: make test
 
   # ---------------------------------------------------------------------------------------------
+  # docs-site — `vitepress build` on docs-platform/, which nothing had ever run.
+  #
+  # Same shape as the four SDK gates above, and the same lesson: the tree could not build, and had
+  # not been able to for its whole history, because no job invoked the builder. Three independent
+  # causes had accumulated behind that silence, and each one was only visible once the previous was
+  # fixed — which is the argument for the gate rather than for the three fixes:
+  #
+  #   1. `.vitepress/theme/index.js` imported three .vue components that have never existed in this
+  #      repository (`git log --all` finds no history for any of them). A missing import is a hard
+  #      rollup error, so this alone broke every page.
+  #   2. `README.md` nested a ```python fence inside a ```markdown fence of equal length, so the
+  #      inner fence closed the outer block and `</CodeRunner>` reached the Vue compiler as a stray
+  #      tag. Reported as `Invalid end tag` at a column in the middle of a heading, which points
+  #      nowhere near the cause.
+  #   3. `[LICENSE](../LICENSE)` leaves the site root. Correct on GitHub, a dead link to the
+  #      builder, and dead links fail the build.
+  #
+  # `npm install`, not `npm ci`: docs-platform commits no package-lock.json. That is #214 and the
+  # reason its npm *security* updates cannot apply — Dependabot cannot determine an installed
+  # version without one. So this job resolves the manifest ranges fresh each run, which makes it a
+  # weaker gate than the SDK one above; it will still catch a broken page, a missing component, and
+  # a dead link, which is what it is here for.
+  #
+  # The site is not published by anything, so this gates content rather than a deploy. It earns its
+  # place anyway: these pages are read on GitHub whether or not the site renders, and a tree that
+  # cannot build is a tree where nobody notices the next thing that breaks.
+  # ---------------------------------------------------------------------------------------------
+  docs-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install docs-platform dependencies
+        working-directory: docs-platform
+        run: npm install --no-audit --no-fund
+
+      - name: Build documentation site
+        working-directory: docs-platform
+        run: npx vitepress build .
+
+  # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must
   # load against the schema and must actually change something.
   #

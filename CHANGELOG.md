@@ -196,6 +196,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#206]: https://github.com/scttfrdmn/objectfs/issues/206
 [#317]: https://github.com/scttfrdmn/objectfs/issues/317
 
+### Removed
+
+- **`markdown-it`, `markdown-it-anchor` and `markdown-it-container` from `docs-platform`, none of
+  which the site was using** ([#299]). Dependabot proposed the `markdown-it` 15 major, which is what
+  prompted looking at it. The answer is that the dependency should not be there at all, and the
+  reason it looked load-bearing is worth writing down, because it is a trap the next person will hit
+  in the same order:
+
+  `.vitepress/config.js` had a `markdown.config` hook registering `markdown-it-container` for 'tip',
+  'warning' and 'danger'. That reads as a genuine use of a genuine dependency. It is three kinds of
+  redundant. VitePress ships those exact three containers built in. No page in this tree uses `:::`
+  syntax at all — the 142 `custom-block` elements in the rendered output all come from VitePress's
+  own handling. And the `md` object handed to that hook is VitePress's *bundled* markdown-it
+  instance, not the top-level one: `vitepress` 1.6.4 does not list `markdown-it` in its
+  `dependencies` and carries its own copy inside `dist/node/`. So the hook that appeared to justify
+  the top-level `markdown-it` was never extending it.
+
+  Measured rather than reasoned: removing all three from `node_modules` and rebuilding produces a
+  site that builds, with all six pages byte-identical to the baseline once asset content hashes are
+  normalized. Confirmed the other way too — leaving the hook in place with the package gone fails
+  the build with `Cannot find module 'markdown-it-container'`, so the hook and the dependency are a
+  matched pair and neither should be removed alone.
+
+  This is also the answer to #299 on its merits. A major bump of a dependency nothing imports is a
+  lockfile change with no behaviour attached, and holding or taking it was the wrong question.
+
+[#299]: https://github.com/scttfrdmn/objectfs/pull/299
+
 ### Fixed
 
 - **The Java SDK's OkHttp dependency names an artifact that still contains code** ([#291]).
@@ -211,6 +239,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release moved the coordinates, so #291 as opened could never have been correct no matter how often
   it was rebased. The `mvn -B test` step added above is what turns that from a silent breakage into a
   failing check.
+
+- **The documentation site builds, for the first time in its history** ([#214], [#323]). `vitepress
+  build` had never been run by anything, and three independent failures had accumulated behind that
+  silence — each only visible once the previous one was fixed, which is why the fix that matters is
+  the CI job rather than any of the three:
+
+  1. `.vitepress/theme/index.js` imported `InteractiveExample.vue`, `PerformanceChart.vue` and
+     `ConfigurationBuilder.vue`. **None of the three has ever existed** — not deleted, never written;
+     `git log --all` finds no history for any of them. A missing import is a hard rollup error, so
+     this alone made every page in the tree unbuildable. Two pages mounted the components anyway and
+     now say what they would have shown; `PerformanceChart` was imported and used nowhere, which fits
+     the hardcoded chart that was removed from `index.md` earlier in this release.
+  2. `README.md` nested a ` ```python ` fence inside a ` ```markdown ` fence of the same length, so
+     the inner fence *closed* the outer block and the `</CodeRunner>` below it reached the Vue
+     compiler as a stray tag. It reported as `Invalid end tag` at a line and column in the middle of
+     an unrelated heading, which points nowhere near the cause. The outer fence is four backticks now.
+  3. `README.md` linked the license as `../LICENSE`, which leaves the VitePress site root: correct
+     for a reader on GitHub, a dead link to the builder, and dead links fail the build. Anything
+     outside `docs-platform/` has to be an absolute URL, and the file now says so. (Written out
+     rather than quoted as markdown, because `TestDocumentedLinksResolve` reads a quoted link as a
+     real one and this entry would otherwise fail the test it is describing a fix for.)
+
+  Each fix was confirmed by reverting it against the otherwise-fixed tree and watching the build fail
+  with that specific error — `Could not resolve "../components/PerformanceChart.vue"`, `Invalid end
+  tag`, `Found dead link ./../LICENSE` — rather than by trusting that three green fixes explain a red
+  build. The new `docs-site` job runs `npx vitepress build .`; it uses `npm install` rather than
+  `npm ci` because this directory still commits no lockfile, which is the rest of [#214] and the
+  reason its npm security updates cannot apply.
+
+- **`github/codeql-action` moves to v4** ([#323]), pinned to the floating major like every other
+  action in this repository. Dependabot proposed `@v4.37.4`, and `v4.37.5` had already shipped by the
+  time it was reviewed — a patch pin on three SARIF uploaders defers every fix to the next merge and
+  buys nothing, since `upload-sarif`'s inputs are unchanged across the major and v4's breaking changes
+  are all in the analysis actions. The one action pinned exactly, `trivy-action`, is exact only
+  because it publishes no major ref, and it needed a comment to say so; this one now carries the
+  inverse note.
 
 - **Two comments in `.github/dependabot.yml` that this release made false** ([#328]). They said the
   `sdk-metrics` job runs `npm install && npm test`, and that "nothing in CI runs `tsc`" — both true
@@ -816,6 +880,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
 [#291]: https://github.com/scttfrdmn/objectfs/pull/291
+[#323]: https://github.com/scttfrdmn/objectfs/pull/323
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [#328]: https://github.com/scttfrdmn/objectfs/issues/328
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
