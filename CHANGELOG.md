@@ -198,6 +198,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Java SDK's OkHttp dependency names an artifact that still contains code** ([#291]).
+  `okhttp.version` moves 4.12.0 → 5.4.0, and in the same commit the `artifactId` moves `okhttp` →
+  `okhttp-jvm`, because OkHttp 5 went multiplatform and split the artifact: `okhttp-5.4.0.jar`
+  contains **zero** `.class` files and the JVM classes are in `okhttp-jvm` (330 of them). Keeping the
+  old coordinates compiles nothing and fails `src/main` with `package okhttp3 does not exist`, which
+  reads like a sweeping API break rather than a renamed artifact — and `src/test` passes either way,
+  since `mockwebserver` pulls `okhttp-jvm` in transitively at *test* scope. No source change was
+  needed: with the right coordinates all 17 tests pass unmodified.
+
+  Worth recording because it is a shape Dependabot cannot handle unaided: it bumps versions, and this
+  release moved the coordinates, so #291 as opened could never have been correct no matter how often
+  it was rebased. The `mvn -B test` step added above is what turns that from a silent breakage into a
+  failing check.
+
 - **Two comments in `.github/dependabot.yml` that this release made false** ([#328]). They said the
   `sdk-metrics` job runs `npm install && npm test`, and that "nothing in CI runs `tsc`" — both true
   when written, neither true once the `npm ci`, build and lint steps above landed. These comments are
@@ -801,6 +815,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#275]: https://github.com/scttfrdmn/objectfs/issues/275
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
+[#291]: https://github.com/scttfrdmn/objectfs/pull/291
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [#328]: https://github.com/scttfrdmn/objectfs/issues/328
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
