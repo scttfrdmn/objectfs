@@ -99,9 +99,16 @@ export class ObjectFSClient extends EventEmitter {
       const result = execSync('which objectfs', { encoding: 'utf8' });
       return result.trim();
     } catch (error) {
+      // The cause is included rather than discarded. `which objectfs` failing usually does mean
+      // the binary is absent, but it is not the only way this throws — a missing `which`, a
+      // permissions failure, or an unwritable cwd all land here, and reporting every one of them
+      // as "not in PATH" sends the reader looking in the wrong place. Installing ObjectFS is still
+      // the first thing to try, so that stays the headline.
       throw new ObjectFSError(
         'ObjectFS binary not found in PATH. Please install ObjectFS or ' +
-          'specify binaryPath in options.'
+          `specify binaryPath in options. (\`which objectfs\` failed: ${
+            error instanceof Error ? error.message : String(error)
+          })`
       );
     }
   }

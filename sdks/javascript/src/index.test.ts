@@ -85,7 +85,12 @@ describe('the entry point', () => {
   });
 
   test('LICENSE agrees with package.json', () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // The rule name is `no-require-imports`, not `no-var-requires`: typescript-eslint 8 renamed
+    // it, and the stale directive that used to be here silenced nothing while itself reporting
+    // as an unused disable. require() is deliberate — an `import` of ../package.json would pull
+    // the manifest into the compiled output's rootDir and change dist/'s shape, and this test
+    // exists to read the manifest the package actually ships with.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pkg = require('../package.json') as {
       license: string;
       version: string;
