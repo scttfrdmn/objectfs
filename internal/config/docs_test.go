@@ -179,7 +179,7 @@ func markdownFiles(t *testing.T) []string {
 
 	root := repoRoot(t)
 
-	cmd := exec.Command("git", "ls-files", "-z", "*.md")
+	cmd := exec.CommandContext(t.Context(), "git", "ls-files", "-z", "*.md")
 	cmd.Dir = root
 
 	out, err := cmd.Output()
@@ -189,7 +189,9 @@ func markdownFiles(t *testing.T) []string {
 
 	var paths []string
 
-	for _, rel := range strings.Split(string(out), "\x00") {
+	// -z, so NUL-separated: a path may contain a newline, and `git ls-files` without -z quotes
+	// those rather than emitting them, which would need unquoting here to match the filesystem.
+	for rel := range strings.SplitSeq(string(out), "\x00") {
 		if rel == "" {
 			continue
 		}
