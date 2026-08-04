@@ -31,7 +31,7 @@
         <slf4j.version>2.0.18</slf4j.version>
         <junit.version>4.13.2</junit.version>
         <mockito.version>5.23.0</mockito.version>
-        <okhttp.version>4.12.0</okhttp.version>
+        <okhttp.version>5.4.0</okhttp.version>
     </properties>
 
     <dependencies>
@@ -62,10 +62,21 @@
             <version>${slf4j.version}</version>
         </dependency>
 
-        <!-- HTTP client -->
+        <!-- HTTP client.
+             `okhttp-jvm`, not `okhttp`. OkHttp 5 went multiplatform and split the artifact: as of
+             5.4.0 `com.squareup.okhttp3:okhttp` is a stub containing zero .class files (verify with
+             `unzip -l okhttp-5.4.0.jar | grep -c '\.class'`), and the JVM classes live in
+             `okhttp-jvm`. Depending on the old coordinates compiles nothing and fails src/main with
+             "package okhttp3 does not exist" — which reads like a sweeping API break rather than a
+             renamed artifact. src/test would have passed either way, because mockwebserver below
+             pulls okhttp-jvm in transitively at test scope.
+
+             This is why #291 could never be merged as opened: Dependabot bumps versions, and this
+             release moved the coordinates, so the version bump and this artifactId belong in the
+             same commit or neither is correct. -->
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>okhttp</artifactId>
+            <artifactId>okhttp-jvm</artifactId>
             <version>${okhttp.version}</version>
         </dependency>
 

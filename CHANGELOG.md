@@ -246,6 +246,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dependabot's own error message, and it is a different mechanism from the lockfile. Both are true
   here, which is exactly the situation in which one gets credited for the other.
 
+- **The JavaScript SDK's lint configuration is read by the linter again, and two swallowed error
+  causes are reported** ([#309]). The `eslint` 10 major could not be taken as Dependabot opened it,
+  because eslint 10 does not read `package.json`'s `eslintConfig` block at all — it requires a flat
+  `eslint.config.js`, and with no such file `npm run lint` lints with default rules or errors out
+  depending on the invocation. Merging the version bump alone would have quietly undone the config
+  fix that had just landed for the same file. So the block moved to `sdks/javascript/eslint.config.js`
+  as a port rather than a rewrite: same five rules, same severities.
+
+  Three points of the translation are worth recording, because none is visible from a version diff.
+  Flat config has no `extends`, so `eslint:recommended` becomes `js.configs.recommended` and
+  `plugin:@typescript-eslint/recommended` becomes a spread of `tseslint.configs.recommended` — the
+  string forms are not accepted anywhere. `env: {node, es6}` was two things at once and splits into
+  `languageOptions.globals` and `ecmaVersion`. And `.eslintignore` is no longer read, so `dist/**`
+  has to appear in an `ignores` block or the emitted JavaScript gets linted as source.
+
+  The bump then surfaced two genuine defects, because typescript-eslint 8 defaults
+  `caughtErrors: 'all'` and so reports every discarded `catch` binding. Eight sites reported; six
+  were deliberate and are now named `_error`, but two were throwing a new error while dropping the
+  cause of the original. `findBinary` reported every failure of `execSync('which objectfs')` as
+  "not found in PATH", which is the wrong place to look when the real cause was a permissions
+  failure or an unwritable cwd; it now includes the underlying message. `prepareMountPoint` reported
+  every `access` rejection as "insufficient permissions", including `ENOENT` for a mount point that
+  does not exist; it now includes the errno.
+
+  Test files are linted now, which they were not before, and that immediately found a third thing:
+  `index.test.ts` carried an `eslint-disable-next-line @typescript-eslint/no-var-requires`, and
+  typescript-eslint 8 renamed that rule to `no-require-imports`, so the directive had been
+  suppressing nothing. Result is 0 errors and 19 warnings, all `no-explicit-any`, which the ported
+  config sets to `warn` deliberately; the config was mutation-checked by introducing an unused
+  binding and a formatting violation and confirming both are reported as errors.
+
+[#309]: https://github.com/scttfrdmn/objectfs/pull/309
+
+- **The Java SDK's OkHttp dependency names an artifact that still contains code** ([#291]).
+  `okhttp.version` moves 4.12.0 → 5.4.0, and in the same commit the `artifactId` moves `okhttp` →
+  `okhttp-jvm`, because OkHttp 5 went multiplatform and split the artifact: `okhttp-5.4.0.jar`
+  contains **zero** `.class` files and the JVM classes are in `okhttp-jvm` (330 of them). Keeping the
+  old coordinates compiles nothing and fails `src/main` with `package okhttp3 does not exist`, which
+  reads like a sweeping API break rather than a renamed artifact — and `src/test` passes either way,
+  since `mockwebserver` pulls `okhttp-jvm` in transitively at *test* scope. No source change was
+  needed: with the right coordinates all 17 tests pass unmodified.
+
+  Worth recording because it is a shape Dependabot cannot handle unaided: it bumps versions, and this
+  release moved the coordinates, so #291 as opened could never have been correct no matter how often
+  it was rebased. The `mvn -B test` step added above is what turns that from a silent breakage into a
+  failing check.
+
 - **The documentation site builds, for the first time in its history** ([#214], [#323]). `vitepress
   build` had never been run by anything, and three independent failures had accumulated behind that
   silence — each only visible once the previous one was fixed, which is why the fix that matters is
@@ -885,6 +932,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#275]: https://github.com/scttfrdmn/objectfs/issues/275
 [#277]: https://github.com/scttfrdmn/objectfs/issues/277
 [#278]: https://github.com/scttfrdmn/objectfs/issues/278
+[#291]: https://github.com/scttfrdmn/objectfs/pull/291
 [#323]: https://github.com/scttfrdmn/objectfs/pull/323
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [#328]: https://github.com/scttfrdmn/objectfs/issues/328

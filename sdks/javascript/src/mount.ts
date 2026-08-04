@@ -21,7 +21,10 @@ const readdir = promisify(fs.readdir);
 const stat = promisify(fs.stat);
 
 export class MountManager {
-  constructor(private binaryPath: string, private config: Configuration) {}
+  constructor(
+    private binaryPath: string,
+    private config: Configuration
+  ) {}
 
   /**
    * Mount ObjectFS filesystem
@@ -92,7 +95,7 @@ export class MountManager {
       if (configFile) {
         try {
           await unlink(configFile);
-        } catch (unlinkError) {
+        } catch (_unlinkError) {
           // Ignore cleanup errors
         }
       }
@@ -168,7 +171,7 @@ export class MountManager {
         if (!stats.isDirectory()) {
           return false;
         }
-      } catch (error) {
+      } catch (_error) {
         return false;
       }
 
@@ -191,7 +194,7 @@ export class MountManager {
               );
             }
           }
-        } catch (error) {
+        } catch (_error) {
           // Fall back to other detection methods
         }
       }
@@ -286,7 +289,7 @@ export class MountManager {
                   mountInfo.free = 0;
                   mountInfo.percent = 0;
                 }
-              } catch (error) {
+              } catch (_error) {
                 // Ignore errors getting usage stats
               }
 
@@ -388,7 +391,7 @@ export class MountManager {
         if (files.length > 0) {
           console.warn(`Mount point ${absolutePath} is not empty`);
         }
-      } catch (error) {
+      } catch (_error) {
         // Ignore readdir errors
       }
 
@@ -396,8 +399,15 @@ export class MountManager {
       try {
         await access(absolutePath, fs.constants.R_OK | fs.constants.W_OK);
       } catch (error) {
+        // The errno is included rather than discarded. `access` rejects with ENOENT when the path
+        // is gone as well as EACCES when it is unreadable, and "insufficient permissions" for a
+        // path that does not exist is a message that costs the reader a debugging session.
+        const code =
+          error instanceof Error && 'code' in error
+            ? String((error as NodeJS.ErrnoException).code)
+            : 'unknown';
         throw new MountError(
-          `Insufficient permissions for mount point: ${absolutePath}`
+          `Insufficient permissions for mount point: ${absolutePath} (${code})`
         );
       }
     } catch (error) {
@@ -463,7 +473,7 @@ export class MountManager {
         try {
           await readdir(mountPoint);
           return;
-        } catch (error) {
+        } catch (_error) {
           // Continue waiting
         }
       }

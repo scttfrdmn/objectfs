@@ -20,7 +20,10 @@ import {
 export class HealthChecker {
   private client: AxiosInstance;
 
-  constructor(timeout = 10000, private retries = 3) {
+  constructor(
+    timeout = 10000,
+    private retries = 3
+  ) {
     this.client = axios.create({
       timeout,
       validateStatus: (status) => status < 500, // Don't throw on 4xx errors
