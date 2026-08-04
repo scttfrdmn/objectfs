@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -160,39 +159,33 @@ var docsExemptFromConfigSchema = map[string]string{
 }
 
 // markdownFiles returns every tracked markdown file in the repository.
+//
+// Tracked, via `git ls-files`, and not every .md on disk. This used to walk the filesystem with a
+// skip-list of `.git`, `vendor` and `node_modules`, which meant the doc comment above was aspiration
+// rather than description — any generated markdown was scanned as though the repository published
+// it. `npm run docs` in sdks/javascript is how that surfaced: TypeDoc copies CONTRIBUTING.md into
+// its output tree, and the copy's relative links then resolve against the wrong base directory, so
+// the test failed on a link that is correct in the original file. The generated tree is now
+// gitignored as well, but a skip-list only ever names the generators someone has already run, which
+// is the same reason this repository keeps discovering build steps nothing had invoked.
+//
+// `git ls-files` inherits .gitignore for free and cannot drift from it. The tradeoff is that a
+// brand-new markdown file is not checked until it is `git add`ed — which is the right boundary for
+// a gate on what the repository publishes, and is moot in CI, where every file is tracked by
+// definition.
+// The `git ls-files` call itself is trackedFiles, in lockfile_test.go — the npm lockfile gate needs
+// the same "tracked, not walked" set for a different pathspec, and the reasoning above is the
+// reasoning there.
 func markdownFiles(t *testing.T) []string {
 	t.Helper()
 
 	root := repoRoot(t)
 
-	var paths []string
+	rels := trackedFiles(t, "*.md")
 
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules":
-				return filepath.SkipDir
-			}
-
-			return nil
-		}
-
-		if strings.HasSuffix(path, ".md") {
-			paths = append(paths, path)
-		}
-
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk %s: %v", root, err)
-	}
-
-	if len(paths) == 0 {
-		t.Fatalf("found no markdown under %s, and an empty set passes every assertion below", root)
+	paths := make([]string, 0, len(rels))
+	for _, rel := range rels {
+		paths = append(paths, filepath.Join(root, rel))
 	}
 
 	return paths

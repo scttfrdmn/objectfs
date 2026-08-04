@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A gate that fails when a `package.json` and its `package-lock.json` disagree, so `npm ci` cannot
+  refuse to install in a later job** ([#332]). `TestNPMLockfilesAgreeWithTheirManifests` compares
+  each manifest's four dependency tables against the same tables in the lockfile's `packages[""]`
+  entry — npm's own record of what the manifest said when the lock was generated — and reports the
+  directory and package name in seconds, in the `test` job, before anything installs.
+
+  The failure it replaces was real and badly phrased. `npm ci` refuses to run on a mismatch, so a
+  manifest edited without regenerating the lock surfaced as an npm error deep in whichever job
+  installed first: `` `npm ci` can only install packages when your package.json and
+  package-lock.json are in sync [...] Invalid: lock file's @types/node@18.19.130 does not satisfy
+  @types/node@26.1.2 ``. Nothing in that names the actual mistake.
+
+  Comparing the lockfile's own root entry, rather than diffing the two files a pull request touched,
+  is deliberate. A changed-files check needs a base ref, does not work under a plain `go test`, and
+  passes a hand edit that touches both files without regenerating the tree. This runs from a single
+  checkout and asks the question npm asks.
+
+  Both directions are checked — a range the lockfile does not record, a range recorded at a
+  different version, and a package the lockfile still records after the manifest dropped it — and
+  all three were mutation-checked against the real tree rather than predicted. A fourth subtest
+  globs `git ls-files` for tracked `package.json` files and fails on any directory not in the list,
+  so a third npm directory cannot be added without a lockfile gate; that one was mutation-checked
+  too. What this does *not* verify is the resolved tree below the root: whether the locked versions
+  satisfy the ranges, and whether every transitive dependency is present. Only `npm ci` answers
+  that, and `sdk-metrics` and `docs-site` both run it.
+
+[#332]: https://github.com/scttfrdmn/objectfs/issues/332
+
 - **`build` and `lint` steps in CI for the JavaScript SDK, which is the gate whose absence let 48 type
   errors ship** ([#314]). The `sdk-metrics` job ran `npm ci && npm test` as a single step; `tsc` was
   never invoked by anything, in any job, ever. It now runs as its own step, so a type error fails the
@@ -245,6 +273,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the manifest admits is already patched. That is the "or pinned version requirement" half of
   Dependabot's own error message, and it is a different mechanism from the lockfile. Both are true
   here, which is exactly the situation in which one gets credited for the other.
+
+- **The JavaScript SDK builds on TypeScript 6** ([#328], [#331]), which is the toolchain bump that
+  #314 tracked as step 4 and then lost when it was closed. `typescript` ^5 → ^6, `typedoc` ^0.24 →
+  ^0.28.20, `jest` and `@types/jest` ^29 → ^30, plus two `tsconfig.json` keys. `ts-jest` stays at
+  ^29.1.0: its 29.4.12 already peers `<7`, so it admits 6.
+
+  The two keys are the whole of the work, and the first one is a trap worth naming. TypeScript 6
+  deprecates `moduleResolution: "node"` and raises **TS5107** for it — but TS5107 is a *config*-level
+  error, so `tsc` exits before typechecking any source. It reports **1 error**, which reads like a
+  nearly-clean bump. Behind it wait 64 more, all `@types/node` failing to resolve, because
+  TypeScript 6 no longer auto-includes it: `Cannot find name 'process'`, `'console'`,
+  `'child_process'`. Bumping `@types/node` does not help — the package is `typesVersions`-only with
+  no `exports` map. `"ignoreDeprecations": "6.0"` and `"types": ["node"]` together take it to zero.
+
+  Both keys were mutation-checked rather than assumed: removing `ignoreDeprecations` gives exactly
+  the 1 TS5107, and removing `types` gives 64 errors across six diagnostic codes (29 × TS2584,
+  18 × TS2591, 10 × TS2304, 4 × TS7006, 2 × TS2339, 1 × TS2503). #328 predicted 63 from a scratch
+  copy; the real number here is 64, which is the sort of thing that only shows up by running it.
+
+  `moduleResolution` deliberately does *not* move. It cannot move alone — `Node16`/`NodeNext`
+  without a matching `module` is TS5110 — and moving both makes `ts-jest` warn TS151002 on every
+  suite. Keeping `module: commonjs` and acknowledging the deprecation is the quieter option.
+
+  Verified from a clean tree, since `sdk-metrics` installs with `npm ci`: `tsc --noEmit` 0 errors,
+  65 tests in 4 suites, `npm run lint` 0 errors / 19 warnings. `npm run docs` was run by hand too —
+  it is the one step of the four that CI does not gate, and `typedoc` moved four minors here.
+
+  Running that ungated step found a second, unrelated thing, which is its own argument for running
+  it. `TestDocumentedLinksResolve` walked the filesystem for `.md` files while its doc comment
+  claimed it returned *tracked* ones, so TypeDoc's output was scanned as though the repository
+  published it — and TypeDoc copies `CONTRIBUTING.md` into its media directory, where the copy's
+  relative links resolve against the wrong base and fail on a link that is correct in the original.
+  It now uses `git ls-files`, which inherits `.gitignore` and cannot drift from it, where the old
+  skip-list could only ever name generators someone had already run. Same count of real documents
+  checked (38); the two dropped files are both generated, TypeDoc's copy and a `.pytest_cache`
+  artifact the old walk had also been reading. `/sdks/javascript/docs/` is gitignored to match.
 
 - **The JavaScript SDK's lint configuration is read by the linter again, and two swallowed error
   causes are reported** ([#309]). The `eslint` 10 major could not be taken as Dependabot opened it,
@@ -936,6 +1000,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#323]: https://github.com/scttfrdmn/objectfs/pull/323
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [#328]: https://github.com/scttfrdmn/objectfs/issues/328
+[#331]: https://github.com/scttfrdmn/objectfs/pull/331
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
