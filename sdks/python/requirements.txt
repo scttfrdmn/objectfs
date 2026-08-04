@@ -1,0 +1,58 @@
+# Fully pinned dependency tree for the Python SDK's CI job. Generated, not hand-maintained:
+#
+#   python3.12 -m venv .venv && .venv/bin/pip install 'requests>=2.25.0' 'pyyaml>=6.0' \
+#     'psutil>=5.8.0' 'aiohttp>=3.8.0' pytest && .venv/bin/pip freeze
+#
+# Python 3.12, matching `actions/setup-python` in the `sdk-metrics` job. Resolving on a different
+# minor can produce different transitive pins, so the version that generates this file has to be the
+# version that installs it.
+#
+# **This is not the SDK's dependency declaration.** `setup.py`'s `install_requires` is, and it stays
+# as ranges — a library that pins its transitive tree pins it for every consumer, which is the wrong
+# tradeoff for something meant to be installed alongside other packages. This file exists so the
+# *test job* runs against a tree a reader can reproduce, which is a different question from what the
+# SDK requires. That split is standard practice and is why "add a lockfile" was not by itself the
+# right instruction here (#343).
+#
+# Two consequences, both verified rather than assumed:
+#
+#   - `trivy fs` detects Python from `requirements.txt` / `poetry.lock` / `Pipfile.lock` and an
+#     installed `.dist-info` — *not* from `setup.py`, and not from a bare `pyproject.toml` either,
+#     which was checked in a scratch directory and reported no targets at all. So before this file
+#     existed, the repository-wide scan reported four targets (`go.mod`, `sdks/java/pom.xml`, and the
+#     two `package-lock.json` files) and this SDK's 16 dependencies were scanned by nothing.
+#
+#     **The filename is load-bearing, and exactly this.** This file was first written as
+#     `requirements-ci.txt`, which is the more descriptive name and which Trivy does not detect —
+#     scanned in a scratch directory, it reported no targets, so the file would have looked like the
+#     fix while leaving the scanning gap exactly as it was. `requirements-dev.txt`,
+#     `dev-requirements.txt` and `requirements/ci.txt` are all equally invisible; only the literal
+#     `requirements.txt` is matched. Do not rename this for tidiness.
+#   - the `sdk-metrics` job installed all six `install_requires` floors fresh on every run, so a
+#     break could appear or vanish with no commit behind it. Same defect `docs-site` had before #337,
+#     in a different language.
+#
+# Regenerate when a dependency needs to move — including when Trivy reports an advisory here, which
+# is now possible. Do not edit a single line by hand: the point of a frozen tree is that every line
+# came from one resolution, and a hand edit makes the file describe a tree nothing ever installed.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+attrs==26.1.0
+certifi==2026.7.22
+charset-normalizer==3.4.9
+frozenlist==1.8.0
+idna==3.18
+iniconfig==2.3.0
+multidict==6.7.1
+packaging==26.2
+pluggy==1.6.0
+propcache==0.5.2
+psutil==7.2.2
+Pygments==2.20.0
+pytest==9.1.1
+PyYAML==6.0.3
+requests==2.34.2
+typing_extensions==4.16.0
+urllib3==2.7.0
+yarl==1.24.5
