@@ -226,6 +226,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The JavaScript SDK builds on TypeScript 6** ([#328], [#331]), which is the toolchain bump that
+  #314 tracked as step 4 and then lost when it was closed. `typescript` ^5 → ^6, `typedoc` ^0.24 →
+  ^0.28.20, `jest` and `@types/jest` ^29 → ^30, plus two `tsconfig.json` keys. `ts-jest` stays at
+  ^29.1.0: its 29.4.12 already peers `<7`, so it admits 6.
+
+  The two keys are the whole of the work, and the first one is a trap worth naming. TypeScript 6
+  deprecates `moduleResolution: "node"` and raises **TS5107** for it — but TS5107 is a *config*-level
+  error, so `tsc` exits before typechecking any source. It reports **1 error**, which reads like a
+  nearly-clean bump. Behind it wait 64 more, all `@types/node` failing to resolve, because
+  TypeScript 6 no longer auto-includes it: `Cannot find name 'process'`, `'console'`,
+  `'child_process'`. Bumping `@types/node` does not help — the package is `typesVersions`-only with
+  no `exports` map. `"ignoreDeprecations": "6.0"` and `"types": ["node"]` together take it to zero.
+
+  Both keys were mutation-checked rather than assumed: removing `ignoreDeprecations` gives exactly
+  the 1 TS5107, and removing `types` gives 64 errors across six diagnostic codes (29 × TS2584,
+  18 × TS2591, 10 × TS2304, 4 × TS7006, 2 × TS2339, 1 × TS2503). #328 predicted 63 from a scratch
+  copy; the real number here is 64, which is the sort of thing that only shows up by running it.
+
+  `moduleResolution` deliberately does *not* move. It cannot move alone — `Node16`/`NodeNext`
+  without a matching `module` is TS5110 — and moving both makes `ts-jest` warn TS151002 on every
+  suite. Keeping `module: commonjs` and acknowledging the deprecation is the quieter option.
+
+  Verified from a clean tree, since `sdk-metrics` installs with `npm ci`: `tsc --noEmit` 0 errors,
+  65 tests in 4 suites, `npm run lint` 0 errors / 19 warnings. `npm run docs` was run by hand too —
+  it is the one step of the four that CI does not gate, and `typedoc` moved four minors here.
+
+  Running that ungated step found a second, unrelated thing, which is its own argument for running
+  it. `TestDocumentedLinksResolve` walked the filesystem for `.md` files while its doc comment
+  claimed it returned *tracked* ones, so TypeDoc's output was scanned as though the repository
+  published it — and TypeDoc copies `CONTRIBUTING.md` into its media directory, where the copy's
+  relative links resolve against the wrong base and fail on a link that is correct in the original.
+  It now uses `git ls-files`, which inherits `.gitignore` and cannot drift from it, where the old
+  skip-list could only ever name generators someone had already run. Same count of real documents
+  checked (38); the two dropped files are both generated, TypeDoc's copy and a `.pytest_cache`
+  artifact the old walk had also been reading. `/sdks/javascript/docs/` is gitignored to match.
+
 - **The JavaScript SDK's lint configuration is read by the linter again, and two swallowed error
   causes are reported** ([#309]). The `eslint` 10 major could not be taken as Dependabot opened it,
   because eslint 10 does not read `package.json`'s `eslintConfig` block at all — it requires a flat
@@ -916,6 +952,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#323]: https://github.com/scttfrdmn/objectfs/pull/323
 [#325]: https://github.com/scttfrdmn/objectfs/issues/325
 [#328]: https://github.com/scttfrdmn/objectfs/issues/328
+[#331]: https://github.com/scttfrdmn/objectfs/pull/331
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed

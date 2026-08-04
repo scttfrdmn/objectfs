@@ -61,6 +61,17 @@ dist/
 build/
 bin/
 
+# TypeDoc's output, for sdks/javascript. `npm run docs` writes ./docs, and like `target/` below,
+# nothing had ever run it — so nothing had produced the directory to notice it was untracked. It is
+# anchored, unlike the entries above, because `docs/` unanchored would swallow the repository's own
+# `docs/` tree.
+#
+# Leaving it untracked-but-not-ignored is worse than either alternative, and not hypothetically:
+# TypeDoc copies CONTRIBUTING.md into docs/media/, and TestDocumentedLinksResolve then reads that
+# copy's relative links against the wrong base directory and fails on a link that is correct in the
+# original.
+/sdks/javascript/docs/
+
 # Maven's output directory, for sdks/java. Nothing had ever run `mvn` in this repository — that is
 # why the Java SDK shipped four compile errors — so nothing had ever produced this directory to
 # notice it was untracked. `target/` and not `sdks/java/target/`, matching the unanchored style of
