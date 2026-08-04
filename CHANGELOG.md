@@ -241,9 +241,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      the inner fence *closed* the outer block and the `</CodeRunner>` below it reached the Vue
      compiler as a stray tag. It reported as `Invalid end tag` at a line and column in the middle of
      an unrelated heading, which points nowhere near the cause. The outer fence is four backticks now.
-  3. `[LICENSE](../LICENSE)` leaves the VitePress site root: correct for a reader on GitHub, a dead
-     link to the builder, and dead links fail the build. Anything outside `docs-platform/` has to be
-     an absolute URL, and the file now says so.
+  3. `README.md` linked the license as `../LICENSE`, which leaves the VitePress site root: correct
+     for a reader on GitHub, a dead link to the builder, and dead links fail the build. Anything
+     outside `docs-platform/` has to be an absolute URL, and the file now says so. (Written out
+     rather than quoted as markdown, because `TestDocumentedLinksResolve` reads a quoted link as a
+     real one and this entry would otherwise fail the test it is describing a fix for.)
 
   Each fix was confirmed by reverting it against the otherwise-fixed tree and watching the build fail
   with that specific error — `Could not resolve "../components/PerformanceChart.vue"`, `Invalid end
