@@ -103,8 +103,8 @@ export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends readonly unknown[]
     ? T[K]
     : T[K] extends object
-    ? DeepPartial<T[K]>
-    : T[K];
+      ? DeepPartial<T[K]>
+      : T[K];
 };
 
 // Operation types
@@ -332,9 +332,7 @@ export interface ErrorInfo {
 // what the client actually needs, since `loadConfig` accepts an already-built Configuration, a path
 // to a YAML file, or a plain object; `ConfigurationLike` says that without the back-edge.
 export type ConfigurationLike =
-  | { toObject(): any }
-  | string
-  | Record<string, any>;
+  { toObject(): any } | string | Record<string, any>;
 
 export interface ClientOptions {
   config?: ConfigurationLike;
