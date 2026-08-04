@@ -75,7 +75,9 @@ cat /mnt/data/test.txt
 
 ### Configuration Builder
 
-<ConfigurationBuilder />
+A `<ConfigurationBuilder />` sat here. Like the chart described below, it was never real — the
+component file has no history in this repository, and importing it is what made `vitepress build`
+fail on every page. `configs/example.yaml` is the commented configuration to copy instead.
 
 ### API Playground
 

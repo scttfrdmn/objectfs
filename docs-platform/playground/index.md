@@ -206,9 +206,11 @@ func main() {
 
 ## Configuration Builder
 
-Build and test different ObjectFS configurations:
-
-<ConfigurationBuilder />
+A `<ConfigurationBuilder />` component was mounted here to generate configurations visually. It was
+never written, so there is nothing to build with — see `configs/example.yaml` in the repository for a
+commented configuration to copy, and `docs/configuration.md` for what each key does. Every key in
+that file is checked against the loader's schema by a test, so it cannot document a key the code
+does not read.
 
 ## Performance Testing
 
@@ -303,10 +305,7 @@ asyncio.run(analyze_cache_performance())
 
 ### Tutorial 1: Basic Operations
 
-<InteractiveExample>
-<div slot="description">
 Learn the fundamentals of ObjectFS by following this step-by-step tutorial.
-</div>
 
 1. **Mount a filesystem**
 
@@ -338,14 +337,9 @@ Learn the fundamentals of ObjectFS by following this step-by-step tutorial.
    fusermount -u /mnt/tutorial   # Linux; on macOS, umount /mnt/tutorial
    ```
 
-</InteractiveExample>
-
 ### Tutorial 2: Performance Optimization
 
-<InteractiveExample>
-<div slot="description">
 Optimize ObjectFS for your specific workload patterns.
-</div>
 
 1. **Identify your workload pattern**
    - Sequential reads (streaming)
@@ -369,8 +363,6 @@ Optimize ObjectFS for your specific workload patterns.
    ```bash
    watch -n2 'curl -s http://localhost:9090/metrics | grep objectfs_cache'
    ```
-
-</InteractiveExample>
 
 ## Real-time Metrics Dashboard
 
