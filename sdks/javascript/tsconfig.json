@@ -3,6 +3,23 @@
     "target": "ES2020",
     "module": "commonjs",
     "lib": ["ES2020"],
+
+    // TypeScript 6 deprecated `moduleResolution: "node"` and raises TS5107 for it. This
+    // acknowledges the deprecation rather than migrating, because migrating is louder:
+    // `moduleResolution` cannot move to `Node16`/`NodeNext` without `module` moving too (TS5110),
+    // and moving both makes ts-jest warn TS151002 — "hybrid module kind is only supported in
+    // isolatedModules: true" — on every suite. Keeping `module: commonjs` is the quieter option.
+    //
+    // TS5107 is worth understanding before touching this: it is a *config*-level error, so tsc
+    // exits before typechecking any source. It reported 1 error while 63 waited behind it, which
+    // reads like a nearly-clean bump and is the opposite.
+    "ignoreDeprecations": "6.0",
+
+    // Those 63 are all `@types/node` failing to resolve — `Cannot find name 'process'`,
+    // `'console'`, `'child_process'`. TypeScript 6 no longer auto-includes it. Bumping the package
+    // does not help; it is typesVersions-only, with no `exports` map. Naming it here is the fix.
+    "types": ["node"],
+
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
