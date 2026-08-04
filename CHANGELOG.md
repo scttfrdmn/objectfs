@@ -196,6 +196,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#206]: https://github.com/scttfrdmn/objectfs/issues/206
 [#317]: https://github.com/scttfrdmn/objectfs/issues/317
 
+### Removed
+
+- **`markdown-it`, `markdown-it-anchor` and `markdown-it-container` from `docs-platform`, none of
+  which the site was using** ([#299]). Dependabot proposed the `markdown-it` 15 major, which is what
+  prompted looking at it. The answer is that the dependency should not be there at all, and the
+  reason it looked load-bearing is worth writing down, because it is a trap the next person will hit
+  in the same order:
+
+  `.vitepress/config.js` had a `markdown.config` hook registering `markdown-it-container` for 'tip',
+  'warning' and 'danger'. That reads as a genuine use of a genuine dependency. It is three kinds of
+  redundant. VitePress ships those exact three containers built in. No page in this tree uses `:::`
+  syntax at all — the 142 `custom-block` elements in the rendered output all come from VitePress's
+  own handling. And the `md` object handed to that hook is VitePress's *bundled* markdown-it
+  instance, not the top-level one: `vitepress` 1.6.4 does not list `markdown-it` in its
+  `dependencies` and carries its own copy inside `dist/node/`. So the hook that appeared to justify
+  the top-level `markdown-it` was never extending it.
+
+  Measured rather than reasoned: removing all three from `node_modules` and rebuilding produces a
+  site that builds, with all six pages byte-identical to the baseline once asset content hashes are
+  normalized. Confirmed the other way too — leaving the hook in place with the package gone fails
+  the build with `Cannot find module 'markdown-it-container'`, so the hook and the dependency are a
+  matched pair and neither should be removed alone.
+
+  This is also the answer to #299 on its merits. A major bump of a dependency nothing imports is a
+  lockfile change with no behaviour attached, and holding or taking it was the wrong question.
+
+[#299]: https://github.com/scttfrdmn/objectfs/pull/299
+
 ### Fixed
 
 - **The documentation site builds, for the first time in its history** ([#214], [#323]). `vitepress
