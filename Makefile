@@ -41,7 +41,7 @@ COLOR_RED = \033[31m
 .PHONY: docker docker-build docker-push package release
 .PHONY: coverage coverage-html coverage-report
 .PHONY: setup-hooks pre-commit-run pre-commit-all
-.PHONY: test-race test-integration test-aws test-release-check
+.PHONY: test-race test-aws test-release-check
 .PHONY: help version
 
 # Default target - now includes hook setup
@@ -257,10 +257,12 @@ package: build-all | $(DIST_DIR)/.mkdir
 release: clean check build-all package
 	@echo "$(COLOR_GREEN)Release $(VERSION) ready!$(COLOR_RESET)"
 
-# Integration tests (requires running infrastructure)
-test-integration:
-	@echo "$(COLOR_BLUE)Running integration tests...$(COLOR_RESET)"
-	@go test -tags=integration -v ./test/integration/...
+# There was a `test-integration` target here running `go test -tags=integration ./test/integration/...`.
+# That directory has never existed — the target failed with `lstat ./test/integration/: no such file
+# or directory` for as long as git records. The `integration` tag's only files lived in `tests/`
+# (note the s) and were a LocalStack suite, deleted in v0.15.0 along with this target (#240). The
+# `integration` tag still marks real-AWS tests inside packages: `make test-aws` and the commands in
+# CONTRIBUTING.md run those.
 
 # AWS S3 integration tests — requires real AWS credentials and a test bucket.
 #

@@ -136,7 +136,7 @@ func (s *AWSS3TestSuite) TestBasicOperations() {
 	start := time.Now()
 
 	// Test PutObject with CargoShip optimization
-	err := s.backend.PutObject(s.ctx, key, data)
+	err := s.backend.PutObject(s.ctx, key, data, nil)
 	assert.NoError(t, err)
 
 	uploadDuration := time.Since(start)
@@ -181,7 +181,7 @@ func (s *AWSS3TestSuite) TestLargeFileUpload() {
 	start := time.Now()
 
 	// Upload with CargoShip optimization
-	err := s.backend.PutObject(s.ctx, key, data)
+	err := s.backend.PutObject(s.ctx, key, data, nil)
 	require.NoError(t, err)
 
 	uploadDuration := time.Since(start)
@@ -219,7 +219,7 @@ func (s *AWSS3TestSuite) TestRangeRequests() {
 	}
 
 	// Upload test data
-	err := s.backend.PutObject(s.ctx, key, data)
+	err := s.backend.PutObject(s.ctx, key, data, nil)
 	require.NoError(t, err)
 
 	// Test range request - first 1KB
@@ -316,7 +316,7 @@ func (s *AWSS3TestSuite) TestPerformanceBenchmark() {
 
 		// Upload benchmark
 		start := time.Now()
-		err := s.backend.PutObject(s.ctx, key, data)
+		err := s.backend.PutObject(s.ctx, key, data, nil)
 		require.NoError(t, err)
 		uploadDuration := time.Since(start)
 		uploadThroughput := float64(test.size) / (1024 * 1024) / uploadDuration.Seconds()
@@ -442,7 +442,7 @@ func (s *AWSS3TestSuite) TestRealLocalData() {
 		key := fmt.Sprintf("objectfs-test/realdata/%s", fileName)
 
 		start := time.Now()
-		err = s.backend.PutObject(s.ctx, key, data)
+		err = s.backend.PutObject(s.ctx, key, data, nil)
 		require.NoError(t, err)
 		uploadDuration := time.Since(start)
 		totalUploadTime += uploadDuration
@@ -530,7 +530,7 @@ func (s *AWSS3TestSuite) TestHighThroughputStress() {
 
 		// Upload stress test
 		start := time.Now()
-		err := s.backend.PutObject(s.ctx, key, data)
+		err := s.backend.PutObject(s.ctx, key, data, nil)
 		require.NoError(t, err)
 		uploadDuration := time.Since(start)
 		uploadThroughput := float64(test.size) / (1024 * 1024) / uploadDuration.Seconds()
@@ -587,7 +587,7 @@ func (s *AWSS3TestSuite) TestListObjects() {
 
 	// Upload three objects.
 	for _, key := range keys {
-		err := s.backend.PutObject(s.ctx, key, []byte("list-test-"+key))
+		err := s.backend.PutObject(s.ctx, key, []byte("list-test-"+key), nil)
 		require.NoError(t, err, "PutObject %s", key)
 	}
 
@@ -647,7 +647,7 @@ func (s *AWSS3TestSuite) TestMultipartUpload() {
 
 	// Upload should use multipart path.
 	start := time.Now()
-	err = mpBackend.PutObject(s.ctx, key, data)
+	err = mpBackend.PutObject(s.ctx, key, data, nil)
 	require.NoError(t, err)
 	t.Logf("Multipart upload: 6 MB in %v", time.Since(start))
 
@@ -702,7 +702,7 @@ func (s *AWSS3TestSuite) TestZSTDCompression() {
 	data = data[:32*1024]
 
 	// Upload through the ZSTD-enabled backend.
-	err = zstdBackend.PutObject(s.ctx, key, data)
+	err = zstdBackend.PutObject(s.ctx, key, data, nil)
 	require.NoError(t, err)
 
 	// Download via the same ZSTD backend — should auto-decompress.
@@ -802,7 +802,7 @@ func (s *AWSS3TestSuite) TestCompressedObjectSizeReporting() {
 			data = data[:tc.size]
 
 			key := "objectfs-test/issue170-" + tc.name
-			require.NoError(t, backend.PutObject(s.ctx, key, data))
+			require.NoError(t, backend.PutObject(s.ctx, key, data, nil))
 			defer backend.DeleteObject(s.ctx, key) //nolint:errcheck
 
 			info, err := backend.HeadObject(s.ctx, key)

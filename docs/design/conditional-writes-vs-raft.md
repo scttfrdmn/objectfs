@@ -215,11 +215,11 @@ type Precondition struct {
 
 Why a new method rather than an extra parameter on `PutObject`:
 
-- `PutObject` has **one production implementation** (`internal/storage/s3/backend.go:808`) and **five
-  test doubles** (`tests/posix_test.go:443`, `tests/fuse_test.go:61`,
-  `tests/predictive_cache_test.go:54`, `tests/integration_test.go:517`,
-  `pkg/types/interfaces_test.go:32`). Changing the signature edits all six and every one of the nine
-  non-test call sites, most of which have no precondition to express. A new method leaves them alone.
+- `PutObject` has **one production implementation** (`internal/storage/s3/backend.go:808`) and **four
+  test doubles** (`tests/fuse_test.go:61`, `tests/predictive_cache_test.go:54`,
+  `tests/integration_test.go:517`, `pkg/types/interfaces_test.go:32`). Changing the signature edits
+  all five and every one of the nine non-test call sites, most of which have no precondition to
+  express. A new method leaves them alone.
 - Not every backend can implement it (see §4), and a backend that cannot must say so rather than
   silently ignore a precondition. A distinct method makes "unsupported" expressible as
   `ErrNotSupported` at the one place that matters.
