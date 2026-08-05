@@ -365,7 +365,7 @@ func (m *Monitor) GetRequestCount() int64 {
 
 ```bash
 go test -race ./...
-go test -race ./pkg/memmon/...
+go test -race ./internal/vfs/...
 go test -race -run TestConcurrentAccess
 ```
 
@@ -529,7 +529,6 @@ When reviewing concurrent code, check:
 
 ## Related Documentation
 
-- [Memory Monitoring and Leak Detection](./memory-monitoring.md)
 - [Error Handling and Recovery](./error-handling-recovery.md)
 - [Testing](https://github.com/scttfrdmn/objectfs/blob/main/CONTRIBUTING.md#-testing) — `./testing.md`
   was linked here and never written; what a contributor needs is in `CONTRIBUTING.md`, including why

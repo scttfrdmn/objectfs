@@ -75,10 +75,14 @@ A bind failure is now fatal to startup and names the address. Both servers used 
 and log the error, so a mount whose metrics port was taken came up with no endpoint and one line in the
 log to say why — an operator finds that out when a probe starts failing.
 
-No pprof listener is started at any address. `global.enable_pprof` and `global.profile_port` were
-removed rather than wired: the server they would have started serves mutating `/memory/gc` and
-`/memory/free` handlers with no authentication. See
-[#245](https://github.com/scttfrdmn/objectfs/issues/245).
+No pprof listener is started at any address, and there is no longer any code in the repository that
+could start one. `global.enable_pprof` and `global.profile_port` were removed rather than wired
+because the server they would have started — `pkg/profiling` — bound `:6060` on every interface and
+served mutating `/memory/gc` and `/memory/free` handlers with no authentication. That package has
+since been deleted along with `pkg/memmon` ([#245](https://github.com/scttfrdmn/objectfs/issues/245));
+neither had an importer, so nothing in a shipped binary ever reached them. Profile a build with
+`go test -cpuprofile`/`-memprofile`, or add `net/http/pprof` behind a loopback bind in a local
+branch — do not ship one.
 
 ## Credentials
 

@@ -147,7 +147,6 @@ nav:
   - Operations:
     - Error Handling & Recovery: error-handling-recovery.md
     - Logging: enhanced-logging.md
-    - Memory Monitoring: memory-monitoring.md
 
   - Architecture:
     - Overview: architecture/overview.md
