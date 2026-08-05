@@ -30,10 +30,19 @@ import (
 const (
 	AccessKeyID = "AKIATEST12345678901"
 
-	// nolint:gosec // G101 is right that this is a hardcoded credential and wrong that it matters:
-	// it is the example key from AWS's own documentation, which every substrate emulator accepts and
-	// no AWS account has ever used. Hardcoding it is what makes these tests hermetic — see above.
-	SecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	// G101 is right that this is a hardcoded credential and wrong that it matters: it is the example
+	// key from AWS's own documentation, which every substrate emulator accepts and no AWS account has
+	// ever used. Hardcoding it is what makes these tests hermetic — see above.
+	//
+	// The finding is at package scope in a file that is not _test.go, so nothing about the file's name
+	// keeps this constant out of a shipped binary — only the fact that no non-test package imports
+	// testaws does, which TestNoNonTestPackageImportsThisOne asserts rather than assumes.
+	//
+	// #nosec and not //nolint:gosec, and not both: golangci-lint runs gosec's own analyser, which
+	// strips #nosec sites before golangci-lint ever sees them, so one directive satisfies both runs
+	// and adding the second makes nolintlint report it unused. The convention and the measurements
+	// behind it are in .golangci.yml, at the gosec settings.
+	SecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" // #nosec G101 -- AWS docs example key, accepted only by the emulator
 
 	// DefaultRegion is the emulator's region. It is not us-west-2: nothing here talks to AWS,
 	// and using the real deployment region would make an accidental escape to the live API
@@ -563,7 +572,7 @@ func (ts *TestServer) probeUploadPartCopy(ctx context.Context) (bool, string) {
 	var parts []s3types.CompletedPart
 
 	for i, rng := range []string{"bytes=0-7", "bytes=8-15"} {
-		partNum := int32(i + 1) //nolint:gosec // 1 or 2
+		partNum := int32(i + 1) // #nosec G115 -- i ranges over a two-element literal, so this is 1 or 2
 
 		out, copyErr := client.UploadPartCopy(ctx, &awss3.UploadPartCopyInput{
 			Bucket:          aws.String(ts.Bucket),
@@ -848,7 +857,9 @@ func DeterministicBytes(seed string, n int) []byte {
 		state ^= state << 13
 		state ^= state >> 7
 		state ^= state << 17
-		out[i] = byte(state >> 24)
+		// G115 (uint64 → byte) is the point: this is a PRNG, and the truncation is how a 64-bit state
+		// becomes one output byte. There is no value to bound.
+		out[i] = byte(state >> 24) // #nosec G115 -- deliberate truncation of a xorshift state to one byte
 	}
 
 	return out
@@ -898,6 +909,28 @@ func (ts *TestServer) ObjectStorageClass(key string) string {
 	}
 
 	return string(out.StorageClass)
+}
+
+// ObjectContentType returns a key's stored Content-Type header.
+//
+// The header, not the user metadata. A "content-type" metadata key and a Content-Type header are
+// different things to every client that reads the object, and writing the first while believing you
+// wrote the second is how the CargoShip upload path stored every small object as
+// application/octet-stream — the value was computed correctly by detectContentType and dropped at the
+// boundary. Metadata is what [TestServer.ObjectMetadata] reports; this is deliberately separate so a
+// test cannot satisfy itself with the wrong one.
+func (ts *TestServer) ObjectContentType(key string) string {
+	ts.t.Helper()
+
+	out, err := ts.Client().HeadObject(context.Background(), &awss3.HeadObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		ts.t.Fatalf("testaws: head %q: %v", key, err)
+	}
+
+	return aws.ToString(out.ContentType)
 }
 
 // ObjectSize returns a key's stored ContentLength — the compressed length for a compressed object,

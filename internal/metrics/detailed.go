@@ -510,11 +510,16 @@ func (dpm *DetailedPerformanceMetrics) updateFileMetrics(
 	fm.TotalAccesses++
 	fm.LastAccess = time.Now()
 
-	// Track bytes by operation type
-	if opType == OpRead { //nolint:staticcheck
+	// Track bytes by operation type.
+	switch opType {
+	case OpRead:
 		fm.BytesRead += bytes
-	} else if opType == OpWrite {
+	case OpWrite:
 		fm.BytesWritten += bytes
+	default:
+		// The other nineteen operation types move no file bytes. They are still counted, in
+		// fm.Operations below; they just contribute to neither byte total, so adding a case here for
+		// each would be nineteen empty arms saying what this one says.
 	}
 
 	// Update operation-specific metrics for this file

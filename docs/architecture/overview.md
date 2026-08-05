@@ -687,7 +687,6 @@ See [ARCHITECTURE_EVOLUTION.md](../ARCHITECTURE_EVOLUTION.md) for details.
 - Fine-grained ACLs and permissions
 - Audit logging and compliance
 - Data lifecycle management
-- Integration with CargoShip for BBR/CUBIC optimization
 
 **Advanced Optimizations:**
 

@@ -39,8 +39,7 @@ The Adapter manages five core subsystems:
 
 S3 Backend:
 Handles object storage operations with multi-region support, connection pooling,
-and intelligent retry logic. Configured with bucket-specific settings and
-CargoShip optimization features.
+and intelligent retry logic. Configured with bucket-specific settings.
 
 Multi-Level Cache:
 Orchestrates L1 (memory) and L2 (persistent disk) caches with configurable

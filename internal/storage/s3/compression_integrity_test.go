@@ -73,9 +73,10 @@ func sha256Hex(data []byte) string {
 }
 
 // defaultBackendAgainst builds a backend from NewDefaultConfig with only the endpoint and credentials
-// changed. That distinction matters: the shipped defaults enable both transparent compression and the
-// CargoShip transporter, and it is the *combination* that corrupted data. A test that assembles a
-// config field by field would not reproduce it.
+// changed. That distinction matters: the shipped defaults enabled both transparent compression and the
+// CargoShip transporter, and it was the *combination* that corrupted data. A test that assembles a
+// config field by field would not have reproduced it, and the same reasoning applies to whatever the
+// defaults turn on next — the point of this helper is that nothing here chooses them.
 func defaultBackendAgainst(t *testing.T, ts *testaws.TestServer) *s3.Backend {
 	t.Helper()
 
@@ -107,12 +108,11 @@ func defaultBackendAgainst(t *testing.T, ts *testaws.TestServer) *s3.Backend {
 // size from objectfs-original-size.
 //
 // Measured before the fix, on the shipped default configuration: an 8192-byte write read back as
-// 29 bytes with a nil error. The audit classified this as latent because
-// EnableCargoShipOptimization is only set in NewDefaultConfig and the mount path bypassed it. That
-// was wrong twice over — NewBackend(ctx, bucket, nil) and NewDefaultConfig() are both documented
-// entry points reaching the same defaulting, and as of v0.10.1 the mount path does not bypass it
-// either: `storage.s3.use_cargoship` maps straight to the flag. The ordering mattered, which is why
-// this fix landed before the plumbing did.
+// 29 bytes with a nil error. The audit classified this as latent because the transporter flag was
+// only set in NewDefaultConfig and the mount path bypassed it. That was wrong twice over —
+// NewBackend(ctx, bucket, nil) and NewDefaultConfig() are both documented entry points reaching the
+// same defaulting, and from v0.10.1 the mount path mapped a config key straight to the flag. The
+// ordering mattered, which is why this fix landed before the plumbing did.
 func TestDefaultConfigDoesNotCorruptCompressedObjects(t *testing.T) {
 	t.Parallel()
 
@@ -520,87 +520,80 @@ func TestChecksumMetadataSurvivesCompression(t *testing.T) {
 	}
 }
 
-// The metadata key CargoShip's transporter stamps on everything it uploads.
+// metaCargoShipStamp is the user-metadata key CargoShip's transporter stamped on everything it
+// uploaded (buildMetadata, cargoship@v0.16.0/pkg/aws/s3/transporter.go:185).
 //
-// buildMetadata sets it unconditionally (cargoship@v0.20.0/pkg/aws/s3/transporter.go:185), which
-// makes it the one observable that says *which* upload path ran. Every other signal is
-// indistinguishable between the two: both end in a PutObject to the same endpoint with the same body,
-// so asserting on the object alone cannot tell them apart, and asserting on a log line would test the
-// logging rather than the routing.
-//
-// Spelled here rather than imported because ObjectFS does not set it — it belongs to the dependency,
-// and if a future CargoShip stops sending it these tests should fail loudly rather than silently
-// stop distinguishing the paths.
+// ObjectFS does not set it and no longer routes through the transporter (#362), so its presence would
+// mean an upload path came back. It stays spelled out here rather than deleted with the branch because
+// it is the one observable that told the two paths apart: both ended in a PutObject to the same
+// endpoint with the same body, so nothing else on the object could distinguish them, and a log-line
+// assertion would have tested the logging rather than the routing.
 const metaCargoShipStamp = "cargoship-created-by"
 
-// TestCargoShipIsNotSelectedForACompressedObject asserts the routing decision, not its consequence.
+// TestTheShippedDefaultStampsNoProvenanceMetadata asserts the routing decision rather than its
+// consequence, on both sides of the compression MinSize.
 //
 // TestDefaultConfigDoesNotCorruptCompressedObjects already proves the stored object carries a real
-// Content-Encoding header. That is the property users need, but it is one step removed from the fix:
-// it would also pass if CargoShip had somehow acquired header support, and it would keep passing if
-// the bypass were replaced by anything else that produced a correct object. This test pins the
-// mechanism — a compressed body does not go through the transporter — so a change that reroutes it
-// there fails here with a reason, next to the comment explaining why the transporter cannot carry
-// the header.
+// Content-Encoding, which is the property users need — but it is one step removed from the mechanism.
+// It would also pass if a second upload path had acquired header support, and it would keep passing if
+// the compressed object reached that path by some other route that happened to produce a correct
+// object. This pins the mechanism: under the shipped default, which enables compression, neither a
+// compressed nor an uncompressed object acquires metadata ObjectFS did not write.
 //
-// Both halves matter. Asserting only that the compressed object lacks the stamp would pass on a
-// build where the transporter never runs at all, which is the configuration this test would then be
-// silently measuring instead of the bypass.
-func TestCargoShipIsNotSelectedForACompressedObject(t *testing.T) {
+// Both sizes matter. The transporter was only reachable below MultipartThreshold and PutObject
+// bypassed it for a compressed body, so a 1 KiB object that declined compression was the one shape
+// that certainly went through it — which makes it the case a reintroduced path would show up in first.
+func TestTheShippedDefaultStampsNoProvenanceMetadata(t *testing.T) {
 	t.Parallel()
 
 	ts := testaws.Start(t)
 	backend := defaultBackendAgainst(t, ts)
 	ctx := context.Background()
 
-	// Below MinSize (4 KB), so compression declines and the object has no encoding to lose. This is
-	// the control: it establishes that the transporter is enabled and reached in this configuration,
-	// which is what makes its absence below evidence of the bypass rather than of a disabled feature.
-	const uncompressedKey = "cargoship-routing/too-small-to-compress"
+	for _, tc := range []struct {
+		name string
+		// size straddles the shipped MinSize of 4 KB, so one object compresses and one declines.
+		size int
+		// wantEncoding is the Content-Encoding the stored object must carry, empty for none.
+		wantEncoding string
+	}{
+		{name: "below MinSize, compression declines", size: 1024, wantEncoding: ""},
+		{name: "above MinSize, compression engages", size: 8192, wantEncoding: "zstd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	if err := backend.PutObject(ctx, uncompressedKey, compressible(1024), nil); err != nil {
-		t.Fatalf("PutObject of an uncompressed object: %v", err)
-	}
+			key := "provenance/" + tc.name
 
-	if _, viaCargoShip := ts.ObjectMetadata(uncompressedKey)[metaCargoShipStamp]; !viaCargoShip {
-		t.Fatalf("a 1 KiB object did not go through the CargoShip transporter, so this test is not "+
-			"measuring the compressed-object bypass. Either the shipped default no longer enables "+
-			"EnableCargoShipOptimization, or a new bypass condition catches this object too, or "+
-			"CargoShip stopped stamping %q. Metadata was %v",
-			metaCargoShipStamp, ts.ObjectMetadata(uncompressedKey))
-	}
+			if err := backend.PutObject(ctx, key, compressible(tc.size), nil); err != nil {
+				t.Fatalf("PutObject: %v", err)
+			}
 
-	// Above MinSize, so compression engages and the bypass must fire.
-	const compressedKey = "cargoship-routing/compressed"
+			meta := ts.ObjectMetadata(key)
 
-	if err := backend.PutObject(ctx, compressedKey, compressible(8192), nil); err != nil {
-		t.Fatalf("PutObject of a compressed object: %v", err)
-	}
+			if _, stamped := meta[metaCargoShipStamp]; stamped {
+				t.Errorf("the stored object carries %q, so an upload path other than PutObject's own "+
+					"handled it. That path could not carry a Content-Encoding, the configured "+
+					"encryption headers, a per-object storage class, or a Content-Type, and each of "+
+					"those failures is invisible on a readable object. Metadata was %v",
+					metaCargoShipStamp, meta)
+			}
 
-	meta := ts.ObjectMetadata(compressedKey)
+			// The encoding the direct path is responsible for. Checked here as well as in
+			// TestDefaultConfigDoesNotCorruptCompressedObjects because an object that acquired no
+			// foreign metadata and still lost its header would satisfy the assertion above while being
+			// exactly as broken.
+			out, err := ts.Client().HeadObject(ctx, &awss3.HeadObjectInput{
+				Bucket: aws.String(ts.Bucket),
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				t.Fatalf("HeadObject: %v", err)
+			}
 
-	if _, viaCargoShip := meta[metaCargoShipStamp]; viaCargoShip {
-		t.Errorf("a compressed object was uploaded through the CargoShip transporter (%q is "+
-			"present). cargoships3.Archive has no ContentEncoding field, so the encoding would be "+
-			"stored as user metadata only and the object would read back as a raw zstd frame while "+
-			"HeadObject reported the uncompressed size. Metadata was %v",
-			metaCargoShipStamp, meta)
-	}
-
-	// And the encoding it was bypassed in order to set is actually set. Checked here as well as in
-	// TestDefaultConfigDoesNotCorruptCompressedObjects because a bypass that routed around CargoShip
-	// and then still failed to send the header would satisfy the assertion above while leaving the
-	// object exactly as broken.
-	out, err := ts.Client().HeadObject(ctx, &awss3.HeadObjectInput{
-		Bucket: aws.String(ts.Bucket),
-		Key:    aws.String(compressedKey),
-	})
-	if err != nil {
-		t.Fatalf("HeadObject: %v", err)
-	}
-
-	if enc := aws.ToString(out.ContentEncoding); enc != "zstd" {
-		t.Errorf("the bypassed upload set Content-Encoding %q, want %q; bypassing CargoShip is only "+
-			"worth its throughput if the direct path sends the header", enc, "zstd")
+			if enc := aws.ToString(out.ContentEncoding); enc != tc.wantEncoding {
+				t.Errorf("stored Content-Encoding %q, want %q", enc, tc.wantEncoding)
+			}
+		})
 	}
 }

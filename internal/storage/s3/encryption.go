@@ -111,29 +111,6 @@ func applyEncryptionCopy(input *s3.CopyObjectInput, cfg EncryptionConfig) {
 	input.BucketKeyEnabled = h.bucketKeys
 }
 
-// cargoShipCanEncrypt reports whether CargoShip's transporter sends exactly the headers cfg asks for.
-//
-// CargoShip sets ServerSideEncryption and SSEKMSKeyId from its own S3Config.KMSKeyID
-// (pkg/aws/s3/transporter.go:105-109 in v0.13.0), and that is the whole of what it supports: the
-// algorithm is hardcoded to aws:kms, so SSE-S3 has no representation, and there is no
-// BucketKeyEnabled field at all.
-//
-// Anything it cannot express has to bypass it, because the alternative is uploading through a path
-// that sends a *different* encryption header than the configuration names — which is P-7 with an extra
-// step, and harder to notice, since the object comes back readable either way. It is exactly the
-// Content-Encoding bypass above: a transporter that cannot carry a header must not carry the object.
-//
-// The cost is small in practice. Objects at or above MultipartThreshold return earlier, before the
-// transporter is consulted, so this only diverts small objects — where CargoShip's congestion control
-// has the least to win.
-func cargoShipCanEncrypt(cfg EncryptionConfig) bool {
-	if !cfg.Enabled() {
-		return true
-	}
-
-	return cfg.Mode == EncryptionModeKMS && !cfg.BucketKeys
-}
-
 // validateEncryption rejects a configuration that cannot mean what it says.
 //
 // It is called from [NewBackend], so a bad value fails at construction rather than at the first

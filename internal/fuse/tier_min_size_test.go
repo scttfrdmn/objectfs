@@ -58,7 +58,6 @@ func TestMountOnATierWithABillingMinimumCanCreate(t *testing.T) {
 				// Compression off: it changes the stored length, so leaving it on would mean a pass could
 				// come from a body that happened to land above the minimum rather than from the gate.
 				cfg.Compression.Enabled = false
-				cfg.EnableCargoShipOptimization = false
 			})
 
 			ctx := context.Background()
