@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -987,5 +991,70 @@ func TestFaultQueryKeyMatchesRegardlessOfValue(t *testing.T) {
 	}
 	if fired := ts.FaultsFired(); fired != 0 {
 		t.Errorf("FaultsFired = %d, want 0", fired)
+	}
+}
+
+// TestNoNonTestPackageImportsThisOne is what makes the hardcoded SecretAccessKey safe, and it is
+// here because the reasoning is otherwise unverifiable.
+//
+// The G101 finding at that constant is suppressed on the grounds that it is AWS's own documentation
+// example key, accepted only by the emulator. That is true, and it is not the whole argument: the
+// constant is at package scope in testaws.go, which is not a _test.go file, so nothing about the
+// file's name keeps it out of a shipped binary. What keeps it out is that this package is reached
+// only from tests — and "only from tests" is a property of the import graph, which drifts silently.
+// One `import "internal/testaws"` from a non-test file and the credential, the recorder, and an
+// embedded AWS emulator all land in the objectfs binary.
+//
+// `go list` is the authority rather than a grep: Imports is the non-test import set, so a file that
+// imports testaws inside a _test.go does not appear in it, which is exactly the distinction being
+// asserted. TestImports and XTestImports are deliberately not consulted.
+//
+// Verifying this test by mutation needs `-count=1`. The violation it detects lives in a *different*
+// package, so adding one leaves this test binary byte-identical and `go test` serves a cached PASS —
+// which is what happened on the first attempt and read as the test failing to detect anything.
+func TestNoNonTestPackageImportsThisOne(t *testing.T) {
+	t.Parallel()
+
+	const self = "github.com/scttfrdmn/objectfs/internal/testaws"
+
+	// From the module root, not the test's working directory. `go test` runs each test binary in its
+	// own package directory, so a bare `./...` here expands to this package alone — which made the
+	// first version of this test pass while a deliberate non-test import of testaws sat in
+	// internal/awsrates/offerfile. It reported "no offenders" because it never looked at that package.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	root, err := exec.CommandContext(ctx, "go", "list", "-m", "-f", "{{.Dir}}").Output()
+	if err != nil {
+		t.Fatalf("locate module root: %v", err)
+	}
+
+	// -deps so a transitive import is caught too: the risk is not only a direct import from a
+	// production package but one arriving through a helper that looks harmless.
+	list := exec.CommandContext(ctx, "go", "list", "-deps", "-f",
+		"{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", "./...")
+	list.Dir = strings.TrimSpace(string(root))
+
+	out, err := list.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+
+	var offenders []string
+	for line := range strings.Lines(string(out)) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] == self {
+			continue
+		}
+		if slices.Contains(fields[1:], self) {
+			offenders = append(offenders, fields[0])
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Errorf("these packages import %s outside a test file: %v\n\n"+
+			"That puts SecretAccessKey, the recording proxy, and the substrate emulator into "+
+			"whatever binary they build. Move the import into a _test.go file, or move the helper "+
+			"being used into one.", self, offenders)
 	}
 }

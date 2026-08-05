@@ -67,9 +67,12 @@ type Local struct {
 func NewLocal(dir string) (*Local, error) {
 	path := filepath.Join(dir, "reference.bin")
 
-	// nolint:gosec // G304 reads dir as tainted. Every caller passes t.TempDir(), and the filename is
-	// a constant this function chooses; there is no caller-controlled component in the path.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	// G304 reads dir as tainted. Every caller passes t.TempDir(), and the filename is a constant this
+	// function chooses; there is no caller-controlled component in the path.
+	//
+	// #nosec rather than //nolint:gosec — see .golangci.yml's gosec settings for why one directive
+	// covers both gosec runs and why writing both fails nolintlint.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600) // #nosec G304 -- dir is always t.TempDir(); filename is a constant
 	if err != nil {
 		return nil, fmt.Errorf("difftest: create reference file: %w", err)
 	}

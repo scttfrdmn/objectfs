@@ -93,6 +93,30 @@ linters:
       default-signifies-exhaustive: true
 
     gosec:
+      # Suppress a gosec finding with `#nosec Gxxx -- reason`, NOT `//nolint:gosec`. This is the
+      # opposite of the convention everywhere else in this file, so it is written down here.
+      #
+      # Two gosec runs exist: this one, and the standalone `gosec -fmt sarif` in
+      # .github/workflows/security.yml whose SARIF becomes GitHub code scanning. golangci-lint runs
+      # gosec's own analyser, which strips #nosec sites before golangci-lint ever sees them — so
+      # #nosec satisfies both runs and //nolint:gosec satisfies only this one. Measured on a
+      # four-case probe: standalone gosec suppresses on #nosec and ignores //nolint (it has never
+      # heard of it); this run suppresses on either.
+      #
+      # Do not write both. Once #nosec has removed the finding, the //nolint:gosec beside it has
+      # nothing left to suppress and nolintlint reports it unused, which fails the lint job. Six
+      # sites carried //nolint alone for months: they passed lint and stayed open as code-scanning
+      # alerts, which is how #264 was found.
+      #
+      # Two further cases, both measured rather than assumed:
+      #
+      #   - G703 (path traversal via taint analysis) exists only in the standalone gosec, not in the
+      #     version golangci-lint bundles. A //nolint:gosec for a G703 cannot work — this run never
+      #     had the finding. internal/awsname/awsname.go is the site.
+      #   - No directive of either form works in a cgo package. cgo rewrites each C.f(...) into an
+      #     inline closure carrying /*line*/ directives, collapsing the call and any nearby comment
+      #     onto one synthetic position, so gosec reports `nosec: 0` — it recognizes nothing. sdks/c
+      #     is the module's only cgo package; see the header of sdks/c/main.go.
       excludes:
         # G104 duplicates errcheck.
         - G104
@@ -101,6 +125,10 @@ linters:
         # bounded. The one case where it mattered — sliceRange's offset+size overflowing int64 —
         # was found by a fuzz target and is pinned by a corpus entry, which is the mechanism that
         # can tell a real overflow from a conversion that cannot occur.
+        #
+        # Excluded here and NOT in the standalone run, which is why s3/config.go:202's uint32
+        # narrowing was reported by neither for as long as it carried a //nolint: this exclusion hid
+        # it from lint, and the directive form hid it from the run that had it. It was a real defect.
         - G115
 
     staticcheck:
