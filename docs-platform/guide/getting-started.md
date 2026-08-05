@@ -28,8 +28,6 @@ Build from source, or install with `go install`. Release binaries are attached t
 [GitHub releases page](https://github.com/scttfrdmn/objectfs/releases); that is the only prebuilt
 artifact, and the release workflow builds no packages.
 
-<CodeRunner language="bash">
-
 ```bash
 git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs
@@ -42,17 +40,11 @@ go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 objectfs --version
 ```
 
-</CodeRunner>
-
 On macOS, install macFUSE first — ObjectFS cannot mount without it:
-
-<CodeRunner language="bash">
 
 ```bash
 brew install --cask macfuse
 ```
-
-</CodeRunner>
 
 ## First Mount
 
@@ -61,8 +53,6 @@ Let's mount your first S3 bucket as a local filesystem.
 ### 1. Set Up Credentials
 
 #### AWS S3
-
-<CodeRunner language="bash">
 
 ```bash
 # Configure AWS credentials
@@ -74,11 +64,7 @@ export AWS_REGION="us-east-1"
 aws configure
 ```
 
-</CodeRunner>
-
 ### 2. Create a Mount Point
-
-<CodeRunner language="bash">
 
 ```bash
 # Create directory for mount
@@ -86,11 +72,7 @@ sudo mkdir -p /mnt/objectfs
 sudo chown $(whoami):$(whoami) /mnt/objectfs
 ```
 
-</CodeRunner>
-
 ### 3. Mount the Filesystem
-
-<CodeRunner language="bash">
 
 ```bash
 # Mount an S3 bucket. There are no subcommands: the binary takes exactly two
@@ -101,11 +83,7 @@ objectfs s3://your-bucket-name /mnt/objectfs
 objectfs --cache-size 8GB --log-level INFO s3://your-bucket-name /mnt/objectfs
 ```
 
-</CodeRunner>
-
 ### 4. Verify the Mount
-
-<CodeRunner language="bash">
 
 ```bash
 # Check if mounted
@@ -120,15 +98,11 @@ echo "Hello ObjectFS!" > /mnt/objectfs/test.txt
 cat /mnt/objectfs/test.txt
 ```
 
-</CodeRunner>
-
 ## Basic Operations
 
 Now that you have ObjectFS mounted, let's explore basic operations:
 
 ### File Operations
-
-<CodeRunner language="bash">
 
 ```bash
 # Copy files to object storage
@@ -157,11 +131,7 @@ to *success*, so without it `rm` exited 0 while the object survived in S3. The
 [supported-operations table](https://github.com/scttfrdmn/objectfs#supported-operations) is the
 authority on which operations are in which state.
 
-</CodeRunner>
-
 ### Directory Operations
-
-<CodeRunner language="bash">
 
 ```bash
 # Recursive copy
@@ -174,11 +144,7 @@ find /mnt/objectfs -name "*.txt" -type f
 du -h /mnt/objectfs/my-folder
 ```
 
-</CodeRunner>
-
 ### Advanced Operations
-
-<CodeRunner language="bash">
 
 ```bash
 # Stream large files
@@ -191,15 +157,11 @@ tar -czf - /path/to/folder | cat > /mnt/objectfs/backup.tar.gz
 cat /mnt/objectfs/backup.tar.gz | tar -xzf -
 ```
 
-</CodeRunner>
-
 ## Configuration
 
 ObjectFS can be configured using command-line options, configuration files, or environment variables.
 
 ### Command-Line Options
-
-<CodeRunner language="bash">
 
 ```bash
 # The complete flag set, from `objectfs --help`. Everything else is configuration-file only.
@@ -218,13 +180,9 @@ neither is parsed. Predictive caching is a configuration key. Cost optimization 
 key and no code path reaches it — see the
 [Not yet wired up table](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md#not-yet-wired-up).
 
-</CodeRunner>
-
 ### Configuration File
 
 Create a configuration file for persistent settings:
-
-<CodeRunner language="yaml">
 
 ```yaml
 # ~/.objectfs/config.yaml
@@ -254,8 +212,6 @@ monitoring:
     addr: 127.0.0.1:8081
 ```
 
-</CodeRunner>
-
 Every key above is one the loader defines, which is checked by
 `TestDocumentedConfigYAMLMatchesTheSchema` — configuration is decoded strictly, so a key the schema
 does not have fails at startup with the key named. One of them sets a value nothing reads:
@@ -269,21 +225,15 @@ so a file still carrying one fails at startup naming it. `small_objects_on_stand
 it stores an object on STANDARD where `storage_tier` names a class that would bill it as larger than
 it is *and* STANDARD is genuinely cheaper for it.
 
-<CodeRunner language="bash">
-
 ```bash
 # Use configuration file
 objectfs --config ~/.objectfs/config.yaml s3://bucket /mnt/objectfs
 ```
 
-</CodeRunner>
-
 ## Monitoring
 
 Two HTTP endpoints, both served by the mount process itself. There is no `objectfs health` or
 `objectfs metrics` command — the binary has no subcommands, so `curl` is the interface.
-
-<CodeRunner language="bash">
 
 ```bash
 # Health, on monitoring.health_checks.addr (127.0.0.1:8081 by default)
@@ -292,8 +242,6 @@ curl http://127.0.0.1:8081/health
 # Prometheus metrics, on monitoring.metrics.addr (127.0.0.1:9090 in the config above)
 curl http://127.0.0.1:9090/metrics
 ```
-
-</CodeRunner>
 
 Both listeners are unauthenticated, which is why each defaults to loopback: set `addr` to
 `0.0.0.0:8080` to reach one from another host, and understand that anything that can route to you can
@@ -304,8 +252,6 @@ then read it. `enabled: false` is how you turn one off — there is no address v
 
 When you're done, unmount the filesystem with the platform's own tool. `objectfs unmount` is not a
 command:
-
-<CodeRunner language="bash">
 
 ```bash
 # Linux
@@ -321,13 +267,9 @@ kill -TERM "$(pgrep -f 'objectfs .*/mnt/objectfs')"
 mount | grep objectfs
 ```
 
-</CodeRunner>
-
 ## Common Issues
 
 ### Permission Denied
-
-<CodeRunner language="bash">
 
 ```bash
 # Ensure proper permissions
@@ -337,11 +279,7 @@ sudo usermod -a -G fuse $(whoami)
 newgrp fuse
 ```
 
-</CodeRunner>
-
 ### Mount Point Busy
-
-<CodeRunner language="bash">
 
 ```bash
 # Check for active processes
@@ -351,11 +289,7 @@ lsof /mnt/objectfs
 sudo fusermount -u /mnt/objectfs
 ```
 
-</CodeRunner>
-
 ### Performance Issues
-
-<CodeRunner language="bash">
 
 ```bash
 # Increase cache size
@@ -367,8 +301,6 @@ objectfs --max-concurrency 200 s3://bucket /mnt/objectfs
 # Check metrics for bottlenecks
 curl -s http://localhost:9090/metrics | grep objectfs_
 ```
-
-</CodeRunner>
 
 Predictive caching is not a flag, and turning the configuration key on does not enable it: the
 predictor is never installed on the mount path. It is listed in the
@@ -404,7 +336,10 @@ exists. For the Go API, `go doc ./internal/adapter` is the authority, with the c
 packages are under `internal/` and importable only inside this module.
 
 The tip that used to close this page said "try the interactive examples above ... each code block can
-be executed directly in your browser." Nothing on this page executes anything: the `CodeRunner`
-component needs the Docker-backed `src/api-server.js` running alongside the site, and the
-`InteractiveExample` wrapper this tip sat inside had never been written at all. The code blocks above
-are ordinary code blocks — copy them into a shell.
+be executed directly in your browser." Nothing on this page ever executed anything. The
+`InteractiveExample` wrapper the tip sat inside had never been written at all, and the `CodeRunner`
+that wrapped each block sent its "Run" button to a Docker-backed Express server in
+`docs-platform/src/api-server.js` that nothing in this repository built, deployed, or ran — so the
+button was inert wherever it appeared. Both are removed
+([#336](https://github.com/scttfrdmn/objectfs/issues/336)). The blocks above are ordinary code blocks:
+copy them into a shell.

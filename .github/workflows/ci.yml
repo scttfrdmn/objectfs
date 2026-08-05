@@ -491,6 +491,13 @@ jobs:
   # The site is not published by anything, so this gates content rather than a deploy. It earns its
   # place anyway: these pages are read on GitHub whether or not the site renders, and a tree that
   # cannot build is a tree where nobody notices the next thing that breaks.
+  #
+  # It gates a site and nothing else, as of #336. `docs-platform` also carried an Express server, two
+  # Vue components that called it, a Dockerfile, and a seven-service docker-compose.yml — and this
+  # job could not have caught any of it, because `vitepress build` does not read them. The components
+  # in particular *built* fine and were inert at runtime, which is the failure this gate is blind to
+  # by construction. That surface is deleted rather than given jobs of its own; what a gate cannot
+  # see, it cannot hold.
   # ---------------------------------------------------------------------------------------------
   docs-site:
     runs-on: ubuntu-latest

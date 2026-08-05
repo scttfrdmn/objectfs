@@ -1,386 +1,88 @@
-# ObjectFS Documentation Platform
+# ObjectFS Documentation Site
 
-A comprehensive, interactive documentation platform for ObjectFS featuring API exploration,
-code examples, tutorials, and real-time testing capabilities.
+A [VitePress](https://vitepress.dev) site. Markdown in, static HTML out — that is the whole of it.
 
-## Features
-
-- 📚 **Interactive Documentation** - VitePress-powered docs with custom components
-- 🧪 **API Playground** - Test ObjectFS API endpoints directly in the browser
-- ⚡ **Code Runner** - Execute code examples in sandboxed containers
-- 🎓 **Interactive Tutorials** - Step-by-step guides with real-time feedback
-- 📊 **Performance Monitoring** - Live metrics and performance dashboards
-- 🔧 **Configuration Builder** - Visual configuration generator
-- 🌐 **Multi-Language SDKs** - Complete documentation for Python, JavaScript, and Java SDKs
-
-## Quick Start
-
-### Development
+## Working on it
 
 ```bash
-# Install dependencies
-npm install
-
-# Start documentation server
-npm run serve:docs
-
-# Start API server (in another terminal)
-npm run serve:api
-
-# Open browser to http://localhost:5173
+npm ci          # against the committed lockfile, not a fresh range resolution
+npm run dev     # http://localhost:5173, with hot reload
+npm run build   # static output in .vitepress/dist
+npm run preview # serve what build produced
 ```
 
-### Production
+`npm run build` is what the `docs-site` job in `.github/workflows/ci.yml` runs on every pull request.
+That job is the reason this tree builds at all: nothing invoked the builder for the whole of its
+history, and three independent breakages had accumulated behind that silence — each visible only once
+the previous was fixed (#214). A step no job runs is not a gate.
 
-```bash
-# Build documentation
-npm run build
-
-# Start production servers
-npm start
-```
-
-## Architecture
+## Layout
 
 ```
 docs-platform/
-├── .vitepress/                 # VitePress configuration
-│   ├── config.js              # Main config
-│   ├── theme/                 # Custom theme
-│   └── components/            # Vue components
-├── src/                       # Backend services
-│   └── api-server.js         # API proxy and code execution
-├── guide/                     # Documentation content
-├── api/                      # API reference
-├── tutorials/                # Interactive tutorials
-├── playground/               # Code playground
-└── examples/                 # Code examples
+├── .vitepress/
+│   ├── config.js       # nav, sidebar, search
+│   └── theme/          # the default theme plus custom.css
+├── guide/              # narrative documentation
+├── playground/         # SDK and CLI examples
+└── index.md            # landing page
 ```
 
-## Components
-
-### Interactive Components
-
-Two exist:
-
-- **ApiPlayground** - Test API endpoints with live requests
-- **CodeRunner** - Execute code examples in sandboxed environments
-
-Both need `src/api-server.js` running alongside the site to do anything; without it they render but
-their execute buttons have nothing to call.
-
-This list also named **ConfigurationBuilder**, **PerformanceChart** and **InteractiveExample**.
-None of the three was ever written — `git log --all` finds no history for any of the `.vue` files —
-and because `.vitepress/theme/index.js` imported them anyway, `vitepress build` failed on every page
-in this tree with `Could not resolve "../components/PerformanceChart.vue"`. They are no longer
-imported, and the pages that used them now say what they would have shown.
-
-### Backend Services
-
-- **API Proxy** - Forwards requests to ObjectFS API
-- **Code Execution** - Sandboxed code execution using Docker
-- **Real-time Updates** - WebSocket-based live features
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# API Server Configuration
-API_PORT=3001
-NODE_ENV=development
-OBJECTFS_API_BASE=http://localhost:8081
-
-# Docker Configuration (for code execution)
-DOCKER_HOST=unix:///var/run/docker.sock
-ENABLE_CODE_EXECUTION=true
-
-# Security
-CORS_ORIGIN=*
-RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX=100
-```
-
-### Docker Setup
-
-For code execution features, ensure Docker is available:
-
-```bash
-# Pull required images
-docker pull alpine:latest
-docker pull python:3.11-alpine
-docker pull node:18-alpine
-docker pull golang:1.21-alpine
-
-# Test code execution
-curl -X POST http://localhost:3001/api/code-runner/execute \
-  -H "Content-Type: application/json" \
-  -d '{"language": "python", "code": "print(\"Hello from sandbox!\")"}'
-```
-
-## Deployment
-
-### Docker Deployment
-
-```bash
-# Build documentation image
-docker build -t objectfs-docs .
-
-# Run with docker-compose
-docker-compose up -d
-```
-
-### Kubernetes Deployment
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: objectfs-docs
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: objectfs-docs
-  template:
-    metadata:
-      labels:
-        app: objectfs-docs
-    spec:
-      containers:
-      - name: docs
-        image: objectfs-docs:latest
-        ports:
-        - containerPort: 3001
-        env:
-        - name: NODE_ENV
-          value: production
-        - name: OBJECTFS_API_BASE
-          value: http://objectfs-api:8081
-```
-
-## Security
-
-### Code Execution Sandbox
-
-Code execution uses Docker containers with security restrictions:
-
-- **Resource limits**: 128MB memory, 50% CPU quota
-- **Network isolation**: No network access
-- **Read-only root filesystem**
-- **Temporary storage**: Limited tmpfs volumes
-- **Execution timeout**: 30 seconds default
-
-### API Security
-
-- **CORS protection** with configurable origins
-- **Rate limiting** to prevent abuse
-- **Input validation** for all endpoints
-- **Request size limits**
-- **Helmet.js** security headers
-
-## Monitoring
-
-### Health Checks
-
-```bash
-# API health
-curl http://localhost:3001/api/health
-
-# Documentation build status
-curl http://localhost:5173/health
-```
-
-### Metrics
-
-The platform exposes metrics compatible with Prometheus:
-
-```bash
-# API metrics
-curl http://localhost:3001/metrics
-
-# Code execution metrics
-curl http://localhost:3001/api/code-runner/metrics
-```
-
-## Contributing
-
-### Adding Documentation
-
-1. Create markdown files in appropriate directories
-2. Update `.vitepress/config.js` navigation
-3. Use custom components for interactive features
-
-### Adding Interactive Examples
-
-Note the outer fence is four backticks. It has to be longer than the fence it contains: with three
-on both, the inner ` ```python ` closes the outer block instead of opening a nested one, and the
-`</CodeRunner>` below it then reaches the Vue compiler as a stray closing tag — which is what broke
-`vitepress build` on this whole tree.
-
-````markdown
-<CodeRunner language="python" :executable="true">
-```python
-# Your executable Python code here
-print("This runs in a sandbox!")
-```
-
-</CodeRunner>
-
-<ApiPlayground />
-````
-
-### Adding Custom Components
-
-1. Create Vue components in `.vitepress/components/`
-2. Register in `.vitepress/theme/index.js`
-3. Use in markdown files
-
-## API Reference
-
-### Code Execution API
-
-```javascript
-// Execute code
-POST /api/code-runner/execute
-{
-  "language": "python|javascript|bash|go",
-  "code": "print('Hello World')",
-  "timeout": 30
-}
-
-// Response
-{
-  "success": true,
-  "output": "Hello World\n",
-  "error": null
-}
-```
-
-### Tutorial Progress API
-
-```javascript
-// Save progress
-POST /api/tutorials/progress
-{
-  "tutorialId": "getting-started",
-  "stepId": "first-mount",
-  "completed": true,
-  "data": {}
-}
-```
-
-### Examples API
-
-```javascript
-// Get examples
-GET /api/examples/python
-{
-  "category": "python",
-  "examples": [...]
-}
-```
-
-## Development
-
-### Local Development
-
-```bash
-# Install dependencies
-npm install
-
-# Start all services
-npm run dev
-
-# Run tests
-npm test
-
-# Lint and format
-npm run lint
-npm run format
-```
-
-### Adding New Languages
-
-To add support for new programming languages in CodeRunner:
-
-1. Add Docker image configuration in `src/api-server.js`
-2. Update language detection in frontend
-3. Add syntax highlighting support
-4. Test code execution sandbox
-
-### Debugging
-
-```bash
-# Enable debug logging
-DEBUG=objectfs:* npm run dev
-
-# View container logs
-docker logs $(docker ps -q --filter ancestor=python:3.11-alpine)
-
-# Test API endpoints
-curl -X POST http://localhost:3001/api/code-runner/execute \
-  -H "Content-Type: application/json" \
-  -d '{"language": "python", "code": "import sys; print(sys.version)"}'
-```
-
-## Performance
-
-### Optimization Tips
-
-1. **Static Generation**: Pre-build documentation for faster loading
-2. **CDN Deployment**: Serve static assets from CDN
-3. **Code Splitting**: Lazy load interactive components
-4. **Caching**: Cache API responses and code execution results
-5. **Container Optimization**: Pre-pull Docker images for faster execution
-
-### Monitoring Performance
-
-```bash
-# Monitor API response times
-curl -w "@curl-format.txt" http://localhost:3001/api/health
-
-# Monitor memory usage
-docker stats
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Documentation not building:**
-
-```bash
-# Clear cache and rebuild
-rm -rf .vitepress/cache
-npm run build:docs
-```
-
-**Code execution failing:**
-
-```bash
-# Check Docker daemon
-docker info
-
-# Test container creation
-docker run --rm alpine:latest echo "test"
-```
-
-**API proxy errors:**
-
-```bash
-# Verify ObjectFS is running
-curl http://localhost:8081/health
-
-# Check network connectivity
-netstat -tlnp | grep 8081
-```
+Note the absences. There is no `src/`, no `client/`, no `api/`, no `tutorials/` and no `sdks/` — and
+this file used to draw five of those in this diagram (#336). The deeper reference documentation lives
+in `docs/` at the repository root, published by MkDocs.
+
+## What this directory is not
+
+It is not an application. It described itself as an "interactive documentation platform" and carried
+the machinery to look like one: a 549-line Express server in `src/api-server.js`, an `ApiPlayground`
+component, a `CodeRunner` component, a `Dockerfile`, a seven-service `docker-compose.yml`, and
+thirteen runtime dependencies. All of it is gone (#336), because nothing built any of it and none of
+it worked:
+
+- **Nothing ran the server.** No CI job, no deployment, no `make` target. `npm start` pointed at
+  `src/server.js`, which has never existed in this repository — so the obvious command to type failed
+  immediately, and had for the whole life of the file. `npm run dev`, `lint`, `format` and `build`
+  named absent paths too.
+- **Both components called that server.** `CodeRunner`'s "Run" button POSTed to
+  `/api/code-runner/execute`, `ApiPlayground`'s "Send Request" to `/api-playground/...`. With no
+  server they were inert on every page they ever appeared on, while looking exactly like controls that
+  work. That is a worse failure than a build error, and the reader is who it happens to.
+- **Six of the seven endpoints the playground offered do not exist in ObjectFS.** A running mount
+  serves `/health` and `/metrics`, on the addresses `monitoring.health_checks.addr` and
+  `monitoring.metrics.addr` configure, and nothing else. `curl` reaches those from a terminal.
+- **The `Dockerfile` could not build.** It `COPY`ed `api/`, `tutorials/`, `sdks/` and `public/`, none
+  of which exist here, so it failed on the first missing directory.
+- **`docker-compose.yml` was not a deployment.** It bind-mounted `./nginx.conf`, `./ssl`,
+  `./prometheus.yml` and `./grafana/` — four paths absent from this directory — and pulled
+  `objectfs/objectfs:latest`, an image this project does not publish; releases go to
+  `ghcr.io/scttfrdmn/objectfs`. Real deployment manifests are tracked in #146.
+
+The dependency list was the measure of the gap: `express`, `cors`, `helmet`, `compression`, `morgan`,
+`swagger-ui-express`, `swagger-jsdoc`, `socket.io`, `dockerode`, `axios`, `dotenv`, `prismjs` and
+`yaml`. Every one was there for the server, and two of them (`prismjs`, `axios`) had no reference
+anywhere in the tree at all. Removing them took `npm ci` from 689 packages to 130, and `npm audit`
+reports zero vulnerabilities. The `uuid` override went with them: it existed for a bounds-check
+advisory reachable only through `dockerode` → `docker-modem`.
+
+Code blocks are plain fenced blocks now. VitePress puts a copy button on each one, which is a thing a
+reader can actually use.
+
+## Adding a page
+
+1. Write the markdown.
+2. Add it to the nav or sidebar in `.vitepress/config.js`.
+3. `npm run build` — a link to a page that does not exist fails the build, deliberately.
+
+Relative links that leave this directory are dead links to the builder even though they resolve on
+GitHub, so anything outside `docs-platform/` has to be an absolute URL.
+`internal/config/docs_links_test.go` checks every link in the repository and treats root-absolute
+paths here as VitePress routes: `/guide/installation` resolves to `guide/installation.md`.
 
 ## License
 
-Apache License 2.0 - see
+Apache License 2.0 — see
 [LICENSE](https://github.com/scttfrdmn/objectfs/blob/main/LICENSE) for details.
 
-The link is absolute rather than `../LICENSE` because this directory is a VitePress site root: a
-relative path that leaves it resolves for a reader on GitHub and is a dead link to the site builder,
-which fails the build over it. Anything outside `docs-platform/` has to be linked by URL.
+The link is absolute rather than `../LICENSE` for the reason given above: this directory is a
+VitePress site root, and a relative path that leaves it fails the build.
