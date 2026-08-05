@@ -1633,6 +1633,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`eventemitter3` 4.0.7 → 5.0.4 in the JavaScript SDK.** A major bump, taken by hand rather than by
+  merging [#346], because that pull request carried four unrelated *downgrades* alongside it: `jest`
+  30 → 29, `typescript` 6 → 5, `typedoc` 0.28 → 0.24, and `@types/jest` 30 → 29. Dependabot had opened
+  it against a manifest that has since moved forward, and its lockfile regeneration reverted the newer
+  pins rather than preserving them. Merging it would have rolled the toolchain back to buy one
+  dependency bump — quietly, since a lockfile diff of 2,883 lines does not advertise which four of its
+  versions went the wrong way.
+
+  The bump itself is safe, and the two facts that make it safe are worth naming because the major
+  version number tells you neither. v5's breaking changes are the removal of the `EventEmitter2` and
+  `EventEmitter3` aliases and of the CommonJS default export; `sdks/javascript/src/client.ts:8` imports
+  `{ EventEmitter }` — the named export, unchanged across the major — and the SDK references neither
+  alias. Verified rather than reasoned: `tsc` compiles clean, all 65 tests across 4 suites pass,
+  `npm run lint` reports 0 errors, and `require('eventemitter3').EventEmitter` constructs and
+  round-trips an `emit` under 5.0.4.
+
+[#346]: https://github.com/scttfrdmn/objectfs/pull/346
+
 - **The JavaScript SDK's fabricated operations throw instead of returning invented data, and its
   README documents what the code does** ([#325]). Ten methods reported success for work they never
   performed. The worst wrote to disk: `S3StorageAdapter.downloadObject` did
