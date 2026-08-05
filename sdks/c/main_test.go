@@ -13,10 +13,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -370,4 +372,157 @@ func goString(b []byte) string {
 		}
 	}
 	return string(b)
+}
+
+// TestPutLengthErrorAtTheBoundary covers the guard added for #200, which is the one real defect the
+// G115 audit of this file found.
+//
+// objectfs_put took a size_t and handed C.int(length) to C.GoBytes, narrowing 64 bits to 32. The
+// consequences were measured in a standalone cgo probe rather than reasoned about, because they are
+// not uniform — the same narrowing fails three different ways:
+//
+//	length = 1<<32     (4 GiB)  -> C.int 0            -> len(goData) == 0, OBJECTFS_OK, empty object
+//	length = (1<<32)+100        -> C.int 100          -> len(goData) == 100, a 100-byte object
+//	length = 1<<31     (2 GiB)  -> C.int -2147483648  -> panic: gobytes: length out of range
+//
+// The first is the worst and is exactly what the issue was concerned about: the caller gets a success
+// code for an object S3 holds as empty, and nothing anywhere reports a short write, because from Go's
+// side the length arrived as zero and there was no short write. The third is worse in a shared
+// library than it would be in a program: a panic in a c-shared build tears down the host process, so
+// a C caller loses unrelated state of its own to one bad argument.
+//
+// This test asserts the boundary rather than the narrowing itself. The narrowing is unreachable now
+// and cannot be provoked from Go — see the header comment on why this package's tests cannot
+// `import "C"` — so tests/test_basic.c carries the other half: that a C caller passing an oversized
+// length gets OBJECTFS_ERR_INVALID and a message, not OBJECTFS_OK.
+func TestPutLengthErrorAtTheBoundary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		length  uint64
+		wantErr bool
+		why     string
+	}{
+		{name: "zero", length: 0},
+		{name: "one", length: 1},
+		{name: "a typical object", length: 4 << 20},
+		{
+			name: "exactly maxPutLength", length: maxPutLength,
+			why: "the boundary itself is representable as a C.int and must stay usable; the guard is " +
+				"`>` and not `>=` for this case",
+		},
+		{
+			name: "maxPutLength plus one", length: maxPutLength + 1, wantErr: true,
+			why: "one past what C.int can hold; C.GoBytes would see a negative length and panic",
+		},
+		{
+			name: "2 GiB", length: 1 << 31, wantErr: true,
+			why: "measured: C.int -2147483648, panic: gobytes: length out of range",
+		},
+		{
+			name: "4 GiB", length: 1 << 32, wantErr: true,
+			why: "measured: C.int 0 — the silent-empty-object case, the reason this guard exists",
+		},
+		{
+			name: "4 GiB plus 100", length: (1 << 32) + 100, wantErr: true,
+			why: "measured: C.int 100 — a partial write reported as complete",
+		},
+		{
+			name: "MaxUint64", length: math.MaxUint64, wantErr: true,
+			why: "size_t's own maximum, which is what an underflowed length subtraction produces",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := putLengthError(tt.length)
+
+			if tt.wantErr && err == nil {
+				t.Fatalf("putLengthError(%d) = nil, want an error%s", tt.length, because(tt.why))
+			}
+
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("putLengthError(%d) = %v, want nil%s", tt.length, err, because(tt.why))
+				}
+
+				return
+			}
+
+			// The message has to name the offending length and the limit. A C caller's only channel for
+			// this is objectfs_last_error, so a message that says merely "invalid length" tells it
+			// nothing it can act on — it cannot see either number otherwise.
+			msg := err.Error()
+
+			for _, want := range []string{
+				strconv.FormatUint(tt.length, 10),
+				strconv.FormatUint(uint64(maxPutLength), 10),
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("putLengthError(%d) message %q does not contain %q; objectfs_last_error is "+
+						"the caller's only view of this, so both the value and the limit have to appear "+
+						"in it", tt.length, msg, want)
+				}
+			}
+		})
+	}
+}
+
+// TestListLimitErrorRejectsNegative covers objectfs_list's limit.
+//
+// The conversion here was never unsafe — C.int is 32 bits and Go's int is at least that on every
+// target this library builds for, so int(limit) widens or matches. The *value* was: objectfs.h
+// documents limit as "max results (0 = no limit, up to S3 page maximum)" and says nothing about a
+// negative one, and downstream ListObjects gates every use of limit on `limit > 0`. So -1 meant "no
+// limit" — which is what -1 conventionally means in a good deal of C API design, and would therefore
+// have looked like it worked, but by accident rather than by contract. Rejecting it says which it is.
+func TestListLimitErrorRejectsNegative(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		limit   int64
+		wantErr bool
+		why     string
+	}{
+		{name: "zero means no limit", limit: 0, why: "documented in objectfs.h as 0 = no limit"},
+		{name: "one", limit: 1},
+		{name: "a page", limit: 1000},
+		{name: "MaxInt32", limit: math.MaxInt32, why: "the largest C.int, so the largest reachable limit"},
+		{
+			name: "negative one", limit: -1, wantErr: true,
+			why: "the case that silently meant 'no limit': ListObjects gates on limit > 0",
+		},
+		{name: "MinInt32", limit: math.MinInt32, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := listLimitError(tt.limit)
+
+			switch {
+			case tt.wantErr && err == nil:
+				t.Fatalf("listLimitError(%d) = nil, want an error%s", tt.limit, because(tt.why))
+			case !tt.wantErr && err != nil:
+				t.Fatalf("listLimitError(%d) = %v, want nil%s", tt.limit, err, because(tt.why))
+			case tt.wantErr && !strings.Contains(err.Error(), strconv.FormatInt(tt.limit, 10)):
+				t.Errorf("listLimitError(%d) message %q does not name the limit it rejected",
+					tt.limit, err.Error())
+			}
+		})
+	}
+}
+
+// because renders a case's rationale into a failure message, or nothing when there is none.
+func because(why string) string {
+	if why == "" {
+		return ""
+	}
+
+	return " — " + why
 }
