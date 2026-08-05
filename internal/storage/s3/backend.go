@@ -2617,31 +2617,73 @@ func (b *Backend) IsFullyHealthy() bool {
 	return b.healthTracker.GetOverallHealth() == health.StateHealthy
 }
 
-// isAccelerationError checks if an error is related to Transfer Acceleration
+// isAccelerationError reports whether err is the accelerate endpoint refusing the request *as* an
+// acceleration problem, rather than any other failure that happened to arrive over it.
+//
+// The distinction matters because a true answer is not a retry: the caller disables acceleration for
+// the remaining life of the mount. So every false positive costs the accelerated path permanently, on
+// the first unrelated error, and does it quietly — the fallback logs a warning naming an acceleration
+// problem regardless of what actually failed. A false *negative* costs one wasted round trip per
+// request forever, which is the milder of the two, so ambiguity resolves toward not matching.
+//
+// # Why this is not a pure error-code match
+//
+// The obvious fix for audit finding L27 — match smithy.APIError.ErrorCode() against a closed set, the
+// way isInvalidRange does — cannot work here, and the reason is worth writing down so it is not
+// "simplified" back. S3 has no acceleration-specific error code. It reports every acceleration
+// failure as InvalidRequest with an acceleration-specific *message*:
+//
+//	InvalidRequest / "S3 Transfer Acceleration is not configured on this bucket"
+//	InvalidRequest / "S3 Transfer Acceleration is disabled on this bucket"
+//	InvalidRequest / "S3 Transfer Acceleration is not supported for buckets with non-DNS compliant names"
+//	InvalidRequest / "S3 Transfer Acceleration is not supported on this bucket. Contact AWS Support for more information."
+//	InvalidRequest / "S3 Transfer Accelerate is not configured on this bucket"
+//
+// So the code alone is necessary and nowhere near sufficient: InvalidRequest is also a bad Range, a
+// single-part CopyObject above 5 GiB, a conflicting parameter combination. That is precisely the
+// defect L27 named — the old classifier matched the *bare string* "InvalidRequest" anywhere in
+// err.Error(), so all of those disabled acceleration, as did "InvalidRequestException" and any
+// wrapped message that quoted one.
+//
+// What replaces it is a conjunction. The error must be a structured API error whose code is exactly
+// InvalidRequest, *and* its message must name Transfer Acceleration. Both halves are load-bearing:
+// the code keeps an arbitrary error whose text mentions acceleration (an AccessDenied on
+// s3:PutAccelerateConfiguration, say) from matching, and the message keeps the large InvalidRequest
+// family from matching. Neither test alone is safe.
+//
+// "BucketAlreadyExists" is gone with no replacement. Its comment claimed it was "sometimes returned
+// for acceleration errors"; it is CreateBucket's name collision, and ObjectFS does not create buckets.
+//
+// The remaining message-only check is for a failure with no API error at all: reaching
+// <bucket>.s3-accelerate.amazonaws.com can fail in DNS or TLS before S3 answers. That is genuinely an
+// acceleration failure and genuinely needs the fallback. It matches the endpoint hostname label rather
+// than the word "acceleration", because a hostname cannot appear in a standard-endpoint error.
 func (b *Backend) isAccelerationError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	errMsg := err.Error()
+	var apiErr smithy.APIError
+	if stderr.As(err, &apiErr) {
+		// Exactly InvalidRequest, not a code containing it, and only when the message says what the
+		// code cannot. Case-insensitive on the message because it is prose from a service, not a
+		// contract: S3 uses both "Transfer Acceleration" and "Transfer Accelerate", and the message
+		// is the one part of this that AWS can reword without a deprecation notice.
+		if apiErr.ErrorCode() == "InvalidRequest" {
+			msg := strings.ToLower(apiErr.ErrorMessage())
 
-	// Common acceleration-specific errors
-	accelerationErrors := []string{
-		"InvalidRequest",         // Acceleration not enabled on bucket
-		"acceleration",           // Generic acceleration error
-		"s3-accelerate",          // Acceleration endpoint error
-		"transfer-acceleration",  // Explicit acceleration error
-		"AccelerateNotSupported", // Bucket doesn't support acceleration
-		"BucketAlreadyExists",    // Sometimes returned for acceleration errors
-	}
-
-	for _, errPattern := range accelerationErrors {
-		if strings.Contains(errMsg, errPattern) {
-			return true
+			return strings.Contains(msg, "transfer acceleration") ||
+				strings.Contains(msg, "transfer accelerate")
 		}
+
+		// Some other structured API error. Whatever it is, it is not about acceleration, and
+		// misreading it would disable the endpoint for the life of the mount.
+		return false
 	}
 
-	return false
+	// No API error: a transport failure reaching the accelerate endpoint itself, which carries the
+	// hostname and no code.
+	return strings.Contains(err.Error(), "s3-accelerate")
 }
 
 // executeWithAccelerationFallback executes an S3 operation with automatic fallback

@@ -529,6 +529,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Error classification for Transfer Acceleration no longer disables the accelerated endpoint on
+  unrelated failures** ([#187]).
+
+  `isAccelerationError` substring-matched six patterns against `err.Error()`, two of which are not
+  acceleration errors: `InvalidRequest`, which is S3's code for a large family of malformed requests,
+  and `BucketAlreadyExists`, which is `CreateBucket`'s name collision and was listed with the comment
+  "sometimes returned for acceleration errors". Because the match was against a *message* rather than
+  a code, both also fired on any wrapped error whose text happened to quote them, and `InvalidRequest`
+  matched inside `InvalidRequestException`.
+
+  A false positive here is not a wasted retry. `executeWithAccelerationFallback` calls
+  `DisableAcceleration` for the remaining life of the mount, so the first unrelated `InvalidRequest`
+  — a bad `Range`, a single-part `CopyObject` above 5 GiB — permanently dropped the mount back to the
+  standard endpoint, and logged a warning naming acceleration regardless of what had actually failed.
+
+  The obvious fix does not work, and the code now says why so it is not simplified back: **S3 has no
+  acceleration-specific error code.** Every acceleration failure arrives as `InvalidRequest`
+  distinguished only by its message — "not configured on this bucket", "disabled on this bucket",
+  "not supported for buckets with non-DNS compliant names". So matching the code against a closed set,
+  the way `isInvalidRange` does, would classify every one of those as unrelated and leave the fallback
+  as dead code. What replaces it is a conjunction: a structured `smithy.APIError` whose code is
+  *exactly* `InvalidRequest` **and** whose message names Transfer Acceleration. Both halves are
+  load-bearing, and each is pinned by a test that fails when the other is removed. The one
+  message-only arm left is for a DNS or TLS failure reaching `<bucket>.s3-accelerate.amazonaws.com`,
+  which carries the hostname and no error code at all; it matches the hostname rather than the word
+  "acceleration", so an unrelated error mentioning acceleration in prose cannot trigger it.
+
+- **Persistent cache filenames use the whole SHA-256 rather than its first 8 bytes** ([#187]).
+
+  Sixty-four bits reaches a one-in-a-million collision chance at around 6 million entries, which a
+  long-lived cache on a large bucket can pass.
+
+  What a collision would actually have cost was measured before changing anything, and it is not
+  corrupt data: the index is keyed on the full entry key and `readFromFile` verifies a full SHA-256 of
+  the content, so two keys landing on one filename produce a **miss** — the checksum fails, the entry
+  is dropped, and the shared file goes with it, costing the other key its entry too. Deleting that
+  checksum check and re-running the same probe *does* serve the wrong bytes under the wrong key, so
+  the content checksum is the guard and the filename width is hygiene. Both directions are now tests.
+
+  Existing cache directories are unaffected. `FilePath` is stored in the index and every read uses the
+  stored value, so the new width applies only to newly written entries; files with the old short names
+  stay readable until they expire or are evicted.
+
 - **Every package the coverage gate reports as unfloored now has a recorded reason, and a test keeps
   the two in agreement** ([#199]).
 
@@ -855,6 +898,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
   ([#353]).
 
+[#187]: https://github.com/scttfrdmn/objectfs/issues/187
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#199]: https://github.com/scttfrdmn/objectfs/issues/199
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200

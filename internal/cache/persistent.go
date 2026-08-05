@@ -576,10 +576,25 @@ func (c *PersistentCache) isExpired(item *persistentItem) bool {
 	return time.Since(item.Timestamp) > c.config.TTL
 }
 
+// generateFilePath names the on-disk file for a cache key.
+//
+// The full SHA-256 rather than its first 8 bytes (audit finding L25). Sixty-four bits gives a 50%
+// chance of some collision at ~5 billion entries and a one-in-a-million chance at ~6 million, which a
+// long-lived cache on a large bucket can reach; 256 bits cannot be reached.
+//
+// What a collision actually cost was worth measuring before changing this, and it is not corruption:
+// the index is keyed on the full entryKey string and readFromFile verifies a full SHA-256 of the
+// content, so two keys landing on one filename produce a *miss* — the checksum fails, dropEntry runs,
+// and the shared file goes with it, costing the other key its entry too. Removing that checksum check
+// and re-running the same probe does serve the wrong bytes, so the checksum is the guard and this
+// width is hygiene. Both were verified by mutation.
+//
+// Widening is backward compatible with a cache directory written by an older build: FilePath is stored
+// in the index and every read uses the stored value, so this function is only consulted for new
+// entries. Old files keep their short names until they expire or are evicted.
 func (c *PersistentCache) generateFilePath(key string) string {
 	hash := sha256.Sum256([]byte(key))
-	filename := fmt.Sprintf("%x", hash[:8]) // Use first 8 bytes of hash
-	return filepath.Join(c.directory, filename+".cache")
+	return filepath.Join(c.directory, fmt.Sprintf("%x.cache", hash))
 }
 
 func (c *PersistentCache) calculateChecksum(data []byte) string {

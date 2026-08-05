@@ -134,10 +134,17 @@ func BenchmarkFallback(b *testing.B) {
 func BenchmarkAccelerationOverhead(b *testing.B) {
 	backend := &Backend{}
 
+	// One error per path through the classifier: the InvalidRequest-plus-message conjunction that
+	// matches, an InvalidRequest that fails the message half (the most expensive path — it pays for
+	// the unwrap, the code comparison, and the ToLower), a different code that short-circuits after
+	// the unwrap, a code-less transport failure at the accelerate endpoint, and a plain error.
+	//
+	// SDK-shaped rather than fmt.Errorf strings, because errors.As unwrapping is part of the cost now.
 	testErrors := []error{
-		fmt.Errorf("InvalidRequest: Transfer acceleration not enabled"),
-		fmt.Errorf("s3-accelerate endpoint error"),
-		fmt.Errorf("AccelerateNotSupported"),
+		apiErr("InvalidRequest", "S3 Transfer Acceleration is not configured on this bucket"),
+		apiErr("InvalidRequest", "Invalid Range header"),
+		apiErr("NoSuchKey", "The specified key does not exist"),
+		fmt.Errorf("dial tcp: lookup b.s3-accelerate.amazonaws.com: no such host"),
 		fmt.Errorf("normal S3 error"),
 	}
 
