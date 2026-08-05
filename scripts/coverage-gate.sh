@@ -64,6 +64,13 @@ trap 'rm -f "$measured"' EXIT
 
 awk -v module="$module" '
   NR == 1 && $0 ~ /^mode:/ { next }
+  # Go files vendored inside npm dependencies are not this repository. `flatted` ships a Go port
+  # under its package directory, so once anything runs `npm install` in docs-platform or
+  # sdks/javascript, `go list ./...` reports two more packages and the gate lists them as unfloored
+  # at 0.0%. They are gitignored, absent from a fresh checkout, and not installed by the coverage
+  # job — so they appear only on a developer machine, which is the worst place for a gate to grow
+  # noise nobody can act on: the fix is neither a floor nor a test, it is not measuring them.
+  $1 ~ /\/node_modules\// { next }
   {
     split($1, loc, ":")
     path = loc[1]
