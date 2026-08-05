@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A measured per-iteration allocation budget for the difftest fuzz target, and a bound on what the
+  shared emulator retains** ([#193]). `TestPerIterationAllocationBudget` asserts that one worst-shaped
+  iteration allocates under 16 MiB; it measures 6.3 MiB for a program of writes and reads and 7.1 MiB for
+  one dominated by flush/reopen pairs, both within 1% with the race detector on and off.
+
+  **It does not assert the ratio #193 proposed**, and the reason is the more useful finding. That issue
+  observed peak RSS tracking ~3.7× `GOMEMLIMIT` across a sweep and suggested asserting on it. Measured
+  before #362, 300 iterations allocated 751 MiB under `GOMEMLIMIT=768MiB` and 3570 MiB under `384MiB` —
+  4.75× apart, because a `sync.Pool` holding a 64 MiB buffer is cleared at every GC cycle, so a *tighter*
+  limit produced *more* total allocation. After that path was removed the same measurement is 1859 MiB
+  against 1862 MiB, 0.15% apart. A number that moves 4.75× → 1.00× on a change touching no harness code
+  describes the collector's response to a limit rather than the harness's footprint, and an assertion
+  written against it would have pinned the deleted upload path's cost as the expected budget.
+
+  The budget is measured against synthetic worst-shaped inputs rather than the committed seed corpus,
+  which is the difference between an assertion with teeth and one without: the corpus averages 0.31 MiB
+  per iteration, 20× less, because its entries are four operations with 64-byte payloads while the decoder
+  admits 64 operations with 4 KiB payloads. A budget measured on the corpus would go on passing while the
+  shapes the fuzzer actually generates got arbitrarily more expensive. Verified by mutation — a 1 MiB
+  allocation per write takes both cases to 30 MiB and fails them.
+
+  The shared emulator's object accumulation is now bounded too. Its state manager is an in-memory map and
+  nothing swept it, while difftest's factory mints a new key per call and `Shrink` calls that factory
+  hundreds of times per counterexample, so retention grew monotonically for the life of the process.
+  Deleting each run's object in the cleanup the factory already returns holds heap flat across 700
+  iterations where its absence grows by ~2.8 KB each, verified in both directions. This was never the OOM
+  cause and the megabytes are not the point: "grows without bound, but slowly" is not a property worth
+  having in the component every other test trusts to be inert.
+
+  The part that generalizes is a note in `internal/testaws`'s package documentation and on the fuzz target:
+  `go test -fuzz` runs one worker **process** per CPU, each an independent runtime sizing its heap against
+  total machine memory with no knowledge of its siblings, so a 4-CPU runner over-commits by 4× before any
+  test code runs. That is why `GOMEMLIMIT` is set for every fuzz target in CI rather than only the one that
+  died, and why the failure is so misleading — the OOM kill reports as "fuzzing process hung or terminated
+  unexpectedly", names an input, and writes it to the corpus, where it replays green.
+
 - **`sdks/python/requirements.txt`, which is both the pinned tree CI installs and the only reason
   anything scans this SDK's dependencies** ([#343]). 21 packages, transitives included, resolved on
   Python 3.12 to match `actions/setup-python`. The `sdk-metrics` job installs `-r requirements.txt`
@@ -2253,6 +2289,7 @@ v0.10.3 established after two tags shipped without the work they were named for.
 [#180]: https://github.com/scttfrdmn/objectfs/issues/180
 [#181]: https://github.com/scttfrdmn/objectfs/issues/181
 [#192]: https://github.com/scttfrdmn/objectfs/issues/192
+[#193]: https://github.com/scttfrdmn/objectfs/issues/193
 [#202]: https://github.com/scttfrdmn/objectfs/issues/202
 [#203]: https://github.com/scttfrdmn/objectfs/issues/203
 [#205]: https://github.com/scttfrdmn/objectfs/issues/205

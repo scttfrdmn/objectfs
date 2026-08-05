@@ -28,6 +28,28 @@ whole object for a ranged GET does not fail the read-path tests, it ratifies the
 probes the running server and reports what is actually there, and helpers like
 [TestServer.RequireRangeGET] turn a missing capability into a skip that names the upstream issue.
 
+# Memory, under a fuzz target
+
+A fuzz target using this package needs an explicit GOMEMLIMIT, and the reason is not that the target
+allocates too much.
+
+`go test -fuzz` runs one worker **process** per CPU. Each is an independent Go runtime, and each sizes
+its heap against total machine memory, because none of them knows the others exist. On a 4-CPU runner
+that is 4× over-commitment before any test code runs. Add a target whose every iteration is a real
+read-modify-write over a real HTTP endpoint and the four runtimes will each decline to collect,
+because from each one's point of view there is memory to spare. Measured on a 7 GB container:
+7.2 GB RSS and a cgroup OOM kill at ~40 seconds.
+
+The failure does not look like a memory failure. `go test` reports "fuzzing process hung or terminated
+unexpectedly while minimizing: EOF", names an input, and writes it to the corpus — and that input
+replays green, because it is simply whichever one the killed worker happened to be holding. The first
+occurrence here was written off as runner preemption. See #193.
+
+So `GOMEMLIMIT` is set for every fuzz target in CI, not just the one that died: the cause is the
+per-worker runtime's view of memory, which every target shares, and a target that allocates little
+never reaches the limit anyway. The cap is not a tax — the memory it reclaims is garbage the collector
+had no pressure signal to collect, so bounding it returned 17× more executions in the same 60 seconds.
+
 # What this package is not
 
 It is not a substitute for the live AWS suite. Real S3 has consistency behavior, throttling,

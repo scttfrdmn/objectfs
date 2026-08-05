@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -281,6 +282,12 @@ var seedCorpus = []struct {
 //
 // A failure prints the shrunk counterexample as pasteable Go, so the first thing to do with one is put it
 // in [TestVFSPassesTheLegacyDefectSuite]'s table and watch it fail deterministically.
+//
+// This target needs GOMEMLIMIT set, and it is set for the whole fuzz-smoke job in CI. The reason is not
+// that this target is profligate: `go test -fuzz` runs one worker process per CPU, each an independent
+// runtime sizing its heap against total machine memory, so four of them jointly over-commit by 4× before
+// any test code runs. See [testaws]'s package documentation for the measurement and the misleading
+// failure mode, and [TestPerIterationAllocationBudget] for what one iteration is allowed to cost.
 func FuzzOperationSequence(f *testing.F) {
 	for _, seed := range seedCorpus {
 		f.Add(seed.in)
@@ -316,6 +323,14 @@ func FuzzOperationSequence(f *testing.F) {
 //
 // The endpoint is [testaws.Shared] rather than [testaws.Start], which matters only inside f.Fuzz: see
 // Shared's own documentation for the port exhaustion that a per-iteration server produced.
+//
+// Each run's object is deleted when the run ends, which bounds what the shared emulator retains. Without
+// that the accumulation is monotonic for the life of the process and nothing sweeps it: the factory mints
+// a new key per call, [difftest.Shrink] calls it hundreds of times per counterexample, and the emulator's
+// state manager is an in-memory map. Measured at ~28 KB per iteration, plateauing near 91 MB heap at 6000
+// iterations — so this was never the OOM cause (#193) and the reason to fix it is not the megabytes. It is
+// that "grows without bound, but slowly" is not a property worth having in the component every other test
+// trusts to be inert, and the plateau is the allocator's, not a bound anything guarantees.
 func vfsPair(t *testing.T) difftest.Factory {
 	t.Helper()
 
@@ -346,7 +361,9 @@ func vfsPair(t *testing.T) difftest.Factory {
 			return nil, nil, func() {}, err
 		}
 
-		sub, err := difftest.NewVFS(context.Background(), backend, fmt.Sprintf("fuzz/subject-%d.bin", n))
+		key := fmt.Sprintf("fuzz/subject-%d.bin", n)
+
+		sub, err := difftest.NewVFS(context.Background(), backend, key)
 		if err != nil {
 			_ = ref.Close()
 			return nil, nil, func() {}, err
@@ -355,6 +372,13 @@ func vfsPair(t *testing.T) difftest.Factory {
 		return ref, sub, func() {
 			_ = ref.Close()
 			_ = sub.Close()
+
+			// Delete after closing, not before: Close releases the handle and a delete first would have
+			// the subject reading a key that vanished under it. The error is discarded because a program
+			// that never flushed leaves no object to delete, and absence is the expected case rather
+			// than a failure — the point here is bounding retention, and a delete that finds nothing has
+			// already achieved it.
+			_ = backend.DeleteObject(context.Background(), key)
 		}, nil
 	}
 }
@@ -519,5 +543,122 @@ func TestDecodeProgramIsTotal(t *testing.T) {
 				// Carry no length or data, so the offset bound checked above is the whole contract.
 			}
 		}
+	}
+}
+
+// TestPerIterationAllocationBudget asserts what one worst-shaped fuzz iteration is allowed to allocate.
+//
+// This is the assertion #193 asked for, and the number it asserts is *total allocation per iteration*
+// rather than a ratio of peak RSS to GOMEMLIMIT — which is what the issue originally proposed, on the
+// strength of peak RSS tracking ~3.7× GOMEMLIMIT across a sweep. That ratio turned out not to be a
+// property of the harness at all. Before #362 removed the CargoShip upload path, 300 iterations
+// allocated 751 MiB under GOMEMLIMIT=768MiB and 3570 MiB under 384MiB — 4.75× apart, because a
+// sync.Pool holding a 64 MiB buffer is cleared at every GC cycle, so a tighter limit meant more
+// collections and therefore *more* total allocation. After the removal the same measurement is 1859 MiB
+// against 1862 MiB: 0.15% apart. A number that moved 4.75× → 1.00× on a change touching no harness code
+// describes the collector's response to a limit, not the harness's footprint, and asserting on it would
+// have pinned the transporter's cost as the expected budget.
+//
+// Total allocation per iteration is the invariant underneath. It is what actually rises when a change
+// makes an iteration hungrier, it is insensitive to GOMEMLIMIT and to the number of workers, and it moves
+// by under 1% with the race detector on and off.
+//
+// Measured on the current tree, 50 iterations after warmup: 6.32 MiB for a program of writes and reads,
+// 7.16 MiB for one dominated by flush/reopen pairs. The ceiling is set at 16 MiB — roughly 2.2× headroom,
+// which is loose enough not to flake on an allocator or SDK change and tight enough that the shapes this
+// is guarding against fail it. The regression worth catching is a 10× one; those are the ones that OOM a
+// worker, and they arrive from a new whole-object copy per operation rather than from drift.
+//
+// Deliberately measured against synthetic worst-shaped inputs, not against [seedCorpus]. The corpus
+// averages 0.31 MiB per iteration — 20× less — because its entries are four operations with 64-byte
+// payloads, while the decoder admits 64 operations with 4 KiB payloads at offsets up to 1 MiB and turns
+// every flush into a real GET and PUT of the whole object. A budget measured on the corpus would assert a
+// number the fuzzer never touches, and would go on passing while the shapes it actually generates got
+// arbitrarily more expensive.
+//
+// nolint:paralleltest // t.Parallel() is not omitted by oversight here and must not be added. This test
+// measures runtime.MemStats, which is process-wide: a sibling test allocating concurrently is counted
+// against this budget, and every other test in this package calls t.Parallel(). Running in parallel would
+// make the measurement report the package's total allocation rather than this program's, which fails
+// randomly and for a reason the message would not name.
+func TestPerIterationAllocationBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocation budget runs a few hundred real read-modify-write cycles")
+	}
+
+	// perIterationCeiling is generous on purpose. See the doc comment: the failure this guards is a
+	// multiple, not a drift.
+	const (
+		perIterationCeiling = 16 << 20
+		warmup              = 10
+		measured            = 50
+	)
+
+	factory := vfsPair(t)
+
+	for _, tc := range []struct {
+		name string
+		// kindBase walks the decoder's eight arms from a different starting point, so one case is
+		// dominated by writes and reads and the other by the flush/reopen pair — the two shapes with
+		// materially different costs.
+		kindBase byte
+	}{
+		{name: "writes and reads", kindBase: 0},
+		{name: "flush and reopen", kindBase: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The most expensive input the decoder admits: maxOps records, the largest length argument,
+			// and offsets near the top of the range. Built from the decoder rather than hand-written as
+			// Op literals, so a change to what the fuzzer can generate changes what this budgets.
+			in := make([]byte, 0, maxOps*opStride)
+			for i := range maxOps {
+				in = append(in,
+					tc.kindBase+byte(i), // walk all eight arms
+					0x0f, 0xff, 0xff,    // offset near maxOffset
+					0xff,    // largest length argument
+					byte(i), // payload seed
+				)
+			}
+
+			prog := decodeProgram(in)
+
+			run := func(n int) uint64 {
+				var before, after runtime.MemStats
+
+				runtime.ReadMemStats(&before)
+
+				for range n {
+					if _, d := difftest.Shrink(context.Background(), prog, factory); d != nil {
+						t.Fatalf("the oracle diverged on a program the budget expected to pass:\n%v", d)
+					}
+				}
+
+				runtime.ReadMemStats(&after)
+
+				return after.TotalAlloc - before.TotalAlloc
+			}
+
+			// Warm up before measuring. The first iterations at a new object shape grow buffers that
+			// later ones reuse, so measuring from cold reports ~20 MiB per iteration for a steady state
+			// of 6 — and a budget that has to accommodate warmup is 3× looser than the one worth having.
+			run(warmup)
+
+			perIteration := run(measured) / uint64(measured)
+
+			t.Logf("%.3f MiB per iteration over %d operations (ceiling %.0f MiB)",
+				float64(perIteration)/(1<<20), prog.Len(), float64(perIterationCeiling)/(1<<20))
+
+			if perIteration > perIterationCeiling {
+				t.Errorf("one iteration allocates %.1f MiB, over the %.0f MiB budget.\n\n"+
+					"This is not about this machine's memory. `go test -fuzz` runs one worker process "+
+					"per CPU, each an independent runtime sizing its heap against total machine memory "+
+					"with no knowledge of its siblings, so a per-iteration cost is multiplied by the "+
+					"core count before any limit applies — which is how the CI runner reached 7.2 GB "+
+					"and an OOM kill (#193). The kill also reports as \"fuzzing process hung or "+
+					"terminated unexpectedly\" against an input that replays green, so the next person "+
+					"to hit it will not be told it was memory.",
+					float64(perIteration)/(1<<20), float64(perIterationCeiling)/(1<<20))
+			}
+		})
 	}
 }
