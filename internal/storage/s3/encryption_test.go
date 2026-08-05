@@ -46,33 +46,21 @@ const (
 	hdrBucketKeys = "X-Amz-Server-Side-Encryption-Bucket-Key-Enabled"
 )
 
-// hdrCargoShip is the user-metadata header CargoShip's transporter stamps on every object it uploads,
-// and it is the only thing on the wire that says which of the two write paths an object took.
-//
-// Without it, the bypass tests are half-blind. The direct path and the transporter send identical
-// encryption headers when both can express the mode, so an assertion on the encryption alone passes
-// whether the object was diverted or not — which means "always bypass" satisfies every encryption
-// assertion in this file while quietly disabling CargoShip for anyone who configures encryption at
-// all. A performance regression that the security tests certify as correct. Found by mutating
-// cargoShipCanEncrypt to `return !cfg.Enabled()` and watching the suite stay green.
-const hdrCargoShip = "X-Amz-Meta-Cargoship-Created-By"
-
 // A syntactically valid key ARN, in the us-west-2 the rest of the suite uses. The account is the
 // documentation-reserved 111122223333.
 const testKMSKeyARN = "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 
-// encryptionMutator returns a Config mutator that sets the encryption block and, deliberately, turns
-// CargoShip off.
+// encryptionMutator returns a Config mutator that sets the encryption block.
 //
-// CargoShip is disabled because PutObject diverts around the transporter for any mode it cannot
-// express, so leaving it on would mean the sse-s3 and bucket-keys cases test the bypass while the
-// sse-kms case tests the transporter — three tests exercising two different code paths, with which
-// one silently depending on the mode. TestCargoShipIsBypassedWhenItCannotSendTheHeaders covers the
-// bypass itself, on purpose, in one place.
+// It used to also turn CargoShip off, because PutObject diverted around the transporter for any mode
+// the transporter could not express — so with the flag on, the sse-s3 and bucket-keys cases exercised
+// the bypass while the sse-kms case exercised the transporter, three tests split across two code paths
+// with which one depending silently on the mode. The transporter is gone as of #362 and there is one
+// upload path, so every case below now reaches the same code by construction rather than by a mutator
+// arranging it.
 func encryptionMutator(enc s3.EncryptionConfig) func(*s3.Config) {
 	return func(cfg *s3.Config) {
 		noCompression(cfg)
-		cfg.EnableCargoShipOptimization = false
 		cfg.Encryption = enc
 	}
 }
@@ -331,9 +319,9 @@ func TestSetObjectMetadataKeepsTheObjectEncrypted(t *testing.T) {
 // one where the drop is least likely to be noticed and hardest to explain afterwards.
 //
 // It is also the path that had no test at all — found by deleting the applyEncryptionCopy call in
-// applyOptimization and watching the whole suite stay green, which is the same mutation that caught
-// the CargoShip bypass. The 30-day floor in analyzeObject is why: nothing could reach the transition
-// without a pattern aged past it, so the copy was unreachable from any test and therefore unasserted.
+// applyOptimization and watching the whole suite stay green. The 30-day floor in analyzeObject is why:
+// nothing could reach the transition without a pattern aged past it, so the copy was unreachable from
+// any test and therefore unasserted.
 func TestTierTransitionKeepsTheObjectEncrypted(t *testing.T) {
 	t.Parallel()
 
@@ -341,7 +329,6 @@ func TestTierTransitionKeepsTheObjectEncrypted(t *testing.T) {
 
 	backend := ts.Backend(func(cfg *s3.Config) {
 		noCompression(cfg)
-		cfg.EnableCargoShipOptimization = false
 		cfg.Encryption = s3.EncryptionConfig{
 			Mode:     s3.EncryptionModeKMS,
 			KMSKeyID: testKMSKeyARN,
@@ -407,119 +394,6 @@ func TestTierTransitionKeepsTheObjectEncrypted(t *testing.T) {
 		hdrSSE:       "aws:kms",
 		hdrSSEKMSKey: testKMSKeyARN,
 	}, nil)
-}
-
-// TestCargoShipIsBypassedWhenItCannotSendTheHeaders pins the divert, because the alternative to
-// diverting is worse than not optimizing.
-//
-// CargoShip's transporter hardcodes the algorithm to aws:kms and has no bucket-key field
-// (pkg/aws/s3/transporter.go:105-109 in v0.13.0), so sse-s3 and bucket keys have no representation
-// there. Uploading through it anyway would store the object under an encryption nobody configured —
-// and the object reads back fine either way, so nothing would ever surface the difference. That is
-// P-7's failure mode with an extra step.
-//
-// This is the one test in the file that leaves CargoShip enabled.
-func TestCargoShipIsBypassedWhenItCannotSendTheHeaders(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		enc  s3.EncryptionConfig
-		want map[string]string
-	}{
-		{
-			// The mode CargoShip cannot express at all: it only ever writes aws:kms.
-			name: "sse-s3",
-			enc:  s3.EncryptionConfig{Mode: s3.EncryptionModeS3},
-			want: map[string]string{hdrSSE: "AES256"},
-		},
-		{
-			// The mode it half-expresses. Without the bypass the object would be encrypted with the
-			// right key and no bucket-key header — correct-looking, and billing a KMS call per read
-			// against a per-region rate limit that bucket keys exist to avoid.
-			name: "sse-kms with bucket keys",
-			enc: s3.EncryptionConfig{
-				Mode:       s3.EncryptionModeKMS,
-				KMSKeyID:   testKMSKeyARN,
-				BucketKeys: true,
-			},
-			want: map[string]string{
-				hdrSSE:        "aws:kms",
-				hdrSSEKMSKey:  testKMSKeyARN,
-				hdrBucketKeys: "true",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			ts := testaws.Start(t)
-			backend := ts.Backend(func(cfg *s3.Config) {
-				noCompression(cfg)
-				cfg.Encryption = tc.enc
-				cfg.EnableCargoShipOptimization = true
-			})
-
-			const key = "encryption/cargoship"
-
-			if err := backend.PutObject(context.Background(), key, []byte("via the bypass"), nil); err != nil {
-				t.Fatalf("PutObject: %v", err)
-			}
-
-			writes := ts.Writes(key)
-			if len(writes) != 1 {
-				t.Fatalf("expected exactly one write, got %d", len(writes))
-			}
-
-			// Both halves, because the encryption assertion alone cannot tell the paths apart: they send
-			// the same headers when both can express the mode. This is the one that says the object was
-			// actually diverted rather than that it happened to end up encrypted.
-			assertHeaders(t, writes[0], tc.want, []string{hdrCargoShip})
-		})
-	}
-}
-
-// TestCargoShipCarriesTheKeyForTheModeItSupports is the other side of the bypass.
-//
-// Plain sse-kms is expressible by the transporter, so the object goes through it and must still carry
-// the headers. Without this the bypass could be "always divert", which would pass every other test in
-// this file while quietly disabling CargoShip for anyone who configures encryption at all — a
-// performance regression that no encryption assertion would notice.
-func TestCargoShipCarriesTheKeyForTheModeItSupports(t *testing.T) {
-	t.Parallel()
-
-	ts := testaws.Start(t)
-	backend := ts.Backend(func(cfg *s3.Config) {
-		noCompression(cfg)
-		cfg.EnableCargoShipOptimization = true
-		cfg.Encryption = s3.EncryptionConfig{
-			Mode:     s3.EncryptionModeKMS,
-			KMSKeyID: testKMSKeyARN,
-		}
-	})
-
-	const key = "encryption/cargoship-kms"
-
-	if err := backend.PutObject(context.Background(), key, []byte("through the transporter"), nil); err != nil {
-		t.Fatalf("PutObject: %v", err)
-	}
-
-	writes := ts.Writes(key)
-	if len(writes) != 1 {
-		t.Fatalf("expected exactly one write, got %d", len(writes))
-	}
-
-	assertHeaders(t, writes[0], map[string]string{
-		hdrSSE:       "aws:kms",
-		hdrSSEKMSKey: testKMSKeyARN,
-
-		// The claim that makes this test the counterweight to the bypass test: the object went *through*
-		// the transporter, and carried the encryption anyway. Asserting only the encryption headers here
-		// would leave "divert everything" passing, since a diverted object is also correctly encrypted.
-		hdrCargoShip: "cargoship",
-	}, []string{hdrBucketKeys})
 }
 
 // TestNewBackendRejectsAnEncryptionConfigItCannotHonour asserts the validation, which is the half of
@@ -730,15 +604,8 @@ func assertHeaders(t *testing.T, r testaws.Request, want map[string]string, abse
 	for name, value := range want {
 		got := r.Header.Get(name)
 		if got == "" {
-			// The encryption headers get the extra sentence because their absence is the defect itself.
-			// hdrCargoShip's absence means something different — the object was diverted around the
-			// transporter — and saying "P-7" there would send the reader to the wrong code.
-			because := ""
-			if name != hdrCargoShip {
-				because = " — the request asked for no encryption, which is audit finding P-7"
-			}
-
-			t.Errorf("%s %s: header %s is absent, want %q%s", r.Method, r.Path, name, value, because)
+			t.Errorf("%s %s: header %s is absent, want %q — the request asked for no encryption, "+
+				"which is audit finding P-7", r.Method, r.Path, name, value)
 
 			continue
 		}

@@ -21,7 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/scttfrdmn/objectfs/internal/awsname"
@@ -928,103 +927,34 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 
 		applyEncryptionPut(input, b.config.Encryption)
 
-		// Use the CargoShip transporter for optimized uploads, but never for a compressed object.
+		// One upload path, deliberately.
 		//
-		// cargoships3.Archive has no ContentEncoding field — its CompressionType becomes user
-		// metadata (transporter.go:184) and nothing sets the HTTP header. Uploading a compressed
-		// object through it therefore stored the encoding as metadata only, so GetObject saw an
-		// empty result.ContentEncoding, skipped decompression, and returned the raw zstd frame while
-		// HeadObject still reported the uncompressed size. An 8 KiB write read back as 29 bytes with
-		// no error, and the kernel zero-padded the difference: silent corruption on the default
-		// configuration, which enables both compression and CargoShip.
+		// A CargoShip transporter branch used to sit here, ahead of the direct PutObject below, and it
+		// accumulated three bypasses because cargoships3.Archive cannot express what a PutObjectInput
+		// expresses. It could not carry a Content-Encoding (its CompressionType becomes user metadata and
+		// nothing sets the header, so a compressed object read back as a raw zstd frame with the kernel
+		// zero-padding to the uncompressed size HeadObject still reported); it could not carry the
+		// configured encryption headers (no representation for SSE-S3 or bucket keys); and it could not
+		// carry a per-object storage class (optimizeStorageClass ignores Archive.StorageClass for every
+		// archive ObjectFS builds and substitutes the transporter's construction-time default).
 		//
-		// The direct path below sets ContentEncoding properly, so compressed objects take it. This
-		// costs CargoShip's throughput optimization only for objects that compressed — and only
-		// until the transporter can carry the header.
-		transporter := b.clientManager.GetTransporter()
-		if contentEncoding != "" && transporter != nil {
-			b.logger.Debug("Bypassing CargoShip for a compressed object: the transporter cannot set Content-Encoding",
-				"key", key,
-				"content_encoding", contentEncoding)
-
-			transporter = nil
-		}
-
-		// Bypassed for the same reason when the transporter cannot send the encryption headers this
-		// configuration asks for. See cargoShipCanEncrypt: it hardcodes aws:kms and has no bucket-key
-		// field, so SSE-S3 and bucket keys have no representation there. Uploading through it anyway
-		// would store the object under an encryption the operator did not configure, and the object
-		// reads back fine either way — so nothing would ever surface the difference.
-		if transporter != nil && !cargoShipCanEncrypt(b.config.Encryption) {
-			b.logger.Debug("Bypassing CargoShip: the transporter cannot send the configured encryption headers",
-				"key", key,
-				"encryption_mode", b.config.Encryption.Mode,
-				"bucket_keys", b.config.Encryption.BucketKeys)
-
-			transporter = nil
-		}
-
-		// Bypassed a third time when this object's class differs from the configured tier, because the
-		// transporter cannot be told a per-object class.
+		// A fourth of the same kind is why the branch is gone rather than bypassed again: Content-Type was
+		// written into Archive.Metadata under a "content-type" key, which is user metadata, not the header.
+		// Every object under MultipartThreshold was stored as application/octet-stream while
+		// detectContentType had computed the right value one line earlier.
 		//
-		// Archive.StorageClass looks like it can: it is set below and it is the field the name promises.
-		// But Transporter.optimizeStorageClass ignores it — for an archive with no AccessPattern and no
-		// RetentionDays, which is every archive ObjectFS builds, it returns the *transporter's own*
-		// config.StorageClass, fixed at construction from cfg.StorageTier (client.go). So a
-		// small-objects-on-Standard diversion sent through here would be stored on the configured tier
-		// with nothing reporting the difference, which is the seam this whole change is about: the value
-		// is computed correctly and dropped at a boundary.
+		// And there was nothing on the other side of the ledger. The transporter was only ever reachable
+		// *below* MultipartThreshold — the check above returns into putObjectMultipart first, and that
+		// function never referenced a transporter — so its 64 MiB multipart BufferProvider served an upload
+		// shape that cannot occur here, and its sync.Pool gave that buffer back at every GC cycle:
+		// 20 measured PUTs allocated 3.4 MiB with no GC between them and 837 MiB with one after each.
+		// Measured throughput against a local endpoint was 35% slower at 4 KiB, 8% slower at 1 MiB, and a
+		// wash at 8 MiB, and the sizes where BBR could plausibly help never reached the branch at all.
 		//
-		// Only the diverging case is bypassed. When effectiveTier equals the configured tier the
-		// transporter's own default is the right answer, so the common path keeps CargoShip's throughput
-		// optimization; a mount that diverts small objects gives it up for those objects only, which
-		// are by definition the small ones. Filed upstream as scttfrdmn/cargoship#352.
-		if transporter != nil && effectiveTier != b.currentTier {
-			b.logger.Debug("Bypassing CargoShip: the transporter cannot carry a per-object storage class",
-				"key", key,
-				"configured_tier", b.currentTier,
-				"effective_tier", effectiveTier)
-
-			transporter = nil
-		}
-
-		if transporter != nil {
-			// Use CargoShip's optimized upload with BBR/CUBIC algorithms
-			cargoStorageClass := ConvertTierToCargoShipStorageClass(effectiveTier)
-			cargoMeta := map[string]string{
-				"objectfs-upload": "true",
-				"content-type":    b.detectContentType(key),
-				"storage-tier":    effectiveTier,
-				"configured-tier": b.currentTier,
-			}
-			maps.Copy(cargoMeta, objectMeta)
-			if contentEncoding != "" {
-				cargoMeta["content-encoding"] = contentEncoding
-			}
-			archive := cargoships3.Archive{
-				Key:          key,
-				Reader:       bytes.NewReader(uploadData),
-				Size:         int64(len(uploadData)),
-				StorageClass: cargoStorageClass,
-				Metadata:     cargoMeta,
-			}
-
-			result, uploadErr := transporter.Upload(ctx, archive)
-			if uploadErr == nil {
-				b.logger.Debug("CargoShip optimized upload completed",
-					"key", key,
-					"size", len(uploadData),
-					"throughput", result.Throughput,
-					"duration", result.Duration)
-				b.metricsCollector.RecordBytesUploaded(int64(len(uploadData)))
-				b.healthTracker.RecordSuccess("s3-writes")
-				return nil
-			}
-
-			b.logger.Warn("CargoShip optimization failed, falling back to standard S3", "key", key, "error", uploadErr)
-		}
-
-		// Fallback to standard S3 client with acceleration support
+		// Four silently-wrong headers against no reachable benefit is a subtraction. See #362. The
+		// assertions that pin the headers and the metadata key set live in upload_path_test.go and hold for
+		// whatever path is live, so a future second upload path has to satisfy them rather than inherit an
+		// untested boundary.
 		return b.executeWithAccelerationFallback(ctx, "PutObject", func(client *s3.Client) error {
 			_, err := client.PutObject(ctx, input)
 			if err != nil {

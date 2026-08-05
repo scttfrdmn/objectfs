@@ -65,10 +65,6 @@ func compressorBackend(t *testing.T, ts *testaws.TestServer, algo string, enable
 		cfg.Compression.Algorithm = algo
 		cfg.Compression.Level = 0
 		cfg.Compression.MinSize = "1KB"
-		// The transporter has its own upload path with its own encoding handling; this test is about
-		// the read side, so keep the write side to the one path whose header behavior is asserted in
-		// compression_integrity_test.go.
-		cfg.EnableCargoShipOptimization = false
 	})
 }
 
