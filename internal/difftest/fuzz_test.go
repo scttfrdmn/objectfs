@@ -285,8 +285,8 @@ var seedCorpus = []struct {
 //
 // This target needs GOMEMLIMIT set, and it is set for the whole fuzz-smoke job in CI. The reason is not
 // that this target is profligate: `go test -fuzz` runs one worker process per CPU, each an independent
-// runtime sizing its heap against total machine memory, so four of them jointly over-commit by 4× before
-// any test code runs. See [testaws]'s package documentation for the measurement and the misleading
+// runtime sizing its heap against total machine memory with no knowledge of its siblings, so four of them
+// over-commit by 4× between them before any test code runs. See [testaws]'s package documentation for the measurement and the misleading
 // failure mode, and [TestPerIterationAllocationBudget] for what one iteration is allowed to cost.
 func FuzzOperationSequence(f *testing.F) {
 	for _, seed := range seedCorpus {
