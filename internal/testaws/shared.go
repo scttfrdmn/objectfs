@@ -37,6 +37,13 @@ import (
 // It is deliberately not the default. A leaked server is invisible where a leaked t.Cleanup is not, and
 // the ordinary case wants the emulator's state reset with the test that created it.
 //
+// Nothing sweeps what callers store here, and that is the cost of the process lifetime: an object written
+// to a shared bucket stays in the emulator's in-memory state manager until the process exits. For an
+// ordinary test that is bounded by the test. For a fuzz target it is bounded by nothing — a run makes
+// millions of iterations — so a caller that writes per iteration has to delete per iteration.
+// difftest's factory does exactly that in the cleanup it returns to the shrinker; measured, it holds
+// retention flat where its absence grows by ~2.8 KB per iteration forever. See #193.
+//
 // It takes a [testing.TB] rather than a *testing.T because its primary caller is a fuzz target, which
 // holds an *testing.F at the point where the endpoint has to be established — outside f.Fuzz, once, for
 // the whole run.
