@@ -3,12 +3,17 @@ package s3_test
 // The configured storage tier has to reach the stored object, and the only place that can be checked
 // is the stored object.
 //
-// Every layer between the config and S3 agrees on the tier by construction: ValidateWrite enforces the
-// tier's minimum-size warning names the tier, the logs name the tier, and ConvertTierToStorageClass has a unit test asserting
-// it maps STANDARD_IA to STANDARD_IA. All of that passed while the upload path stored a different class
-// entirely, because the class the object is written with is chosen inside the CargoShip transporter
+// Every layer between the config and S3 agrees on the tier by construction: the minimum-size warning
+// names the tier, the logs name the tier, and ConvertTierToStorageClass has a unit test asserting it
+// maps STANDARD_IA to STANDARD_IA. All of that passed while the upload path stored a different class
+// entirely, because the class the object was written with was chosen inside the CargoShip transporter
 // from a config built alongside — not from the value those layers agree about. A tier defect is silent
 // by nature: the object is readable, nothing errors, and the difference shows up on an invoice.
+//
+// That transporter is gone (#362) and there is one upload path, so the class now comes from the same
+// value the rest of the stack agrees on. These assertions stay against the endpoint anyway: what makes
+// this class of defect invisible is the absence of an assertion at the boundary, not which path was
+// installed behind it.
 
 import (
 	"context"
@@ -18,39 +23,29 @@ import (
 	"github.com/scttfrdmn/objectfs/internal/testaws"
 )
 
-// TestConfiguredStorageTierReachesTheStoredObject asserts the class the endpoint recorded, for each
-// upload path independently.
+// TestConfiguredStorageTierReachesTheStoredObject asserts the class the endpoint recorded.
 //
-// Both paths must be covered because they choose the class differently and only one of them was wrong.
-// The direct path passes ConvertTierToStorageClass(effectiveTier) on the PutObjectInput. The CargoShip
-// path hands cargoship an Archive with no AccessPattern and no RetentionDays, and
-// Transporter.optimizeStorageClass falls back to its *own* config's StorageClass for exactly that
-// shape — which was the constant StorageClassIntelligentTiering. Since EnableCargoShipOptimization is
-// true in NewDefaultConfig, that was the live path: `storage_tier: STANDARD_IA` stored
-// INTELLIGENT_TIERING.
+// PutObject passes ConvertTierToStorageClass(effectiveTier) on the PutObjectInput, and this checks the
+// value that arrived rather than the value passed in. The distinction is the whole point: the tier
+// defect this file was written for was a correct value handed to a path that substituted its own.
 func TestConfiguredStorageTierReachesTheStoredObject(t *testing.T) {
 	t.Parallel()
 
-	// STANDARD_IA and ONEZONE_IA rather than the archive tiers: a Glacier object's body is
+	// Mostly STANDARD_IA and ONEZONE_IA rather than the archive tiers: a Glacier object's body is
 	// unavailable, so the assertion that the bytes also survived could not be made. GLACIER_IR is
-	// included as the case where the two paths legitimately differ — cargoship has no instant-retrieval
-	// class, so it maps to GLACIER. Asserting per-path expectations rather than one shared value is
-	// what keeps that from being papered over.
+	// included with that assertion skipped, because an unreadable body is the tier working as intended
+	// and the class is still worth pinning.
 	tiers := []struct {
 		tier string
 
-		// direct is the class expected when the object goes out through PutObject itself.
-		direct string
-
-		// viaCargoShip is the class expected when the CargoShip transporter carries it. Different from
-		// direct only where cargoship's class set is coarser.
-		viaCargoShip string
+		// readsOK is whether the body can be fetched back on this class.
+		readsOK bool
 	}{
-		{tier: s3.TierStandard, direct: s3.TierStandard, viaCargoShip: s3.TierStandard},
-		{tier: s3.TierStandardIA, direct: s3.TierStandardIA, viaCargoShip: s3.TierStandardIA},
-		{tier: s3.TierOneZoneIA, direct: s3.TierOneZoneIA, viaCargoShip: s3.TierOneZoneIA},
-		{tier: s3.TierIntelligent, direct: s3.TierIntelligent, viaCargoShip: s3.TierIntelligent},
-		{tier: s3.TierGlacierIR, direct: s3.TierGlacierIR, viaCargoShip: s3.TierGlacier},
+		{tier: s3.TierStandard, readsOK: true},
+		{tier: s3.TierStandardIA, readsOK: true},
+		{tier: s3.TierOneZoneIA, readsOK: true},
+		{tier: s3.TierIntelligent, readsOK: true},
+		{tier: s3.TierGlacierIR, readsOK: false},
 	}
 
 	for _, tc := range tiers {
@@ -65,45 +60,31 @@ func TestConfiguredStorageTierReachesTheStoredObject(t *testing.T) {
 			// refused — but this test is about the storage class, not about the warning.
 			const size = 192 * 1024
 
-			for _, path := range []struct {
-				name    string
-				cargo   bool
-				want    string
-				readsOK bool
-			}{
-				{name: "direct", cargo: false, want: tc.direct, readsOK: tc.tier != s3.TierGlacierIR},
-				{name: "cargoship", cargo: true, want: tc.viaCargoShip, readsOK: false},
-			} {
-				t.Run(path.name, func(t *testing.T) {
-					backend := ts.Backend(func(cfg *s3.Config) {
-						cfg.StorageTier = tc.tier
-						cfg.EnableCargoShipOptimization = path.cargo
-						// Compression off: it changes the stored length, and a tier's minimum-size check
-						// against a compressed body is its own defect (M23) with its own test.
-						cfg.Compression.Enabled = false
-					})
+			backend := ts.Backend(func(cfg *s3.Config) {
+				cfg.StorageTier = tc.tier
+				// Compression off: it changes the stored length, and a tier's minimum-size check
+				// against a compressed body is its own defect (M23) with its own test.
+				cfg.Compression.Enabled = false
+			})
 
-					key := "tier/" + tc.tier + "/" + path.name
-					want := testaws.DeterministicBytes(key, size)
+			key := "tier/" + tc.tier
+			want := testaws.DeterministicBytes(key, size)
 
-					if err := backend.PutObject(ctx, key, want, nil); err != nil {
-						t.Fatalf("PutObject with storage_tier %q: %v", tc.tier, err)
-					}
+			if err := backend.PutObject(ctx, key, want, nil); err != nil {
+				t.Fatalf("PutObject with storage_tier %q: %v", tc.tier, err)
+			}
 
-					if got := ts.ObjectStorageClass(key); got != path.want {
-						t.Errorf("storage_tier %q stored the object as %q, want %q. Nothing reports "+
-							"this: the object is readable and the config is only visible in the bill.",
-							tc.tier, got, path.want)
-					}
+			if got := ts.ObjectStorageClass(key); got != tc.tier {
+				t.Errorf("storage_tier %q stored the object as %q, want %q. Nothing reports this: "+
+					"the object is readable and the config is only visible in the bill.",
+					tc.tier, got, tc.tier)
+			}
 
-					// The class is not worth much if the body did not survive the same path. Skipped for
-					// classes whose objects cannot be read back — that is the tier working as intended.
-					if path.readsOK {
-						if got := ts.GetObject(key); string(got) != string(want) {
-							t.Errorf("the object holds %d bytes, want %d", len(got), len(want))
-						}
-					}
-				})
+			// The class is not worth much if the body did not survive the same path.
+			if tc.readsOK {
+				if got := ts.GetObject(key); string(got) != string(want) {
+					t.Errorf("the object holds %d bytes, want %d", len(got), len(want))
+				}
 			}
 		})
 	}
@@ -112,10 +93,10 @@ func TestConfiguredStorageTierReachesTheStoredObject(t *testing.T) {
 // TestDefaultConfigStoresStandard checks the shipped default specifically, through the path the
 // default actually takes.
 //
-// NewDefaultConfig sets StorageTier STANDARD and EnableCargoShipOptimization true, which is the exact
-// combination that stored INTELLIGENT_TIERING. Worth its own test rather than a row above because a
-// default is what most users get, and because the combination — not either setting alone — is what
-// produced the defect.
+// NewDefaultConfig sets StorageTier STANDARD, and with CargoShip also on it stored INTELLIGENT_TIERING
+// — the combination, not either setting alone, was the defect. The transporter is gone, so the
+// combination cannot recur, but the shipped default is what most users get and is worth asserting
+// through the constructor they actually call rather than through a field-by-field config.
 func TestDefaultConfigStoresStandard(t *testing.T) {
 	t.Parallel()
 

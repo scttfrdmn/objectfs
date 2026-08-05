@@ -449,9 +449,13 @@ network:
 `,
 	},
 	{
-		name: "the CargoShip upload path",
-		why: "off by default here and on in s3.NewDefaultConfig. Plumbed only after the " +
-			"Content-Encoding corruption in that path was fixed",
+		name: "the removed CargoShip upload path",
+		why: "#362 deleted the second PutObject implementation this key selected, so the key names " +
+			"no choice. Rejected rather than ignored for the same reason as the moved compression " +
+			"block below: an operator who set it did so believing their uploads took a different " +
+			"path, and if that belief is now wrong they have to be told rather than left with a " +
+			"file that reads as though it still configures something",
+		rejectedByLoader: true,
 		yaml: `storage:
   s3:
     use_cargoship: true

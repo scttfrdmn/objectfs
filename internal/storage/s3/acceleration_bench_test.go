@@ -36,7 +36,6 @@ func getBenchConfig(b *testing.B) (*Config, string) {
 	cfg := NewDefaultConfig()
 	cfg.Region = region
 	cfg.PoolSize = 10
-	cfg.EnableCargoShipOptimization = false // Disable CargoShip for pure acceleration benchmarking
 
 	return cfg, bucket
 }
@@ -380,7 +379,6 @@ func BenchmarkMultipartConcurrency(b *testing.B) {
 				cfg.Region = "us-east-1"
 			}
 			cfg.PoolSize = 10
-			cfg.EnableCargoShipOptimization = false
 			cfg.MultipartConcurrency = concurrency
 
 			backend, err := NewBackend(ctx, bucket, cfg)

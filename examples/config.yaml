@@ -45,12 +45,6 @@ storage:
     # replacing it: 3 SDK attempts inside 3 ObjectFS attempts is up to nine requests.
     max_retries: 3
 
-    # Route uploads through the CargoShip transporter, which does its own chunking and congestion
-    # control. Off by default: the plain path is the one the filesystem has the most coverage of,
-    # and until v0.10.1 this flag was unreachable from a config file, so leaving it off preserves
-    # what mounts actually did rather than switching every deployment's write path on upgrade.
-    use_cargoship: false
-
     multipart:
       threshold: 32MB                 # objects at least this large are uploaded in parts
       chunk_size: 16MB                # bytes per part; S3 rejects a non-final part under 5MB

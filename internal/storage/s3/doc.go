@@ -1,15 +1,17 @@
 /*
-Package s3 provides an AWS S3 backend with CargoShip upload optimization and storage tier management.
+Package s3 provides an AWS S3 backend with storage tier management.
 
 This package implements the core object storage functionality for ObjectFS: S3 integration with
-multi-tier storage support, cost accounting, and an optional CargoShip transporter on the upload path.
+multi-tier storage support and cost accounting.
 
 Throughput figures are deliberately absent, here and everywhere else in this repository. This doc
 comment used to open by claiming "up to 4.6x performance improvements over standard S3 operations",
 repeated twice more below. Nothing in this repository measured that number, and no benchmark here can
 produce it — it came from CargoShip's own reporting on CargoShip's own workload, and was restated as a
 property of ObjectFS. A reader had no way to tell it apart from something this project had measured.
-See benchmarks/ for what can actually be run against a named bucket and object size.
+See benchmarks/ for what can actually be run against a named bucket and object size. The transporter
+that figure was attributed to is gone (#362); when it was finally measured here it was 35% slower at
+4 KiB and a wash at 8 MiB.
 
 # Architecture Overview
 
@@ -28,35 +30,30 @@ The S3 backend provides multiple layers of functionality:
 	└─────────────────────────────────────────────────────────────┘
 	                          │
 	┌─────────────────────────────────────────────────────────────┐
-	│              CargoShip Transporter                          │
-	│           (upload path only, when enabled)                 │
-	└─────────────────────────────────────────────────────────────┘
-	                          │
-	┌─────────────────────────────────────────────────────────────┐
 	│                 AWS S3 Service                             │
 	│    Connection Pool  │  Multiple Regions  │  Storage Tiers  │
 	└─────────────────────────────────────────────────────────────┘
 
-# CargoShip Integration
+# One upload path
 
-When EnableCargoShipOptimization is set, PutObject routes through CargoShip's transporter instead of
-the direct SDK call. What that changes, as a list of mechanisms rather than a speedup figure:
+PutObject has a single implementation. Until v0.15.0 a config flag routed it through CargoShip's
+transporter instead of the direct SDK call, for that library's BBR/CUBIC congestion control; #362
+removed both the flag and the branch.
 
-- Chunking is sized by CargoShip rather than by MultipartChunkSize alone
-- Connections are pooled and reused across uploads
-- Retries and multipart part scheduling are CargoShip's, not this package's retryer
-- Batching reduces the number of API calls for many small objects
+The reason is worth recording, because it is the failure mode this package is most exposed to. A
+cargoships3.Archive cannot express what a PutObjectInput expresses — there is no field for a
+Content-Encoding, for the configured encryption headers, or for a per-object storage class — and the
+branch had grown three bypasses saying so. The fourth of the same kind was not bypassed: Content-Type
+was written into Archive.Metadata, which is S3 user metadata rather than the header, so every object
+under MultipartThreshold was stored as application/octet-stream while detectContentType had computed
+the right value one line earlier. Each of those failures leaves a readable object, which is why none
+of them surfaced without an assertion made at the endpoint.
 
-Note the diversions: PutObject bypasses the transporter for any encryption mode CargoShip cannot
-express (see cargoShipCanEncrypt), and GetObject never uses it — the read path is this package's own.
-So "CargoShip is enabled" describes some writes, not all traffic.
-
-CargoShip Features:
-- Automatic optimal chunk size calculation
-- Concurrent upload streams with load balancing
-- Smart failure detection and recovery
-- Regional endpoint optimization
-- Bandwidth-aware throttling
+There was also nothing on the other side. The transporter was only reachable *below*
+MultipartThreshold, since an object at or above it returned into this package's own multipart path,
+which never consulted a transporter — so the 64 MiB multipart buffer it installed served an upload
+shape a mount cannot produce, and sync.Pool released that buffer at every GC cycle. See
+upload_path_test.go for the assertions that now hold at the boundary regardless of what runs behind it.
 
 # Storage Tier Management
 
@@ -150,9 +147,6 @@ Flexible configuration options:
 		Region:   "us-west-2",
 		Endpoint: "", // empty: the AWS endpoint for the region
 
-		// CargoShip upload path
-		EnableCargoShipOptimization: true,
-
 		// Connections and timeouts
 		PoolSize:       8,
 		ConnectTimeout: 10 * time.Second,
@@ -185,7 +179,7 @@ Object operations with automatic optimization:
 	// not the bytes you handed in.
 	err := backend.PutObject(ctx, "data/file.txt", data, nil)
 
-	// Get object with CargoShip optimization
+	// Get object; -1 reads to the end
 	data, err := backend.GetObject(ctx, "data/file.txt", 0, -1)
 
 	// Head object for metadata
@@ -207,12 +201,6 @@ Batch operations for improved performance:
 # Performance Optimization
 
 Multi-level performance optimizations:
-
-CargoShip Integration:
-- Automatically enabled for all operations
-- Intelligent chunk size calculation
-- Concurrent stream optimization
-- Advanced retry mechanisms
 
 Connection Pooling:
 - Configurable pool size (default: 8 connections)

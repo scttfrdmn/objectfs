@@ -900,6 +900,28 @@ func (ts *TestServer) ObjectStorageClass(key string) string {
 	return string(out.StorageClass)
 }
 
+// ObjectContentType returns a key's stored Content-Type header.
+//
+// The header, not the user metadata. A "content-type" metadata key and a Content-Type header are
+// different things to every client that reads the object, and writing the first while believing you
+// wrote the second is how the CargoShip upload path stored every small object as
+// application/octet-stream — the value was computed correctly by detectContentType and dropped at the
+// boundary. Metadata is what [TestServer.ObjectMetadata] reports; this is deliberately separate so a
+// test cannot satisfy itself with the wrong one.
+func (ts *TestServer) ObjectContentType(key string) string {
+	ts.t.Helper()
+
+	out, err := ts.Client().HeadObject(context.Background(), &awss3.HeadObjectInput{
+		Bucket: aws.String(ts.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		ts.t.Fatalf("testaws: head %q: %v", key, err)
+	}
+
+	return aws.ToString(out.ContentType)
+}
+
 // ObjectSize returns a key's stored ContentLength — the compressed length for a compressed object,
 // which is exactly the distinction the v0.10.0 size defect turned on.
 func (ts *TestServer) ObjectSize(key string) int64 {

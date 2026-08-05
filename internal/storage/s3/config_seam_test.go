@@ -233,11 +233,6 @@ func TestStorageTierReachesTheStoredObject(t *testing.T) {
 			ts := testaws.Start(t)
 			backend := ts.Backend(func(cfg *s3.Config) {
 				cfg.StorageTier = tier
-
-				// The IA and Glacier tiers reject objects below 128 KiB, and CargoShip has its own
-				// storage-class path — both are covered by storage_tier_seam_test.go. This is about
-				// the plain PutObject path.
-				cfg.EnableCargoShipOptimization = false
 			})
 
 			const key = "tier/object"
