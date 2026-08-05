@@ -158,6 +158,16 @@ updates:
   # new lockfile also reports 0 vulnerabilities, so both readings point the same way here — but a
   # closed alert on a lockfile-less manifest is not by itself evidence that anything was installed
   # or upgraded, which is the trap in #313.
+  #
+  # As of #336 this directory has **no runtime dependencies at all** and four devDependencies, all
+  # VitePress build tooling: vitepress, vite, vue, @vue/compiler-sfc. Thirteen runtime dependencies
+  # and seven more dev ones went with an Express API server nothing ran, so the surface Dependabot
+  # watches here is now the docs builder and nothing else — `npm ci` installs 130 packages where it
+  # installed 689, and `npm audit` reports zero vulnerabilities. Two open Dependabot PRs were closed
+  # rather than merged at that point (#348 eslint, #349 express) because the dependencies they bumped
+  # no longer exist here; a bump against a removed dependency has nothing to apply to. The entry stays
+  # because vite and vitepress are exactly the kind of thing that needs watching, and it is a build
+  # dependency of a published artifact.
 - package-ecosystem: npm
   directory: /docs-platform
   schedule:

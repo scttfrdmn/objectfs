@@ -22,15 +22,22 @@ installation.
 
 ## Interactive API Explorer
 
-Try ObjectFS API endpoints directly in your browser:
+There isn't one, and there never was. An `<ApiPlayground />` sat here under the line "Try ObjectFS
+API endpoints directly in your browser" — it sent requests to `/api-playground/...`, a proxy in
+`docs-platform/src/api-server.js` that nothing built, deployed, or ran, so the button did nothing on
+every page it appeared on. Both are removed ([#336]).
 
-<ApiPlayground />
+Nor were the endpoints it listed real. Six of its seven — `/api/v1/metrics`, `/api/v1/mount`,
+`/api/v1/mount/{mount_point}`, `/api/v1/mounts`, `/api/v1/storage/objects`, and a second health
+route — have no handler anywhere in ObjectFS. A running mount serves `/health` and `/metrics`, at
+the addresses `monitoring.health_checks.addr` and `monitoring.metrics.addr` configure, and that is
+the whole HTTP surface. `curl` reaches it from a terminal, which is what the examples below do.
+
+[#336]: https://github.com/scttfrdmn/objectfs/issues/336
 
 ## Code Examples
 
 ### Basic Mount Operations
-
-<CodeRunner language="bash" :executable="true">
 
 ```bash
 # Mount an S3 bucket — two positional arguments, no subcommand
@@ -43,11 +50,7 @@ mount | grep objectfs
 curl http://localhost:8081/health
 ```
 
-</CodeRunner>
-
 ### Python SDK Example
-
-<CodeRunner language="python" :executable="true">
 
 ```python
 import asyncio
@@ -84,11 +87,7 @@ async def demo():
 asyncio.run(demo())
 ```
 
-</CodeRunner>
-
 ### JavaScript SDK Example
-
-<CodeRunner language="javascript" :executable="true">
 
 ```javascript
 const { ObjectFSClient, Configuration } = require('@objectfs/sdk');
@@ -136,8 +135,6 @@ async function demo() {
 demo().catch(console.error);
 ```
 
-</CodeRunner>
-
 ### Go API Example
 
 > **This example previously imported `github.com/scttfrdmn/objectfs/pkg/client`, which does not
@@ -153,8 +150,6 @@ demo().catch(console.error);
 > rule makes it unimportable from another program, so today the only supported way to use ObjectFS
 > from outside is to run the binary. A stable embedding API would need these types moved under
 > `pkg/`, which is a decision and not an oversight.
-
-<CodeRunner language="go" :executable="true">
 
 ```go
 package main
@@ -202,8 +197,6 @@ func main() {
 }
 ```
 
-</CodeRunner>
-
 ## Configuration Builder
 
 A `<ConfigurationBuilder />` component was mounted here to generate configurations visually. It was
@@ -215,8 +208,6 @@ does not read.
 ## Performance Testing
 
 ### Benchmark Different Cache Sizes
-
-<CodeRunner language="bash" :executable="true">
 
 ```bash
 #!/bin/bash
@@ -250,11 +241,7 @@ done
 echo "Benchmark complete!"
 ```
 
-</CodeRunner>
-
 ### Cache Hit Rate Analysis
-
-<CodeRunner language="python" :executable="true">
 
 ```python
 import asyncio
@@ -298,8 +285,6 @@ async def analyze_cache_performance():
 # Run analysis
 asyncio.run(analyze_cache_performance())
 ```
-
-</CodeRunner>
 
 ## Interactive Tutorials
 
@@ -397,8 +382,6 @@ Optimize ObjectFS for your specific workload patterns.
 
 ### Log Analysis
 
-<CodeRunner language="bash" :executable="true">
-
 ```bash
 # View ObjectFS logs in real-time
 tail -f /var/log/objectfs.log | grep -E "(ERROR|WARN|mount|unmount)"
@@ -410,11 +393,7 @@ grep "cache_hit" /var/log/objectfs.log | tail -10
 grep "ERROR" /var/log/objectfs.log | head -20
 ```
 
-</CodeRunner>
-
 ### Network Tracing
-
-<CodeRunner language="bash" :executable="true">
 
 ```bash
 # Trace network calls to object storage
@@ -423,8 +402,6 @@ grep "ERROR" /var/log/objectfs.log | head -20
 strace -e trace=network objectfs s3://bucket /mnt/test 2>&1 | \
     grep -E "(connect|send|recv)"
 ```
-
-</CodeRunner>
 
 ## Community Examples
 

@@ -50,8 +50,6 @@ features:
 
 Get ObjectFS running in minutes:
 
-<CodeRunner language="bash">
-
 ```bash
 # Build from source. There is no install script: get.objectfs.io is not a domain
 # this project serves, and no release workflow publishes a binary yet.
@@ -69,19 +67,20 @@ echo "Hello ObjectFS!" > /mnt/data/test.txt
 cat /mnt/data/test.txt
 ```
 
-</CodeRunner>
+## Configuration
 
-## Interactive Examples
+`configs/example.yaml` is the commented configuration to copy. A `<ConfigurationBuilder />` sat
+here instead, and like the chart described below it was never real — the component file has no
+history in this repository, and importing it is what made `vitepress build` fail on every page.
 
-### Configuration Builder
+An `<ApiPlayground />` sat here too, and it is gone for a different reason ([#336]): it sent every
+request to `/api-playground/...`, a proxy served by `docs-platform/src/api-server.js` — which
+nothing built, deployed, or ran, so the "Send Request" button was inert on every page it appeared
+on. That server is removed with it. The endpoints it offered were mostly invented as well: a
+mount serves `/health` and `/metrics`, on the addresses `monitoring.health_checks.addr` and
+`monitoring.metrics.addr` name, and nothing else. `configs/example.yaml` documents both.
 
-A `<ConfigurationBuilder />` sat here. Like the chart described below, it was never real — the
-component file has no history in this repository, and importing it is what made `vitepress build`
-fail on every page. `configs/example.yaml` is the commented configuration to copy instead.
-
-### API Playground
-
-<ApiPlayground />
+[#336]: https://github.com/scttfrdmn/objectfs/issues/336
 
 ## Performance Comparison
 

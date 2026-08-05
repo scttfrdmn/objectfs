@@ -338,6 +338,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#245]: https://github.com/scttfrdmn/objectfs/issues/245
 
+- **`docs-platform`'s application surface: an API server nothing ran, the two components that called
+  it, a Dockerfile that could not build, and a seven-service compose file** ([#336]). The directory is
+  a VitePress documentation site and is now only that.
+
+  #336 was filed as four `package.json` keys naming files that do not exist — `main` and `start` and
+  `dev` pointed at `src/server.js`, which has no history in this repository, and `lint`/`format`/`build`
+  named a `client/` directory that has none either. So `npm start`, the obvious thing to type here, had
+  never worked. The question the issue left open was whether the API server was part of the supported
+  surface. It is not.
+
+  What `src/api-server.js` actually was: 549 lines of Express serving a health endpoint, a Docker-backed
+  code-execution sandbox, a Swagger UI, a socket.io channel, and a proxy to ObjectFS. Nothing built it,
+  tested it, deployed it, or documented how to start it correctly.
+
+  **The two Vue components are the part worth stating plainly, because they were worse than broken —
+  they rendered.** `CodeRunner` drew a "Run" button on 26 code blocks across three pages and POSTed to
+  `/api/code-runner/execute`; `ApiPlayground` drew a "Send Request" button on three pages and fetched
+  `/api-playground/...`. Both endpoints existed only in the unrun server, so every one of those buttons
+  was inert on every page it ever appeared on, with no error to say why. The three phantom components
+  removed in #214 failed at build time and were therefore *found*; these two compiled, shipped, and
+  failed at the reader. A gate that runs `vitepress build` cannot see the difference, which is recorded
+  in the `docs-site` job rather than fixed by adding another job.
+
+  Six of the seven endpoints the playground offered do not exist in ObjectFS at all — `/api/v1/metrics`,
+  `/api/v1/mount`, `/api/v1/mount/{mount_point}`, `/api/v1/mounts`, `/api/v1/storage/objects`, and a
+  second health route. A running mount serves `/health` and `/metrics`, at the addresses
+  `monitoring.health_checks.addr` and `monitoring.metrics.addr` configure. The pages say so now.
+
+  The `Dockerfile` and `docker-compose.yml` go for the same reason, and each was independently
+  unusable. The Dockerfile `COPY`ed `api/`, `tutorials/`, `sdks/` and `public/`, none of which exist in
+  this directory, so it failed on the first one. The compose file bind-mounted `./nginx.conf`, `./ssl`,
+  `./prometheus.yml` and `./grafana/` — four more absent paths — across seven services, and pulled
+  `objectfs/objectfs:latest`, an image this project does not publish; releases go to
+  `ghcr.io/scttfrdmn/objectfs`. Deployment manifests that work are #146's job.
+
+  **Thirteen runtime dependencies went with it**, every one of them there for the server: `express`,
+  `cors`, `helmet`, `compression`, `morgan`, `swagger-ui-express`, `swagger-jsdoc`, `socket.io`,
+  `dockerode`, `axios`, `dotenv`, `prismjs`, `yaml`. Two of those (`prismjs`, `axios`) had no reference
+  anywhere in the tree even before this change. `nodemon`, `jest`, `eslint`, `prettier`, `typescript`,
+  `@types/express` and `@types/node` went too — the test, lint and format scripts they backed all named
+  absent directories, and no CI job ran any of them. `npm ci` installs **130 packages where it
+  installed 689** — 739 lockfile entries down to 180 — `npm audit` reports zero vulnerabilities, and the
+  `uuid` override is gone because the advisory it forced was reachable only through `dockerode` →
+  `docker-modem`.
+
+  Two open Dependabot pull requests were closed rather than merged as part of this: #348 bumping
+  `eslint` and #349 bumping `express` and `@types/express`, both in this directory. A bump against a
+  dependency that no longer exists has nothing to apply to. `.github/dependabot.yml`'s entry for this
+  directory records the new shape, because a comment describing runtime dependencies would otherwise
+  outlive them; the entry itself stays, since `vite` and `vitepress` are exactly what needs watching.
+
+  Verified end to end: `npx vitepress build .` succeeds, `internal/config`'s docs-link, symbol and
+  lockfile gates pass, and the regenerated lockfile agrees with the trimmed manifest — which is what
+  `TestNPMLockfilesAgreeWithTheirManifests` checks, and what `npm ci` would otherwise refuse at install
+  time in whichever job happened to run first.
+
+[#336]: https://github.com/scttfrdmn/objectfs/issues/336
+
 - **The CargoShip transporter upload path, and the `storage.s3.use_cargoship` key that selected it**
   ([#362]). `PutObject` has one implementation now.
 
