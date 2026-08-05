@@ -65,23 +65,43 @@ jobs:
         # `fixes`: gosec emits artifactChanges GitHub considers invalid. This part predates the
         # rewrite of this file and was presumably arrived at the hard way.
         #
-        # Empty `artifactLocation`: gosec reports three G115 integer-conversion findings with no file
-        # path at all — `"artifactLocation": {}` — and the upload fails whole with
-        # `locationFromSarifResult: expected artifact location`, discarding the other 45 findings with
-        # them. They come from `sdks/c/main.go`, which is cgo: gosec analyses the generated
-        # intermediate and cannot map the location back to a real file. So there is nothing to point
-        # a reviewer at, and a result with no location is not a finding anyone can act on.
+        # Empty `artifactLocation`: gosec reports the G115 integer-conversion findings in
+        # `sdks/c/main.go` with no file path at all — `"artifactLocation": {}` — and the upload then
+        # fails whole with `locationFromSarifResult: expected artifact location`, discarding the other
+        # ~45 findings along with them. The cause is cgo: gosec analyses the generated intermediate,
+        # whose path is a `~/Library/Caches/go-build/<hash>-d` artifact, and emits nothing rather than
+        # a path outside the repository.
         #
-        # This is the first time either has been observed, because the workflow was
-        # `disabled_inactivity` from January 2026 until it was rewritten — the `fixes` deletion was
-        # carried forward untested along with everything else in the file.
+        # These are back-filled to `sdks/c/main.go` rather than dropped, which is a change of
+        # position: this step used to drop them on the grounds that gosec "cannot map the location back
+        # to a real file". That turned out to be half wrong, and the half that is wrong is the useful
+        # half. **The line numbers are exactly right.** cgo emits `//line` directives into the
+        # generated file, so the reported line is a real `main.go` line — verified by inserting eight
+        # blank lines after the import block, which moved all three findings by exactly eight. Only the
+        # *path* is missing, and `sdks/c` is the only cgo package in the module (`go list` over `./...`
+        # reports exactly one with CgoFiles), so there is only one path it can be. Nothing is being
+        # guessed at.
         #
-        # Dropped rather than back-filled with a placeholder path: inventing a location would put a
-        # finding on a line that has nothing to do with it. The G115 conversions in sdks/c are worth
-        # auditing by hand; a SARIF entry pointing at the wrong file is not how to remember that.
+        # Which matters because the alternative was measured and it is not "these get reviewed
+        # elsewhere": golangci-lint discards the same findings for the same reason — its log says
+        # `runner/invalid_issue: issue related to file <cache path> is skipped` — so dropping them here
+        # left them visible to no tool at all. Three unreviewed integer conversions across a C ABI is
+        # how #200's real defect survived: objectfs_put narrowed a size_t length to a C.int, so a 4 GiB
+        # PUT returned OBJECTFS_OK and stored an empty object.
+        #
+        # Scoped to results that have a region but no uri, so a genuine gosec finding elsewhere with a
+        # malformed location still gets dropped rather than silently relabelled as living in sdks/c.
         if [ -f gosec.sarif ]; then
           jq '
             del(.runs[].results[].fixes)
+            | .runs[].results |= map(
+                if ((.locations // []) | length) > 0
+                   and ((.locations[0].physicalLocation.artifactLocation.uri // "") == "")
+                   and ((.locations[0].physicalLocation.region.startLine // 0) > 0)
+                then
+                  .locations[0].physicalLocation.artifactLocation.uri = "sdks/c/main.go"
+                else . end
+              )
             | .runs[].results |= map(
                 select(
                   (.locations // []) | length > 0 and
@@ -92,6 +112,7 @@ jobs:
           mv gosec-fixed.sarif gosec.sarif
 
           echo "gosec: $(jq '[.runs[].results[]] | length' gosec.sarif) results after filtering"
+          echo "gosec: $(jq '[.runs[].results[] | select(.locations[0].physicalLocation.artifactLocation.uri == "sdks/c/main.go")] | length' gosec.sarif) back-filled to sdks/c/main.go"
         fi
 
     # `@v4`, the floating major, not a patch pin — which is the convention for every action in this
