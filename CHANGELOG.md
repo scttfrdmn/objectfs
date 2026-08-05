@@ -403,6 +403,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every package the coverage gate reports as unfloored now has a recorded reason, and a test keeps
+  the two in agreement** ([#199]).
+
+  `.coverage-floors`' header said four packages were deliberately unfloored, listed five, and the gate
+  reported six. `internal/cache/cachetest` arrived with the shared conformance suite and was never
+  explained; `pkg/optimization` was still explained two releases after being deleted. The gate names
+  unfloored packages in every run, so none of this was hidden — but a run cannot say whether an
+  absence was decided or overlooked, and that is the only thing the header is for.
+
+  Five of the six report 0.0%, and that number is an artifact rather than a measurement.
+  `go test -coverprofile` instruments only the package under test, so a package with no test files of
+  its own gets a profile of count-0 lines even when every statement in it runs under a sibling suite.
+  Measured with `-coverpkg` from the packages that use each one:
+
+  ```text
+  internal/cache/cachetest        0.0% reported, 81.9% under internal/cache + internal/cache/redis
+  internal/testhttp               0.0% reported, 75.6% under internal/adapter
+  pkg/compression                 0.0% reported, 88.9% under internal/compression
+  pkg/archive                     0.0% reported, 48.6% under internal/archive
+  internal/awsrates/…/offertest   0.0% reported, 48.9% under internal/awsrates/...
+  ```
+
+  So a floor for any of them would have to be 0 to pass, and 0 is not a gate. One header claim was
+  wrong in the direction that matters: `pkg/archive` was described as "dead code pending a decision",
+  and `internal/archive` imports it from five files — a reason not to test a package that a floored
+  package depends on. `sdks/c` is unfloorable for a different reason, which is that its 11.0% depends
+  on `CGO_ENABLED`: `main.go` is a `CgoFile`, so `CGO_ENABLED=0 go test ./sdks/c/` does not fall back
+  to a tag-excluded variant, it fails to compile.
+
+  Two of the three packages #199 names as unexplained cannot be floored at all. `pkg/types` and
+  `tests` contain no statements — declarations only, and only `_test.go` files, respectively — so they
+  produce no profile lines and the gate never reports them. Adding `pkg/types 50` does not weaken the
+  gate, it fails it: `FAIL pkg/types — a floor of 50% is set but the coverage profile has no data for
+  it`, via the stale-floor arm. They are documented as a separate category for that reason.
+
+  `TestUnfloorablePackagesAreExplained` pins the invariant #199 asks for — the set the gate reports
+  and the set the header explains are the same set — and fails in both directions, since a stale
+  explanation is worse than none. It runs `coverage-gate.sh` rather than re-deriving its unlisted set,
+  because that derivation has its own recorded failure mode: the module path was once a literal in the
+  script's awk program, a rename stopped it matching anything, and every package reported "no floor
+  set" while the run failed naming nothing. A test that computed the set from `go list` would have
+  been green throughout that.
 - **`benchmarks/run_benchmarks.sh` runs the nine S3 benchmarks that need no credentials, and stops
   labelling its results with a release four versions old** ([#235]).
 
@@ -688,6 +730,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#353]).
 
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
+[#199]: https://github.com/scttfrdmn/objectfs/issues/199
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
 [#235]: https://github.com/scttfrdmn/objectfs/issues/235
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
