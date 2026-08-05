@@ -1,10 +1,19 @@
 #!/bin/bash
 #
 # ObjectFS Benchmark Runner
-# Runs comprehensive performance benchmarks for v0.4.0
+#
+# The version is read from the source rather than written here. It said v0.4.0 in four places,
+# including the H1 of the results file this script writes — and a benchmark report is exactly the
+# artifact someone keeps and compares against months later, so a stale label on it is worse than a
+# stale label in a comment. Per CLAUDE.md the `version` constant in cmd/objectfs/main.go is the only
+# authority, so this greps that constant instead of restating it.
 #
 
 set -e
+
+# The constant's line is `	version = "0.11.0"`. Falling back rather than failing: an unrunnable
+# benchmark runner because a grep missed would be a worse trade than an unlabelled report.
+OBJECTFS_VERSION="$(grep -oE '^[[:space:]]*version = "[^"]+"' "$(dirname "$0")/../cmd/objectfs/main.go" 2>/dev/null | grep -oE '[0-9][^"]*' || echo "unknown")"
 
 # Colors for output
 RED='\033[0;31m'
@@ -53,7 +62,7 @@ run_benchmarks() {
     local mode="${1:-full}"
 
     echo -e "${BLUE}Running benchmarks in ${mode} mode...${NC}"
-    echo "# ObjectFS v0.4.0 Benchmark Results" > "${RESULTS_FILE}"
+    echo "# ObjectFS v${OBJECTFS_VERSION} Benchmark Results" > "${RESULTS_FILE}"
     echo "# Date: $(date)" >> "${RESULTS_FILE}"
     echo "# Mode: ${mode}" >> "${RESULTS_FILE}"
     echo "" >> "${RESULTS_FILE}"
@@ -93,13 +102,27 @@ run_full_benchmarks() {
     echo -e "${BLUE}4/6 Adapter benchmarks...${NC}"
     go test -bench=. -benchmem ./internal/adapter/ | tee -a "${RESULTS_FILE}" || true
 
-    echo -e "${BLUE}5/6 S3 acceleration benchmarks...${NC}"
+    # The S3Backend_* set runs against an in-process stub — no credentials, no bucket, no network — so
+    # it is outside the gate rather than inside it. It is also the only S3 block here that produced
+    # numbers without a bucket, and it was not being run at all.
+    #
+    # #235 read the old block as matching nothing because of the `S3Backend_` infix. That is not what
+    # happened: `-bench=BenchmarkGetObject` is an unanchored regex and it did match four benchmarks in
+    # acceleration_bench_test.go. They skip on an unset OBJECTFS_BENCH_BUCKET, and `go test -bench`
+    # reports `ok` with exit 0 for a skipped benchmark exactly as it does for one that ran. So the
+    # names were fine and the gate was what silenced them — which is the same "reports success while
+    # doing nothing" shape, arriving by a different route, and worth writing down because the obvious
+    # fix (correct the names) would have changed nothing.
+    echo -e "${BLUE}5/6 S3 backend benchmarks (stub, no credentials needed)...${NC}"
+    go test -bench=BenchmarkS3Backend_ -benchmem ./internal/storage/s3/ | tee -a "${RESULTS_FILE}"
+
+    echo -e "${BLUE}5b/6 S3 acceleration benchmarks...${NC}"
     if [[ -n "${OBJECTFS_BENCH_BUCKET}" ]]; then
-        go test -bench=BenchmarkGetObject -benchmem ./internal/storage/s3/ | tee -a "${RESULTS_FILE}"
-        go test -bench=BenchmarkPutObject -benchmem ./internal/storage/s3/ | tee -a "${RESULTS_FILE}"
-        go test -bench=BenchmarkFallback -benchmem ./internal/storage/s3/ | tee -a "${RESULTS_FILE}"
+        go test -bench='BenchmarkGetObject_|BenchmarkPutObject_|BenchmarkFallback' -benchmem \
+            ./internal/storage/s3/ | tee -a "${RESULTS_FILE}"
     else
-        echo -e "${YELLOW}Skipping S3 benchmarks (OBJECTFS_BENCH_BUCKET not set)${NC}"
+        echo -e "${YELLOW}Skipping acceleration benchmarks (OBJECTFS_BENCH_BUCKET not set)${NC}"
+        # Runs without a bucket; the others in that file do not.
         go test -bench=BenchmarkAccelerationOverhead -benchmem ./internal/storage/s3/ | tee -a "${RESULTS_FILE}"
     fi
 
@@ -138,7 +161,7 @@ generate_summary() {
     local summary_file="${RESULTS_DIR}/summary_${TIMESTAMP}.txt"
 
     {
-        echo "ObjectFS v0.4.0 Benchmark Summary"
+        echo "ObjectFS v${OBJECTFS_VERSION} Benchmark Summary"
         echo "=================================="
         echo ""
         echo "Date: $(date)"
@@ -147,16 +170,22 @@ generate_summary() {
         echo "Key Performance Metrics:"
         echo ""
 
-        # Extract key metrics if available
-        if grep -q "BenchmarkGetObject" "${RESULTS_FILE}"; then
+        # Extract key metrics if available.
+        #
+        # `Benchmark.*GetObject` rather than `BenchmarkGetObject`, because the stub benchmarks are named
+        # BenchmarkS3Backend_GetObject_1KB and the literal string "BenchmarkGetObject" does not appear
+        # in that — the infix breaks the match. The narrower pattern is why this section printed an
+        # empty "Key Performance Metrics" heading in full mode even when nine benchmarks had just run
+        # and written their numbers into the file two lines above.
+        if grep -qE "Benchmark.*GetObject" "${RESULTS_FILE}"; then
             echo "S3 GET Operations:"
-            grep "BenchmarkGetObject" "${RESULTS_FILE}" | head -5
+            grep -E "Benchmark.*GetObject" "${RESULTS_FILE}" | head -5
             echo ""
         fi
 
-        if grep -q "BenchmarkPutObject" "${RESULTS_FILE}"; then
+        if grep -qE "Benchmark.*PutObject" "${RESULTS_FILE}"; then
             echo "S3 PUT Operations:"
-            grep "BenchmarkPutObject" "${RESULTS_FILE}" | head -5
+            grep -E "Benchmark.*PutObject" "${RESULTS_FILE}" | head -5
             echo ""
         fi
 
@@ -177,7 +206,7 @@ main() {
     local mode="${1:-full}"
 
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}   ObjectFS v0.4.0 Benchmark Suite     ${NC}"
+    echo -e "${GREEN}   ObjectFS v${OBJECTFS_VERSION} Benchmark Suite     ${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
 

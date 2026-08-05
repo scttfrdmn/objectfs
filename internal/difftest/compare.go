@@ -9,10 +9,11 @@ import (
 
 // Divergence is a disagreement between the reference and the system under test.
 //
-// nolint:errname // Not named DivergenceError: this is primarily a report a human reads, and it
-// implements error so it can be returned where one is expected rather than because a caller
-// classifies it. Renaming it would make every call site read as though the divergence were an error
-// in the harness.
+// Not named DivergenceError: this is primarily a report a human reads, and it implements error so it
+// can be returned where one is expected rather than because a caller classifies it. Renaming it
+// would make every call site read as though the divergence were an error in the harness.
+//
+//nolint:errname // named for the report it is, not the interface it satisfies; see above
 type Divergence struct {
 	// Index is the position in the program of the operation that diverged. -1 for a final-state
 	// comparison, which belongs to no single operation.
@@ -148,7 +149,7 @@ func compareErr(i int, op Op, refErr, subErr error) *Divergence {
 	case refErr == nil && subErr == nil:
 		return nil
 	case refErr != nil && subErr != nil:
-		// nolint:nilerr // Both refused, which is agreement — the one outcome this function is here
+		//nolint:nilerr // Both refused, which is agreement — the one outcome this function is here
 		// to detect is one side succeeding where the other failed. Propagating either error would
 		// report a divergence for a program the generator produced invalid, and the oracle would
 		// spend its runs rediscovering that the local filesystem also rejects a negative offset.
@@ -178,7 +179,7 @@ func compareSize(ctx context.Context, i int, op Op, ref, subject FS) *Divergence
 		return d
 	}
 	if refErr != nil {
-		// nolint:nilerr // compareErr above already ruled on these errors: reaching here with a
+		//nolint:nilerr // compareErr above already ruled on these errors: reaching here with a
 		// non-nil refErr means both sides failed, which it treats as agreement. There is no size to
 		// compare, and no divergence to report.
 		return nil
@@ -208,7 +209,7 @@ func compareDurable(ctx context.Context, ref, subject FS) *Divergence {
 		return d
 	}
 	if refErr != nil {
-		// nolint:nilerr // Both flushes failed, which compareErr treats as agreement. Neither side's
+		//nolint:nilerr // Both flushes failed, which compareErr treats as agreement. Neither side's
 		// durable contents are meaningful after a failed sync, so comparing them would assert on
 		// undefined state — a reference that could not sync is not an authority.
 		return nil

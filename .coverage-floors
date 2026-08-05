@@ -22,28 +22,88 @@
 #   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
 #                                      work
 #
-# Floors are deliberately absent for four packages with no test files at all. A floor of 0% reads
-# as a target rather than as an absence, and the gate names unlisted packages in every run so the
-# omission stays visible instead of looking like a decision:
+# Floors are deliberately absent for six packages, and the gate names all six in every run so the
+# omission stays visible instead of looking like a decision. TestUnfloorablePackagesAreExplained in
+# internal/config/coverage_floors_test.go asserts that the set the gate reports and the set this
+# block explains are the same set, in both directions, so this list cannot drift out of agreement
+# with the gate the way it had.
 #
-#   internal/testhttp   no tests, deliberately: it is test support, and every statement in it runs
-#                       under the suites that use it. A test for FreeAddr would assert that an
-#                       address is free by binding it, which is what the function does — a
-#                       tautology. Its
-#                       real check is that deleting adapter.Start's metrics call fails the tests
-#                       built on it, which it does, with the message it exists to print
-#   pkg/archive         no tests — metadata types; dead code pending a decision (Part 4)
-#   pkg/compression     no tests in this package; its constants and SupportedAlgorithms list are
-#                       exercised from internal/compression, which is at 88.6%. SupportedAlgorithms
-#                       is load-bearing there since #230 — the decoder table is derived from it, so
-#                       adding an algorithm to that list makes it readable with no second edit
-#   internal/awsrates/offerfile/offertest
-#                       no tests, deliberately, and for the same reason as internal/testhttp: it builds
-#                       the offer-file fixtures three suites run against, so every statement in it
-#                       executes on every run. A test of its own would assert that a fixture it just
-#                       built contains what it put in — the self-consistency failure the Glacier PUT
-#                       defect had. Its real check is that the suites using it fail when a rule changes
-#   sdks/c              no tests — cgo shim, not reachable from `go test`
+# All six report 0.0% or near it, and for five of them that number is an artifact rather than a
+# measurement — which is the thing to understand before reading a floor into it. `go test
+# -coverprofile` instruments only the package under test, so a package with no test files of its own
+# gets a profile full of count-0 lines even when every statement in it executes under a sibling
+# suite. Measured with -coverpkg pointed at each one from the packages that use it:
+#
+#   internal/cache/cachetest        0.0% reported, 81.9% under internal/cache + internal/cache/redis
+#   internal/testhttp               0.0% reported, 75.6% under internal/adapter
+#   pkg/compression                 0.0% reported, 88.9% under internal/compression
+#   pkg/archive                     0.0% reported, 48.6% under internal/archive
+#   internal/awsrates/…/offertest   0.0% reported, 48.9% under internal/awsrates/...
+#
+# So a floor here would not be a weak gate, it would be a broken one: it would have to be 0 to pass,
+# and 0 is not a gate. The real check for each is that its consumers' suites fail when it changes,
+# which is what their own floors above already enforce.
+#
+# no-floor: internal/cache/cachetest
+#     no tests, deliberately: it is the shared conformance suite five cache implementations are
+#     enrolled in, so every statement in it runs under internal/cache and internal/cache/redis, both
+#     floored above. A test of its own would assert that the suite it just ran agrees with itself
+# no-floor: internal/testhttp
+#     no tests, deliberately: it is test support, and every statement in it runs under the suites
+#     that use it. A test for FreeAddr would assert that an address is free by binding it, which is
+#     what the function does — a tautology. Its real check is that deleting adapter.Start's metrics
+#     call fails the tests built on it, which it does, with the message it exists to print
+# no-floor: pkg/archive
+#     no tests of its own. It is *not* dead code — this line said "dead code pending a decision
+#     (Part 4)" and internal/archive imports it from five files, so the claim was wrong in the
+#     direction that matters: it read as a reason not to test a package that a floored package
+#     depends on. Its ArchiveFormat table and IsArchive run under internal/archive (floored at 90),
+#     reaching 48.6% of it. The uncovered half is metadata.go's index construction, which
+#     internal/archive does not exercise — worth its own tests, tracked rather than floored, because
+#     a floor set from the artifact number gates nothing
+# no-floor: pkg/compression
+#     no tests in this package; its constants and SupportedAlgorithms list are exercised from
+#     internal/compression, which is at 88.6%. SupportedAlgorithms is load-bearing there since #230
+#     — the decoder table is derived from it, so adding an algorithm to that list makes it readable
+#     with no second edit
+# no-floor: internal/awsrates/offerfile/offertest
+#     no tests, deliberately, and for the same reason as internal/testhttp: it builds the offer-file
+#     fixtures three suites run against, so every statement in it executes on every run. A test of
+#     its own would assert that a fixture it just built contains what it put in — the
+#     self-consistency failure the Glacier PUT defect had. Its real check is that the suites using
+#     it fail when a rule changes
+# no-floor: sdks/c
+#     11.0%, and unfloorable for a different reason than the five above: the number depends on
+#     CGO_ENABLED. main.go is a CgoFile, so `CGO_ENABLED=0 go test ./sdks/c/` does not fall back to
+#     a build-tag-excluded variant — it fails to compile, because main_test.go references
+#     codeFromErr and fillCStr and neither declaration is built. CI's Go jobs set CGO_ENABLED=0 for
+#     the cross-build matrix and the release build, so a floor here would be a claim about a file
+#     set part of CI does not compile — the mistake internal/network's note below records, arriving
+#     through cgo rather than through //go:build. The 11.0% is stable (three runs, and identical
+#     under the full-repo profile), so this is a floor worth setting once the coverage job's cgo
+#     posture is explicit rather than incidental
+#
+# Three packages are absent from the gate's report entirely, and that is correct rather than a gap.
+# They contain no statements at all, so they produce no profile lines for the gate to match, and
+# `go test` reports them as `coverage: [no statements]` rather than 0.0%:
+#
+# no-statements: pkg/types
+#     three files of interface and struct declarations, no function bodies. Its doc.go example is in
+#     a comment
+# no-statements: tests
+#     five _test.go files and no non-test Go files, so there is nothing in the package for a profile
+#     to be about. Three of the five are behind build tags (aws_s3, distributed, e2e)
+# no-statements: test/benchmarks
+#     behind //go:build benchmark, so `go list ./...` does not report it either
+#
+# A floor for any of these three fails the gate rather than weakening it — verified, not assumed:
+# adding `pkg/types 50` produces "FAIL pkg/types — a floor of 50% is set but the coverage profile has
+# no data for it" and exits 1, via the stale-floor arm in coverage-gate.sh. That arm is correct and
+# should stay; the consequence is just that a zero-statement package cannot be floored, which is why
+# these three are documented here rather than in the list above.
+#
+# `pkg/optimization` was in this file's backlog (#199) as an unexplained absence. It no longer exists:
+# 4d10da0 deleted pkg/optimization/interfaces.go.
 
 internal/analytics       96
 internal/archive         90

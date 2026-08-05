@@ -11,6 +11,11 @@ objectfs-*
 sdks/c/tests/test_basic
 sdks/c/tests/test_mount
 
+# `go build ./sdks/c/` — the obvious way to check that package compiles — writes a binary named
+# after its directory, so a 44 MB file called `c` lands at the repo root. Ignored rather than
+# discouraged: the command is the right one to run, and the artifact is not obviously an artifact.
+/c
+
 # Python SDK
 __pycache__/
 *.py[cod]
@@ -104,6 +109,11 @@ config/secrets.yaml
 # Benchmark results
 *.bench
 benchmark-results/
+
+# What benchmarks/run_benchmarks.sh actually writes. The line above names benchmark-results/, which
+# nothing creates — so every run left an untracked directory of timestamped result files, a baseline
+# and a summary, ready for the next `git add -A` to commit them.
+benchmarks/results/
 
 # Profile data
 *.prof

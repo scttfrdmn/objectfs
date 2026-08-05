@@ -64,9 +64,11 @@ func Shared(t testing.TB) *SharedServer {
 // The three vary together and are named to say so: sharedOnce guards the assignment of shared and
 // sharedErr, and exactly one of the latter two is non-nil afterwards.
 //
-// nolint:errname // sharedErr is not a sentinel. It holds whatever startShared returned, so errXxx
-// would advertise a comparable value callers could match on — and Shared t.Fatalf's on it rather
-// than returning it, so no caller ever sees it to compare.
+// sharedErr is not a sentinel. It holds whatever startShared returned, so errXxx would advertise a
+// comparable value callers could match on — and Shared t.Fatalf's on it rather than returning it, so
+// no caller ever sees it to compare.
+//
+//nolint:errname // sharedErr holds a returned error, not a sentinel; see above
 var (
 	sharedOnce sync.Once
 	shared     *SharedServer
@@ -118,7 +120,7 @@ func startShared() (*SharedServer, error) {
 	// Bind before serving and hand the listener over, so the port is known without a
 	// reserve-then-bind window another process could win.
 	//
-	// nolint:noctx // ListenConfig.Listen's context governs the bind, which is not a network round
+	//nolint:noctx // ListenConfig.Listen's context governs the bind, which is not a network round
 	// trip and cannot block on a loopback ephemeral port. There is also no context to hand it: this
 	// runs under sync.Once for the life of the process, so any caller's context would be the wrong
 	// lifetime — the first test's context canceling would tear down every later test's endpoint.

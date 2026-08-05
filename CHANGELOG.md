@@ -439,6 +439,265 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every package the coverage gate reports as unfloored now has a recorded reason, and a test keeps
+  the two in agreement** ([#199]).
+
+  `.coverage-floors`' header said four packages were deliberately unfloored, listed five, and the gate
+  reported six. `internal/cache/cachetest` arrived with the shared conformance suite and was never
+  explained; `pkg/optimization` was still explained two releases after being deleted. The gate names
+  unfloored packages in every run, so none of this was hidden — but a run cannot say whether an
+  absence was decided or overlooked, and that is the only thing the header is for.
+
+  Five of the six report 0.0%, and that number is an artifact rather than a measurement.
+  `go test -coverprofile` instruments only the package under test, so a package with no test files of
+  its own gets a profile of count-0 lines even when every statement in it runs under a sibling suite.
+  Measured with `-coverpkg` from the packages that use each one:
+
+  ```text
+  internal/cache/cachetest        0.0% reported, 81.9% under internal/cache + internal/cache/redis
+  internal/testhttp               0.0% reported, 75.6% under internal/adapter
+  pkg/compression                 0.0% reported, 88.9% under internal/compression
+  pkg/archive                     0.0% reported, 48.6% under internal/archive
+  internal/awsrates/…/offertest   0.0% reported, 48.9% under internal/awsrates/...
+  ```
+
+  So a floor for any of them would have to be 0 to pass, and 0 is not a gate. One header claim was
+  wrong in the direction that matters: `pkg/archive` was described as "dead code pending a decision",
+  and `internal/archive` imports it from five files — a reason not to test a package that a floored
+  package depends on. `sdks/c` is unfloorable for a different reason, which is that its 11.0% depends
+  on `CGO_ENABLED`: `main.go` is a `CgoFile`, so `CGO_ENABLED=0 go test ./sdks/c/` does not fall back
+  to a tag-excluded variant, it fails to compile.
+
+  Two of the three packages #199 names as unexplained cannot be floored at all. `pkg/types` and
+  `tests` contain no statements — declarations only, and only `_test.go` files, respectively — so they
+  produce no profile lines and the gate never reports them. Adding `pkg/types 50` does not weaken the
+  gate, it fails it: `FAIL pkg/types — a floor of 50% is set but the coverage profile has no data for
+  it`, via the stale-floor arm. They are documented as a separate category for that reason.
+
+  `TestUnfloorablePackagesAreExplained` pins the invariant #199 asks for — the set the gate reports
+  and the set the header explains are the same set — and fails in both directions, since a stale
+  explanation is worse than none. It runs `coverage-gate.sh` rather than re-deriving its unlisted set,
+  because that derivation has its own recorded failure mode: the module path was once a literal in the
+  script's awk program, a rename stopped it matching anything, and every package reported "no floor
+  set" while the run failed naming nothing. A test that computed the set from `go list` would have
+  been green throughout that.
+- **`benchmarks/run_benchmarks.sh` runs the nine S3 benchmarks that need no credentials, and stops
+  labelling its results with a release four versions old** ([#235]).
+
+  The runner's S3 block reported success while running nothing, which is the failure shape #190 had —
+  but not for the reason that issue gives. `-bench=BenchmarkGetObject` is an unanchored regex, and it
+  did match four benchmarks in `acceleration_bench_test.go`; they skip on an unset
+  `OBJECTFS_BENCH_BUCKET`, and `go test -bench` prints `ok` with exit 0 for a skipped benchmark exactly
+  as it does for one that ran:
+
+  ```text
+  $ go test -run XXX -bench=BenchmarkGetObject -benchtime=1x -v ./internal/storage/s3/
+  BenchmarkGetObject_Standard
+  --- SKIP: BenchmarkGetObject_Standard
+  ...
+  ok  	github.com/scttfrdmn/objectfs/internal/storage/s3	0.393s
+  ```
+
+  So correcting the names, which is what the issue proposes, would have changed nothing: the lines sit
+  inside `if [[ -n "${OBJECTFS_BENCH_BUCKET}" ]]`, so without a bucket they never ran, and with one they
+  were already matching. The real gap was `backend_bench_test.go`'s nine `BenchmarkS3Backend_*`
+  benchmarks, which run against an in-process stub with no credentials and no network — its own header
+  says they are meant to run unconditionally — and which the runner never invoked under either branch.
+  Those now run outside the gate; the acceleration set is one invocation inside it;
+  `BenchmarkAccelerationOverhead` stays in the `else` because, unlike its file-mates, it needs no
+  bucket.
+
+  The summary section was silent for the same class of reason. It greps for the literal
+  `BenchmarkGetObject`, which does not appear in `BenchmarkS3Backend_GetObject_1KB` — the infix breaks
+  the match — so "Key Performance Metrics" printed an empty heading in full mode even with nine
+  benchmarks' numbers in the file two lines above. Widened to `Benchmark.*GetObject`.
+
+  The version said **v0.4.0** in four places, including the H1 of the results file the script writes.
+  That is the worst place for it: a benchmark report is the artifact someone keeps and compares against
+  months later. It is now grepped out of the `version` constant in `cmd/objectfs/main.go`, which
+  `CLAUDE.md` makes the only authority, falling back to `unknown` rather than failing — an unrunnable
+  benchmark runner would be a worse trade than an unlabelled report.
+
+  `.gitignore` named `benchmark-results/`, which nothing creates. The script writes
+  `benchmarks/results/`, so every run left an untracked directory of timestamped results, a baseline and
+  a summary sitting in `git status`, one `git add -A` away from being committed. Now ignored under the
+  name that exists.
+- **A `failure_threshold` above 2³² opened the circuit breaker before the first request, rejecting
+  every S3 operation for the life of the mount** ([#264]).
+
+  `readyToTrip` converted the configured `int` threshold to the `uint32` that
+  `circuit.Counts.TotalFailures` is, guarded only by `if cfg.FailureThreshold <= 0`. That guard bounds
+  the sign and not the width. On a 64-bit platform `failure_threshold: 4294967296` passes it, narrows
+  to `0`, and yields the predicate `TotalFailures >= 0` — true on the zeroth failure. The breaker
+  opens immediately and stays open, which the function's own doc comment already named as the outcome
+  its zero case exists to avoid; it arrived by the one path that bypassed that case. `4294967297` is
+  the quieter half: it narrows to a threshold of `1`, so the breaker trips on a single failure while
+  the configuration says four billion.
+
+  Now clamped. A threshold above `math.MaxUint32` becomes a predicate that never trips, because no
+  count of failures can reach it when the counter is a `uint32` — unreachable is the honest reading of
+  an unreachable number, and clamping keeps this a total function rather than adding a second
+  validation site. `internal/config` already rejects a negative threshold at load.
+
+  Four mutations of the clamp are detected by `TestCircuitBreakerConfigReachesTheBreaker`: removing
+  it, `>` → `>=`, restoring the always-true predicate, and bounding at `MaxInt32` instead. The jumbo
+  cases are behind `math.MaxInt > math.MaxUint32` because on `linux/386` and `linux/arm` the literals
+  do not compile, and skipping at runtime would not be enough.
+
+- **Twelve `// nolint` directives had a leading space, which makes them ordinary comments** ([#264]).
+
+  `// nolint:gosec` is not a directive; only `//nolint:` is. Twelve sites across nine files carried
+  the spaced form with a full paragraph of justification each, and every one of them was inert.
+  Whether that mattered depended on the site: at `s3/config.go:202` the finding was also excluded
+  repo-wide by `.golangci.yml`, so it was reported by neither run and turned out to be the real defect
+  above. `gofmt` moves a `//nolint:` to the end of its comment block, so the four multi-line cases
+  were restructured to put the prose first.
+
+  Eleven further `//nolint` directives had no explanation, which `nolintlint`'s
+  `require-explanation` reports. Five were `//nolint:staticcheck` on findings that were simply
+  fixable — two `QF1008` embedded-field selectors, two `QF1003` if-chains that wanted a tagged switch,
+  and a `QF1012` `WriteString(Sprintf(...))` — so those are fixed rather than annotated. `nolintlint`
+  is now at 0 findings, down from 23.
+
+- **The six gosec sites #264 lists are suppressed for the run that reports them, and the convention is
+  written down in `.golangci.yml`** ([#264]).
+
+  Two of the issue's premises do not hold, both measured:
+
+  - **`#nosec` alone satisfies both runs, and writing both directives fails lint.** golangci-lint runs
+    gosec's own analyser, which strips `#nosec` sites before golangci-lint sees them. So the dual
+    annotation the issue prescribes leaves the `//nolint:gosec` with nothing to suppress, and
+    `nolintlint` reports it unused — turning a suppression into a lint failure.
+  - **`G703` does not exist in the gosec golangci-lint bundles.** Probed on a two-line program
+    reading `os.Getenv`: standalone gosec reports `G703` and `G304`, golangci-lint reports `G304`
+    alone. The `//nolint:gosec` at `internal/awsname/awsname.go` could not have worked even written
+    correctly, because that run never had the finding.
+
+  Also recorded there: no suppression directive of either form works in a cgo package (see the header
+  of `sdks/c/main.go`), and `internal/network/congestion_linux.go` is linux-only, so a `//nolint` there
+  is unverifiable from a macOS developer machine while the standalone run on ubuntu does report it.
+
+- **`internal/testaws`'s hardcoded credential is now provably test-only** ([#264]).
+
+  `SecretAccessKey` is AWS's own documentation example key and is accepted only by the substrate
+  emulator, which is the whole `G101` argument and not the whole risk: the constant is at package
+  scope in `testaws.go`, not a `_test.go` file, so nothing about the filename keeps it — or the
+  recording proxy, or the embedded emulator — out of a shipped binary. What keeps them out is that no
+  non-test package imports `testaws`, which is a property of the import graph and drifts silently.
+  `TestNoNonTestPackageImportsThisOne` asserts it via `go list -deps`, whose `Imports` field is the
+  non-test import set.
+
+  Verifying that test took two attempts, and the first failure mode is recorded in it. `go test` runs
+  each test binary in its own package directory, so the initial `./...` expanded to `internal/testaws`
+  alone and reported no offenders while a deliberate violation sat in `internal/awsrates/offerfile`.
+  It now runs `go list` from the module root. The mutation also needs `-count=1`: the violation lives
+  in another package, so the test binary is byte-identical and `go test` serves a cached pass.
+- **`make build` no longer passes three linker flags that do nothing** ([#353]).
+
+  `Makefile`'s `LDFLAGS` injected `-X main.Version`, `-X main.Commit` and `-X main.BuildTime`, and none
+  of those symbols exist. `cmd/objectfs/main.go` declares the version as an untyped *constant*, which
+  the linker cannot rewrite, so all three were accepted and silently ignored:
+
+  ```text
+  $ go build -ldflags="-s -w -X main.Version=FAKE-VERSION" -o /tmp/probe ./cmd/objectfs
+  $ /tmp/probe --version
+  objectfs version 0.11.0
+  ```
+
+  Every target sharing that variable — `build`, `build-all`, `build-linux`, `build-darwin`, `install`
+  and `package` — passed the dead flags. `OBJECTFS.md`'s build-configuration example showed the same
+  injection, and its three `go build` lines targeted `.` rather than `./cmd/objectfs`, which is not a
+  main package; both are corrected.
+
+  Dropped rather than made real, which is the choice `.github/workflows/release.yml` already made and
+  explains at its build step: the constant is the documented single authority for the version, so the
+  release asserts that it and the git tag agree instead of overwriting it at link time and leaving the
+  source disagreeing with the shipped artifact. `VERSION`, `COMMIT` and `BUILD_TIME` are still real
+  Makefile variables — `make version` prints them and the packaging targets name archives with them.
+  They simply do not reach the binary, and nothing now claims they do.
+
+  Whether the binary should report its commit and build time at all is a separate question: those two
+  have no constant to disagree with, so there is a real argument for injecting them — but `--version`
+  does not print them today, so injecting them would produce values nothing displays.
+- **`objectfs_put` in the C SDK no longer narrows a `size_t` length to a `C.int`, which could store
+  an empty object and report success** ([#200]).
+
+  `objectfs_put` takes a `size_t` and passed `C.int(length)` to `C.GoBytes`. `size_t` is 64 bits on
+  every platform this library ships for and `C.int` is 32, so the length was truncated. Measured in a
+  standalone cgo probe rather than reasoned about, because the same narrowing fails three different
+  ways:
+
+  ```text
+  length = 1<<32     (4 GiB)  ->  C.int 0            ->  len(goData) == 0
+  length = (1<<32)+100        ->  C.int 100          ->  len(goData) == 100
+  length = 1<<31     (2 GiB)  ->  C.int -2147483648  ->  panic: gobytes: length out of range
+  ```
+
+  The first is the dangerous one. A caller hands over 4 GiB, `objectfs_put` returns `OBJECTFS_OK`,
+  and S3 holds an **empty object**. Nothing reports a short write, because from Go's side there was
+  no short write — the length arrived as zero. Confirmed end to end against real S3 by removing the
+  new guard and running `tests/test_basic.c`: the call returned `OBJECTFS_OK` and `aws s3api
+  head-object` on the key reported `"ContentLength": 0`. The third case is worse in a shared library
+  than it would be in a program: a panic in a `c-shared` build tears down the host process, so a C
+  caller loses unrelated state of its own to one bad argument. In the same run it aborted the test
+  binary with exit 134 *before stdout was flushed*, so the harness printed nothing at all — not the
+  21 assertions that had already passed.
+
+  A length that will not survive the conversion is now refused with `OBJECTFS_ERR_INVALID` and an
+  `objectfs_last_error` message naming both the length and the limit, rather than converted and used.
+  The bound is `math.MaxInt32` because that is what `C.GoBytes` can represent, not a policy about
+  object size; the comparison is `>` rather than `>=` so the boundary itself stays usable.
+
+- **`objectfs_list` rejects a negative `limit` instead of treating it as "no limit"** ([#200]).
+
+  `objectfs.h` documents `limit` as "max results (0 = no limit)" and says nothing about a negative
+  one. Downstream, `ListObjects` gates every use of `limit` on `limit > 0`, so `-1` meant "return the
+  whole bucket" — which is what `-1` conventionally means in a good deal of C API design, and so
+  would have looked deliberate, but it was an accident of a `> 0` comparison and nothing documented
+  it. The `C.int` → `int` conversion itself was never unsafe; it widens on every target this builds
+  for.
+
+- **`security.yml` back-fills the cgo SARIF path instead of dropping the findings, and the audit
+  those findings needed is done** ([#200]).
+
+  gosec reported three G115 integer conversions in `sdks/c/main.go` with `"artifactLocation": {}`,
+  which GitHub's SARIF ingester rejects — and it fails the *whole* upload, taking the other ~45
+  findings with it. This workflow dropped them, on the stated grounds that gosec "cannot map the
+  location back to a real file".
+
+  That was half wrong, and the wrong half was the useful one. **The line numbers are exactly right.**
+  cgo emits `//line` directives into the file it generates, so each reported line is a real
+  `main.go` line — verified by inserting eight blank lines after the import block, which moved all
+  three findings by exactly eight. Only the path is absent, and `sdks/c` is the only cgo package in
+  the module, so there is one path it can be. The filter now sets it, scoped to results that have a
+  region but no URI so a genuinely malformed location elsewhere is still dropped rather than silently
+  relabelled; verified against the real 48-result SARIF plus three injected negatives (no region,
+  no locations, `startLine: 0`), all three of which are still dropped.
+
+  This matters because the alternative was measured and it was not "reviewed somewhere else":
+  golangci-lint discards the same findings for the same reason, and says so in its own log —
+  `runner/invalid_issue: issue related to file <go-build cache path> is skipped`. Three unreviewed
+  integer conversions across a C ABI is precisely how the `objectfs_put` defect above survived.
+
+  Two further findings from the same investigation, both stated in `sdks/c/main.go`'s header comment
+  so they are not rediscovered:
+
+  - **No gosec suppression directive works inside a cgo package.** Probed with four placements —
+    above the call, first of a comment block, last of a block, and trailing the call. In a pure-Go
+    package all four suppress; in a cgo package none do, and gosec reports `nosec: 0`, meaning it
+    recognized no directive at all. cgo rewrites each `C.f(...)` call into an inline closure carrying
+    `/*line :N:C*/` directives, which collapses the call and any nearby comment onto one synthetic
+    position. The `#nosec` and `//nolint:gosec` annotations added during this work were therefore
+    removed again in favour of plain comments that do not claim to be doing something.
+  - **`CGO_ENABLED=0 gosec ./sdks/c/...`, which #200 suggested might resolve the paths, analyses
+    zero files.** The package cannot build without cgo, so its clean report is a vacuous pass rather
+    than a fix.
+
+  Two `errcheck` findings in the same file were also fixed: `val.(*entry)` was a bare type assertion
+  in `getEntry` and `objectfs_free`. Nothing but that file writes to the `sync.Map`, so neither could
+  fail today — but a bare assertion converts any future violation into a panic, and a panic in a
+  `c-shared` library takes the host process down rather than just the call.
+
 - **`internal/fuse` compiles for 32-bit targets again, and `linux/armv7` is back in the release
   matrix** ([#198]).
 
@@ -502,11 +761,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform_unsupported.go` fails deliberately. It now lists what `release.yml` publishes, notes the
   386 canary, and says why Windows is absent. Its local-build snippet also passed
   `-ldflags "-X main.Version=$VERSION"`, which does nothing: `version` is a `const` and the linker
-  cannot rewrite a constant. Two other copies of that dead injection survive, in `Makefile:11` and
-  `OBJECTFS.md:613`, and are filed rather than fixed here ([#353]).
+  cannot rewrite a constant. Two other copies of that dead injection were in `Makefile` and
+  `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
+  ([#353]).
 
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
+[#199]: https://github.com/scttfrdmn/objectfs/issues/199
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
+[#235]: https://github.com/scttfrdmn/objectfs/issues/235
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
 [#362]: https://github.com/scttfrdmn/objectfs/issues/362
 

@@ -60,7 +60,7 @@ func NewFromConfig(ctx context.Context, cfg *config.Configuration) (types.Cache,
 		return c, nil
 	}
 
-	// nolint:contextcheck // ctx deliberately does not reach the in-process cache. What it would reach
+	//nolint:contextcheck // ctx deliberately does not reach the in-process cache. What it would reach
 	// is the predictive layer's prefetch workers, which outlive this call by design — they run for as
 	// long as the mount does, and are stopped by MultiLevelCache.Close on the unmount path rather than
 	// by a context. Passing a startup context down to them would cancel every prefetch the moment
