@@ -338,6 +338,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`internal/fuse` compiles for 32-bit targets again, and `linux/armv7` is back in the release
+  matrix** ([#198]).
+
+  `safeIntToUint32` bounded its conversion with `if i > 0xFFFFFFFF`. `int` is 32 bits wide on 32-bit
+  platforms and that constant is not, so the guard against overflow overflowed — a compile error, not
+  a wrong answer:
+
+  ```text
+  $ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build ./internal/fuse/
+  internal/fuse/filesystem.go:37:9: 0xFFFFFFFF (untyped int constant 4294967295) overflows int
+  ```
+
+  It is now compared as `uint64(i) > math.MaxUint32`, which holds the value on every word width. The
+  negative check stays first, and has to: `uint64(-1)` is 2^64-1, which would clamp to `MaxUint32`
+  rather than to zero. `safeInt64ToUint64` beside it was audited too and has no equivalent defect —
+  int64 and uint64 are both 64 bits everywhere Go targets, so it has no upper bound to test and no
+  constant to overflow. That is now stated in its doc comment, because "why does the function above
+  check two things and this one check one" is a reasonable question to have answered in place.
+
+  **Why it survived to a release, which is the more interesting half.** That single line was the only
+  error on the target — the whole tree cross-builds for `linux/arm` and `linux/386` with it fixed. But
+  `linux/armv7` appeared in `release.yml`'s matrix and in nothing else: every `cross-build` cell in
+  `ci.yml` was 64-bit, and no test on a 64-bit host can see this class of defect, because
+  `i > 0xFFFFFFFF` compiles and behaves correctly on amd64 and arm64. So the break first appeared when
+  a tag was pushed, where the cheapest response was to delete the cell — and in v0.10.1 that is what
+  happened, taking the platform with it.
+
+  So the durable fix is a coupling rather than a line. `ci.yml`'s `cross-build` matrix gains
+  `linux/arm` (GOARM=7) and `linux/386` cells, and `TestEveryReleasePlatformIsCompiledInCI` fails if
+  `release.yml` publishes a platform that matrix does not build. The relation is deliberately
+  release ⊆ ci, not equality: `linux/386` is compiled and not published, as a second 32-bit
+  word-width canary. `TestThirtyTwoBitIsStillInTheCrossBuildMatrix` asserts at least one cell has a
+  32-bit `int` at all, stated by word width rather than by naming `arm`, so dropping one 32-bit
+  platform while keeping another stays green and going all-64-bit does not. Same shape of gate as
+  #240's build-tags matrix, and the same reasoning: an unbuilt target is not merely untested.
+
+  Each cross-build cell also now runs `go vet ./internal/... ./pkg/... ./cmd/...` alongside its
+  build. `go build` does not compile `_test.go` files, so a width bug in a test — `int(math.MaxUint32)`
+  is the same error in the same shape, and the new test had to route around it — would still pass a
+  green build cell. Scoped away from `sdks/c`, which is cgo and cannot be vetted under
+  `CGO_ENABLED=0` for any target ([#200] covers that surface).
+
+  `GOARM` is set explicitly rather than left to the toolchain default in both workflows: armv6 and
+  armv7 binaries are not interchangeable and the artifact is named `linux-armv7`, so the flag should
+  say 7 rather than trust that it will keep meaning 7.
+
+  Verified five ways. Restoring the original comparison passes `go build`, `go vet` and the full test
+  suite on this 64-bit host and fails `linux/arm`, `linux/386` and `./cmd/objectfs` for arm — the
+  measurement that says where the gate has to live. Swapping the two branches, deleting the negative
+  check, and deleting `safeInt64ToUint64`'s negative check each fail the new table tests. Removing the
+  `linux/arm` cell from `ci.yml`, removing both 32-bit cells, adding an unbuilt platform to
+  `release.yml`, and renaming the `cross-build` job all fail the coupling tests — the last one
+  because a parser that reads nothing would otherwise pass vacuously, which is the failure mode a test
+  that reads a workflow is most likely to have.
+
+  One mutation is deliberately not claimed: `>` versus `>=` on the boundary is an equivalent mutant,
+  since clamping `MaxUint32` to `MaxUint32` returns the same value either way.
+
+  `DEVELOPMENT.md`'s cross-build section listed three of the five shipped platforms plus a
+  `GOOS=windows` build that has never produced a binary — `internal/fuse` is `linux || darwin` and
+  `platform_unsupported.go` fails deliberately. It now lists what `release.yml` publishes, notes the
+  386 canary, and says why Windows is absent. Its local-build snippet also passed
+  `-ldflags "-X main.Version=$VERSION"`, which does nothing: `version` is a `const` and the linker
+  cannot rewrite a constant. Two other copies of that dead injection survive, in `Makefile:11` and
+  `OBJECTFS.md:613`, and are filed rather than fixed here ([#353]).
+
+[#198]: https://github.com/scttfrdmn/objectfs/issues/198
+[#200]: https://github.com/scttfrdmn/objectfs/issues/200
+[#353]: https://github.com/scttfrdmn/objectfs/issues/353
+
 - **Every build tag is compiled in CI, and the two tagged files that had stopped compiling now
   compile** ([#240], [#197]).
 

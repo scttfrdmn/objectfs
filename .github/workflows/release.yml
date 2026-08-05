@@ -52,10 +52,18 @@ jobs:
       contents: read
     # Linux and macOS only, because that is what builds. `internal/fuse` carries
     # `//go:build linux || darwin` and `platform_unsupported.go` fails the build on anything else by
-    # design, so windows/amd64 and freebsd/amd64 could never have produced an artifact — and
-    # linux/armv7 fails separately on a 32-bit `int` overflow in `safeIntToUint32`. Three of the
-    # previous seven matrix entries were guaranteed-red jobs. Adding a platform back means adding a
-    # FUSE binding for it first; see internal/fuse/doc.go.
+    # design, so windows/amd64 and freebsd/amd64 could never have produced an artifact. Adding a
+    # GOOS back means adding a FUSE binding for it first; see internal/fuse/doc.go.
+    #
+    # linux/armv7 is back (#198). It was dropped alongside those two, but for a different reason: not
+    # a missing binding, a one-line compile error — `safeIntToUint32` bounded an `int` against
+    # `0xFFFFFFFF`, which does not fit a 32-bit `int`. The guard against overflow overflowed. Fixed by
+    # comparing as uint64, and ci.yml's cross-build matrix now carries linux/arm and linux/386 cells
+    # so a 32-bit break is a red PR rather than a platform quietly leaving the matrix.
+    #
+    # 32-bit ARM is a real target here — Raspberry Pi collectors and edge instruments writing to S3 —
+    # and shipping it is part of testing it: a platform that builds but is never shipped gets no
+    # runtime exposure at all.
     strategy:
       matrix:
         include:
@@ -65,6 +73,10 @@ jobs:
         - goos: linux
           goarch: arm64
           name: linux-arm64
+        - goos: linux
+          goarch: arm
+          goarm: '7'
+          name: linux-armv7
         - goos: darwin
           goarch: amd64
           name: darwin-amd64
@@ -105,6 +117,11 @@ jobs:
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
+        # Empty for every non-arm cell, which the toolchain ignores. Set explicitly for linux/arm
+        # rather than left to whatever the toolchain defaults to: armv6 and armv7 are not
+        # interchangeable binaries, and the artifact is named linux-armv7, so the flag has to say 7
+        # rather than trusting that it will keep meaning 7.
+        GOARM: ${{ matrix.goarm }}
         CGO_ENABLED: 0
       run: |
         # No -X ldflags: `main.Version` does not exist. cmd/objectfs/main.go declares an untyped
