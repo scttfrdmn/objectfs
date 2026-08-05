@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -527,6 +529,124 @@ func TestPersistentCache_ChecksumValidation(t *testing.T) {
 	retrieved := cache.Get(key, 0, int64(len(data)))
 	if retrieved != nil {
 		t.Error("should return nil for corrupted data")
+	}
+}
+
+// TestPersistentCache_FilenameUsesFullHash pins the on-disk filename width (audit finding L25).
+//
+// The cache used to name files after the first 8 bytes of the key's SHA-256. Sixty-four bits is
+// reachable by a long-lived cache on a large bucket, and this test asserts the full digest is used so
+// a later "shorter names are tidier" change has to argue with a failing test.
+func TestPersistentCache_FilenameUsesFullHash(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cache, err := NewPersistentCache(&PersistentCacheConfig{
+		Directory: tmpDir,
+		MaxSize:   10 * 1024 * 1024,
+		TTL:       time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewPersistentCache failed: %v", err)
+	}
+	defer func() { _ = cache.Close() }()
+
+	key := entryKey("some/object", 0)
+	got := filepath.Base(cache.generateFilePath(key))
+
+	want := fmt.Sprintf("%x.cache", sha256.Sum256([]byte(key)))
+	if got != want {
+		t.Errorf("generateFilePath basename = %q, want %q", got, want)
+	}
+
+	// 64 hex characters plus ".cache". Stated as a length too, because that is the property that
+	// matters and it fails loudly if the digest is ever truncated some other way.
+	if len(got) != sha256.Size*2+len(".cache") {
+		t.Errorf("filename %q is %d chars; a full SHA-256 digest plus .cache is %d",
+			got, len(got), sha256.Size*2+len(".cache"))
+	}
+}
+
+// TestPersistentCache_CollidingFilenameMisses records what a filename collision actually costs, which
+// is not corruption: the index is keyed on the full entry key and readFromFile verifies a full SHA-256
+// of the content, so a collision is a miss.
+//
+// The collision is simulated rather than found — with the full digest in use it is not reachable —
+// by pointing one entry's FilePath at another entry's file. That makes this a test of the checksum
+// guard, which is the thing standing between a collision and wrong bytes. Deleting the check in
+// readFromFile makes this test report served bytes.
+func TestPersistentCache_CollidingFilenameMisses(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cache, err := NewPersistentCache(&PersistentCacheConfig{
+		Directory:   tmpDir,
+		MaxSize:     10 * 1024 * 1024,
+		TTL:         time.Hour,
+		Compression: false,
+	})
+	if err != nil {
+		t.Fatalf("NewPersistentCache failed: %v", err)
+	}
+	defer func() { _ = cache.Close() }()
+
+	alpha, beta := []byte("AAAAAAAA"), []byte("BBBBBBBB")
+	cache.Put("alpha", 0, alpha)
+	cache.Put("beta", 0, beta)
+
+	alphaItem := cache.index[entryKey("alpha", 0)]
+	betaItem := cache.index[entryKey("beta", 0)]
+	if alphaItem == nil || betaItem == nil {
+		t.Fatal("both entries should be indexed after Put")
+	}
+
+	// Collide: alpha's own file goes away and its index entry points at beta's.
+	if err := os.Remove(alphaItem.FilePath); err != nil {
+		t.Fatalf("removing alpha's file: %v", err)
+	}
+	alphaItem.FilePath = betaItem.FilePath
+
+	if got := cache.Get("alpha", 0, int64(len(alpha))); got != nil {
+		t.Errorf("collision served %q under key alpha; the content checksum must turn this into a miss", got)
+	}
+}
+
+// TestPersistentCache_ChecksumIsWhatCatchesWrongBytes states the same guard directly, without the
+// collision framing: an entry whose stored checksum does not describe its file must not be served.
+func TestPersistentCache_ChecksumIsWhatCatchesWrongBytes(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cache, err := NewPersistentCache(&PersistentCacheConfig{
+		Directory:   tmpDir,
+		MaxSize:     10 * 1024 * 1024,
+		TTL:         time.Hour,
+		Compression: false,
+	})
+	if err != nil {
+		t.Fatalf("NewPersistentCache failed: %v", err)
+	}
+	defer func() { _ = cache.Close() }()
+
+	data := []byte("the bytes that were stored")
+	cache.Put("obj", 0, data)
+
+	item := cache.index[entryKey("obj", 0)]
+	if item == nil {
+		t.Fatal("entry should be indexed after Put")
+	}
+
+	// Same length, different content — so a length check alone would pass it.
+	wrong := []byte("the bytes that were WRONGED")[:len(data)]
+	if err := os.WriteFile(item.FilePath, wrong, 0600); err != nil {
+		t.Fatalf("rewriting the cache file: %v", err)
+	}
+
+	if got, err := cache.readFromFile(item); err == nil {
+		t.Errorf("readFromFile returned %q with no error; the checksum must reject it", got)
+	}
+	if got := cache.Get("obj", 0, int64(len(data))); got != nil {
+		t.Errorf("Get served %q from a file whose checksum does not match", got)
 	}
 }
 
