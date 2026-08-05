@@ -7,6 +7,61 @@
 //
 // The generated libobjectfs.h contains the raw CGO-derived declarations;
 // users should include objectfs.h instead (the clean public header).
+//
+// # Integer conversions across the C boundary
+//
+// Every width conversion in this file was audited against the C signature it feeds (#200). The
+// summary, because "which of these can truncate" is not answerable by reading any one line:
+//
+//   - objectfs_put's length was the one real defect. It took a size_t and passed C.int(length) to
+//     C.GoBytes, narrowing 64 bits to 32. See the comment at the call site; it is now range-checked
+//     and rejected rather than narrowed.
+//   - Lengths derived from a Go slice (fillCStr, objectfs_get, objectfs_list) convert int to size_t.
+//     A Go len is non-negative by construction and cannot exceed maxAllocSize, so these are
+//     genuinely unreachable. Recorded here rather than at each site, because an unexplained
+//     conversion is indistinguishable from an unexamined one and five identical comments would say
+//     less than one list.
+//   - Handle IDs are int64 both sides (objectfs_id_to_handle takes int64_t), so no narrowing occurs.
+//   - objectfs_new's cache_bytes is C.long → int64. long is 64 bits on the LP64 targets this library
+//     ships for and 32 on ILP32; either way it widens or stays, never narrows.
+//   - objectfs_list's limit is C.int → int, which widens on every target this builds for, so the
+//     conversion is safe. The *value* was not: a negative limit reached ListObjects, whose every use
+//     of limit is gated on `limit > 0`, so it meant "no limit" by accident. Now rejected.
+//
+// The two guards are `putLengthError` and `listLimitError` rather than inline `if`s, so that
+// main_test.go can reach them: that file cannot `import "C"` (go test refuses it), so a Go test in
+// this package can neither build a C.size_t nor call an exported function. tests/test_basic.c covers
+// the same two guards from the C side, which is the half that proves the return code and the error
+// string actually arrive.
+//
+// # Why there are no suppression directives in this file
+//
+// The notes at the conversions below are plain comments. `#nosec` and `//nolint:gosec` were both tried
+// and neither does anything here — a property of cgo rather than of how they were written, worth
+// stating so the next person does not add one and assume it took effect.
+//
+// cgo rewrites every `C.f(...)` call into an inline closure carrying `/*line :N:C*/` directives, so by
+// the time either tool sees the code, the call and any comment near it have collapsed onto the same
+// synthetic position and the association between them is gone. Measured on a four-case probe — the
+// directive on the line above the call, first of a comment block, last of a comment block, and
+// trailing the call itself. In a pure-Go package all four suppress. In a cgo package none do: gosec
+// reported every finding with `nosec: 0`, meaning it recognized no directive at all.
+//
+// The two runs then diverge in what they do with the findings neither can suppress:
+//
+//   - golangci-lint discards them. Its own log says so — `runner/invalid_issue: issue related to file
+//     <go-build cache path> is skipped` — because the analyzed file is a build-cache artifact and not a
+//     path in the repository. `lint` is therefore green here no matter what this file contains, and
+//     that is not the `.golangci.yml` G115 exclusion doing it: lifting that exclusion still yields 0.
+//   - security.yml's standalone gosec keeps them, with `"artifactLocation": {}` for the same reason.
+//     GitHub's SARIF ingester rejects a result with no location and fails the whole upload, so that
+//     workflow filters them out by hand.
+//
+// Which is the whole reason #200 had to exist: these conversions were invisible to both runs, so only
+// a hand audit could reach them, and one of the three was a real defect.
+//
+// `CGO_ENABLED=0 gosec ./sdks/c/...`, which #200 suggested might resolve the paths, reports zero issues
+// over zero files — the package cannot build without cgo, so that is a vacuous pass rather than a fix.
 package main
 
 /*
@@ -42,6 +97,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -57,9 +113,46 @@ type entry struct {
 }
 
 var (
-	store   sync.Map // int64 → *entry
-	counter int64    // monotonically increasing handle IDs; 0 = invalid
+	store   sync.Map     // int64 → *entry
+	counter atomic.Int64 // monotonically increasing handle IDs; 0 = invalid
 )
+
+// maxPutLength is the largest length objectfs_put accepts, and it is math.MaxInt32 because that is
+// what C.GoBytes's C.int parameter can represent — not a policy choice about object size.
+//
+// Written as a math constant rather than 1<<31-1 so it stays correct if it is ever compared against a
+// differently-sized type, and stated as its own name so the error message and the guard cannot drift
+// apart.
+const maxPutLength = math.MaxInt32
+
+// putLengthError reports why a length cannot cross into C.GoBytes, or nil if it can.
+//
+// Split out of objectfs_put as a plain Go function taking a uint64 so it can be tested. main_test.go
+// deliberately does not `import "C"` — `go test` refuses it outright ("use of cgo in test
+// main_test.go not supported") — so a test in this package cannot construct a C.size_t or call the
+// exported function at all. Everything above this line in objectfs_put is nil-checks; this is the
+// only decision it makes about the length, and putting it here is what makes that decision reachable
+// from a Go test rather than only from tests/test_basic.c.
+func putLengthError(length uint64) error {
+	if length > maxPutLength {
+		return fmt.Errorf("length %d exceeds the maximum this API can transfer in one call (%d bytes); "+
+			"split the object or use multipart", length, uint64(maxPutLength))
+	}
+
+	return nil
+}
+
+// listLimitError reports why a limit is not acceptable, or nil if it is.
+//
+// Takes an int64 rather than a C.int for the same reason putLengthError takes a uint64: so a Go test
+// can call it. int64 holds every C.int on every target, so no case is lost in the widening.
+func listLimitError(limit int64) error {
+	if limit < 0 {
+		return fmt.Errorf("limit %d is negative; pass 0 for no limit, or a positive count", limit)
+	}
+
+	return nil
+}
 
 // Global error string for failed objectfs_new calls (no valid handle yet).
 var (
@@ -107,8 +200,19 @@ func getEntry(h C.objectfs_client_t) *entry {
 	}
 	id := fromHandle(h)
 	if val, ok := store.Load(id); ok {
-		return val.(*entry)
+		// Comma-ok rather than a bare assertion. store is a sync.Map, so its value type is `any` and
+		// the compiler cannot help; nothing but this file writes to it, and it writes only *entry, but
+		// a bare assertion would turn any future violation of that into a panic — and a panic in a
+		// c-shared library takes the host process down, not just this call. Returning nil lands the
+		// caller on the same path a freed handle takes, which is already handled everywhere.
+		e, ok := val.(*entry)
+		if !ok {
+			return nil
+		}
+
+		return e
 	}
+
 	return nil
 }
 
@@ -191,17 +295,17 @@ func fillCStr(dst unsafe.Pointer, src string, capacity int) {
 	if capacity <= 0 {
 		return
 	}
-	n := len(src)
-	if n > capacity-1 {
-		n = capacity - 1
-	}
+	n := min(len(src), capacity-1)
 	if n > 0 {
 		cs := C.CString(src[:n])
+		// G115, and unreachable: n is in [1, capacity-1], and capacity comes from unsafe.Sizeof of a
+		// fixed C array, so it can be neither negative nor larger than size_t. No suppression
+		// directive — see the header comment for why one would not work here.
 		C.memcpy(dst, unsafe.Pointer(cs), C.size_t(n))
 		C.free(unsafe.Pointer(cs))
 	}
 	// Null-terminate.
-	*(*C.char)(unsafe.Pointer(uintptr(dst) + uintptr(n))) = 0
+	*(*C.char)(unsafe.Add(dst, n)) = 0
 }
 
 // fillInfo copies fields from a types.ObjectInfo into a C objectfs_info_t.
@@ -249,7 +353,7 @@ func objectfs_new(bucket *C.char, region *C.char, cacheBytes C.long) C.objectfs_
 		client:  client,
 		errCStr: C.CString(""),
 	}
-	id := atomic.AddInt64(&counter, 1)
+	id := counter.Add(1)
 	store.Store(id, e)
 	setGlobalErr(nil) // clear global error on success
 	return toHandle(id)
@@ -262,7 +366,13 @@ func objectfs_free(handle C.objectfs_client_t) {
 	}
 	id := fromHandle(handle)
 	if val, ok := store.LoadAndDelete(id); ok {
-		e := val.(*entry)
+		e, ok := val.(*entry)
+		if !ok {
+			// Already removed from the table by LoadAndDelete, so there is nothing to leak and nothing
+			// further to do. See the note in getEntry for why this is not a bare assertion.
+			return
+		}
+
 		e.mu.Lock()
 		_ = e.client.Close()
 		if e.errCStr != nil {
@@ -321,13 +431,42 @@ func objectfs_put(handle C.objectfs_client_t, key *C.char, data unsafe.Pointer, 
 		return C.OBJECTFS_ERR_INVALID
 	}
 
+	// The length is refused when it will not survive the conversion, rather than converted and used.
+	//
+	// C.GoBytes's second parameter is a C.int — 32 bits on every target this library builds for —
+	// while `length` is a size_t, which is 64 on all of them. `C.int(length)` therefore narrowed, and
+	// the results are not merely wrong but wrong in three different directions. Measured, not reasoned:
+	//
+	//	length = 1<<32     (4 GiB)  -> C.int 0            -> len(goData) == 0
+	//	length = (1<<32)+100        -> C.int 100          -> len(goData) == 100
+	//	length = 1<<31     (2 GiB)  -> C.int -2147483648  -> panic: gobytes: length out of range
+	//
+	// The first is the dangerous one and is exactly this issue's stated concern: a caller hands over
+	// 4 GiB, `objectfs_put` returns OBJECTFS_OK, and S3 holds an **empty object**. Nothing reports a
+	// short write, because from Go's side there was no short write — the length arrived as zero. The
+	// third is worse in a shared library than in a program: a panic in a c-shared build tears down the
+	// host process, so a C caller loses its own unrelated state to a bad argument.
+	//
+	// maxPutLength is the largest value C.GoBytes can be given, and the check is `>` rather than `>=`
+	// so the boundary itself stays usable. A 2 GiB single-object PUT is not something this SDK should
+	// be doing regardless — S3's own single-request limit is 5 GiB and multipart exists for a reason —
+	// but the API has to say so rather than round the request down to nothing.
+	if err := putLengthError(uint64(length)); err != nil {
+		e.setErr(err)
+
+		return C.OBJECTFS_ERR_INVALID
+	}
+
 	var goData []byte
 	if length > 0 && data != nil {
+		// G115. Bounded by putLengthError immediately above, which is the whole subject of this
+		// function's comment; the conversion is safe only because of that check.
 		goData = C.GoBytes(data, C.int(length))
 	}
 
 	err := e.client.Put(context.Background(), C.GoString(key), goData)
 	e.setErr(err)
+
 	return codeFromErr(err)
 }
 
@@ -380,33 +519,53 @@ func objectfs_list(handle C.objectfs_client_t, prefix *C.char, limit C.int, resu
 		return C.OBJECTFS_ERR_INVALID
 	}
 
+	// objectfs.h documents limit as "max results (0 = no limit, up to S3 page maximum)", and says
+	// nothing about a negative one. Downstream, ListObjects gates every use of limit on `limit > 0`, so
+	// a negative value is silently treated as "no limit" — the caller asks for -1 results and gets the
+	// whole bucket. That is a plausible thing for a C caller to pass, since -1 means "unlimited" in a
+	// good deal of C API design, and here it happens to mean the same thing by accident rather than by
+	// contract. Rejecting it says which one it is.
+	//
+	// The conversion itself is safe in both directions: C.int is 32 bits and Go's int is at least that
+	// on every target this builds for, so int(limit) widens or matches and never narrows.
+	if err := listLimitError(int64(limit)); err != nil {
+		e.setErr(err)
+
+		return C.OBJECTFS_ERR_INVALID
+	}
+
 	objects, err := e.client.List(context.Background(), C.GoString(prefix), int(limit))
 	if err != nil {
 		e.setErr(err)
+
 		return codeFromErr(err)
 	}
 
+	// len of a Go slice, so non-negative and far below size_t's range on every target.
 	n := len(objects)
 	resultOut.count = C.size_t(n)
 	resultOut.items = nil
 
 	if n > 0 {
 		infoSize := C.size_t(unsafe.Sizeof(C.objectfs_info_t{}))
+
 		items := (*C.objectfs_info_t)(C.malloc(C.size_t(n) * infoSize))
 		if items == nil {
 			e.setErr(fmt.Errorf("out of memory for list result"))
+
 			return C.OBJECTFS_ERR_IO
 		}
+
 		for i, obj := range objects {
-			item := (*C.objectfs_info_t)(unsafe.Pointer(
-				uintptr(unsafe.Pointer(items)) + uintptr(i)*unsafe.Sizeof(C.objectfs_info_t{}),
-			))
+			item := (*C.objectfs_info_t)(unsafe.Add(unsafe.Pointer(items), uintptr(i)*unsafe.Sizeof(C.objectfs_info_t{})))
 			fillInfo(item, obj.Key, obj.ETag, obj.ContentType, obj.Size, obj.LastModified.Unix())
 		}
+
 		resultOut.items = items
 	}
 
 	e.setErr(nil)
+
 	return C.OBJECTFS_OK
 }
 
