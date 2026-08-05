@@ -105,6 +105,11 @@ config/secrets.yaml
 *.bench
 benchmark-results/
 
+# What benchmarks/run_benchmarks.sh actually writes. The line above names benchmark-results/, which
+# nothing creates — so every run left an untracked directory of timestamped result files, a baseline
+# and a summary, ready for the next `git add -A` to commit them.
+benchmarks/results/
+
 # Profile data
 *.prof
 *.pprof

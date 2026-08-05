@@ -338,6 +338,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`benchmarks/run_benchmarks.sh` runs the nine S3 benchmarks that need no credentials, and stops
+  labelling its results with a release four versions old** ([#235]).
+
+  The runner's S3 block reported success while running nothing, which is the failure shape #190 had —
+  but not for the reason that issue gives. `-bench=BenchmarkGetObject` is an unanchored regex, and it
+  did match four benchmarks in `acceleration_bench_test.go`; they skip on an unset
+  `OBJECTFS_BENCH_BUCKET`, and `go test -bench` prints `ok` with exit 0 for a skipped benchmark exactly
+  as it does for one that ran:
+
+  ```text
+  $ go test -run XXX -bench=BenchmarkGetObject -benchtime=1x -v ./internal/storage/s3/
+  BenchmarkGetObject_Standard
+  --- SKIP: BenchmarkGetObject_Standard
+  ...
+  ok  	github.com/scttfrdmn/objectfs/internal/storage/s3	0.393s
+  ```
+
+  So correcting the names, which is what the issue proposes, would have changed nothing: the lines sit
+  inside `if [[ -n "${OBJECTFS_BENCH_BUCKET}" ]]`, so without a bucket they never ran, and with one they
+  were already matching. The real gap was `backend_bench_test.go`'s nine `BenchmarkS3Backend_*`
+  benchmarks, which run against an in-process stub with no credentials and no network — its own header
+  says they are meant to run unconditionally — and which the runner never invoked under either branch.
+  Those now run outside the gate; the acceleration set is one invocation inside it;
+  `BenchmarkAccelerationOverhead` stays in the `else` because, unlike its file-mates, it needs no
+  bucket.
+
+  The summary section was silent for the same class of reason. It greps for the literal
+  `BenchmarkGetObject`, which does not appear in `BenchmarkS3Backend_GetObject_1KB` — the infix breaks
+  the match — so "Key Performance Metrics" printed an empty heading in full mode even with nine
+  benchmarks' numbers in the file two lines above. Widened to `Benchmark.*GetObject`.
+
+  The version said **v0.4.0** in four places, including the H1 of the results file the script writes.
+  That is the worst place for it: a benchmark report is the artifact someone keeps and compares against
+  months later. It is now grepped out of the `version` constant in `cmd/objectfs/main.go`, which
+  `CLAUDE.md` makes the only authority, falling back to `unknown` rather than failing — an unrunnable
+  benchmark runner would be a worse trade than an unlabelled report.
+
+  `.gitignore` named `benchmark-results/`, which nothing creates. The script writes
+  `benchmarks/results/`, so every run left an untracked directory of timestamped results, a baseline and
+  a summary sitting in `git status`, one `git add -A` away from being committed. Now ignored under the
+  name that exists.
+
 - **`internal/fuse` compiles for 32-bit targets again, and `linux/armv7` is back in the release
   matrix** ([#198]).
 
@@ -406,6 +448,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
+[#235]: https://github.com/scttfrdmn/objectfs/issues/235
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
 
 - **Every build tag is compiled in CI, and the two tagged files that had stopped compiling now
