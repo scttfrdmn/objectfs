@@ -153,27 +153,29 @@ successRate := mc.GetMultipartSuccessRate()
 avgParts := mc.GetAveragePartsPerUpload()
 ```
 
-### 5. CargoShip Integration
+### 5. There is one upload path
 
-When CargoShip optimization is enabled, multipart uploads benefit from:
+`use_cargoship` selected a second `PutObject` implementation, routed through CargoShip's
+transporter for its BBR/CUBIC congestion control. It was **removed in v0.15.0** (#362), and the
+loader decodes strictly, so a config still setting the key fails at startup naming it.
 
-- **BBR/CUBIC congestion control** for optimal throughput
-- **Intelligent connection management**
-- **Automatic parallelization** based on concurrency settings
-- **Network-aware optimization**
+It was removed rather than tuned because it could not express what the direct path expresses. A
+`cargoships3.Archive` has no field for a `Content-Encoding`, for the configured encryption headers,
+or for a per-object storage class, and the upload path had already grown three bypasses saying so.
+The fourth was not bypassed but silently wrong: `Content-Type` was written into `Archive.Metadata`,
+which is S3 *user metadata* rather than the header, so every small object was stored as
+`application/octet-stream`.
 
-```yaml
-storage:
-  s3:
-    use_cargoship: true
-    multipart:
-      concurrency: 8
-```
+Nothing was measured on the other side. The transporter was only reachable *below*
+`multipart.threshold` — an object at or above it returned into ObjectFS's own multipart path, which
+never consulted a transporter — so the 64 MiB multipart buffer it installed served an upload shape
+a mount cannot produce, and `sync.Pool` handed that buffer back at every GC cycle. Throughput
+against a local endpoint was 35% slower at 4 KiB, 8% slower at 1 MiB, and a wash at 8 MiB; the
+sizes where congestion control could plausibly help never reached it.
 
-There is no throughput target or optimization level to set. Earlier versions of this page showed
-`target_throughput: 800.0` and `optimization_level: "standard"`; neither key exists in the schema,
-and with the loader now decoding strictly, a config containing them fails to start rather than
-ignoring them. CargoShip sizes its own transfers.
+There is also no throughput target or optimization level to set. Earlier versions of this page
+showed `target_throughput: 800.0` and `optimization_level: "standard"`; neither key ever existed in
+the schema, and strict decoding now fails a config containing them rather than ignoring it.
 
 ## Configuration Examples
 
@@ -184,7 +186,6 @@ For environments with high bandwidth and large files:
 ```yaml
 storage:
   s3:
-    use_cargoship: true
     multipart:
       threshold: "50MB"
       chunk_size: "32MB"
@@ -198,7 +199,6 @@ For environments with limited bandwidth or small files:
 ```yaml
 storage:
   s3:
-    use_cargoship: true
     multipart:
       threshold: "100MB"  # higher threshold: fewer objects go multipart
       chunk_size: "8MB"   # smaller parts
@@ -214,7 +214,6 @@ storage:
   s3:
     endpoint: "http://localhost:9000"
     force_path_style: true
-    use_cargoship: false
     multipart:
       threshold: "10MB"
       chunk_size: "5MB"   # the S3 floor; anything smaller is raised to it

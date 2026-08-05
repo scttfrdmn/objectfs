@@ -74,22 +74,18 @@ func (s *AWSS3TestSuite) SetupSuite() {
 	})
 	require.NoError(s.T(), err, "Cannot access test bucket %s", s.bucket)
 
-	// Create ObjectFS S3 backend with CargoShip optimization
 	backendConfig := &s3backend.Config{
 		Region:         s.region,
 		MaxRetries:     3,
 		ConnectTimeout: 10 * time.Second,
 		RequestTimeout: 60 * time.Second,
 		PoolSize:       8,
-
-		// Enable CargoShip optimization for performance testing
-		EnableCargoShipOptimization: true,
 	}
 
 	s.backend, err = s3backend.NewBackend(s.ctx, s.bucket, backendConfig)
 	require.NoError(s.T(), err, "Failed to create S3 backend")
 
-	s.T().Logf("AWS S3 backend initialized with CargoShip optimization")
+	s.T().Logf("AWS S3 backend initialized")
 }
 
 func (s *AWSS3TestSuite) TearDownSuite() {
@@ -131,11 +127,10 @@ func (s *AWSS3TestSuite) TestBasicOperations() {
 
 	// Test data
 	key := "objectfs-test/basic-operations"
-	data := []byte("Hello from ObjectFS with CargoShip optimization!")
+	data := []byte("Hello from ObjectFS!")
 
 	start := time.Now()
 
-	// Test PutObject with CargoShip optimization
 	err := s.backend.PutObject(s.ctx, key, data, nil)
 	assert.NoError(t, err)
 
@@ -171,7 +166,7 @@ func (s *AWSS3TestSuite) TestBasicOperations() {
 func (s *AWSS3TestSuite) TestLargeFileUpload() {
 	t := s.T()
 
-	// Create 10MB test file to trigger CargoShip optimization
+	// 10MB, above the multipart threshold
 	key := "objectfs-test/large-file-10mb"
 	data := make([]byte, 10*1024*1024) // 10MB
 	for i := range data {
@@ -180,7 +175,6 @@ func (s *AWSS3TestSuite) TestLargeFileUpload() {
 
 	start := time.Now()
 
-	// Upload with CargoShip optimization
 	err := s.backend.PutObject(s.ctx, key, data, nil)
 	require.NoError(t, err)
 
@@ -250,7 +244,7 @@ func (s *AWSS3TestSuite) TestBatchOperations() {
 	objects := make(map[string][]byte)
 	for i := 0; i < 5; i++ {
 		key := fmt.Sprintf("objectfs-test/batch-%d", i)
-		data := []byte(fmt.Sprintf("Batch test data %d with CargoShip optimization", i))
+		data := []byte(fmt.Sprintf("Batch test data %d", i))
 		objects[key] = data
 	}
 

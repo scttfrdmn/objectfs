@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"math"
 	"time"
 
 	"github.com/scttfrdmn/objectfs/internal/awsname"
@@ -52,10 +53,6 @@ type Config struct {
 	// Advanced settings
 	UseAccelerate bool `yaml:"use_accelerate"`
 	UseDualStack  bool `yaml:"use_dual_stack"`
-
-	// EnableCargoShipOptimization routes uploads through the CargoShip transporter, which does its
-	// own multipart chunking and congestion control.
-	EnableCargoShipOptimization bool `yaml:"enable_cargoship_optimization"`
 
 	// Multipart upload configuration
 	MultipartThreshold   int64 `yaml:"multipart_threshold"`   // Size threshold for multipart uploads (bytes)
@@ -175,11 +172,25 @@ type CircuitBreakerConfig struct {
 	//
 	// A failure here is what circuit.defaultIsSuccessful calls one — a service failure, per
 	// errors.IsServiceFailure. A missing object is an answer, not an outage, and does not count.
+	//
+	// Values above maxFailureThreshold are clamped rather than honored; see readyToTrip.
 	FailureThreshold int `yaml:"failure_threshold"`
 
 	// Timeout is how long the breaker stays open before admitting probe requests. Zero means 30s.
 	Timeout time.Duration `yaml:"timeout"`
 }
+
+// maxFailureThreshold is the largest failure count this config can express.
+//
+// It is math.MaxUint32 because circuit.Counts.TotalFailures is a uint32, so a threshold above it can
+// never be reached. On a 64-bit platform `int` holds larger values, and readyToTrip clamps rather
+// than narrowing them — see there for what the narrowing did.
+//
+// Typed int64 rather than untyped, because this package cross-builds for linux/386 and linux/arm,
+// where `int` is 32 bits and comparing it against an untyped 4294967295 does not compile
+// ("constant overflows int"). int64 holds every int on every target objectfs builds for, so the
+// comparison in readyToTrip is exact on all of them.
+const maxFailureThreshold int64 = math.MaxUint32
 
 // readyToTrip turns a CircuitBreakerConfig into the predicate circuit.Config wants.
 //
@@ -190,6 +201,20 @@ type CircuitBreakerConfig struct {
 //   - zero: nil, which NewCircuitBreaker replaces with its proportional default. Returning a
 //     `failures >= 0` closure instead would open the breaker before the first request and keep every
 //     S3 operation rejected for the life of the mount.
+//
+// The clamp is the fourth case, and it exists because the `<= 0` guard above does not bound the
+// conversion the way the suppression it used to carry claimed. That comment read "guarded positive
+// above", which is true and insufficient: `int` is 64-bit here and circuit.Counts.TotalFailures is a
+// uint32, so a positive threshold can still wrap. failure_threshold: 4294967296 passed the guard,
+// narrowed to 0, and made the predicate `TotalFailures >= 0` — always true, so the breaker opened
+// before the first request and rejected every S3 operation for the life of the mount. That is
+// precisely the outcome the zero case above is written to avoid, arriving by the one path that
+// bypassed it. 4294967297 gave a threshold of 1, which is worse: not obviously broken, just wrong.
+//
+// Clamping rather than erroring keeps this a total function, which is what lets it be a value
+// translation rather than a second validation site. internal/config rejects a negative threshold at
+// load; an absurdly large one is not invalid, only unreachable, and the reachable maximum is the
+// honest reading of it.
 func readyToTrip(cfg CircuitBreakerConfig) func(circuit.Counts) bool {
 	if !cfg.Enabled {
 		return func(circuit.Counts) bool { return false }
@@ -199,7 +224,11 @@ func readyToTrip(cfg CircuitBreakerConfig) func(circuit.Counts) bool {
 		return nil
 	}
 
-	threshold := uint32(cfg.FailureThreshold) //nolint:gosec // guarded positive above
+	if int64(cfg.FailureThreshold) > maxFailureThreshold {
+		return func(circuit.Counts) bool { return false }
+	}
+
+	threshold := uint32(cfg.FailureThreshold) // #nosec G115 -- bounded by both guards above
 
 	return func(counts circuit.Counts) bool {
 		return counts.TotalFailures >= threshold
@@ -439,15 +468,14 @@ func NewDefaultConfig() *Config {
 			FailureThreshold: 0,
 			Timeout:          30 * time.Second,
 		},
-		EnableCargoShipOptimization: true,
-		MultipartThreshold:          32 * 1024 * 1024, // 32MB - trigger multipart for larger files
-		MultipartChunkSize:          16 * 1024 * 1024, // 16MB - optimal chunk size for performance
-		MultipartConcurrency:        8,                // Match pool size for concurrent uploads
-		ParallelReadThreshold:       64 * 1024 * 1024, // 64MB - fan out reads above this size
-		ReadChunkSize:               defaultReadChunkSize,
-		ParallelReadConcurrency:     0,                 // 0 = inherit MultipartConcurrency
-		StorageTier:                 TierStandard,      // Default to Standard tier
-		TierConstraints:             TierConstraints{}, // Use tier defaults
+		MultipartThreshold:      32 * 1024 * 1024, // 32MB - trigger multipart for larger files
+		MultipartChunkSize:      16 * 1024 * 1024, // 16MB - optimal chunk size for performance
+		MultipartConcurrency:    8,                // Match pool size for concurrent uploads
+		ParallelReadThreshold:   64 * 1024 * 1024, // 64MB - fan out reads above this size
+		ReadChunkSize:           defaultReadChunkSize,
+		ParallelReadConcurrency: 0,                 // 0 = inherit MultipartConcurrency
+		StorageTier:             TierStandard,      // Default to Standard tier
+		TierConstraints:         TierConstraints{}, // Use tier defaults
 		Compression: CompressionConfig{
 			Enabled:   true,
 			Algorithm: "zstd",

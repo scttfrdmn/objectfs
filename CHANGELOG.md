@@ -270,6 +270,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The CargoShip transporter upload path, and the `storage.s3.use_cargoship` key that selected it**
+  ([#362]). `PutObject` has one implementation now.
+
+  The branch was removed rather than given a fourth bypass. A `cargoships3.Archive` cannot express what
+  a `PutObjectInput` expresses, and three bypasses in front of it already said so in long comments: it
+  has no field for a `Content-Encoding` (uploading a compressed object through it stored the encoding as
+  *user metadata*, so `GetObject` saw an empty encoding, skipped decompression, and returned a raw zstd
+  frame while `HeadObject` still reported the uncompressed size), no representation for SSE-S3 or bucket
+  keys, and no per-object storage class — `optimizeStorageClass` ignores `Archive.StorageClass` for every
+  archive ObjectFS builds and substitutes the transporter's construction-time default.
+
+  **The fourth was not bypassed, and is the one this issue found.** `Content-Type` was written into
+  `Archive.Metadata` under a `"content-type"` key. That is S3 user metadata, not the header. Measured on
+  `file.txt` through the endpoint: the transporter path stored `application/octet-stream` and the direct
+  path stored `text/plain`, with `detectContentType` having computed the right value one line earlier in
+  both cases. Since the transporter was reachable only *below* `multipart.threshold`, that was every
+  object under 32 MiB on the shipped defaults — which is every object a FUSE mount writes.
+
+  **Nothing was on the other side of the ledger.** The transporter was unreachable at or above the
+  threshold, because `PutObject` returns into `putObjectMultipart` first and that function never
+  referenced a transporter (grep count: zero). So its 64 MiB *multipart* `BufferProvider` was installed
+  on a path that only ever performed single-part uploads — an upload shape a mount cannot produce. That
+  buffer lives in a `sync.Pool`, which is cleared at every GC cycle, so it was not amortized across
+  uploads but re-allocated on the first PUT after each collection: 20 PUTs with no GC between them
+  allocated 3.4 MiB total, and 20 PUTs with a forced GC after each allocated **837.2 MiB**. It also
+  inverted `GOMEMLIMIT` — tightening the limit from 768 MiB to 384 MiB took 300 difftest iterations from
+  751 MiB of total allocation over 4 GCs to **3570 MiB over 28**, because a tighter limit means more pool
+  clears. With the transporter off, both limits gave 285 MiB.
+
+  Throughput gave nothing back either. 30 PUTs per size against the in-process endpoint: 4 KiB 327µs on
+  vs 243µs off (**35% slower**), 1 MiB 2.851ms vs 2.624ms (8% slower), 8 MiB 20.531ms vs 20.786ms (a
+  wash). A local endpoint is not evidence against BBR over a real network — but the sizes where BBR could
+  matter never reached the branch.
+
+  It also stamped four metadata keys on every small object that no caller asked for, two of them
+  structurally empty: `cargoship-original-size` was always `"0"` and `cargoship-compression-type` always
+  `""` (ObjectFS never set the `Archive` fields they come from), plus `cargoship-created-by` and
+  `cargoship-upload-time` — a timestamp, so two otherwise-identical objects differed. User metadata is
+  billed, returned on every `HEAD`, and part of what makes two objects compare unequal.
+
+  **The config key is removed rather than deprecated**, and the loader decodes strictly, so a file still
+  setting `storage.s3.use_cargoship` now fails at startup naming the key. Same reasoning as the removed
+  `security.encryption` booleans and the `cost_optimization` block: an operator who set it did so
+  believing their uploads took a different path, and an error is the one way that belief gets
+  re-examined. `s3.Config.EnableCargoShipOptimization`, `ClientManager.GetTransporter`,
+  `ClientManager.IsCargoShipEnabled`, and `cargoShipCanEncrypt` are gone with it.
+  `ConvertTierToCargoShipStorageClass` stays — it has its own unit tests and CargoShip's `awsconfig`
+  types are still used for tier mapping.
+
+  Three tests in `internal/storage/s3/upload_path_test.go` now pin the boundary rather than the path:
+  the detected `Content-Type` reaches the stored object on both sides of the multipart threshold, the
+  stored user-metadata key set is exactly what ObjectFS wrote, and caller-supplied metadata survives.
+  All three were written to fail first and verified by mutation — dropping `ContentType` from the input,
+  stamping a foreign key, and dropping the caller's keys each fail the corresponding test.
+  `testaws.TestServer.ObjectContentType` was added to read the header specifically, kept separate from
+  `ObjectMetadata` so a test cannot satisfy itself with the wrong one, since confusing the two is the
+  defect.
+
+  **One test in this change nearly shipped passing for the wrong reason**, which is worth recording. The
+  first draft set `MultipartChunkSize` to 1 MiB — below the AWS uploader's 5 MiB part minimum — so every
+  CargoShip upload failed with `part size must be at least 5242880 bytes`, fell back to the direct path,
+  and the direct path set the header correctly. The test was green against the broken code. It was caught
+  by reading the `CargoShip optimization failed, falling back to standard S3` warning in the output of a
+  run that was supposed to be failing.
+
 - **`tests/posix_test.go`, `tests/integration/`, and `pkg/optimization` — three suites and a package
   that had never compiled, run, or been imported** ([#197], [#240]).
 
@@ -380,6 +445,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script's awk program, a rename stopped it matching anything, and every package reported "no floor
   set" while the run failed naming nothing. A test that computed the set from `go list` would have
   been green throughout that.
+- **`benchmarks/run_benchmarks.sh` runs the nine S3 benchmarks that need no credentials, and stops
+  labelling its results with a release four versions old** ([#235]).
+
+  The runner's S3 block reported success while running nothing, which is the failure shape #190 had —
+  but not for the reason that issue gives. `-bench=BenchmarkGetObject` is an unanchored regex, and it
+  did match four benchmarks in `acceleration_bench_test.go`; they skip on an unset
+  `OBJECTFS_BENCH_BUCKET`, and `go test -bench` prints `ok` with exit 0 for a skipped benchmark exactly
+  as it does for one that ran:
+
+  ```text
+  $ go test -run XXX -bench=BenchmarkGetObject -benchtime=1x -v ./internal/storage/s3/
+  BenchmarkGetObject_Standard
+  --- SKIP: BenchmarkGetObject_Standard
+  ...
+  ok  	github.com/scttfrdmn/objectfs/internal/storage/s3	0.393s
+  ```
+
+  So correcting the names, which is what the issue proposes, would have changed nothing: the lines sit
+  inside `if [[ -n "${OBJECTFS_BENCH_BUCKET}" ]]`, so without a bucket they never ran, and with one they
+  were already matching. The real gap was `backend_bench_test.go`'s nine `BenchmarkS3Backend_*`
+  benchmarks, which run against an in-process stub with no credentials and no network — its own header
+  says they are meant to run unconditionally — and which the runner never invoked under either branch.
+  Those now run outside the gate; the acceleration set is one invocation inside it;
+  `BenchmarkAccelerationOverhead` stays in the `else` because, unlike its file-mates, it needs no
+  bucket.
+
+  The summary section was silent for the same class of reason. It greps for the literal
+  `BenchmarkGetObject`, which does not appear in `BenchmarkS3Backend_GetObject_1KB` — the infix breaks
+  the match — so "Key Performance Metrics" printed an empty heading in full mode even with nine
+  benchmarks' numbers in the file two lines above. Widened to `Benchmark.*GetObject`.
+
+  The version said **v0.4.0** in four places, including the H1 of the results file the script writes.
+  That is the worst place for it: a benchmark report is the artifact someone keeps and compares against
+  months later. It is now grepped out of the `version` constant in `cmd/objectfs/main.go`, which
+  `CLAUDE.md` makes the only authority, falling back to `unknown` rather than failing — an unrunnable
+  benchmark runner would be a worse trade than an unlabelled report.
+
+  `.gitignore` named `benchmark-results/`, which nothing creates. The script writes
+  `benchmarks/results/`, so every run left an untracked directory of timestamped results, a baseline and
+  a summary sitting in `git status`, one `git add -A` away from being committed. Now ignored under the
+  name that exists.
+- **A `failure_threshold` above 2³² opened the circuit breaker before the first request, rejecting
+  every S3 operation for the life of the mount** ([#264]).
+
+  `readyToTrip` converted the configured `int` threshold to the `uint32` that
+  `circuit.Counts.TotalFailures` is, guarded only by `if cfg.FailureThreshold <= 0`. That guard bounds
+  the sign and not the width. On a 64-bit platform `failure_threshold: 4294967296` passes it, narrows
+  to `0`, and yields the predicate `TotalFailures >= 0` — true on the zeroth failure. The breaker
+  opens immediately and stays open, which the function's own doc comment already named as the outcome
+  its zero case exists to avoid; it arrived by the one path that bypassed that case. `4294967297` is
+  the quieter half: it narrows to a threshold of `1`, so the breaker trips on a single failure while
+  the configuration says four billion.
+
+  Now clamped. A threshold above `math.MaxUint32` becomes a predicate that never trips, because no
+  count of failures can reach it when the counter is a `uint32` — unreachable is the honest reading of
+  an unreachable number, and clamping keeps this a total function rather than adding a second
+  validation site. `internal/config` already rejects a negative threshold at load.
+
+  Four mutations of the clamp are detected by `TestCircuitBreakerConfigReachesTheBreaker`: removing
+  it, `>` → `>=`, restoring the always-true predicate, and bounding at `MaxInt32` instead. The jumbo
+  cases are behind `math.MaxInt > math.MaxUint32` because on `linux/386` and `linux/arm` the literals
+  do not compile, and skipping at runtime would not be enough.
+
+- **Twelve `// nolint` directives had a leading space, which makes them ordinary comments** ([#264]).
+
+  `// nolint:gosec` is not a directive; only `//nolint:` is. Twelve sites across nine files carried
+  the spaced form with a full paragraph of justification each, and every one of them was inert.
+  Whether that mattered depended on the site: at `s3/config.go:202` the finding was also excluded
+  repo-wide by `.golangci.yml`, so it was reported by neither run and turned out to be the real defect
+  above. `gofmt` moves a `//nolint:` to the end of its comment block, so the four multi-line cases
+  were restructured to put the prose first.
+
+  Eleven further `//nolint` directives had no explanation, which `nolintlint`'s
+  `require-explanation` reports. Five were `//nolint:staticcheck` on findings that were simply
+  fixable — two `QF1008` embedded-field selectors, two `QF1003` if-chains that wanted a tagged switch,
+  and a `QF1012` `WriteString(Sprintf(...))` — so those are fixed rather than annotated. `nolintlint`
+  is now at 0 findings, down from 23.
+
+- **The six gosec sites #264 lists are suppressed for the run that reports them, and the convention is
+  written down in `.golangci.yml`** ([#264]).
+
+  Two of the issue's premises do not hold, both measured:
+
+  - **`#nosec` alone satisfies both runs, and writing both directives fails lint.** golangci-lint runs
+    gosec's own analyser, which strips `#nosec` sites before golangci-lint sees them. So the dual
+    annotation the issue prescribes leaves the `//nolint:gosec` with nothing to suppress, and
+    `nolintlint` reports it unused — turning a suppression into a lint failure.
+  - **`G703` does not exist in the gosec golangci-lint bundles.** Probed on a two-line program
+    reading `os.Getenv`: standalone gosec reports `G703` and `G304`, golangci-lint reports `G304`
+    alone. The `//nolint:gosec` at `internal/awsname/awsname.go` could not have worked even written
+    correctly, because that run never had the finding.
+
+  Also recorded there: no suppression directive of either form works in a cgo package (see the header
+  of `sdks/c/main.go`), and `internal/network/congestion_linux.go` is linux-only, so a `//nolint` there
+  is unverifiable from a macOS developer machine while the standalone run on ubuntu does report it.
+
+- **`internal/testaws`'s hardcoded credential is now provably test-only** ([#264]).
+
+  `SecretAccessKey` is AWS's own documentation example key and is accepted only by the substrate
+  emulator, which is the whole `G101` argument and not the whole risk: the constant is at package
+  scope in `testaws.go`, not a `_test.go` file, so nothing about the filename keeps it — or the
+  recording proxy, or the embedded emulator — out of a shipped binary. What keeps them out is that no
+  non-test package imports `testaws`, which is a property of the import graph and drifts silently.
+  `TestNoNonTestPackageImportsThisOne` asserts it via `go list -deps`, whose `Imports` field is the
+  non-test import set.
+
+  Verifying that test took two attempts, and the first failure mode is recorded in it. `go test` runs
+  each test binary in its own package directory, so the initial `./...` expanded to `internal/testaws`
+  alone and reported no offenders while a deliberate violation sat in `internal/awsrates/offerfile`.
+  It now runs `go list` from the module root. The mutation also needs `-count=1`: the violation lives
+  in another package, so the test binary is byte-identical and `go test` serves a cached pass.
+- **`make build` no longer passes three linker flags that do nothing** ([#353]).
+
+  `Makefile`'s `LDFLAGS` injected `-X main.Version`, `-X main.Commit` and `-X main.BuildTime`, and none
+  of those symbols exist. `cmd/objectfs/main.go` declares the version as an untyped *constant*, which
+  the linker cannot rewrite, so all three were accepted and silently ignored:
+
+  ```text
+  $ go build -ldflags="-s -w -X main.Version=FAKE-VERSION" -o /tmp/probe ./cmd/objectfs
+  $ /tmp/probe --version
+  objectfs version 0.11.0
+  ```
+
+  Every target sharing that variable — `build`, `build-all`, `build-linux`, `build-darwin`, `install`
+  and `package` — passed the dead flags. `OBJECTFS.md`'s build-configuration example showed the same
+  injection, and its three `go build` lines targeted `.` rather than `./cmd/objectfs`, which is not a
+  main package; both are corrected.
+
+  Dropped rather than made real, which is the choice `.github/workflows/release.yml` already made and
+  explains at its build step: the constant is the documented single authority for the version, so the
+  release asserts that it and the git tag agree instead of overwriting it at link time and leaving the
+  source disagreeing with the shipped artifact. `VERSION`, `COMMIT` and `BUILD_TIME` are still real
+  Makefile variables — `make version` prints them and the packaging targets name archives with them.
+  They simply do not reach the binary, and nothing now claims they do.
+
+  Whether the binary should report its commit and build time at all is a separate question: those two
+  have no constant to disagree with, so there is a real argument for injecting them — but `--version`
+  does not print them today, so injecting them would produce values nothing displays.
 - **`objectfs_put` in the C SDK no longer narrows a `size_t` length to a `C.int`, which could store
   an empty object and report success** ([#200]).
 
@@ -522,13 +725,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform_unsupported.go` fails deliberately. It now lists what `release.yml` publishes, notes the
   386 canary, and says why Windows is absent. Its local-build snippet also passed
   `-ldflags "-X main.Version=$VERSION"`, which does nothing: `version` is a `const` and the linker
-  cannot rewrite a constant. Two other copies of that dead injection survive, in `Makefile:11` and
-  `OBJECTFS.md:613`, and are filed rather than fixed here ([#353]).
+  cannot rewrite a constant. Two other copies of that dead injection were in `Makefile` and
+  `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
+  ([#353]).
 
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#199]: https://github.com/scttfrdmn/objectfs/issues/199
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
+[#235]: https://github.com/scttfrdmn/objectfs/issues/235
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
+[#362]: https://github.com/scttfrdmn/objectfs/issues/362
 
 - **Every build tag is compiled in CI, and the two tagged files that had stopped compiling now
   compile** ([#240], [#197]).

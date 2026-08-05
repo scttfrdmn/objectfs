@@ -64,10 +64,14 @@ func detectFrom(availablePath, defaultPath string) DetectionResult {
 // readAvailableAlgorithms reads
 // /proc/sys/net/ipv4/tcp_available_congestion_control and returns the list.
 func readAvailableAlgorithms(path string) ([]Algorithm, error) {
-	//nolint:gosec // G304: path is a procfs constant from detect, or a t.TempDir file from a test.
-	// It is not reachable from configuration or from a mount path — nothing plumbs a user-supplied
-	// string to either caller, and both are in this package.
-	data, err := os.ReadFile(path)
+	// G304: path is a procfs constant from detect, or a t.TempDir file from a test. It is not
+	// reachable from configuration or from a mount path — nothing plumbs a user-supplied string to
+	// either caller, and both are in this package.
+	//
+	// #nosec rather than //nolint:gosec. This file is linux-only, so a golangci-lint run on darwin
+	// never type-checks it and the //nolint that used to be here was unverifiable from a developer
+	// machine; the standalone gosec in security.yml runs on ubuntu and does report it.
+	data, err := os.ReadFile(path) // #nosec G304 -- procfs constant from detect, or a test's temp file
 	if err != nil {
 		return nil, fmt.Errorf("read available congestion algorithms: %w", err)
 	}
@@ -81,8 +85,8 @@ func readAvailableAlgorithms(path string) ([]Algorithm, error) {
 
 // readSystemDefault reads /proc/sys/net/ipv4/tcp_congestion_control.
 func readSystemDefault(path string) (Algorithm, error) {
-	//nolint:gosec // G304: as above — a procfs constant or a test's temporary file, never input.
-	data, err := os.ReadFile(path)
+	// G304: as above — a procfs constant or a test's temporary file, never input.
+	data, err := os.ReadFile(path) // #nosec G304 -- procfs constant from detect, or a test's temp file
 	if err != nil {
 		return "", fmt.Errorf("read system congestion default: %w", err)
 	}
