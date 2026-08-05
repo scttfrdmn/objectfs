@@ -338,6 +338,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `failure_threshold` above 2³² opened the circuit breaker before the first request, rejecting
+  every S3 operation for the life of the mount** ([#264]).
+
+  `readyToTrip` converted the configured `int` threshold to the `uint32` that
+  `circuit.Counts.TotalFailures` is, guarded only by `if cfg.FailureThreshold <= 0`. That guard bounds
+  the sign and not the width. On a 64-bit platform `failure_threshold: 4294967296` passes it, narrows
+  to `0`, and yields the predicate `TotalFailures >= 0` — true on the zeroth failure. The breaker
+  opens immediately and stays open, which the function's own doc comment already named as the outcome
+  its zero case exists to avoid; it arrived by the one path that bypassed that case. `4294967297` is
+  the quieter half: it narrows to a threshold of `1`, so the breaker trips on a single failure while
+  the configuration says four billion.
+
+  Now clamped. A threshold above `math.MaxUint32` becomes a predicate that never trips, because no
+  count of failures can reach it when the counter is a `uint32` — unreachable is the honest reading of
+  an unreachable number, and clamping keeps this a total function rather than adding a second
+  validation site. `internal/config` already rejects a negative threshold at load.
+
+  Four mutations of the clamp are detected by `TestCircuitBreakerConfigReachesTheBreaker`: removing
+  it, `>` → `>=`, restoring the always-true predicate, and bounding at `MaxInt32` instead. The jumbo
+  cases are behind `math.MaxInt > math.MaxUint32` because on `linux/386` and `linux/arm` the literals
+  do not compile, and skipping at runtime would not be enough.
+
+- **Twelve `// nolint` directives had a leading space, which makes them ordinary comments** ([#264]).
+
+  `// nolint:gosec` is not a directive; only `//nolint:` is. Twelve sites across nine files carried
+  the spaced form with a full paragraph of justification each, and every one of them was inert.
+  Whether that mattered depended on the site: at `s3/config.go:202` the finding was also excluded
+  repo-wide by `.golangci.yml`, so it was reported by neither run and turned out to be the real defect
+  above. `gofmt` moves a `//nolint:` to the end of its comment block, so the four multi-line cases
+  were restructured to put the prose first.
+
+  Eleven further `//nolint` directives had no explanation, which `nolintlint`'s
+  `require-explanation` reports. Five were `//nolint:staticcheck` on findings that were simply
+  fixable — two `QF1008` embedded-field selectors, two `QF1003` if-chains that wanted a tagged switch,
+  and a `QF1012` `WriteString(Sprintf(...))` — so those are fixed rather than annotated. `nolintlint`
+  is now at 0 findings, down from 23.
+
+- **The six gosec sites #264 lists are suppressed for the run that reports them, and the convention is
+  written down in `.golangci.yml`** ([#264]).
+
+  Two of the issue's premises do not hold, both measured:
+
+  - **`#nosec` alone satisfies both runs, and writing both directives fails lint.** golangci-lint runs
+    gosec's own analyser, which strips `#nosec` sites before golangci-lint sees them. So the dual
+    annotation the issue prescribes leaves the `//nolint:gosec` with nothing to suppress, and
+    `nolintlint` reports it unused — turning a suppression into a lint failure.
+  - **`G703` does not exist in the gosec golangci-lint bundles.** Probed on a two-line program
+    reading `os.Getenv`: standalone gosec reports `G703` and `G304`, golangci-lint reports `G304`
+    alone. The `//nolint:gosec` at `internal/awsname/awsname.go` could not have worked even written
+    correctly, because that run never had the finding.
+
+  Also recorded there: no suppression directive of either form works in a cgo package (see the header
+  of `sdks/c/main.go`), and `internal/network/congestion_linux.go` is linux-only, so a `//nolint` there
+  is unverifiable from a macOS developer machine while the standalone run on ubuntu does report it.
+
+- **`internal/testaws`'s hardcoded credential is now provably test-only** ([#264]).
+
+  `SecretAccessKey` is AWS's own documentation example key and is accepted only by the substrate
+  emulator, which is the whole `G101` argument and not the whole risk: the constant is at package
+  scope in `testaws.go`, not a `_test.go` file, so nothing about the filename keeps it — or the
+  recording proxy, or the embedded emulator — out of a shipped binary. What keeps them out is that no
+  non-test package imports `testaws`, which is a property of the import graph and drifts silently.
+  `TestNoNonTestPackageImportsThisOne` asserts it via `go list -deps`, whose `Imports` field is the
+  non-test import set.
+
+  Verifying that test took two attempts, and the first failure mode is recorded in it. `go test` runs
+  each test binary in its own package directory, so the initial `./...` expanded to `internal/testaws`
+  alone and reported no offenders while a deliberate violation sat in `internal/awsrates/offerfile`.
+  It now runs `go list` from the module root. The mutation also needs `-count=1`: the violation lives
+  in another package, so the test binary is byte-identical and `go test` serves a cached pass.
+
 - **`internal/fuse` compiles for 32-bit targets again, and `linux/armv7` is back in the release
   matrix** ([#198]).
 

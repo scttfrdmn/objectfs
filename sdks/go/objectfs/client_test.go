@@ -348,7 +348,7 @@ func TestNew_WithDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer c.Close() //nolint:errcheck // test teardown; a close error here cannot change the assertions above
 	if c.IsMounted() {
 		t.Error("IsMounted should be false after New")
 	}
@@ -361,7 +361,7 @@ func TestNew_WithRegion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer c.Close() //nolint:errcheck // test teardown; a close error here cannot change the assertions above
 	if c.opts.region != region {
 		t.Errorf("region: got %q, want %q", c.opts.region, region)
 	}
@@ -399,7 +399,7 @@ func TestIntegration_PutGetDeleteHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer c.Close() //nolint:errcheck // test teardown; a close error here cannot change the assertions above
 
 	key := "sdk-integration-test/put-get-delete-head"
 	data := []byte("ObjectFS Go SDK integration test data — Put/Get/Delete/Head round-trip")
@@ -459,7 +459,7 @@ func TestIntegration_List(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer c.Close() //nolint:errcheck // test teardown; a close error here cannot change the assertions above
 
 	prefix := "sdk-integration-test/list/"
 	keys := []string{prefix + "a", prefix + "b", prefix + "c"}
@@ -472,7 +472,7 @@ func TestIntegration_List(t *testing.T) {
 	}
 	defer func() {
 		for _, k := range keys {
-			c.Delete(ctx, k) //nolint:errcheck
+			c.Delete(ctx, k) //nolint:errcheck // best-effort cleanup of keys the test created
 		}
 	}()
 
@@ -513,7 +513,7 @@ func TestIntegration_Health(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer c.Close() //nolint:errcheck // test teardown; a close error here cannot change the assertions above
 
 	if err := c.Health(ctx); err != nil {
 		t.Errorf("Health: %v", err)

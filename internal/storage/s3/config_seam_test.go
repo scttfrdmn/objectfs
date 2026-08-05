@@ -8,6 +8,7 @@ package s3_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -268,14 +269,18 @@ func TestStorageTierReachesTheStoredObject(t *testing.T) {
 func TestCircuitBreakerConfigReachesTheBreaker(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
+	// Named rather than anonymous, because the jumbo cases below are appended in a build-conditional
+	// block and an anonymous struct would have to be spelled out again at each one.
+	type tripCase struct {
 		name      string
 		cfg       s3.CircuitBreakerConfig
 		failures  int
 		wantTrip  bool
 		wantNilFn bool
 		why       string
-	}{
+	}
+
+	cases := []tripCase{
 		{
 			name:      "an unset threshold takes the package default",
 			cfg:       s3.CircuitBreakerConfig{Enabled: true},
@@ -305,6 +310,63 @@ func TestCircuitBreakerConfigReachesTheBreaker(t *testing.T) {
 		},
 	}
 
+	// The jumbo cases only mean anything on a 64-bit platform: on linux/386 and linux/arm, `int`
+	// cannot hold a threshold above 2^32 in the first place, so there is nothing there to narrow.
+	//
+	// They are guarded at runtime and their values come from int64 *variables*, and the second half is
+	// the part that is easy to get wrong. This `if` does not stop the block being compiled, only
+	// executed, and a constant conversion is checked at compile time — so writing
+	// `FailureThreshold: math.MaxUint32 + 1` inside here fails to build for GOARCH=386 with "overflows
+	// int" regardless of the guard. CI type-checks tests on every cell of the cross-build matrix
+	// (`go vet ./internal/...` under each GOOS/GOARCH), which is where that surfaced. Going through a
+	// variable makes each `int(...)` a runtime conversion, legal to compile everywhere, and the guard
+	// is what guarantees it never actually runs on a platform where it would wrap.
+	if math.MaxInt > math.MaxUint32 {
+		var (
+			twoPow32     int64 = math.MaxUint32 + 1
+			twoPow32Plus int64 = math.MaxUint32 + 2
+			maxReachable int64 = math.MaxUint32
+		)
+
+		cases = append(cases,
+			tripCase{
+				name:     "a threshold of 2^32 does not trip on zero failures",
+				cfg:      s3.CircuitBreakerConfig{Enabled: true, FailureThreshold: int(twoPow32)},
+				failures: 0,
+				wantTrip: false,
+				why: "this is the narrowing defect. uint32(4294967296) is 0, and the predicate was " +
+					"`TotalFailures >= 0` — true on the zeroth failure, so the breaker opened before " +
+					"the first request and rejected every S3 operation for the life of the mount. The " +
+					"`<= 0` guard it carried passed: the value is positive. It just does not fit",
+			},
+			tripCase{
+				name:     "a threshold of 2^32 does not trip on many failures either",
+				cfg:      s3.CircuitBreakerConfig{Enabled: true, FailureThreshold: int(twoPow32)},
+				failures: 1_000_000,
+				wantTrip: false,
+				why: "clamped to unreachable, which is the honest reading: no count of failures can " +
+					"reach 2^32 when circuit.Counts.TotalFailures is a uint32",
+			},
+			tripCase{
+				name:     "a threshold of 2^32+1 does not trip on one failure",
+				cfg:      s3.CircuitBreakerConfig{Enabled: true, FailureThreshold: int(twoPow32Plus)},
+				failures: 1,
+				wantTrip: false,
+				why: "the quieter half of the same defect: uint32(4294967297) is 1, so this configured " +
+					"a threshold of one failure. Not obviously broken — just not what was asked for, " +
+					"which is the version nobody reports",
+			},
+			tripCase{
+				name:     "the largest reachable threshold still trips when reached",
+				cfg:      s3.CircuitBreakerConfig{Enabled: true, FailureThreshold: int(maxReachable)},
+				failures: int(maxReachable),
+				wantTrip: true,
+				why: "MaxUint32 is inside the clamp, not above it. An off-by-one in the bound would " +
+					"turn the largest honest threshold into a predicate that never trips",
+			},
+		)
+	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -324,8 +386,7 @@ func TestCircuitBreakerConfigReachesTheBreaker(t *testing.T) {
 					"count is silently replaced by the package default")
 			}
 
-			//nolint:gosec // small test values
-			got := fn(circuit.Counts{TotalFailures: uint32(tc.failures)})
+			got := fn(circuit.Counts{TotalFailures: uint32(tc.failures)}) // #nosec G115 -- table values are small literals
 			if got != tc.wantTrip {
 				t.Errorf("with %d failures and threshold %d, ReadyToTrip = %v, want %v. %s",
 					tc.failures, tc.cfg.FailureThreshold, got, tc.wantTrip, tc.why)

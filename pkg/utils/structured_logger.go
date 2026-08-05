@@ -272,7 +272,10 @@ func (sl *StructuredLogger) formatText(entry LogEntry) string {
 			first = false
 			sb.WriteString(k)
 			sb.WriteString("=")
-			sb.WriteString(fmt.Sprintf("%v", v)) //nolint:staticcheck
+			// Fprintf rather than WriteString(Sprintf(...)): strings.Builder.Write never returns an
+			// error, so there is nothing here for errcheck to want, and this drops the intermediate
+			// string.
+			fmt.Fprintf(&sb, "%v", v)
 		}
 		sb.WriteString("}")
 	}

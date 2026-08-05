@@ -2332,7 +2332,7 @@ func checkFullyDecoded(metadata map[string]string, data []byte, offset, size int
 		// HeadObject warns and falls back to ContentLength for a malformed value; matching that
 		// here keeps the two from disagreeing about the same object.
 		//
-		// nolint:nilerr // parseErr is not this function's error to report. An unparseable
+		//nolint:nilerr // parseErr is not this function's error to report. An unparseable
 		// objectfs-original-size means the integrity check has no expected length to compare
 		// against, not that the object failed the check — returning parseErr would refuse to read
 		// an object over a malformed metadata value that HeadObject tolerates.

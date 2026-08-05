@@ -124,10 +124,16 @@ func RegionIsResolvable(region string) bool {
 		path = filepath.Join(home, ".aws", "config")
 	}
 
-	// nolint:gosec // G703 reads AWS_CONFIG_FILE as a tainted path. It is tainted by the operator of
-	// this process, which is the AWS SDK's own contract for that variable — and this only stats it.
-	// Nothing here opens, reads, or writes the path, so there is no traversal to perform.
-	info, err := os.Stat(path)
+	// G703 reads AWS_CONFIG_FILE as a tainted path. It is tainted by the operator of this process,
+	// which is the AWS SDK's own contract for that variable — and this only stats it. Nothing here
+	// opens, reads, or writes the path, so there is no traversal to perform.
+	//
+	// G703 exists only in the standalone gosec, not in the version golangci-lint bundles: probed on a
+	// two-line program reading os.Getenv, standalone reports G703 and G304 and golangci-lint reports
+	// G304 alone. So the //nolint:gosec that used to be here could not have suppressed anything even
+	// written correctly — golangci-lint never had the finding, and the standalone run does not read
+	// //nolint. #nosec is the directive that reaches the run that reports it.
+	info, err := os.Stat(path) // #nosec G703 -- AWS_CONFIG_FILE is operator-supplied by the SDK's own contract; stat only
 
 	return err == nil && !info.IsDir() && info.Size() > 0
 }
