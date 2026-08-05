@@ -46,7 +46,7 @@
   "homepage": "https://github.com/scttfrdmn/objectfs/tree/main/sdks/javascript",
   "dependencies": {
     "axios": "^1.4.0",
-    "eventemitter3": "^4.0.7",
+    "eventemitter3": "^5.0.4",
     "ws": "^8.13.0",
     "yaml": "^2.3.0"
   },
