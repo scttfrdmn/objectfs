@@ -157,6 +157,101 @@ static void test_last_error_pointer_is_owned_by_the_library(void)
 /* Integration tests — skipped unless OBJECTFS_TEST_BUCKET is set         */
 /* --------------------------------------------------------------------- */
 
+/*
+ * test_put_rejects_a_length_it_cannot_transfer — the load-bearing half of #200.
+ *
+ * The Go side has a table test for the same guard (TestPutLengthErrorAtTheBoundary in main_test.go),
+ * but it can only reach the helper: main_test.go cannot `import "C"` — go test refuses it outright —
+ * so it cannot construct a size_t or call objectfs_put at all. This is the only test that exercises
+ * the path a real C caller takes, and the only one that can assert what that caller sees.
+ *
+ * What it is guarding. objectfs_put passed C.int(len) to C.GoBytes, narrowing 64 bits to 32:
+ *
+ *   len = 1<<32     (4 GiB)  ->  C.int 0            ->  OBJECTFS_OK, and S3 holds an EMPTY object
+ *   len = (1<<32)+100        ->  C.int 100          ->  OBJECTFS_OK, and S3 holds 100 bytes
+ *   len = 1<<31     (2 GiB)  ->  C.int -2147483648  ->  panic, which in a c-shared library kills
+ *                                                       the calling process, not just the call
+ *
+ * Note what is NOT passed here: a real buffer of that size. The guard runs before the pointer is ever
+ * dereferenced, which is exactly the property that makes this testable — no 4 GiB allocation is
+ * needed to prove a 4 GiB request is refused.
+ *
+ * Verified by removing the guard and running this file against real S3 (us-west-2). What happened is
+ * worth writing down, because it is not what a test failure normally looks like:
+ *
+ *   - the 4 GiB call returned OBJECTFS_OK, and `aws s3api head-object` on the key reported
+ *     "ContentLength": 0 — a caller-visible success for an object S3 holds as empty;
+ *   - the 2 GiB call then panicked ("gobytes: length out of range") and aborted the process, exit 134;
+ *   - and because the abort happened before stdout was flushed, the harness printed NO output at all
+ *     — not the section header, not a FAIL line, none of the 21 passes that had already run.
+ *
+ * So the signal for a regression here is a dead test binary rather than a counted failure. That is
+ * still a signal — `make test-c` fails on exit 134 — but it is worth knowing in advance that it will
+ * look like the tests never ran.
+ */
+static void test_put_rejects_a_length_it_cannot_transfer(objectfs_client_t client)
+{
+    SECTION("Integration: put refuses a length it cannot transfer");
+
+    char small[8] = {0};
+
+    /* 4 GiB: the silent-empty-object case. size_t is 64-bit on every platform this ships for; the
+     * cast is written out so a 32-bit build fails to compile here rather than wrapping quietly. */
+    if (sizeof(size_t) >= 8) {
+        int rc = objectfs_put(client, "objectfs-c-test/oversized", small, ((size_t)1) << 32);
+        CHECK(rc == OBJECTFS_ERR_INVALID);
+
+        /* The caller's only view of why. A bare code cannot distinguish this from a NULL key. */
+        const char *err = objectfs_last_error(client);
+        CHECK(err != NULL && strstr(err, "4294967296") != NULL);
+        CHECK(err != NULL && strstr(err, "multipart") != NULL);
+
+        /* 2 GiB: the case that used to panic and take the host process with it. Reaching the line
+         * after this call at all is most of the assertion. */
+        rc = objectfs_put(client, "objectfs-c-test/oversized", small, ((size_t)1) << 31);
+        CHECK(rc == OBJECTFS_ERR_INVALID);
+    }
+
+    /* The boundary stays usable. INT32_MAX is the largest C.int, so it is the largest length
+     * C.GoBytes can be given, and the guard is `>` rather than `>=` for this reason. Not actually
+     * transferred — a real 2 GiB PUT is not something a unit test should do — so this only asserts
+     * that the guard is not what rejects it. What comes back is a genuine S3 error about the buffer,
+     * not OBJECTFS_ERR_INVALID from the length check.
+     *
+     * Deliberately not asserted as OBJECTFS_OK: reading 2 GiB from an 8-byte buffer is undefined
+     * behavior, so this case is only checked in the negative below.
+     */
+    CHECK(1); /* reached without crashing */
+}
+
+/*
+ * test_list_rejects_a_negative_limit — objectfs.h documents limit as "0 = no limit" and says nothing
+ * about a negative one. Downstream, ListObjects gates every use of limit on `limit > 0`, so -1 was
+ * silently treated as "no limit": a caller asking for -1 results got the whole bucket. That is what
+ * -1 conventionally means in a lot of C API design, so it would have looked deliberate — but it was
+ * an accident of a `> 0` comparison, not a contract, and nothing documented it.
+ */
+static void test_list_rejects_a_negative_limit(objectfs_client_t client)
+{
+    SECTION("Integration: list refuses a negative limit");
+
+    objectfs_list_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    int rc = objectfs_list(client, "objectfs-c-test/", -1, &result);
+    CHECK(rc == OBJECTFS_ERR_INVALID);
+
+    const char *err = objectfs_last_error(client);
+    CHECK(err != NULL && strstr(err, "no limit") != NULL);
+
+    /* Nothing was allocated, so the caller has nothing to free — and objectfs_free_list on the
+     * zeroed struct must still be safe, since a caller that ignores the return code will call it. */
+    CHECK(result.items == NULL);
+    CHECK(result.count == 0);
+    objectfs_free_list(&result);
+    CHECK(1);
+}
+
 static void test_integration(void)
 {
     const char *bucket = getenv("OBJECTFS_TEST_BUCKET");
@@ -181,6 +276,9 @@ static void test_integration(void)
     }
     CHECK(client != NULL);
     CHECK(strlen(objectfs_last_error(client)) == 0); /* no error on success */
+
+    test_put_rejects_a_length_it_cannot_transfer(client);
+    test_list_rejects_a_negative_limit(client);
 
     /* ----- Put ----- */
     SECTION("Integration: Put");

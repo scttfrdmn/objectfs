@@ -408,6 +408,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone and reported no offenders while a deliberate violation sat in `internal/awsrates/offerfile`.
   It now runs `go list` from the module root. The mutation also needs `-count=1`: the violation lives
   in another package, so the test binary is byte-identical and `go test` serves a cached pass.
+- **`objectfs_put` in the C SDK no longer narrows a `size_t` length to a `C.int`, which could store
+  an empty object and report success** ([#200]).
+
+  `objectfs_put` takes a `size_t` and passed `C.int(length)` to `C.GoBytes`. `size_t` is 64 bits on
+  every platform this library ships for and `C.int` is 32, so the length was truncated. Measured in a
+  standalone cgo probe rather than reasoned about, because the same narrowing fails three different
+  ways:
+
+  ```text
+  length = 1<<32     (4 GiB)  ->  C.int 0            ->  len(goData) == 0
+  length = (1<<32)+100        ->  C.int 100          ->  len(goData) == 100
+  length = 1<<31     (2 GiB)  ->  C.int -2147483648  ->  panic: gobytes: length out of range
+  ```
+
+  The first is the dangerous one. A caller hands over 4 GiB, `objectfs_put` returns `OBJECTFS_OK`,
+  and S3 holds an **empty object**. Nothing reports a short write, because from Go's side there was
+  no short write — the length arrived as zero. Confirmed end to end against real S3 by removing the
+  new guard and running `tests/test_basic.c`: the call returned `OBJECTFS_OK` and `aws s3api
+  head-object` on the key reported `"ContentLength": 0`. The third case is worse in a shared library
+  than it would be in a program: a panic in a `c-shared` build tears down the host process, so a C
+  caller loses unrelated state of its own to one bad argument. In the same run it aborted the test
+  binary with exit 134 *before stdout was flushed*, so the harness printed nothing at all — not the
+  21 assertions that had already passed.
+
+  A length that will not survive the conversion is now refused with `OBJECTFS_ERR_INVALID` and an
+  `objectfs_last_error` message naming both the length and the limit, rather than converted and used.
+  The bound is `math.MaxInt32` because that is what `C.GoBytes` can represent, not a policy about
+  object size; the comparison is `>` rather than `>=` so the boundary itself stays usable.
+
+- **`objectfs_list` rejects a negative `limit` instead of treating it as "no limit"** ([#200]).
+
+  `objectfs.h` documents `limit` as "max results (0 = no limit)" and says nothing about a negative
+  one. Downstream, `ListObjects` gates every use of `limit` on `limit > 0`, so `-1` meant "return the
+  whole bucket" — which is what `-1` conventionally means in a good deal of C API design, and so
+  would have looked deliberate, but it was an accident of a `> 0` comparison and nothing documented
+  it. The `C.int` → `int` conversion itself was never unsafe; it widens on every target this builds
+  for.
+
+- **`security.yml` back-fills the cgo SARIF path instead of dropping the findings, and the audit
+  those findings needed is done** ([#200]).
+
+  gosec reported three G115 integer conversions in `sdks/c/main.go` with `"artifactLocation": {}`,
+  which GitHub's SARIF ingester rejects — and it fails the *whole* upload, taking the other ~45
+  findings with it. This workflow dropped them, on the stated grounds that gosec "cannot map the
+  location back to a real file".
+
+  That was half wrong, and the wrong half was the useful one. **The line numbers are exactly right.**
+  cgo emits `//line` directives into the file it generates, so each reported line is a real
+  `main.go` line — verified by inserting eight blank lines after the import block, which moved all
+  three findings by exactly eight. Only the path is absent, and `sdks/c` is the only cgo package in
+  the module, so there is one path it can be. The filter now sets it, scoped to results that have a
+  region but no URI so a genuinely malformed location elsewhere is still dropped rather than silently
+  relabelled; verified against the real 48-result SARIF plus three injected negatives (no region,
+  no locations, `startLine: 0`), all three of which are still dropped.
+
+  This matters because the alternative was measured and it was not "reviewed somewhere else":
+  golangci-lint discards the same findings for the same reason, and says so in its own log —
+  `runner/invalid_issue: issue related to file <go-build cache path> is skipped`. Three unreviewed
+  integer conversions across a C ABI is precisely how the `objectfs_put` defect above survived.
+
+  Two further findings from the same investigation, both stated in `sdks/c/main.go`'s header comment
+  so they are not rediscovered:
+
+  - **No gosec suppression directive works inside a cgo package.** Probed with four placements —
+    above the call, first of a comment block, last of a block, and trailing the call. In a pure-Go
+    package all four suppress; in a cgo package none do, and gosec reports `nosec: 0`, meaning it
+    recognized no directive at all. cgo rewrites each `C.f(...)` call into an inline closure carrying
+    `/*line :N:C*/` directives, which collapses the call and any nearby comment onto one synthetic
+    position. The `#nosec` and `//nolint:gosec` annotations added during this work were therefore
+    removed again in favour of plain comments that do not claim to be doing something.
+  - **`CGO_ENABLED=0 gosec ./sdks/c/...`, which #200 suggested might resolve the paths, analyses
+    zero files.** The package cannot build without cgo, so its clean report is a vacuous pass rather
+    than a fix.
+
+  Two `errcheck` findings in the same file were also fixed: `val.(*entry)` was a bare type assertion
+  in `getEntry` and `objectfs_free`. Nothing but that file writes to the `sync.Map`, so neither could
+  fail today — but a bare assertion converts any future violation into a panic, and a panic in a
+  `c-shared` library takes the host process down rather than just the call.
 
 - **`internal/fuse` compiles for 32-bit targets again, and `linux/armv7` is back in the release
   matrix** ([#198]).
