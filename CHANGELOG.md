@@ -338,6 +338,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`make build` no longer passes three linker flags that do nothing** ([#353]).
+
+  `Makefile`'s `LDFLAGS` injected `-X main.Version`, `-X main.Commit` and `-X main.BuildTime`, and none
+  of those symbols exist. `cmd/objectfs/main.go` declares the version as an untyped *constant*, which
+  the linker cannot rewrite, so all three were accepted and silently ignored:
+
+  ```text
+  $ go build -ldflags="-s -w -X main.Version=FAKE-VERSION" -o /tmp/probe ./cmd/objectfs
+  $ /tmp/probe --version
+  objectfs version 0.11.0
+  ```
+
+  Every target sharing that variable — `build`, `build-all`, `build-linux`, `build-darwin`, `install`
+  and `package` — passed the dead flags. `OBJECTFS.md`'s build-configuration example showed the same
+  injection, and its three `go build` lines targeted `.` rather than `./cmd/objectfs`, which is not a
+  main package; both are corrected.
+
+  Dropped rather than made real, which is the choice `.github/workflows/release.yml` already made and
+  explains at its build step: the constant is the documented single authority for the version, so the
+  release asserts that it and the git tag agree instead of overwriting it at link time and leaving the
+  source disagreeing with the shipped artifact. `VERSION`, `COMMIT` and `BUILD_TIME` are still real
+  Makefile variables — `make version` prints them and the packaging targets name archives with them.
+  They simply do not reach the binary, and nothing now claims they do.
+
+  Whether the binary should report its commit and build time at all is a separate question: those two
+  have no constant to disagree with, so there is a real argument for injecting them — but `--version`
+  does not print them today, so injecting them would produce values nothing displays.
+
 - **`internal/fuse` compiles for 32-bit targets again, and `linux/armv7` is back in the release
   matrix** ([#198]).
 
@@ -401,8 +429,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform_unsupported.go` fails deliberately. It now lists what `release.yml` publishes, notes the
   386 canary, and says why Windows is absent. Its local-build snippet also passed
   `-ldflags "-X main.Version=$VERSION"`, which does nothing: `version` is a `const` and the linker
-  cannot rewrite a constant. Two other copies of that dead injection survive, in `Makefile:11` and
-  `OBJECTFS.md:613`, and are filed rather than fixed here ([#353]).
+  cannot rewrite a constant. Two other copies of that dead injection were in `Makefile` and
+  `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
+  ([#353]).
 
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200

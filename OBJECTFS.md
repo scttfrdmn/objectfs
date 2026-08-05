@@ -610,18 +610,24 @@ make build-all-platforms
 ```makefile
 # Makefile configuration
 VERSION := $(shell git describe --tags --always)
-LDFLAGS := -ldflags="-s -w -X main.Version=$(VERSION)"
+LDFLAGS := -ldflags="-s -w"
 TAGS := release,netgo
 
 build-production:
-	CGO_ENABLED=0 GOOS=linux go build $(LDFLAGS) -tags $(TAGS) -o objectfs .
+	CGO_ENABLED=0 GOOS=linux go build $(LDFLAGS) -tags $(TAGS) -o objectfs ./cmd/objectfs
 
 build-debug:
-	go build -race -tags debug -o objectfs-debug .
+	go build -race -tags debug -o objectfs-debug ./cmd/objectfs
 
 build-profile:
-	go build -tags profile -o objectfs-profile .
+	go build -tags profile -o objectfs-profile ./cmd/objectfs
 ```
+
+`LDFLAGS` carries no `-X`. This example used to inject `main.Version`, and there is no such symbol:
+`cmd/objectfs/main.go` declares the version as an untyped constant, which the linker cannot rewrite,
+so the flag was accepted and ignored. The constant is the single authority for the version — the
+release workflow asserts that it and the git tag agree rather than injecting a value the source would
+then disagree with. `VERSION` remains useful for naming artifacts.
 
 ### Environment Setup
 

@@ -8,7 +8,18 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%d_%I:%M:%S%p')
 GO_VERSION := $(shell go version | cut -d ' ' -f 3)
 
 # Build flags
-LDFLAGS := -ldflags="-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)"
+#
+# No -X: main.Version, main.Commit and main.BuildTime do not exist. cmd/objectfs/main.go declares an
+# untyped `version` *constant*, which the linker cannot rewrite, so all three flags were accepted and
+# silently ignored — `-X main.Version=FAKE` builds a binary that still reports the constant. Every
+# target below shares this variable, so that was six targets passing three dead symbols.
+#
+# The constant stays the single authority, which is what CLAUDE.md asks for and what
+# .github/workflows/release.yml already does: it asserts the tag and the constant agree rather than
+# injecting a version the source then disagrees with. VERSION, COMMIT and BUILD_TIME above are still
+# real — `make version` prints them and the packaging targets name archives with them; they just do
+# not reach the binary.
+LDFLAGS := -ldflags="-s -w"
 TAGS := release,netgo
 DEBUG_TAGS := debug
 RACE_FLAGS := -race
