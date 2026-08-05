@@ -151,12 +151,13 @@ type FUSEConfig struct {
 // metrics one failed in the direction that leaves a port open. There is no `0` in an address, and each
 // listener already has an `enabled` flag next to its new `addr` — one way to disable, per listener.
 //
-// global.profile_port is removed rather than wired. It defaulted to 6060 and started nothing; the one
-// pprof server in the tree is pkg/profiling's, which has no importer, also binds every interface, and
-// serves mutating /memory/gc and /memory/free endpoints with no authentication. Binding a third
-// unauthenticated listener inside the change that stops binding two of them was the wrong trade to
-// make on the strength of a boolean nothing read. Tracked as #245, where the profiling package's fate
-// is decided with it.
+// global.profile_port is removed rather than wired, and there is now nothing left for it to have
+// wired. It defaulted to 6060 and started nothing; the only pprof server in the tree was
+// pkg/profiling's, which bound every interface and served mutating /memory/gc and /memory/free with
+// no authentication. Binding a third unauthenticated listener inside the change that stops binding
+// two of them was the wrong trade to make on the strength of a boolean nothing read — and #245
+// resolved the other half by deleting the package, since nothing imported it. Restoring the setting
+// therefore means building the server too, with an authenticated, non-wildcard bind.
 type GlobalConfig struct {
 	LogLevel string `yaml:"log_level"`
 	LogFile  string `yaml:"log_file"`

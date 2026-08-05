@@ -306,6 +306,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`pkg/profiling` and `pkg/memmon`, two memory-monitoring packages nothing imported** ([#245]).
+  2,738 lines across five files, plus `docs/memory-monitoring.md`, its `mkdocs.yml` nav entry, and
+  both `.coverage-floors` entries.
+
+  `pkg/profiling` is the security half. `startPprofServer` built a mux carrying the five standard
+  `net/http/pprof` handlers plus four of its own — `/memory/stats`, `/memory/samples`, `/memory/gc`
+  and `/memory/free` — and served it from `Addr: fmt.Sprintf(":%d", m.config.Port)`. A bare `:port`
+  binds every interface, the last two handlers mutate process state, and there is no authentication
+  anywhere in the package. Nothing in a shipped binary could reach it, because nothing imported it;
+  what made it worth deleting rather than leaving is that it was the thing `global.enable_pprof` and
+  `global.profile_port` would have wired if either setting had ever been honoured. Those two keys were
+  removed in v0.11.0 with the reason recorded as "tracked as #245"; this closes the other end, so
+  restoring the setting now requires building the server it names, with an authenticated bind that
+  is not a wildcard.
+
+  `pkg/memmon` is a near-duplicate of the same idea with the listener left off — `MemoryMonitor`,
+  `Profiler`, alerts, leak detection, per-object tracking. It is not a vulnerability; it is 1,464
+  lines of dead code whose doc page described it as a shipped feature with a Quick Start. Two
+  packages implementing one absent feature is how a reader ends up believing the feature exists.
+
+  Neither had a Go importer outside its own package, verified before and after. `go build ./...` and
+  `go vet ./...` are unchanged by the deletion, which is the whole argument: a package the compiler
+  does not need is a package the documentation should not promise.
+
+  The `.coverage-floors` note about `pkg/memmon`'s 51.0%-or-50.6% flake outlived the package, so its
+  finding was rewritten into the file's header as the general lesson rather than deleted with the
+  entry. The flake was the smaller half — the test it exposed accepted either outcome with
+  `t.Log("No alerts generated (may be normal...)")`, so deleting the branch under test left it green.
+  That is worth keeping regardless of which package it happened in.
+
+[#245]: https://github.com/scttfrdmn/objectfs/issues/245
+
 - **The CargoShip transporter upload path, and the `storage.s3.use_cargoship` key that selected it**
   ([#362]). `PutObject` has one implementation now.
 
