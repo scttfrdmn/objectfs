@@ -48,7 +48,6 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 	cfg.Storage.S3.UseAcceleration = true
 	cfg.Storage.S3.StorageTier = "GLACIER_IR"
 	cfg.Storage.S3.MaxRetries = 7
-	cfg.Storage.S3.UseCargoShip = true
 	cfg.Storage.S3.Multipart = config.MultipartConfig{
 		Threshold:   "48MB",
 		ChunkSize:   "12MB",
@@ -130,15 +129,6 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 			want:  7,
 			why:   "the SDK's per-request attempt limit, passed to config.WithRetryMaxAttempts",
 		},
-		{
-			field: "EnableCargoShipOptimization",
-			got:   got.EnableCargoShipOptimization,
-			want:  true,
-			why: "mapped from use_cargoship. Plumbed only after the Content-Encoding corruption in " +
-				"the CargoShip upload path was fixed: activating this first would have made a latent " +
-				"defect live on every mount that set the key",
-		},
-
 		{
 			field: "MultipartThreshold",
 			got:   got.MultipartThreshold,
@@ -400,7 +390,7 @@ func TestBuildS3ConfigOnDefaultsConstructsAViableBackendConfig(t *testing.T) {
 
 	// The compression split between the two packages is deliberate and easy to "fix" by accident:
 	// internal/config defaults compression off and s3.NewDefaultConfig defaults it on, because the
-	// former serves a mount and the latter serves the Go SDK. Same for use_cargoship.
+	// former serves a mount and the latter serves the Go SDK.
 	if got.Compression.Enabled {
 		t.Error("compression is on in the default mount configuration. It is opt-in: a zstd object " +
 			"is not readable by `aws s3 cp` or boto3, which voids the implicit \"my data is just " +

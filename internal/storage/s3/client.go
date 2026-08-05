@@ -12,8 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
-	cargoships3 "github.com/scttfrdmn/cargoship/pkg/aws/s3"
 
 	"github.com/scttfrdmn/objectfs/internal/network"
 )
@@ -66,7 +64,6 @@ type ClientManager struct {
 	acceleratedClient *s3.Client // Client with Transfer Acceleration enabled
 	standardClient    *s3.Client // Fallback client without acceleration
 	pool              *ConnectionPool
-	transporter       *cargoships3.Transporter
 	config            *Config
 	logger            *slog.Logger
 	networkMonitor    *network.Monitor // Tracks bytes/connections for this client
@@ -198,52 +195,11 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
-	// Initialize CargoShip S3 transporter if enabled
-	var transporter *cargoships3.Transporter
-	if cfg.EnableCargoShipOptimization {
-		// The storage class comes from the configured tier, not from a constant.
-		//
-		// cargoship's Transporter.optimizeStorageClass falls back to its config's StorageClass for an
-		// Archive with no AccessPattern and no RetentionDays, which is every archive ObjectFS builds —
-		// so a hardcoded value here is the class every object is stored under, whatever storage_tier
-		// says. It read StorageClassIntelligentTiering, and CargoShip is on in the shipped defaults,
-		// so `storage_tier: STANDARD_IA` silently stored INTELLIGENT_TIERING: no error, no log, and a
-		// different bill from the one the config describes. Found by asserting the stored class at the
-		// endpoint rather than the value passed in.
-		cargoConfig := awsconfig.S3Config{
-			Bucket:             bucket,
-			StorageClass:       ConvertTierToCargoShipStorageClass(cfg.StorageTier),
-			MultipartThreshold: cfg.MultipartThreshold,   // Use configured threshold
-			MultipartChunkSize: cfg.MultipartChunkSize,   // Use configured chunk size
-			Concurrency:        cfg.MultipartConcurrency, // Use configured concurrency
-		}
-
-		// The KMS key is passed through so objects that *do* go via CargoShip carry the same encryption
-		// as the direct path. It is set only for sse-kms, because that is the only mode CargoShip can
-		// express — its transporter hardcodes the algorithm to aws:kms and has no bucket-key field — and
-		// PutObject diverts around the transporter for anything else. See cargoShipCanEncrypt: setting
-		// the key here for a mode CargoShip cannot honor is what would let an object be stored under an
-		// encryption nobody configured.
-		if cfg.Encryption.Mode == EncryptionModeKMS {
-			cargoConfig.KMSKeyID = cfg.Encryption.KMSKeyID
-		}
-
-		// Use CargoShip's optimized transporter with BBR/CUBIC algorithms
-		// Use accelerated client if available, otherwise use standard
-		transporter = cargoships3.NewTransporter(primaryClient, cargoConfig)
-		logger.Info("CargoShip S3 optimization enabled",
-			"multipart_threshold", cfg.MultipartThreshold,
-			"chunk_size", cfg.MultipartChunkSize,
-			"concurrency", cfg.MultipartConcurrency,
-			"storage_class", cargoConfig.StorageClass)
-	}
-
 	return &ClientManager{
 		client:             primaryClient,
 		acceleratedClient:  acceleratedClient,
 		standardClient:     standardClient,
 		pool:               pool,
-		transporter:        transporter,
 		config:             cfg,
 		logger:             logger,
 		accelerationActive: accelerationActive,
@@ -274,19 +230,9 @@ func (cm *ClientManager) ReturnPooledClient(client *s3.Client) {
 	cm.pool.Put(client)
 }
 
-// GetTransporter returns the CargoShip transporter if available
-func (cm *ClientManager) GetTransporter() *cargoships3.Transporter {
-	return cm.transporter
-}
-
 // GetPool returns the connection pool for statistics
 func (cm *ClientManager) GetPool() *ConnectionPool {
 	return cm.pool
-}
-
-// IsCargoShipEnabled returns whether CargoShip optimization is enabled
-func (cm *ClientManager) IsCargoShipEnabled() bool {
-	return cm.transporter != nil
 }
 
 // HealthCheck verifies the client connection

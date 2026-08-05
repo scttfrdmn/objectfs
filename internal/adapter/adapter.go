@@ -457,8 +457,6 @@ func (a *Adapter) buildS3Config() *s3.Config {
 
 		UseAccelerate: s3cfg.UseAcceleration,
 
-		EnableCargoShipOptimization: s3cfg.UseCargoShip,
-
 		MultipartThreshold: a.sizeOrDefault("storage.s3.multipart.threshold",
 			s3cfg.Multipart.Threshold, defaults.MultipartThreshold),
 		MultipartChunkSize: a.sizeOrDefault("storage.s3.multipart.chunk_size",

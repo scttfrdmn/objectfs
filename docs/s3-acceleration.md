@@ -132,26 +132,19 @@ if metrics.Requests > 0 {
 }
 ```
 
-### Integration with CargoShip
+### There is no second upload path to fall back from
 
-ObjectFS uses CargoShip for optimized uploads when available. The acceleration
-feature integrates seamlessly:
+Until v0.15.0 this section described a three-level upload priority, with CargoShip's transporter
+first and acceleration as its fallback. That path was removed in #362 — it could not carry a
+`Content-Encoding`, the configured encryption headers, a per-object storage class, or a
+`Content-Type`, and it was unreachable above `multipart.threshold` in the first place.
 
-**Upload Priority:**
-
-1. CargoShip optimization (primary) — used for uploads when enabled and the encryption mode
-   is one CargoShip can express
-2. S3 Transfer Acceleration (fallback) - Uses acceleration if CargoShip fails
-3. Standard S3 endpoint (final fallback)
-
-**Example Flow:**
+**Upload path:**
 
 ```
 PutObject Request
     ↓
-CargoShip Upload (if available)
-    ↓ (if fails)
-Accelerated Endpoint
+Accelerated Endpoint (if use_accelerate)
     ↓ (if acceleration error)
 Standard S3 Endpoint
 ```
@@ -374,11 +367,6 @@ go test -bench='BenchmarkGetObject' ./internal/storage/s3/
    - Acceleration adds $0.04-0.08 per GB transfer
    - Evaluate cost vs time savings for your use case
    - Review AWS Transfer Acceleration pricing
-
-6. **Combine with CargoShip optimization:**
-   - Leave CargoShip enabled alongside acceleration
-   - Let ObjectFS choose optimal path automatically
-   - Benefits stack for maximum performance
 
 ## API Reference
 

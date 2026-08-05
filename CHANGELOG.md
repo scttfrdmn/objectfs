@@ -270,6 +270,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The CargoShip transporter upload path, and the `storage.s3.use_cargoship` key that selected it**
+  ([#362]). `PutObject` has one implementation now.
+
+  The branch was removed rather than given a fourth bypass. A `cargoships3.Archive` cannot express what
+  a `PutObjectInput` expresses, and three bypasses in front of it already said so in long comments: it
+  has no field for a `Content-Encoding` (uploading a compressed object through it stored the encoding as
+  *user metadata*, so `GetObject` saw an empty encoding, skipped decompression, and returned a raw zstd
+  frame while `HeadObject` still reported the uncompressed size), no representation for SSE-S3 or bucket
+  keys, and no per-object storage class — `optimizeStorageClass` ignores `Archive.StorageClass` for every
+  archive ObjectFS builds and substitutes the transporter's construction-time default.
+
+  **The fourth was not bypassed, and is the one this issue found.** `Content-Type` was written into
+  `Archive.Metadata` under a `"content-type"` key. That is S3 user metadata, not the header. Measured on
+  `file.txt` through the endpoint: the transporter path stored `application/octet-stream` and the direct
+  path stored `text/plain`, with `detectContentType` having computed the right value one line earlier in
+  both cases. Since the transporter was reachable only *below* `multipart.threshold`, that was every
+  object under 32 MiB on the shipped defaults — which is every object a FUSE mount writes.
+
+  **Nothing was on the other side of the ledger.** The transporter was unreachable at or above the
+  threshold, because `PutObject` returns into `putObjectMultipart` first and that function never
+  referenced a transporter (grep count: zero). So its 64 MiB *multipart* `BufferProvider` was installed
+  on a path that only ever performed single-part uploads — an upload shape a mount cannot produce. That
+  buffer lives in a `sync.Pool`, which is cleared at every GC cycle, so it was not amortized across
+  uploads but re-allocated on the first PUT after each collection: 20 PUTs with no GC between them
+  allocated 3.4 MiB total, and 20 PUTs with a forced GC after each allocated **837.2 MiB**. It also
+  inverted `GOMEMLIMIT` — tightening the limit from 768 MiB to 384 MiB took 300 difftest iterations from
+  751 MiB of total allocation over 4 GCs to **3570 MiB over 28**, because a tighter limit means more pool
+  clears. With the transporter off, both limits gave 285 MiB.
+
+  Throughput gave nothing back either. 30 PUTs per size against the in-process endpoint: 4 KiB 327µs on
+  vs 243µs off (**35% slower**), 1 MiB 2.851ms vs 2.624ms (8% slower), 8 MiB 20.531ms vs 20.786ms (a
+  wash). A local endpoint is not evidence against BBR over a real network — but the sizes where BBR could
+  matter never reached the branch.
+
+  It also stamped four metadata keys on every small object that no caller asked for, two of them
+  structurally empty: `cargoship-original-size` was always `"0"` and `cargoship-compression-type` always
+  `""` (ObjectFS never set the `Archive` fields they come from), plus `cargoship-created-by` and
+  `cargoship-upload-time` — a timestamp, so two otherwise-identical objects differed. User metadata is
+  billed, returned on every `HEAD`, and part of what makes two objects compare unequal.
+
+  **The config key is removed rather than deprecated**, and the loader decodes strictly, so a file still
+  setting `storage.s3.use_cargoship` now fails at startup naming the key. Same reasoning as the removed
+  `security.encryption` booleans and the `cost_optimization` block: an operator who set it did so
+  believing their uploads took a different path, and an error is the one way that belief gets
+  re-examined. `s3.Config.EnableCargoShipOptimization`, `ClientManager.GetTransporter`,
+  `ClientManager.IsCargoShipEnabled`, and `cargoShipCanEncrypt` are gone with it.
+  `ConvertTierToCargoShipStorageClass` stays — it has its own unit tests and CargoShip's `awsconfig`
+  types are still used for tier mapping.
+
+  Three tests in `internal/storage/s3/upload_path_test.go` now pin the boundary rather than the path:
+  the detected `Content-Type` reaches the stored object on both sides of the multipart threshold, the
+  stored user-metadata key set is exactly what ObjectFS wrote, and caller-supplied metadata survives.
+  All three were written to fail first and verified by mutation — dropping `ContentType` from the input,
+  stamping a foreign key, and dropping the caller's keys each fail the corresponding test.
+  `testaws.TestServer.ObjectContentType` was added to read the header specifically, kept separate from
+  `ObjectMetadata` so a test cannot satisfy itself with the wrong one, since confusing the two is the
+  defect.
+
+  **One test in this change nearly shipped passing for the wrong reason**, which is worth recording. The
+  first draft set `MultipartChunkSize` to 1 MiB — below the AWS uploader's 5 MiB part minimum — so every
+  CargoShip upload failed with `part size must be at least 5242880 bytes`, fell back to the direct path,
+  and the direct path set the header correctly. The test was green against the broken code. It was caught
+  by reading the `CargoShip optimization failed, falling back to standard S3` warning in the output of a
+  run that was supposed to be failing.
+
 - **`tests/posix_test.go`, `tests/integration/`, and `pkg/optimization` — three suites and a package
   that had never compiled, run, or been imported** ([#197], [#240]).
 
@@ -408,6 +473,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone and reported no offenders while a deliberate violation sat in `internal/awsrates/offerfile`.
   It now runs `go list` from the module root. The mutation also needs `-count=1`: the violation lives
   in another package, so the test binary is byte-identical and `go test` serves a cached pass.
+- **`make build` no longer passes three linker flags that do nothing** ([#353]).
+
+  `Makefile`'s `LDFLAGS` injected `-X main.Version`, `-X main.Commit` and `-X main.BuildTime`, and none
+  of those symbols exist. `cmd/objectfs/main.go` declares the version as an untyped *constant*, which
+  the linker cannot rewrite, so all three were accepted and silently ignored:
+
+  ```text
+  $ go build -ldflags="-s -w -X main.Version=FAKE-VERSION" -o /tmp/probe ./cmd/objectfs
+  $ /tmp/probe --version
+  objectfs version 0.11.0
+  ```
+
+  Every target sharing that variable — `build`, `build-all`, `build-linux`, `build-darwin`, `install`
+  and `package` — passed the dead flags. `OBJECTFS.md`'s build-configuration example showed the same
+  injection, and its three `go build` lines targeted `.` rather than `./cmd/objectfs`, which is not a
+  main package; both are corrected.
+
+  Dropped rather than made real, which is the choice `.github/workflows/release.yml` already made and
+  explains at its build step: the constant is the documented single authority for the version, so the
+  release asserts that it and the git tag agree instead of overwriting it at link time and leaving the
+  source disagreeing with the shipped artifact. `VERSION`, `COMMIT` and `BUILD_TIME` are still real
+  Makefile variables — `make version` prints them and the packaging targets name archives with them.
+  They simply do not reach the binary, and nothing now claims they do.
+
+  Whether the binary should report its commit and build time at all is a separate question: those two
+  have no constant to disagree with, so there is a real argument for injecting them — but `--version`
+  does not print them today, so injecting them would produce values nothing displays.
 - **`objectfs_put` in the C SDK no longer narrows a `size_t` length to a `C.int`, which could store
   an empty object and report success** ([#200]).
 
@@ -550,12 +642,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform_unsupported.go` fails deliberately. It now lists what `release.yml` publishes, notes the
   386 canary, and says why Windows is absent. Its local-build snippet also passed
   `-ldflags "-X main.Version=$VERSION"`, which does nothing: `version` is a `const` and the linker
-  cannot rewrite a constant. Two other copies of that dead injection survive, in `Makefile:11` and
-  `OBJECTFS.md:613`, and are filed rather than fixed here ([#353]).
+  cannot rewrite a constant. Two other copies of that dead injection were in `Makefile` and
+  `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
+  ([#353]).
 
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
+[#362]: https://github.com/scttfrdmn/objectfs/issues/362
 
 - **Every build tag is compiled in CI, and the two tagged files that had stopped compiling now
   compile** ([#240], [#197]).

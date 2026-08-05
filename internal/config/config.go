@@ -592,16 +592,17 @@ type S3Config struct {
 	// nine requests.
 	MaxRetries int `yaml:"max_retries"`
 
-	// UseCargoShip routes uploads through the CargoShip transporter, which does its own
-	// multipart chunking and congestion control.
+	// `use_cargoship` was removed in v0.15.0 along with the upload path it selected (#362), and the
+	// loader is strict, so a file still setting it fails at startup naming the key — the same
+	// reasoning as the removed encryption booleans and the cost-optimization block above.
 	//
-	// Off by default, and deliberately different from internal/storage/s3.NewDefaultConfig's true —
-	// the same split as Compression, which is off here and on there. That constructor serves the Go
-	// SDK, where the caller has chosen the S3 backend explicitly; this file serves a mount, where the
-	// conservative path is the one the filesystem has the most test coverage of. Until v0.10.1 the
-	// flag was unreachable from a config file at all, so leaving it off preserves what mounts
-	// actually did rather than switching every deployment's write path on upgrade.
-	UseCargoShip bool `yaml:"use_cargoship"`
+	// The setting selected a second PutObject implementation that could not carry a Content-Encoding,
+	// the configured encryption headers, a per-object storage class, or a Content-Type; three of those
+	// had already been bypassed and the fourth was silently storing every small object as
+	// application/octet-stream. It was also unreachable above `multipart.threshold`, so the 64 MiB
+	// buffer it installed served an upload shape a mount cannot produce. There is one upload path now
+	// and nothing to select, so the key names no choice rather than naming a choice that no longer
+	// exists.
 
 	// Multipart controls when an upload is split into parts and how those parts are sent.
 	Multipart MultipartConfig `yaml:"multipart"`
@@ -709,8 +710,6 @@ func NewDefault() *Configuration {
 				ForcePathStyle:  false,
 				StorageTier:     awsname.StorageClassStandard,
 				MaxRetries:      3,
-				// Off, unlike internal/storage/s3.NewDefaultConfig — see the field comment.
-				UseCargoShip: false,
 				Multipart: MultipartConfig{
 					Threshold:   "32MB",
 					ChunkSize:   "16MB",
@@ -723,9 +722,9 @@ func NewDefault() *Configuration {
 				// the whole object, since a compression frame cannot be sliced. Opt in when the
 				// tradeoff is wanted.
 				//
-				// Off here and on in internal/storage/s3.NewDefaultConfig, the same split as
-				// UseCargoShip and for the same reason: that constructor serves the Go SDK, where the
-				// caller chose the S3 backend explicitly, and this file serves a mount.
+				// Off here and on in internal/storage/s3.NewDefaultConfig, because that constructor
+				// serves the Go SDK, where the caller chose the S3 backend explicitly, and this file
+				// serves a mount.
 				//
 				// The algorithm is named even though compression is disabled, so that flipping
 				// Enabled to true does not also have to supply one. zstd/3/4KB matches what

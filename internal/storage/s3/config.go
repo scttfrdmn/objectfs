@@ -54,10 +54,6 @@ type Config struct {
 	UseAccelerate bool `yaml:"use_accelerate"`
 	UseDualStack  bool `yaml:"use_dual_stack"`
 
-	// EnableCargoShipOptimization routes uploads through the CargoShip transporter, which does its
-	// own multipart chunking and congestion control.
-	EnableCargoShipOptimization bool `yaml:"enable_cargoship_optimization"`
-
 	// Multipart upload configuration
 	MultipartThreshold   int64 `yaml:"multipart_threshold"`   // Size threshold for multipart uploads (bytes)
 	MultipartChunkSize   int64 `yaml:"multipart_chunk_size"`  // Chunk size for multipart uploads (bytes)
@@ -472,15 +468,14 @@ func NewDefaultConfig() *Config {
 			FailureThreshold: 0,
 			Timeout:          30 * time.Second,
 		},
-		EnableCargoShipOptimization: true,
-		MultipartThreshold:          32 * 1024 * 1024, // 32MB - trigger multipart for larger files
-		MultipartChunkSize:          16 * 1024 * 1024, // 16MB - optimal chunk size for performance
-		MultipartConcurrency:        8,                // Match pool size for concurrent uploads
-		ParallelReadThreshold:       64 * 1024 * 1024, // 64MB - fan out reads above this size
-		ReadChunkSize:               defaultReadChunkSize,
-		ParallelReadConcurrency:     0,                 // 0 = inherit MultipartConcurrency
-		StorageTier:                 TierStandard,      // Default to Standard tier
-		TierConstraints:             TierConstraints{}, // Use tier defaults
+		MultipartThreshold:      32 * 1024 * 1024, // 32MB - trigger multipart for larger files
+		MultipartChunkSize:      16 * 1024 * 1024, // 16MB - optimal chunk size for performance
+		MultipartConcurrency:    8,                // Match pool size for concurrent uploads
+		ParallelReadThreshold:   64 * 1024 * 1024, // 64MB - fan out reads above this size
+		ReadChunkSize:           defaultReadChunkSize,
+		ParallelReadConcurrency: 0,                 // 0 = inherit MultipartConcurrency
+		StorageTier:             TierStandard,      // Default to Standard tier
+		TierConstraints:         TierConstraints{}, // Use tier defaults
 		Compression: CompressionConfig{
 			Enabled:   true,
 			Algorithm: "zstd",

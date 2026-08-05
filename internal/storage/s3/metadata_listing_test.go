@@ -191,7 +191,6 @@ func TestSetObjectMetadataPreservesStorageClass(t *testing.T) {
 	backend := ts.Backend(func(cfg *s3.Config) {
 		cfg.StorageTier = s3.TierStandardIA
 		cfg.Compression.Enabled = false
-		cfg.EnableCargoShipOptimization = false
 	})
 	ctx := context.Background()
 
