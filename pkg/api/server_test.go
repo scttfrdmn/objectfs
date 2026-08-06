@@ -531,7 +531,7 @@ func BenchmarkHandleHealth(b *testing.B) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		w := httptest.NewRecorder()
 		server.handleHealth(w, req)
 	}
@@ -554,7 +554,7 @@ func BenchmarkHandleOperations(b *testing.B) {
 	req := httptest.NewRequest(http.MethodGet, "/status/operations", nil)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		w := httptest.NewRecorder()
 		server.handleOperations(w, req)
 	}

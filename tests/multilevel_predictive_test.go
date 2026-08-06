@@ -167,7 +167,7 @@ func BenchmarkMultiLevelCache_PredictiveEnabled(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		keyIndex := i % numKeys
 		data := mlCache.Get(keys[keyIndex], 0, blockSize)
 		if data == nil {
@@ -210,7 +210,7 @@ func BenchmarkMultiLevelCache_PredictiveDisabled(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		keyIndex := i % numKeys
 		data := mlCache.Get(keys[keyIndex], 0, blockSize)
 		if data == nil {

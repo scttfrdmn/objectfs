@@ -101,7 +101,7 @@ func BenchmarkS3Backend_GetObject_1KB(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(1024)
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = bb.getObject(ctx, key, 0, 0)
 	}
 }
@@ -114,7 +114,7 @@ func BenchmarkS3Backend_GetObject_1MB(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(1024 * 1024)
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = bb.getObject(ctx, key, 0, 0)
 	}
 }
@@ -127,7 +127,7 @@ func BenchmarkS3Backend_GetObject_10MB(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(10 * 1024 * 1024)
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = bb.getObject(ctx, key, 0, 0)
 	}
 }
@@ -141,7 +141,7 @@ func BenchmarkS3Backend_PutObject_1KB(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(1024)
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := fmt.Sprintf("bench/put-%d", i)
 		_ = bb.putObject(ctx, key, payload)
 	}
@@ -154,7 +154,7 @@ func BenchmarkS3Backend_PutObject_1MB(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(1024 * 1024)
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := fmt.Sprintf("bench/put-%d", i)
 		_ = bb.putObject(ctx, key, payload)
 	}
@@ -167,7 +167,7 @@ func BenchmarkS3Backend_DeleteObject(b *testing.B) {
 	payload := makePayload(1024)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		b.StopTimer()
 		bb := newBenchBackend()
 		key := fmt.Sprintf("bench/del-%d", i)
@@ -185,7 +185,7 @@ func BenchmarkS3Backend_ListObjects_100entries(b *testing.B) {
 	ctx := context.Background()
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = bb.listObjects(ctx, "bench/", 100)
 	}
 }
@@ -196,7 +196,7 @@ func BenchmarkS3Backend_ListObjects_1000entries(b *testing.B) {
 	ctx := context.Background()
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = bb.listObjects(ctx, "bench/", 1000)
 	}
 }
@@ -232,7 +232,7 @@ func BenchmarkS3Backend_GetObject_Latency(b *testing.B) {
 
 	var totalNs int64
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		start := time.Now()
 		_, _ = bb.getObject(ctx, key, 0, 0)
 		totalNs += time.Since(start).Nanoseconds()

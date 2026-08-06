@@ -1735,6 +1735,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every three-clause counting loop is now an integer range, and the lint run stops reporting a
+  dependency's Go files as this repository's** ([#179]). `intrange` 37 → 0 and `modernize` 2 → 0, taking
+  the total from 570 to 531. Applied with `golangci-lint --fix` rather than a hand-written transform,
+  because the fixer knows which loops it cannot safely rewrite and a regex over `for i := 0;` does not.
+
+  Eight of those 39 findings were never ours. The `flatted` npm package ships a Go port under its own
+  package directory, so once anything runs `npm install` in `docs-platform` or `sdks/javascript`, `./...`
+  picks up two copies of it — six `intrange` and both `modernize` findings, in a file nobody here can
+  edit. `.golangci.yml` now excludes `/node_modules/` by path, which is the same exclusion
+  `scripts/coverage-gate.sh` grew for the same two directories, and that one is what made these visible:
+  the copies showed up as unfloored packages at 0.0% first. Verified in the way that distinguishes the
+  exclusion from the fixer: after the run, both vendored files still contain their three old-style loops
+  each, so the findings went away without `--fix` rewriting a dependency's source.
+
+  Twenty-nine of the 31 in-repo sites are `for i := 0; i < b.N; i++` in benchmarks, and the choice not to
+  write `for b.Loop()` instead was settled by probe rather than by preference. `b.Loop` is the Go 1.24+
+  form and it would also make the adjacent `b.ResetTimer()` calls redundant, but that is a semantic change
+  to what each benchmark measures, and the concern that would have forced it does not apply: `modernize`'s
+  `bloop` analyzer is present in the bundled binary and does not fire on `range b.N` even when explicitly
+  enabled, so this does not trade one finding for another. The benchmarks were run rather than assumed to
+  still iterate — `-benchtime=10x` reports 10 iterations and real per-op timings across the touched
+  packages.
+
+  The two sites that are not benchmarks are the ones where a transform can change behaviour, and both are
+  the outer loop of an adjacent-comparison sort over `len(x)-1`: `range` evaluates its bound once, where
+  the three-clause form re-evaluated it every iteration. Equivalent here because the bodies swap elements
+  without changing length, and `range` over a negative int does zero iterations exactly as `i < -1` would —
+  measured, since an empty slice makes that bound `-1`. Both were then mutation-verified: neutering the
+  `LoadBalancer` sort fails `TestLoadBalancer_LeastLoad` with `got [n1], want [n2]`, and inverting the
+  alert-ordering assertion fails `TestAlertManager_GetRecentAlerts`. The second needed a probe first — a
+  mutation that deletes an assertion loop passes by construction, so the useful check was that the loop
+  runs at all, and it makes two comparisons over three alerts rather than being vacuous.
+
+[#179]: https://github.com/scttfrdmn/objectfs/issues/179
+
 - **`eventemitter3` 4.0.7 → 5.0.4 in the JavaScript SDK.** A major bump, taken by hand rather than by
   merging [#346], because that pull request carried four unrelated *downgrades* alongside it: `jest`
   30 → 29, `typescript` 6 → 5, `typedoc` 0.28 → 0.24, and `@types/jest` 30 → 29. Dependabot had opened

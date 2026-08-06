@@ -498,7 +498,7 @@ func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		blockIndex := int64(i % int(numBlocks))
 		data := pc.Get(key, blockIndex*blockSize, blockSize)
 		if data == nil {
@@ -537,7 +537,7 @@ func BenchmarkPredictiveCache_RandomRead(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		keyIndex := rand.Intn(numKeys)
 		data := pc.Get(keys[keyIndex], 0, blockSize)
 		if data == nil {

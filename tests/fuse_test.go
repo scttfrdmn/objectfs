@@ -478,7 +478,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			_, err := backend.GetObject(context.Background(), testKey, 0, int64(len(testData)))
 			if err != nil {
 				b.Fatal(err)
@@ -492,7 +492,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
-		for i := 0; i < b.N; i++ {
+		for i := range b.N {
 			testKey := "bench-write-" + string(rune(i%100)) // Cycle through 100 keys
 			err := backend.PutObject(context.Background(), testKey, testData, nil)
 			if err != nil {
@@ -511,7 +511,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			data := mlCache.Get(testKey, 0, int64(len(testData)))
 			if data == nil {
 				b.Fatal("Cache miss")

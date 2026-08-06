@@ -469,7 +469,7 @@ func BenchmarkTracker_RecordSuccess(b *testing.B) {
 	tracker.RegisterComponent("test-service")
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		tracker.RecordSuccess("test-service")
 	}
 }
@@ -480,7 +480,7 @@ func BenchmarkTracker_RecordError(b *testing.B) {
 	testErr := fmt.Errorf("test error")
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		tracker.RecordError("test-service", testErr)
 	}
 }
@@ -490,7 +490,7 @@ func BenchmarkTracker_GetState(b *testing.B) {
 	tracker.RegisterComponent("test-service")
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = tracker.GetState("test-service")
 	}
 }

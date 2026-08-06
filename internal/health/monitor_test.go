@@ -544,7 +544,7 @@ func TestAlertManager_GetRecentAlerts(t *testing.T) {
 	}
 
 	// Verify they're sorted by timestamp (most recent first)
-	for i := 0; i < len(recent)-1; i++ {
+	for i := range len(recent) - 1 {
 		if recent[i].Timestamp.Before(recent[i+1].Timestamp) {
 			t.Error("alerts not sorted by timestamp (most recent first)")
 			break

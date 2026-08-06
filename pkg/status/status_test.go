@@ -559,7 +559,7 @@ func BenchmarkTracker_StartOperation(b *testing.B) {
 	ctx := context.Background()
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		tracker.StartOperation(ctx, "test", nil)
 	}
 }
@@ -570,7 +570,7 @@ func BenchmarkTracker_UpdateProgress(b *testing.B) {
 	op, _ := tracker.StartOperation(ctx, "test", nil)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		_ = tracker.UpdateProgress(op.ID, int64(i), 1000000, "bytes")
 	}
 }
@@ -581,7 +581,7 @@ func BenchmarkTracker_GetOperation(b *testing.B) {
 	op, _ := tracker.StartOperation(ctx, "test", nil)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = tracker.GetOperation(op.ID)
 	}
 }
@@ -596,7 +596,7 @@ func BenchmarkTracker_GetSystemStatus(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		tracker.GetSystemStatus()
 	}
 }

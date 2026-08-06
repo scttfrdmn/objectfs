@@ -929,7 +929,7 @@ func (lb *LoadBalancer) selectLeastLoad(nodes []string, count int) ([]string, er
 	lb.stats.mu.RUnlock()
 
 	// Sort by load (ascending)
-	for i := 0; i < len(nodeLoads)-1; i++ {
+	for i := range len(nodeLoads) - 1 {
 		for j := i + 1; j < len(nodeLoads); j++ {
 			if nodeLoads[i].load > nodeLoads[j].load {
 				nodeLoads[i], nodeLoads[j] = nodeLoads[j], nodeLoads[i]
