@@ -528,6 +528,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **`internal/cache`'s 37 tests now run in parallel** ([#179]). `paralleltest` 80 → 43.
+
+  Nothing had to change in the cache itself: every test already builds its own `LRUCache` or its own
+  `PersistentCache` under `t.TempDir()`, so the annotations were the whole of it. That is worth stating
+  rather than assuming, because the two packages before this one each hid a real defect behind their
+  serial ordering. Verified at `-race -count=4`, and mutation-checked in both table tests — changing the
+  default eviction policy fails `TestNewLRUCache/nil_config_uses_defaults` by value, and changing the
+  default cleanup interval fails `TestNewPersistentCache/zero_values_get_defaults`, each naming the
+  single case that produced it.
 - **A recovery goroutine read an attempt counter it had already released the lock on** ([#179]).
   `paralleltest` 138 → 80 across `pkg/recovery` and `pkg/status`.
 
