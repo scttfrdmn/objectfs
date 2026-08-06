@@ -333,7 +333,11 @@ type Stats struct {
 // without a MountConfig. Note that a *non-nil* config is used as given: a caller that sets one field
 // and leaves DefaultUID zero gets root as the fallback owner, which is why
 // [CreatePlatformMountManager] fills every field it passes.
-func NewFileSystem(backend types.Backend, cache types.Cache, buffer *vfs.Writer, metrics types.MetricsCollector, config *Config) *FileSystem {
+//
+// ctx is the mount's lifetime, not this call's. It is the parent of the read-ahead manager's prefetch
+// GETs and the signal that stops its goroutines; see [NewReadAheadManager] for why the manager needed
+// a second stop signal alongside its own Stop.
+func NewFileSystem(ctx context.Context, backend types.Backend, cache types.Cache, buffer *vfs.Writer, metrics types.MetricsCollector, config *Config) *FileSystem {
 	if config == nil {
 		config = &Config{
 			DefaultUID:     safeIntToUint32(os.Getuid()),
@@ -366,7 +370,7 @@ func NewFileSystem(backend types.Backend, cache types.Cache, buffer *vfs.Writer,
 	//
 	// config.ReadAhead, not nil. This argument was nil, which meant performance.read_ahead was decoded,
 	// validated, documented in five shipped preset files, and read by nothing (#176).
-	filesystem.readAhead = NewReadAheadManager(filesystem, config.ReadAhead)
+	filesystem.readAhead = NewReadAheadManager(ctx, filesystem, config.ReadAhead)
 
 	return filesystem
 }

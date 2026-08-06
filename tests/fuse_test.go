@@ -224,7 +224,7 @@ func TestFUSEOptimizations(t *testing.T) {
 		DefaultMode: 0644,
 	}
 
-	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, fuseConfig)
+	filesystem := fuse.NewFileSystem(t.Context(), backend, mlCache, writeBuffer, collector, fuseConfig)
 
 	// Test filesystem operations
 	_ = filesystem // Use filesystem to avoid unused variable
@@ -386,7 +386,7 @@ func TestFUSEFileOperations(t *testing.T) {
 	collector, err := metrics.NewCollector(&metrics.Config{Enabled: true})
 	require.NoError(t, err)
 
-	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, nil)
+	filesystem := fuse.NewFileSystem(t.Context(), backend, mlCache, writeBuffer, collector, nil)
 	_ = filesystem // Use filesystem to avoid unused variable
 
 	t.Run("FileCreationAndAccess", func(t *testing.T) {
@@ -462,7 +462,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 	defer func() { _ = writeBuffer.Close() }()
 
 	collector, _ := metrics.NewCollector(&metrics.Config{Enabled: false})
-	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, nil)
+	filesystem := fuse.NewFileSystem(b.Context(), backend, mlCache, writeBuffer, collector, nil)
 	_ = filesystem // Use filesystem to avoid unused variable
 
 	// Prepare test data

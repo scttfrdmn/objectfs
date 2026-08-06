@@ -173,7 +173,7 @@ func TestCacheInfo_Overwrite(t *testing.T) {
 func TestNewFileSystem_NilConfig_DefaultsToProcessUID(t *testing.T) {
 	t.Parallel()
 
-	fs := NewFileSystem(nil, nil, nil, nil, nil)
+	fs := NewFileSystem(t.Context(), nil, nil, nil, nil, nil)
 
 	wantUID := safeIntToUint32(os.Getuid())
 	if fs.config.DefaultUID != wantUID {
@@ -277,7 +277,7 @@ func TestMountManager_checkMount_InvertedBooleanFixed(t *testing.T) {
 func TestGetStatsReportsEveryCounter(t *testing.T) {
 	t.Parallel()
 
-	filesystem := NewFileSystem(nil, nil, nil, nil, nil)
+	filesystem := NewFileSystem(t.Context(), nil, nil, nil, nil, nil)
 
 	// Written directly rather than by performing operations: the point is the snapshot, and driving a
 	// dozen real operations would need a backend and would still not prove the copy is complete.

@@ -74,7 +74,7 @@ func TestMountOnATierWithABillingMinimumCanCreate(t *testing.T) {
 			})
 			t.Cleanup(func() { _ = byteCache.Close() })
 
-			filesystem := NewFileSystem(backend, byteCache, writer, nil, &Config{
+			filesystem := NewFileSystem(t.Context(), backend, byteCache, writer, nil, &Config{
 				DefaultMode:    0o644,
 				DefaultDirMode: 0o755,
 				DefaultUID:     1000,

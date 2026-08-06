@@ -179,7 +179,13 @@ func (a *Adapter) Start(ctx context.Context) error {
 		ReadAhead:  a.buildReadAheadConfig(),
 	}
 
-	a.mountMgr = fuse.CreatePlatformMountManager(a.backend, a.cache, a.writeBuffer, a.metrics, mountConfig)
+	//nolint:contextcheck // a.mountCtx, not ctx, for the same reason as the write path above and with
+	// the same consequence if it were Start's: the read-ahead manager's prefetch workers live as long
+	// as the mount does, so inheriting a context canceled when Start returns would leave four workers
+	// running that could never fetch anything. mountCtx is a WithCancel over WithoutCancel(ctx), so it
+	// does carry the caller's values — what it deliberately does not inherit is the caller's
+	// cancellation, which is the whole point. Stop cancels it, and that is now what stops them.
+	a.mountMgr = fuse.CreatePlatformMountManager(a.mountCtx, a.backend, a.cache, a.writeBuffer, a.metrics, mountConfig)
 
 	// 6. Initialize and start health monitor
 	if a.config.Monitoring.HealthChecks.Enabled {

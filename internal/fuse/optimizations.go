@@ -81,7 +81,21 @@ func DefaultReadAheadConfig() ReadAheadConfig {
 
 // NewReadAheadManager creates a new read-ahead manager. A nil config takes
 // [DefaultReadAheadConfig].
-func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadManager {
+//
+// ctx is the mount's, and it does two things. It is the parent of every prefetch GET, so a value the
+// mount was configured with reaches the speculative reads made on its behalf — each prefetch used to
+// build its own context from context.Background(), which is the one context nothing can carry anything
+// into and nothing can cancel.
+//
+// And it is a second stop signal, which is the one that matters in production. [ReadAheadManager.Stop]
+// exists, is safe to call twice, and **is called by nothing outside tests** — not by
+// [MountManager.Unmount], not by Adapter.Stop, not by anything on the unmount path. Measured: five
+// goroutines per filesystem, `ConcurrentReads` prefetch workers plus the cleanup ticker, surviving
+// every unmount for the life of the process. A long-running host that mounts and unmounts — which is
+// what the mount watcher's remount does — accumulates them, each still holding its FileSystem, its
+// backend and its cache reachable. Canceling ctx now stops them, so the adapter's existing
+// cancelMount() on the unmount path is the fix without a new call anyone has to remember to make.
+func NewReadAheadManager(ctx context.Context, fs *FileSystem, config *ReadAheadConfig) *ReadAheadManager {
 	if config == nil {
 		defaults := DefaultReadAheadConfig()
 		config = &defaults
@@ -97,11 +111,11 @@ func NewReadAheadManager(fs *FileSystem, config *ReadAheadConfig) *ReadAheadMana
 
 	// Start prefetch workers
 	for range config.ConcurrentReads {
-		go ram.prefetchWorker()
+		go ram.prefetchWorker(ctx)
 	}
 
 	// Start cleanup goroutine
-	go ram.cleanupWorker()
+	go ram.cleanupWorker(ctx)
 
 	return ram
 }
@@ -202,21 +216,31 @@ func (ram *ReadAheadManager) schedulePrefetch(path string, offset, size int64) {
 	}
 }
 
-// prefetchWorker handles prefetch requests
-func (ram *ReadAheadManager) prefetchWorker() {
+// prefetchWorker handles prefetch requests until Stop closes stopCh or the mount's context ends.
+//
+// Both, not either: Stop is what the tests call, and canceling the mount context is what actually
+// happens on the unmount path, since nothing in the tree calls Stop. See [NewReadAheadManager].
+func (ram *ReadAheadManager) prefetchWorker(mount context.Context) {
 	for {
 		select {
 		case req := <-ram.prefetchQueue:
-			ram.performPrefetch(req)
+			ram.performPrefetch(mount, req)
 		case <-ram.stopCh:
+			return
+		case <-mount.Done():
 			return
 		}
 	}
 }
 
-// performPrefetch executes a prefetch operation
-func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// performPrefetch executes a prefetch operation.
+//
+// mount is the mount's context, and the 5-second budget is derived from it rather than from
+// context.Background(). Five seconds is the right scope for a speculative read either way — what
+// changes is that a prefetch in flight when the mount goes away is canceled instead of running to its
+// own deadline against a backend that is being closed underneath it.
+func (ram *ReadAheadManager) performPrefetch(mount context.Context, req *PrefetchRequest) {
+	ctx, cancel := context.WithTimeout(mount, 5*time.Second)
 	defer cancel()
 
 	// Clamp to the end of the file, and drop a prefetch that starts at or past it.
@@ -299,8 +323,8 @@ func (ram *ReadAheadManager) performPrefetch(req *PrefetchRequest) {
 	}
 }
 
-// cleanupWorker removes expired patterns
-func (ram *ReadAheadManager) cleanupWorker() {
+// cleanupWorker removes expired patterns until Stop closes stopCh or the mount's context ends.
+func (ram *ReadAheadManager) cleanupWorker(mount context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
@@ -309,6 +333,8 @@ func (ram *ReadAheadManager) cleanupWorker() {
 		case <-ticker.C:
 			ram.cleanup()
 		case <-ram.stopCh:
+			return
+		case <-mount.Done():
 			return
 		}
 	}

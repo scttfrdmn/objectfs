@@ -528,6 +528,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **Read-ahead leaked five goroutines per mount, for the life of the process** ([#179]).
+  `contextcheck` 4 → 3, and the fourth finding was sitting on the fourth live defect of this batch.
+
+  `ReadAheadManager.Stop` exists, is `sync.Once`-guarded, and is documented "safe to call multiple
+  times". Nothing outside tests calls it — not `MountManager.Unmount`, not `Adapter.Stop`, not anything
+  on the unmount path. So the goroutines the constructor starts, `ConcurrentReads` prefetch workers plus
+  a cleanup ticker, ran until the process exited. Measured: **2 → 27 goroutines after five
+  `NewFileSystem` calls**, five per filesystem at the default `ConcurrentReads: 4`. Each holds its
+  `FileSystem`, and through it the backend and the cache, reachable — so a long-running host that
+  remounts, which is what the mount watcher does on a lost mount, accumulates both goroutines and heap.
+
+  The fix is not a new `Stop` call on each unmount path, because that is the same kind of obligation
+  that was already being missed. `NewReadAheadManager` now takes the mount's context, and both workers
+  select on `mount.Done()` alongside `stopCh` — so the `cancelMount()` the adapter *already* performs
+  on unmount is what stops them, with nothing new for a future caller to remember. `NewFileSystem` and
+  `CreatePlatformMountManager` take the same context and document that it is the mount's lifetime
+  rather than the constructing call's. `Stop` itself is now reachable only from tests, which is a
+  smaller inconsistency and is filed as [#376] rather than resolved here.
+
+  Each prefetch also derived its 5-second budget from `context.Background()`. Five seconds is the right
+  scope for a speculative read either way; what changes is that a prefetch in flight when the mount
+  goes away is now canceled, instead of running to its own deadline against a backend being closed
+  underneath it, and that a value the mount was configured with reaches the reads made on its behalf.
+
+  Both halves are verified by mutation. Removing `mount.Done()` from the worker selects reports
+  *"25 goroutines still running after every mount context was canceled"*; restoring the
+  `context.Background()` prefetch budget reports *"a prefetch on a canceled mount context issued 1
+  GET(s), want 0"*.
+
+  The leak test counts goroutines by the frame names of the two worker functions rather than by
+  `runtime.NumGoroutine()`. The first version measured the process total, which in this package sits
+  near 960 because of the substrate servers and S3 clients its other tests stand up, and it flaked on
+  1 run in 6 — reading 24 started goroutines where 25 had started. A delta between two numbers that
+  are each only accurate to whatever a sibling test happened to be doing is not a measurement.
 - **Three live defects found by fixing five `contextcheck` findings** ([#179]). `contextcheck` 9 → 4.
   The linter's complaint — background work building its own `context.Background()` instead of descending
   from the caller's — was accurate everywhere, and in three places the code around it was wrong in ways
@@ -2025,6 +2059,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs at all, and it makes two comparisons over three alerts rather than being vacuous.
 
 [#179]: https://github.com/scttfrdmn/objectfs/issues/179
+[#376]: https://github.com/scttfrdmn/objectfs/issues/376
 
 - **`eventemitter3` 4.0.7 → 5.0.4 in the JavaScript SDK.** A major bump, taken by hand rather than by
   merging [#346], because that pull request carried four unrelated *downgrades* alongside it: `jest`
