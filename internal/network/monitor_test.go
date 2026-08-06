@@ -147,7 +147,13 @@ func TestWrapDialContext_Success(t *testing.T) {
 	t.Parallel()
 
 	// Start a local echo server.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	//
+	// ListenConfig.Listen rather than net.Listen so the bind is bounded by the test's own context: a
+	// net.Listen that blocks in the resolver has nothing to cancel it and hangs until the package
+	// timeout, reported against whichever test happens to be running. internal/health's listenHealth
+	// takes the same shape for the same reason.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -169,7 +175,7 @@ func TestWrapDialContext_Success(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, network, address)
 	})
 
-	conn, err := wrapped(context.Background(), "tcp", ln.Addr().String())
+	conn, err := wrapped(t.Context(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("wrapped dial: %v", err)
 	}
@@ -219,7 +225,7 @@ func TestWrapDialContext_Error(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: network, Addr: nil, Err: &net.AddrError{Err: "connection refused", Addr: address}}
 	})
 
-	_, err := wrapped(context.Background(), "tcp", "127.0.0.1:1")
+	_, err := wrapped(t.Context(), "tcp", "127.0.0.1:1")
 	if err == nil {
 		t.Error("expected error from dial, got nil")
 	}

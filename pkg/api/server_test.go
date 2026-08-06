@@ -80,7 +80,7 @@ func TestHandleHealth(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
 	server.handleHealth(w, req)
@@ -113,7 +113,7 @@ func TestHandleHealthDegraded(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
 	server.handleHealth(w, req)
@@ -142,7 +142,7 @@ func TestHandleHealthComponents(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health/components", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health/components", nil)
 	w := httptest.NewRecorder()
 
 	server.handleHealthComponents(w, req)
@@ -174,7 +174,7 @@ func TestHandleLiveness(t *testing.T) {
 		config: DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health/live", nil)
 	w := httptest.NewRecorder()
 
 	server.handleLiveness(w, req)
@@ -202,7 +202,7 @@ func TestHandleReadiness(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()
 
 	server.handleReadiness(w, req)
@@ -235,7 +235,7 @@ func TestHandleReadinessUnavailable(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()
 
 	server.handleReadiness(w, req)
@@ -267,7 +267,7 @@ func TestHandleSystemStatus(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status", nil)
 	w := httptest.NewRecorder()
 
 	server.handleSystemStatus(w, req)
@@ -299,7 +299,7 @@ func TestHandleOperations(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/status/operations", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status/operations", nil)
 	w := httptest.NewRecorder()
 
 	server.handleOperations(w, req)
@@ -333,7 +333,7 @@ func TestHandleOperation(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/status/operations/"+op.ID, nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status/operations/"+op.ID, nil)
 	w := httptest.NewRecorder()
 
 	server.handleOperation(w, req)
@@ -360,7 +360,7 @@ func TestHandleOperationNotFound(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/status/operations/non-existent", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status/operations/non-existent", nil)
 	w := httptest.NewRecorder()
 
 	server.handleOperation(w, req)
@@ -387,7 +387,7 @@ func TestHandleHistory(t *testing.T) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/status/history?limit=2", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status/history?limit=2", nil)
 	w := httptest.NewRecorder()
 
 	server.handleHistory(w, req)
@@ -419,7 +419,7 @@ func TestHandleInfo(t *testing.T) {
 		cfg.Version = "0.9.0"
 		server := &Server{config: cfg}
 
-		req := httptest.NewRequest(http.MethodGet, "/info", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/info", nil)
 		w := httptest.NewRecorder()
 		server.handleInfo(w, req)
 
@@ -443,7 +443,7 @@ func TestHandleInfo(t *testing.T) {
 		t.Parallel()
 		server := &Server{config: DefaultServerConfig()} // Version is ""
 
-		req := httptest.NewRequest(http.MethodGet, "/info", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/info", nil)
 		w := httptest.NewRecorder()
 		server.handleInfo(w, req)
 
@@ -463,7 +463,7 @@ func TestMethodNotAllowed(t *testing.T) {
 	}
 
 	// Test POST on GET-only endpoint
-	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/health", nil)
 	w := httptest.NewRecorder()
 
 	server.handleHealth(w, req)
@@ -479,7 +479,7 @@ func TestCORSMiddleware(t *testing.T) {
 
 	server := NewServer(config, nil, nil, nil)
 
-	req := httptest.NewRequest(http.MethodOptions, "/health", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/health", nil)
 	w := httptest.NewRecorder()
 
 	server.httpServer.Handler.ServeHTTP(w, req)
@@ -533,7 +533,7 @@ func TestNilTrackers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, tt.path, nil)
 			w := httptest.NewRecorder()
 
 			tt.handler(w, req)
@@ -558,7 +558,7 @@ func BenchmarkHandleHealth(b *testing.B) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequestWithContext(b.Context(), http.MethodGet, "/health", nil)
 
 	b.ResetTimer()
 	for range b.N {
@@ -581,7 +581,7 @@ func BenchmarkHandleOperations(b *testing.B) {
 		config:        DefaultServerConfig(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/status/operations", nil)
+	req := httptest.NewRequestWithContext(b.Context(), http.MethodGet, "/status/operations", nil)
 
 	b.ResetTimer()
 	for range b.N {
@@ -607,7 +607,7 @@ func TestHealthWithActualErrors(t *testing.T) {
 		healthTracker.RecordError("storage", writeErr)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
 	server.handleHealth(w, req)
@@ -635,7 +635,7 @@ func TestHandleMetrics_NilGatherer(t *testing.T) {
 		gatherer: nil,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 
 	server.handleMetrics(w, req)
@@ -655,7 +655,7 @@ func TestHandleMetrics_MethodNotAllowed(t *testing.T) {
 		gatherer: nil,
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/metrics", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/metrics", nil)
 	w := httptest.NewRecorder()
 
 	server.handleMetrics(w, req)
@@ -702,7 +702,7 @@ func TestHandleMetrics_WithGatherer(t *testing.T) {
 		gatherer: reg,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 
 	server.handleMetrics(w, req)
@@ -782,7 +782,7 @@ func TestHandleMounts_NoMountManager(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, "/api/v1/mounts", strings.NewReader("{}"))
+			req := httptest.NewRequestWithContext(t.Context(), method, "/api/v1/mounts", strings.NewReader("{}"))
 			w := httptest.NewRecorder()
 			server.handleMounts(w, req)
 			if w.Code != http.StatusNotImplemented {
@@ -801,7 +801,7 @@ func TestHandleMounts_List(t *testing.T) {
 	cfg.MountManager = mm
 	server := &Server{config: cfg}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/mounts", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/mounts", nil)
 	w := httptest.NewRecorder()
 	server.handleMounts(w, req)
 
@@ -826,7 +826,7 @@ func TestHandleMounts_Post(t *testing.T) {
 	server := &Server{config: cfg}
 
 	body := `{"mount_point":"/mnt/test","options":{"storage_uri":"s3://my-bucket"}}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/mounts", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/mounts", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	server.handleMounts(w, req)
 
@@ -846,7 +846,7 @@ func TestHandleMounts_Post_MissingMountPoint(t *testing.T) {
 	server := &Server{config: cfg}
 
 	body := `{"options":{"storage_uri":"s3://bucket"}}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/mounts", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/mounts", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	server.handleMounts(w, req)
 
@@ -864,7 +864,7 @@ func TestHandleMount_GetStatus(t *testing.T) {
 	cfg.MountManager = mm
 	server := &Server{config: cfg}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/mounts//mnt/bucket", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/mounts//mnt/bucket", nil)
 	req.URL.Path = "/api/v1/mounts//mnt/bucket"
 	w := httptest.NewRecorder()
 	server.handleMount(w, req)
@@ -890,7 +890,7 @@ func TestHandleMount_Delete(t *testing.T) {
 	cfg.MountManager = mm
 	server := &Server{config: cfg}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/mounts//mnt/bucket", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/v1/mounts//mnt/bucket", nil)
 	req.URL.Path = "/api/v1/mounts//mnt/bucket"
 	w := httptest.NewRecorder()
 	server.handleMount(w, req)
@@ -907,7 +907,7 @@ func TestHandleMount_NoMountManager(t *testing.T) {
 	t.Parallel()
 	server := &Server{config: DefaultServerConfig()} // MountManager is nil
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/mounts//mnt/foo", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/mounts//mnt/foo", nil)
 	req.URL.Path = "/api/v1/mounts//mnt/foo"
 	w := httptest.NewRecorder()
 	server.handleMount(w, req)
@@ -924,12 +924,36 @@ func TestHandleMount_MethodNotAllowed(t *testing.T) {
 	cfg.MountManager = mm
 	server := &Server{config: cfg}
 
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/mounts//mnt/foo", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/api/v1/mounts//mnt/foo", nil)
 	req.URL.Path = "/api/v1/mounts//mnt/foo"
 	w := httptest.NewRecorder()
 	server.handleMount(w, req)
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected 405, got %d", w.Code)
+	}
+}
+
+// TestRequestContextReachesTheHandler is why the httptest.NewRequestWithContext migration is worth more
+// than a quiet linter.
+//
+// httptest.NewRequest attaches context.Background(), so every handler test above ran with a context
+// that no test could cancel and that carried nothing. This asserts the replacement actually plumbs
+// t.Context through: a handler reading r.Context() sees a live context whose Done channel is the
+// test's, not a background one that is never done. Without it, "noctx: 0" would be indistinguishable
+// from a mechanical rewrite that compiled and changed nothing observable.
+func TestRequestContextReachesTheHandler(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil)
+
+	if got := req.Context(); got != t.Context() {
+		t.Fatalf("request context = %v, want the test's own context", got)
+	}
+
+	// context.Background()'s Done is nil forever; a test context's is a real channel that closes when
+	// the test ends. That difference is the whole point of the migration.
+	if req.Context().Done() == nil {
+		t.Error("request context has a nil Done channel, so nothing can cancel this request")
 	}
 }

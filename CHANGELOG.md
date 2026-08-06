@@ -528,6 +528,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **Every `pkg/api` handler test ran with a context nothing could cancel** ([#179]). `noctx` 31 → 0.
+  Thirty of the thirty-one findings were `httptest.NewRequest`, which attaches `context.Background()`:
+  a handler reading `r.Context()` in these tests saw a context carrying nothing, with a nil `Done`
+  channel, that no test could cancel. They now use `httptest.NewRequestWithContext` with `t.Context()`
+  — `b.Context()` in the two benchmarks. Asserted rather than assumed, because a mechanical rewrite
+  that compiles and changes nothing observable would also report `noctx: 0`: the new test compares
+  `req.Context()` against the test's own and checks `Done()` is non-nil, and reverting one call site
+  reports `request context = context.Background, want the test's own context`.
+
+  The thirty-first was `net.Listen` in `internal/network`'s echo-server test, which has nothing to
+  cancel it if the bind blocks and would hang to the package timeout, reported against whichever test
+  happened to be running. It is `(&net.ListenConfig{}).Listen(t.Context(), ...)` now, the shape
+  `internal/health`'s `listenHealth` already uses, and the two `wrapped(context.Background(), ...)`
+  dials in the same file are on `t.Context()` too.
+
 - **Election timeouts were jittered by about one part in a million, and panicked below one
   millisecond** ([#179]). The expression mixed units: `base + rand.Intn(int(base.Milliseconds()))`
   takes a millisecond *count* and uses it as a nanosecond `Duration`. Against the 5s default, measured
