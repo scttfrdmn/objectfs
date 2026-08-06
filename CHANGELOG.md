@@ -528,6 +528,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **The Redis invalidation subscriber's deletes now honour the subscription's context** ([#179]).
+  `contextcheck` 3 → 2.
+
+  `types.Cache` assigns no context to any of its methods, so `redis.Cache.Delete` ran under
+  `context.Background()` — and so did the delete the pub/sub invalidation subscriber performs on every
+  message it receives. That one is different from the rest: it is a Redis round trip on the same
+  connection pool the subscription holds, so a canceled subscription could leave a `DEL` in flight
+  against a client being closed underneath it. `Cache.DeleteContext` is the same operation with the
+  caller's context restored, and the subscriber uses it.
+
+  `Delete` itself keeps `context.Background()`, documented rather than left implicit. The alternatives
+  are worse: a context stored on the `Cache` at construction is a startup context outliving its scope,
+  which `NewCache` already explains it deliberately avoids, and there is no per-call context to descend
+  from. go-redis applies its own 5s dial and 3s read timeouts, so it is bounded — just not cancelable.
+  Putting a context on `types.Cache` is a change across four implementations and every `internal/fuse`
+  call site, which is a decision to take on its own merits and not by way of a lint finding.
+
+  Verified by mutation: making `DeleteContext` ignore its context reports *"DeleteContext on a canceled
+  context still reached Redis, so the context is decorative"*. The test also asserts the same call on a
+  live context does delete, so the first assertion is about cancellation rather than about the method
+  being broken.
+
+  Found while doing this: the `Invalidator` that owns that subscriber has no production caller at all,
+  so a Redis cache is shared across nodes and its cross-node invalidation is never started. Filed as
+  [#377], since whether that is a bug or a deletion depends on whether any configuration puts a local
+  tier in front of the Redis one.
 - **Read-ahead leaked five goroutines per mount, for the life of the process** ([#179]).
   `contextcheck` 4 → 3, and the fourth finding was sitting on the fourth live defect of this batch.
 
@@ -2060,6 +2086,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#179]: https://github.com/scttfrdmn/objectfs/issues/179
 [#376]: https://github.com/scttfrdmn/objectfs/issues/376
+[#377]: https://github.com/scttfrdmn/objectfs/issues/377
 
 - **`eventemitter3` 4.0.7 → 5.0.4 in the JavaScript SDK.** A major bump, taken by hand rather than by
   merging [#346], because that pull request carried four unrelated *downgrades* alongside it: `jest`

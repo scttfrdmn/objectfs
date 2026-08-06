@@ -130,8 +130,25 @@ func (c *Cache) Put(key string, offset int64, data []byte) {
 }
 
 // Delete removes key from the cache.
+//
+// context.Background() because types.Cache assigns no context to Delete, and the alternatives are worse
+// than this one: a context stored on the Cache at construction would be a startup context outliving its
+// own scope (see [NewCache]), and there is no per-call one to descend from. go-redis applies its own
+// DialTimeout and ReadTimeout defaults, 5s and 3s, so this is bounded rather than unbounded — it is
+// simply not cancelable by the caller. A caller that does have a context should use
+// [Cache.DeleteContext].
 func (c *Cache) Delete(key string) {
-	ctx := context.Background()
+	c.DeleteContext(context.Background(), key)
+}
+
+// DeleteContext removes key from the cache under ctx.
+//
+// This exists for the one caller inside this package that holds a context worth respecting: the pub/sub
+// invalidation subscriber, whose deletes are round trips on the same connection pool its subscription
+// uses. Not part of types.Cache — adding a context to that interface is a change across four
+// implementations and every call site in internal/fuse, which is its own decision and not one to make
+// by way of a lint finding.
+func (c *Cache) DeleteContext(ctx context.Context, key string) {
 	_ = c.client.Del(ctx, c.rkey(key)).Err()
 }
 

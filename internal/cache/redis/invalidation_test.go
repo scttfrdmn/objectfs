@@ -72,6 +72,40 @@ func TestInvalidator_Subscribe_RemoteInvalidation(t *testing.T) {
 	}, 500*time.Millisecond, 20*time.Millisecond, "node1 cache should be invalidated by node2")
 }
 
+// TestCache_DeleteContext_HonorsCancellation is the assertion behind the contextcheck fix on
+// handle->Delete.
+//
+// [redis.Cache.Delete] takes no context, because types.Cache assigns none to any of its methods, so
+// every operation on this cache ran under context.Background(). For the pub/sub subscriber that is
+// wrong in a specific way rather than merely untidy: its deletes are round trips on the same connection
+// pool its subscription holds, so a canceled subscription could leave a DEL in flight against a client
+// being closed underneath it. DeleteContext restores the caller's context on that one path.
+//
+// Asserting on cancellation rather than on the delete succeeding is what gives this teeth. A test that
+// only checked the key was gone would pass just as well against Delete's context.Background(), which is
+// the whole thing being changed.
+func TestCache_DeleteContext_HonorsCancellation(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	c, _ := newTestCacheAndInvalidator(t, mr, "node1")
+
+	c.Put("doomed/key", 0, []byte("value"))
+	require.NotNil(t, c.Get("doomed/key", 0, 0), "precondition: the key must be cached")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	c.DeleteContext(ctx, "doomed/key")
+
+	assert.NotNil(t, c.Get("doomed/key", 0, 0),
+		"DeleteContext on a canceled context still reached Redis, so the context is decorative")
+
+	// And the same call on a live context does delete, so the assertion above is about cancellation
+	// rather than about DeleteContext being broken.
+	c.DeleteContext(t.Context(), "doomed/key")
+	assert.Nil(t, c.Get("doomed/key", 0, 0), "DeleteContext on a live context should delete the key")
+}
+
 func TestInvalidator_Subscribe_IgnoresSelf(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
