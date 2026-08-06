@@ -2201,6 +2201,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **substrate v0.87.0 → v0.92.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
+  `go.sum` are the whole diff.
+
+  The S3 conditional-write behaviour that [#282] is built on was re-probed on the new version rather
+  than assumed to be stable across five releases: `If-None-Match: *` succeeds on an absent key and
+  answers 412 on a present one, a failed precondition leaves the stored bytes unmodified, `If-Match`
+  succeeds on a current ETag and answers 412 on a stale one, and `If-Match` against an absent key
+  answers **404 rather than 412** — the distinction #282 makes load-bearing, since a lost race and a
+  vanished object need different recovery. Identical on both versions.
+
+  `internal/testaws`, `internal/storage/s3`, and `internal/difftest` all pass at `-race`, as does the
+  full suite. [scttfrdmn/substrate#540] — the third conditional-write outcome, 409 Conflict from a
+  delete interleaving a conditional write — is still open, and is not a blocker for #282.
 - **Six section-header comments sitting where a doc comment goes are now doc comments, and three of
   them record something a reader would otherwise get wrong** ([#179]). `staticcheck` ST1020/ST1021
   6 → 0. Each was a heading like `// Enums for health check categorization` above an exported type,
