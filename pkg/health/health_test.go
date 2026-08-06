@@ -11,6 +11,8 @@ import (
 )
 
 func TestTracker_RegisterComponent(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 
 	tracker.RegisterComponent("test-service")
@@ -22,6 +24,8 @@ func TestTracker_RegisterComponent(t *testing.T) {
 }
 
 func TestTracker_RecordSuccess(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("test-service")
 
@@ -44,6 +48,8 @@ func TestTracker_RecordSuccess(t *testing.T) {
 }
 
 func TestTracker_RecordError_Degradation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -69,6 +75,8 @@ func TestTracker_RecordError_Degradation(t *testing.T) {
 }
 
 func TestTracker_RecordError_Unavailable(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	config.UnavailableThreshold = 10
@@ -87,6 +95,8 @@ func TestTracker_RecordError_Unavailable(t *testing.T) {
 }
 
 func TestTracker_RecordError_ReadOnly(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -105,6 +115,8 @@ func TestTracker_RecordError_ReadOnly(t *testing.T) {
 }
 
 func TestTracker_GetOverallHealth(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("service-1")
 	tracker.RegisterComponent("service-2")
@@ -138,8 +150,7 @@ func TestTracker_GetOverallHealth(t *testing.T) {
 }
 
 func TestTracker_CanRead(t *testing.T) {
-	tracker := NewTracker(DefaultConfig())
-	tracker.RegisterComponent("test-service")
+	t.Parallel()
 
 	tests := []struct {
 		state    HealthState
@@ -154,9 +165,29 @@ func TestTracker_CanRead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.state.String(), func(t *testing.T) {
-			// Set state directly for testing
+			t.Parallel()
+
+			// A tracker per subtest, and nextProbe set alongside State rather than left at its zero
+			// value. Both are needed, and the first is what made the second visible.
+			//
+			// State alone does not decide what CanRead answers. admissionState admits one probe
+			// against a refusing component once nextProbe has elapsed, and reports StateDegraded to
+			// get that probe past the gate — so State=StateUnavailable with a zero-value nextProbe,
+			// which is always in the past, reads as *readable*. The tracker never produces that
+			// combination: RecordError sets both fields, and this test set one.
+			//
+			// A single shared tracker concealed it. The first subtest to reach a refusing state took
+			// the probe path, which pushed nextProbe ProbeAfter into the future, and every later
+			// subtest then read raw state and agreed with the table — so the assertion held on the
+			// order its siblings happened to run in. Verified by deleting the nextProbe line below:
+			// the unavailable case fails.
+			tracker := NewTracker(DefaultConfig())
+			tracker.RegisterComponent("test-service")
+
+			// Set state directly for testing, in the shape RecordError would leave it.
 			tracker.mu.Lock()
 			tracker.components["test-service"].State = tt.state
+			tracker.components["test-service"].nextProbe = time.Now().Add(DefaultConfig().ProbeAfter)
 			tracker.mu.Unlock()
 
 			canRead := tracker.CanRead("test-service")
@@ -173,6 +204,8 @@ func TestTracker_CanRead(t *testing.T) {
 }
 
 func TestTracker_StateChangeCallback(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -247,6 +280,8 @@ func (l *testHealthListener) OnHealthCheck(component string, healthy bool, err e
 }
 
 func TestTracker_HealthListener(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -284,6 +319,8 @@ func TestTracker_HealthListener(t *testing.T) {
 }
 
 func TestTracker_GetAllComponents(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("service-1")
 	tracker.RegisterComponent("service-2")
@@ -303,6 +340,8 @@ func TestTracker_GetAllComponents(t *testing.T) {
 }
 
 func TestTracker_SetComponentMetadata(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("test-service")
 
@@ -324,6 +363,8 @@ func TestTracker_SetComponentMetadata(t *testing.T) {
 }
 
 func TestTracker_IsHealthy(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("test-service")
 
@@ -342,6 +383,8 @@ func TestTracker_IsHealthy(t *testing.T) {
 }
 
 func TestTracker_StartHealthChecks(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.HealthCheckInterval = 50 * time.Millisecond
 	tracker := NewTracker(config)
@@ -372,6 +415,8 @@ func TestTracker_StartHealthChecks(t *testing.T) {
 }
 
 func TestTracker_StartHealthChecks_WithErrors(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.HealthCheckInterval = 50 * time.Millisecond
 	config.ErrorThreshold = 2
@@ -400,6 +445,8 @@ func TestTracker_StartHealthChecks_WithErrors(t *testing.T) {
 }
 
 func TestHealthState_String(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		state    HealthState
 		expected string
@@ -413,6 +460,8 @@ func TestHealthState_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.state.String()
 			if result != tt.expected {
 				t.Errorf("String() = %s, want %s", result, tt.expected)
@@ -422,6 +471,8 @@ func TestHealthState_String(t *testing.T) {
 }
 
 func TestTracker_GetComponentHealth_NotRegistered(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 
 	_, err := tracker.GetComponentHealth("non-existent")
@@ -431,6 +482,8 @@ func TestTracker_GetComponentHealth_NotRegistered(t *testing.T) {
 }
 
 func TestTracker_RecoveryFromDegradation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	config.RecoveryThreshold = 5

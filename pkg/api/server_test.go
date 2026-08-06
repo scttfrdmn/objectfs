@@ -18,6 +18,8 @@ import (
 )
 
 func TestNewServer(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultServerConfig()
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 	healthTracker := health.NewTracker(health.DefaultConfig())
@@ -42,6 +44,8 @@ func TestNewServer(t *testing.T) {
 }
 
 func TestHandleHealth(t *testing.T) {
+	t.Parallel()
+
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	healthTracker.RegisterComponent("test-service")
 
@@ -70,6 +74,8 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleHealthDegraded(t *testing.T) {
+	t.Parallel()
+
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	healthTracker.RegisterComponent("test-service")
 
@@ -103,6 +109,8 @@ func TestHandleHealthDegraded(t *testing.T) {
 }
 
 func TestHandleHealthComponents(t *testing.T) {
+	t.Parallel()
+
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	healthTracker.RegisterComponent("service-1")
 	healthTracker.RegisterComponent("service-2")
@@ -140,6 +148,8 @@ func TestHandleHealthComponents(t *testing.T) {
 }
 
 func TestHandleLiveness(t *testing.T) {
+	t.Parallel()
+
 	server := &Server{
 		config: DefaultServerConfig(),
 	}
@@ -164,6 +174,8 @@ func TestHandleLiveness(t *testing.T) {
 }
 
 func TestHandleReadiness(t *testing.T) {
+	t.Parallel()
+
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	healthTracker.RegisterComponent("test-service")
 
@@ -192,6 +204,8 @@ func TestHandleReadiness(t *testing.T) {
 }
 
 func TestHandleReadinessUnavailable(t *testing.T) {
+	t.Parallel()
+
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	healthTracker.RegisterComponent("test-service")
 
@@ -225,6 +239,8 @@ func TestHandleReadinessUnavailable(t *testing.T) {
 }
 
 func TestHandleSystemStatus(t *testing.T) {
+	t.Parallel()
+
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -257,6 +273,8 @@ func TestHandleSystemStatus(t *testing.T) {
 }
 
 func TestHandleOperations(t *testing.T) {
+	t.Parallel()
+
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -293,6 +311,8 @@ func TestHandleOperations(t *testing.T) {
 }
 
 func TestHandleOperation(t *testing.T) {
+	t.Parallel()
+
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -323,6 +343,8 @@ func TestHandleOperation(t *testing.T) {
 }
 
 func TestHandleOperationNotFound(t *testing.T) {
+	t.Parallel()
+
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 
 	server := &Server{
@@ -341,6 +363,8 @@ func TestHandleOperationNotFound(t *testing.T) {
 }
 
 func TestHandleHistory(t *testing.T) {
+	t.Parallel()
+
 	statusTracker := status.NewTracker(status.DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -383,6 +407,8 @@ func TestHandleHistory(t *testing.T) {
 }
 
 func TestHandleInfo(t *testing.T) {
+	t.Parallel()
+
 	t.Run("version from config", func(t *testing.T) {
 		t.Parallel()
 		cfg := DefaultServerConfig()
@@ -428,6 +454,8 @@ func TestHandleInfo(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
+	t.Parallel()
+
 	server := &Server{
 		config: DefaultServerConfig(),
 	}
@@ -444,6 +472,8 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestCORSMiddleware(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultServerConfig()
 	config.EnableCORS = true
 
@@ -464,6 +494,8 @@ func TestCORSMiddleware(t *testing.T) {
 }
 
 func TestServerShutdown(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultServerConfig()
 	config.Address = "localhost:0" // Use random available port
 
@@ -486,6 +518,8 @@ func TestServerShutdown(t *testing.T) {
 }
 
 func TestNilTrackers(t *testing.T) {
+	t.Parallel()
+
 	server := &Server{
 		config: DefaultServerConfig(),
 	}
@@ -503,6 +537,8 @@ func TestNilTrackers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			w := httptest.NewRecorder()
 
@@ -563,6 +599,8 @@ func BenchmarkHandleOperations(b *testing.B) {
 // Test with actual errors integration
 
 func TestHealthWithActualErrors(t *testing.T) {
+	t.Parallel()
+
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	healthTracker.RegisterComponent("storage")
 
@@ -752,6 +790,8 @@ func TestHandleMounts_NoMountManager(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
 			req := httptest.NewRequest(method, "/api/v1/mounts", strings.NewReader("{}"))
 			w := httptest.NewRecorder()
 			server.handleMounts(w, req)

@@ -10,6 +10,8 @@ import (
 )
 
 func TestRetryer_Success(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 3
 	retryer := New(config)
@@ -30,6 +32,8 @@ func TestRetryer_Success(t *testing.T) {
 }
 
 func TestRetryer_RetryableError(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 3
 	config.InitialDelay = 10 * time.Millisecond
@@ -56,6 +60,8 @@ func TestRetryer_RetryableError(t *testing.T) {
 }
 
 func TestRetryer_NonRetryableError(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 3
 	retryer := New(config)
@@ -79,6 +85,8 @@ func TestRetryer_NonRetryableError(t *testing.T) {
 }
 
 func TestRetryer_MaxAttemptsExceeded(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 3
 	config.InitialDelay = 10 * time.Millisecond
@@ -109,6 +117,8 @@ func TestRetryer_MaxAttemptsExceeded(t *testing.T) {
 }
 
 func TestRetryer_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 10
 	config.InitialDelay = 100 * time.Millisecond
@@ -139,6 +149,8 @@ func TestRetryer_ContextCancellation(t *testing.T) {
 }
 
 func TestRetryer_ExponentialBackoff(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 4
 	config.InitialDelay = 100 * time.Millisecond
@@ -183,6 +195,8 @@ func TestRetryer_ExponentialBackoff(t *testing.T) {
 }
 
 func TestRetryer_MaxDelayCap(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 10
 	config.InitialDelay = 1 * time.Second
@@ -210,6 +224,8 @@ func TestRetryer_MaxDelayCap(t *testing.T) {
 }
 
 func TestRetryer_OnRetryCallback(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 3
 	config.InitialDelay = 10 * time.Millisecond
@@ -251,6 +267,8 @@ func TestRetryer_OnRetryCallback(t *testing.T) {
 }
 
 func TestRetryer_WithMethods(t *testing.T) {
+	t.Parallel()
+
 	original := New(DefaultConfig())
 
 	// Test WithMaxAttempts
@@ -291,6 +309,8 @@ func TestRetryer_WithMethods(t *testing.T) {
 }
 
 func TestRetryWithBackoff_Convenience(t *testing.T) {
+	t.Parallel()
+
 	attempts := 0
 	err := RetryWithBackoff(context.Background(), 3, func() error {
 		attempts++
@@ -310,6 +330,8 @@ func TestRetryWithBackoff_Convenience(t *testing.T) {
 }
 
 func TestRetryableFunc(t *testing.T) {
+	t.Parallel()
+
 	attempts := 0
 	fn := RetryableFunc(func() error {
 		attempts++
@@ -331,6 +353,8 @@ func TestRetryableFunc(t *testing.T) {
 }
 
 func TestStatsCollector(t *testing.T) {
+	t.Parallel()
+
 	collector := NewStatsCollector()
 
 	// Record some attempts
@@ -371,6 +395,8 @@ func TestStatsCollector(t *testing.T) {
 }
 
 func TestRetryer_JitterVariance(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.MaxAttempts = 3
 	config.InitialDelay = 100 * time.Millisecond
