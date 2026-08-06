@@ -528,6 +528,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **`pkg/utils`' debug tests could not be parallelized because there was no way to own a debug
+  manager** ([#373], [#179]). `paralleltest` 194 → 138; the package's 56 findings are now 0.
+
+  `GetDebugManager` returned a process-wide singleton and was the only way to get a manager, so every
+  test recorded into the same one. `RecordEvent` fans each event out to *every* open session — that is
+  what a global trace facility is for, since a caller deep in the read path records an event without
+  knowing which sessions are open — so two tests holding that manager see each other's events and
+  neither can assert an event count. A mutex does not help: the broadcast is doing what it is written to
+  do. `NewDebugManager` now returns a manager that shares nothing, `StartTrace` has a method form that
+  traces a session on a given manager, and the fan-out is documented where a reader will meet it rather
+  than being something you deduce from a failing count. The two tests that assert the *global* behaviour
+  — the singleton identity and the nil trace for an absent session — still use it deliberately.
+  Confirmed by mutation: reverting the tests to the shared manager reproduces the failures #373 reported,
+  including `Expected 1 event, got 3` and `Expected 3 events in stats, got 8`.
+
+  Reading that code for the constructor turned up two unguarded reads worth fixing on their own account.
+  `StopSession` set `enabled`/`endTime` under the session lock and then read `endTime`, `events` and
+  `profiles` back *after* unlocking, to format a log line — and it returns the session pointer, so a
+  caller can be recording into it while that line formats. `StartTrace` read `session.enabled` with no
+  lock at all, racing any concurrent `StopSession`. Both now read under the lock that writes them.
+
+  #373's fix plan also called for deleting a `.golangci.yml` exclusion for `debug_mode_test.go`. There is
+  no such exclusion — `grep debug_mode .golangci.yml` finds nothing — so the 56 findings were never
+  suppressed and there was nothing to remove.
 - **A health test only passed because its four cases shared one tracker and ran in order** ([#179]).
   `paralleltest` 325 → 263 across seven packages, and one of those 62 turned out to be covering a real
   gap rather than an annotation.
@@ -2176,6 +2200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs at all, and it makes two comparisons over three alerts rather than being vacuous.
 
 [#179]: https://github.com/scttfrdmn/objectfs/issues/179
+[#373]: https://github.com/scttfrdmn/objectfs/issues/373
 [#376]: https://github.com/scttfrdmn/objectfs/issues/376
 [#377]: https://github.com/scttfrdmn/objectfs/issues/377
 

@@ -9,6 +9,8 @@ import (
 )
 
 func TestNewLogRotator(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -33,6 +35,8 @@ func TestNewLogRotator(t *testing.T) {
 }
 
 func TestLogRotator_Write(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -75,6 +79,8 @@ func TestLogRotator_Write(t *testing.T) {
 }
 
 func TestLogRotator_SizeBasedRotation(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -124,6 +130,8 @@ func TestLogRotator_SizeBasedRotation(t *testing.T) {
 }
 
 func TestLogRotator_ForceRotate(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -185,6 +193,8 @@ func TestLogRotator_ForceRotate(t *testing.T) {
 }
 
 func TestLogRotator_Compression(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -237,6 +247,8 @@ func TestLogRotator_Compression(t *testing.T) {
 }
 
 func TestLogRotator_MaxBackups(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -286,6 +298,8 @@ func TestLogRotator_MaxBackups(t *testing.T) {
 }
 
 func TestLogRotator_DirectoryCreation(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logDir := filepath.Join(tmpDir, "logs", "app")
 	logFile := filepath.Join(logDir, "test.log")
@@ -316,6 +330,8 @@ func TestLogRotator_DirectoryCreation(t *testing.T) {
 }
 
 func TestLogRotator_Close(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -348,6 +364,8 @@ func TestLogRotator_Close(t *testing.T) {
 }
 
 func TestRotationConfig_Validation(t *testing.T) {
+	t.Parallel()
+
 	// Test with nil config
 	_, err := NewLogRotator(nil)
 	if err == nil {
@@ -365,6 +383,8 @@ func TestRotationConfig_Validation(t *testing.T) {
 }
 
 func TestLogRotator_Sync(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 
@@ -399,6 +419,8 @@ func TestLogRotator_Sync(t *testing.T) {
 }
 
 func TestBackupFilename(t *testing.T) {
+	t.Parallel()
+
 	config := &RotationConfig{
 		Filename:  "/var/log/app/test.log",
 		LocalTime: false,
@@ -418,6 +440,8 @@ func TestBackupFilename(t *testing.T) {
 }
 
 func TestGetBackupFiles(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "test.log")
 

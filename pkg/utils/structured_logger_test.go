@@ -8,6 +8,8 @@ import (
 )
 
 func TestNewStructuredLogger(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -29,6 +31,8 @@ func TestNewStructuredLogger(t *testing.T) {
 }
 
 func TestLogLevels(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -81,6 +85,8 @@ func TestLogLevels(t *testing.T) {
 }
 
 func TestStructuredFields(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -116,6 +122,8 @@ func TestStructuredFields(t *testing.T) {
 }
 
 func TestWithField(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -146,6 +154,8 @@ func TestWithField(t *testing.T) {
 }
 
 func TestWithFields(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -178,6 +188,8 @@ func TestWithFields(t *testing.T) {
 }
 
 func TestWithComponent(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -202,6 +214,8 @@ func TestWithComponent(t *testing.T) {
 }
 
 func TestJSONFormat(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -247,6 +261,8 @@ func TestJSONFormat(t *testing.T) {
 }
 
 func TestComponentLevels(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -296,6 +312,8 @@ func TestComponentLevels(t *testing.T) {
 }
 
 func TestFormatfMethods(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -340,6 +358,8 @@ func TestFormatfMethods(t *testing.T) {
 }
 
 func TestCaller(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -364,6 +384,8 @@ func TestCaller(t *testing.T) {
 }
 
 func TestStructuredParseLogLevel(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input    string
 		expected LogLevel
@@ -392,6 +414,8 @@ func TestStructuredParseLogLevel(t *testing.T) {
 }
 
 func TestStructuredLogLevelString(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		level    LogLevel
 		expected string
@@ -413,6 +437,8 @@ func TestStructuredLogLevelString(t *testing.T) {
 }
 
 func TestSetLevel(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -453,6 +479,8 @@ func TestSetLevel(t *testing.T) {
 }
 
 func TestTrace(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	config := &StructuredLoggerConfig{
@@ -479,6 +507,8 @@ func TestTrace(t *testing.T) {
 }
 
 func TestDefaultConfig(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultStructuredLoggerConfig()
 
 	if config.Level != INFO {
