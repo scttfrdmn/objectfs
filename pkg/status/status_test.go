@@ -11,6 +11,8 @@ import (
 )
 
 func TestOperationStatus_String(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		status   OperationStatus
 		expected string
@@ -25,6 +27,8 @@ func TestOperationStatus_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.status.String()
 			if result != tt.expected {
 				t.Errorf("String() = %s, want %s", result, tt.expected)
@@ -34,6 +38,8 @@ func TestOperationStatus_String(t *testing.T) {
 }
 
 func TestTracker_StartOperation(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -70,6 +76,8 @@ func TestTracker_StartOperation(t *testing.T) {
 }
 
 func TestTracker_UpdateProgress(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -107,6 +115,8 @@ func TestTracker_UpdateProgress(t *testing.T) {
 }
 
 func TestTracker_UpdateProgress_NotFound(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 
 	err := tracker.UpdateProgress("non-existent", 50, 100, "bytes")
@@ -116,6 +126,8 @@ func TestTracker_UpdateProgress_NotFound(t *testing.T) {
 }
 
 func TestTracker_SetPhase(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -137,6 +149,8 @@ func TestTracker_SetPhase(t *testing.T) {
 }
 
 func TestTracker_SetMessage(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -158,6 +172,8 @@ func TestTracker_SetMessage(t *testing.T) {
 }
 
 func TestTracker_CompleteOperation(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -190,6 +206,8 @@ func TestTracker_CompleteOperation(t *testing.T) {
 }
 
 func TestTracker_FailOperation(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -221,6 +239,8 @@ func TestTracker_FailOperation(t *testing.T) {
 }
 
 func TestTracker_CancelOperation(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -251,6 +271,8 @@ func TestTracker_CancelOperation(t *testing.T) {
 }
 
 func TestTracker_GetAllOperations(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -282,6 +304,8 @@ func TestTracker_GetAllOperations(t *testing.T) {
 }
 
 func TestTracker_GetHistory(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -307,6 +331,8 @@ func TestTracker_GetHistory(t *testing.T) {
 }
 
 func TestTracker_Subscribe(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx := context.Background()
 
@@ -339,6 +365,8 @@ func TestTracker_Subscribe(t *testing.T) {
 }
 
 func TestTracker_Subscribe_NotFound(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 
 	_, err := tracker.Subscribe("non-existent")
@@ -348,6 +376,8 @@ func TestTracker_Subscribe_NotFound(t *testing.T) {
 }
 
 func TestTracker_GetSystemStatus(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultTrackerConfig()
 	healthTracker := health.NewTracker(health.DefaultConfig())
 	config.HealthTracker = healthTracker
@@ -384,6 +414,8 @@ func TestTracker_GetSystemStatus(t *testing.T) {
 }
 
 func TestProgress_Update(t *testing.T) {
+	t.Parallel()
+
 	progress := &Progress{
 		Unit: "bytes",
 	}
@@ -417,6 +449,8 @@ func TestProgress_Update(t *testing.T) {
 }
 
 func TestProgress_Copy(t *testing.T) {
+	t.Parallel()
+
 	original := &Progress{
 		Current:    50,
 		Total:      100,
@@ -452,6 +486,8 @@ func TestProgress_Copy(t *testing.T) {
 }
 
 func TestOperation_Copy(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	original := &Operation{
 		ID:        "test-123",
@@ -495,6 +531,8 @@ func TestOperation_Copy(t *testing.T) {
 }
 
 func TestTracker_MaxHistory(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultTrackerConfig()
 	config.MaxHistorySize = 3
 	tracker := NewTracker(config)
@@ -515,6 +553,8 @@ func TestTracker_MaxHistory(t *testing.T) {
 }
 
 func TestTracker_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultTrackerConfig())
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -540,6 +580,8 @@ func TestTracker_ContextCancellation(t *testing.T) {
 }
 
 func TestGenerateOperationID(t *testing.T) {
+	t.Parallel()
+
 	id1 := generateOperationID()
 	time.Sleep(1 * time.Millisecond)
 	id2 := generateOperationID()

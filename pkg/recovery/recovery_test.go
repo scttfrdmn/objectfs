@@ -15,6 +15,8 @@ import (
 )
 
 func TestNewRecoveryManager(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -36,6 +38,8 @@ func TestNewRecoveryManager(t *testing.T) {
 }
 
 func TestRecoveryManager_ExecuteSuccess(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.DefaultStrategy = StrategyRetry
 	rm := NewRecoveryManager(config)
@@ -58,6 +62,8 @@ func TestRecoveryManager_ExecuteSuccess(t *testing.T) {
 }
 
 func TestRecoveryManager_ExecuteWithRetry(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.DefaultStrategy = StrategyRetry
 	config.RetryConfig.MaxAttempts = 3
@@ -85,6 +91,8 @@ func TestRecoveryManager_ExecuteWithRetry(t *testing.T) {
 }
 
 func TestRecoveryManager_ExecuteWithCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.CircuitBreakerConfig = circuit.Config{
 		MaxRequests: 1,
@@ -120,6 +128,8 @@ func TestRecoveryManager_ExecuteWithCircuitBreaker(t *testing.T) {
 }
 
 func TestRecoveryManager_RegisterFallback(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -149,6 +159,8 @@ func TestRecoveryManager_RegisterFallback(t *testing.T) {
 }
 
 func TestRecoveryManager_GracefulDegradation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.DefaultStrategy = StrategyGracefulDegradation
 	rm := NewRecoveryManager(config)
@@ -189,6 +201,8 @@ func TestRecoveryManager_GracefulDegradation(t *testing.T) {
 }
 
 func TestRecoveryManager_RecoverComponent(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.EnableAutoRecovery = false // Disable auto recovery for this test
 	rm := NewRecoveryManager(config)
@@ -216,6 +230,8 @@ func TestRecoveryManager_RecoverComponent(t *testing.T) {
 }
 
 func TestRecoveryManager_GetRecoveryStats(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -235,6 +251,8 @@ func TestRecoveryManager_GetRecoveryStats(t *testing.T) {
 }
 
 func TestRecoveryManager_FailFastStrategy(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.DefaultStrategy = StrategyFailFast
 	rm := NewRecoveryManager(config)
@@ -257,6 +275,8 @@ func TestRecoveryManager_FailFastStrategy(t *testing.T) {
 }
 
 func TestRecoveryManager_DetermineStrategy(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.DefaultStrategy = StrategyRetry
 	rm := NewRecoveryManager(config)
@@ -285,6 +305,8 @@ func TestRecoveryManager_DetermineStrategy(t *testing.T) {
 }
 
 func TestRecoveryStrategy_String(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		strategy RecoveryStrategy
 		expected string
@@ -304,6 +326,8 @@ func TestRecoveryStrategy_String(t *testing.T) {
 }
 
 func TestRecoveryManager_EnhanceError(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -333,6 +357,8 @@ func TestRecoveryManager_EnhanceError(t *testing.T) {
 }
 
 func TestRecoveryManager_ExecuteWithResult(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -353,6 +379,8 @@ func TestRecoveryManager_ExecuteWithResult(t *testing.T) {
 }
 
 func TestRecoveryManager_HandleSuccessAndFailure(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -383,6 +411,8 @@ func TestRecoveryManager_HandleSuccessAndFailure(t *testing.T) {
 }
 
 func TestRecoveryManager_AutoRecoveryDisabled(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.EnableAutoRecovery = false
 	rm := NewRecoveryManager(config)
@@ -407,6 +437,8 @@ func TestRecoveryManager_AutoRecoveryDisabled(t *testing.T) {
 }
 
 func TestRecoveryManager_Shutdown(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	rm := NewRecoveryManager(config)
 
@@ -506,7 +538,51 @@ func TestDegradedState(t *testing.T) {
 	}
 }
 
+// TestRecoveryManager_RepeatedDegradationWithAutoRecovery covers the one shape no other test in this
+// package produces: a second failure on a component whose auto-recovery goroutine is already running.
+//
+// markDegraded starts that goroutine and then keeps writing AttemptCount on every later failure, while
+// attemptAutoRecovery read the same field off the shared pointer *after* releasing the lock, to format
+// a log line. Every existing test marks each component exactly once — TestDegradedState marks twice but
+// disables auto-recovery, so no goroutine exists to race — which is why a plain concurrent read and
+// write of a mutex-guarded field survived a suite that runs entirely under -race.
+//
+// The assertions here are ordinary, and the race detector is the actual subject: with the unlocked read
+// restored this reports a read at attemptAutoRecovery against the write in markDegraded.
+func TestRecoveryManager_RepeatedDegradationWithAutoRecovery(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultRecoveryConfig()
+	config.EnableAutoRecovery = true
+	config.MaxRecoveryAttempts = 10
+	// Short enough that the recovery goroutines are live while the loop below is still marking, which
+	// is the overlap the race needs; the assertion afterwards does not depend on the timing.
+	config.RecoveryBackoff = 1 * time.Millisecond
+	rm := NewRecoveryManager(config)
+
+	const component = "flapping"
+	for range 10 {
+		rm.markDegraded(component, "read-object", errors.New("boom"))
+	}
+
+	// Auto-recovery deletes the component's record when it fires, so the only stable claim is that the
+	// manager is still answerable and consistent about the component: degraded with a record, or
+	// recovered with none. A mismatch between the two views would mean a lost or duplicated delete.
+	degraded := rm.isComponentDegraded(component)
+	_, hasRecord := rm.GetDegradedComponents()[component]
+	if degraded != hasRecord {
+		t.Errorf("isComponentDegraded() = %v but GetDegradedComponents() has record = %v; the two "+
+			"read the same map and must agree", degraded, hasRecord)
+	}
+
+	if err := rm.Shutdown(context.Background()); err != nil {
+		t.Errorf("Shutdown after repeated degradation: %v", err)
+	}
+}
+
 func TestRecoveryManager_ConcurrentExecution(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 	config.RetryConfig.MaxAttempts = 2
 	config.RetryConfig.InitialDelay = 5 * time.Millisecond
@@ -542,6 +618,8 @@ func TestRecoveryManager_ConcurrentExecution(t *testing.T) {
 }
 
 func TestDefaultRecoveryConfig(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultRecoveryConfig()
 
 	if config.DefaultStrategy != StrategyRetry {

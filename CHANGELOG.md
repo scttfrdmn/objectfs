@@ -528,6 +528,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **A recovery goroutine read an attempt counter it had already released the lock on** ([#179]).
+  `paralleltest` 138 → 80 across `pkg/recovery` and `pkg/status`.
+
+  `markDegraded` starts `attemptAutoRecovery` in a goroutine and then keeps writing `AttemptCount` under
+  the manager's lock on every later failure for the same component. `attemptAutoRecovery` copied
+  `NextAttempt` under the lock, released it, and then read `AttemptCount` off the shared pointer to
+  format a log line — a plain unsynchronized read of a mutex-guarded field, which the race detector
+  reports the moment a component fails twice with auto-recovery enabled. The whole suite runs under
+  `-race` and never saw it, because every test marks each component exactly once; the one test that
+  marks twice disables auto-recovery, so there was no goroutine to race with. Both fields are copied
+  under the lock now, and `TestRecoveryManager_RepeatedDegradationWithAutoRecovery` produces the shape
+  that was missing. Verified in both directions: restoring the unlocked read fails that test with a data
+  race at `recovery.go`, and the fix is clean at `-count=5`.
+
+  Nothing in `pkg/status` needed changing; its 21 tests each build their own tracker already.
 - **`pkg/utils`' debug tests could not be parallelized because there was no way to own a debug
   manager** ([#373], [#179]). `paralleltest` 194 → 138; the package's 56 findings are now 0.
 

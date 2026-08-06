@@ -19,6 +19,8 @@ func (m *mockConnection) Close() error {
 }
 
 func TestConnectionState_String(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		state    ConnectionState
 		expected string
@@ -38,6 +40,8 @@ func TestConnectionState_String(t *testing.T) {
 }
 
 func TestDefaultConnectionConfig(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 
 	if config.ConnectionTimeout != 30*time.Second {
@@ -66,6 +70,8 @@ func TestDefaultConnectionConfig(t *testing.T) {
 }
 
 func TestNewConnectionManager(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -93,6 +99,8 @@ func TestNewConnectionManager(t *testing.T) {
 }
 
 func TestConnectionManager_Connect(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.ConnectionTimeout = 5 * time.Second
 
@@ -124,6 +132,8 @@ func TestConnectionManager_Connect(t *testing.T) {
 }
 
 func TestConnectionManager_ConnectTimeout(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.ConnectionTimeout = 100 * time.Millisecond
 	config.EnableAutoReconnect = false // Disable for this test
@@ -151,6 +161,8 @@ func TestConnectionManager_ConnectTimeout(t *testing.T) {
 }
 
 func TestConnectionManager_GetConnection(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -190,6 +202,8 @@ func TestConnectionManager_GetConnection(t *testing.T) {
 }
 
 func TestConnectionManager_Reconnect(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.EnableAutoReconnect = false
 
@@ -227,6 +241,8 @@ func TestConnectionManager_Reconnect(t *testing.T) {
 }
 
 func TestConnectionManager_HealthCheckFailure(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.HealthCheckInterval = 50 * time.Millisecond
 	config.HealthCheckTimeout = 10 * time.Millisecond
@@ -265,6 +281,8 @@ func TestConnectionManager_HealthCheckFailure(t *testing.T) {
 }
 
 func TestConnectionManager_GetStats(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -312,6 +330,8 @@ func TestConnectionManager_GetStats(t *testing.T) {
 }
 
 func TestConnectionManager_Close(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -363,6 +383,8 @@ func TestConnectionManager_Close(t *testing.T) {
 }
 
 func TestConnectionManager_AutoReconnect(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.ReconnectDelay = 50 * time.Millisecond
 	config.MaxReconnectDelay = 100 * time.Millisecond
@@ -401,6 +423,8 @@ func TestConnectionManager_AutoReconnect(t *testing.T) {
 }
 
 func TestConnectionManager_MaxReconnectAttempts(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.ReconnectDelay = 10 * time.Millisecond
 	config.MaxReconnectAttempts = 2
@@ -440,6 +464,8 @@ func TestConnectionManager_MaxReconnectAttempts(t *testing.T) {
 }
 
 func TestConnectionPool_New(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -460,6 +486,8 @@ func TestConnectionPool_New(t *testing.T) {
 }
 
 func TestConnectionPool_ConnectAll(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -486,6 +514,8 @@ func TestConnectionPool_ConnectAll(t *testing.T) {
 }
 
 func TestConnectionPool_GetConnection(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -515,6 +545,8 @@ func TestConnectionPool_GetConnection(t *testing.T) {
 }
 
 func TestConnectionPool_HealthyCount(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	config.EnableAutoReconnect = false
 
@@ -543,6 +575,8 @@ func TestConnectionPool_HealthyCount(t *testing.T) {
 }
 
 func TestConnectionPool_Close(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -568,6 +602,8 @@ func TestConnectionPool_Close(t *testing.T) {
 }
 
 func TestConnectionManager_Wait(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		return &mockConnection{healthy: true}, nil
@@ -599,6 +635,8 @@ func TestConnectionManager_Wait(t *testing.T) {
 }
 
 func TestConnectionManager_WaitTimeout(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConnectionConfig()
 	factory := func(ctx context.Context) (any, error) {
 		// Never connects

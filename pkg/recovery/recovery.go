@@ -354,13 +354,19 @@ func (rm *RecoveryManager) isComponentDegraded(component string) bool {
 
 // attemptAutoRecovery attempts to automatically recover a degraded component
 func (rm *RecoveryManager) attemptAutoRecovery(component string) {
+	// Both fields this needs are copied under the lock. The version this replaces copied only
+	// NextAttempt and then read state.AttemptCount off the shared pointer after unlocking, for a log
+	// line — and markDegraded, which is what starts this goroutine, writes AttemptCount under the lock
+	// on every subsequent failure. Two failures on one component is therefore a data race, reported by
+	// -race as a read at this function against the write in markDegraded. Nothing in the suite provoked
+	// it because every existing caller marks each component once.
 	rm.mu.RLock()
 	state := rm.degradedComponents[component]
 	if state == nil {
 		rm.mu.RUnlock()
 		return
 	}
-	nextAttempt := state.NextAttempt
+	nextAttempt, attemptCount := state.NextAttempt, state.AttemptCount
 	rm.mu.RUnlock()
 
 	// Wait until next attempt time
@@ -368,7 +374,7 @@ func (rm *RecoveryManager) attemptAutoRecovery(component string) {
 
 	rm.logger.Info("Attempting automatic recovery", map[string]any{
 		"component": component,
-		"attempt":   state.AttemptCount + 1,
+		"attempt":   attemptCount + 1,
 	})
 
 	// For now, just reset the circuit breaker for this component
