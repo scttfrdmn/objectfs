@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -697,5 +698,245 @@ func TestMonitor_ComponentHealthFailure(t *testing.T) {
 
 	if comp.checkCount == 0 {
 		t.Error("the component's HealthCheck was never called")
+	}
+}
+
+// recoveryCtxKey marks a context so a check or a recovery can report which one it was handed.
+type recoveryCtxKey struct{}
+
+// recoverableComponent is unhealthy, recoverable, and records the context value it sees in each role.
+//
+// Both fields are read by the test after performMonitoringCycle returns, and HealthCheck runs on one
+// of RunAllChecks' goroutines, so the mutex is not decoration.
+type recoverableComponent struct {
+	mu           sync.Mutex
+	checkedValue any
+	recoverValue any
+	recoverCalls int
+}
+
+func (c *recoverableComponent) GetComponentName() string { return "recoverable-comp" }
+func (c *recoverableComponent) GetComponentType() string { return "storage" }
+
+func (c *recoverableComponent) HealthCheck(ctx context.Context) error {
+	c.mu.Lock()
+	c.checkedValue = ctx.Value(recoveryCtxKey{})
+	c.mu.Unlock()
+
+	return errors.New("unhealthy on purpose, so auto-recovery runs")
+}
+
+func (c *recoverableComponent) Recover(ctx context.Context) error {
+	c.mu.Lock()
+	c.recoverValue = ctx.Value(recoveryCtxKey{})
+	c.recoverCalls++
+	c.mu.Unlock()
+
+	return errors.New("recovery fails on purpose, so every attempt is used")
+}
+
+// newRecoveryMonitor returns a started Monitor with auto-recovery on and the given delay, plus the
+// unhealthy recoverable component it monitors.
+func newRecoveryMonitor(t *testing.T, delay time.Duration) (*Monitor, *recoverableComponent) {
+	t.Helper()
+
+	monitor, err := NewMonitor(&MonitorConfig{
+		Enabled:          true,
+		MonitorInterval:  time.Hour, // the test drives cycles itself
+		AutoRecovery:     true,
+		RecoveryAttempts: 2,
+		RecoveryDelay:    delay,
+		HealthCheckConfig: &Config{
+			Enabled:       true,
+			CheckInterval: time.Hour,
+			Timeout:       10 * time.Second,
+			HTTPEnabled:   false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMonitor() error = %v", err)
+	}
+
+	if err := monitor.Start(t.Context()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = monitor.Stop() })
+
+	comp := &recoverableComponent{}
+	if err := monitor.RegisterComponent(comp); err != nil {
+		t.Fatalf("RegisterComponent() error = %v", err)
+	}
+
+	return monitor, comp
+}
+
+// TestMonitorCycle_CarriesTheCallersContext is what the contextcheck fix is worth beyond a linter
+// count.
+//
+// monitorLoop took no context and every cycle built one from context.Background(), so the context
+// Start was handed reached m.checker.Start and nothing else this type ran — checks and recoveries
+// driven by the monitor's own ticker saw an empty context forever. This asserts the value plumbs all
+// the way to both, which a mechanical `parent context.Context` parameter that was then ignored would
+// not satisfy.
+func TestMonitorCycle_CarriesTheCallersContext(t *testing.T) {
+	t.Parallel()
+
+	monitor, comp := newRecoveryMonitor(t, 0)
+
+	ctx := context.WithValue(t.Context(), recoveryCtxKey{}, "from-the-caller")
+	monitor.performMonitoringCycle(ctx)
+
+	comp.mu.Lock()
+	defer comp.mu.Unlock()
+
+	if comp.checkedValue != "from-the-caller" {
+		t.Errorf("the health check saw context value %v, want %q: the cycle's context does not "+
+			"descend from the one it was given", comp.checkedValue, "from-the-caller")
+	}
+
+	if comp.recoverValue != "from-the-caller" {
+		t.Errorf("Recover saw context value %v, want %q", comp.recoverValue, "from-the-caller")
+	}
+
+	if comp.recoverCalls != 2 {
+		t.Errorf("Recover called %d times, want 2 (RecoveryAttempts), each having failed",
+			comp.recoverCalls)
+	}
+}
+
+// TestAutoRecovery_DelayEndsOnCancellation pins the other half: the wait between attempts is
+// interruptible.
+//
+// It was time.Sleep(delay), which no cancellation could shorten — a component configured with a long
+// RecoveryDelay held a goroutine retrying a recovery whose context had already expired and whose
+// monitor may already have been stopped. With an hour of delay and a context canceled before the
+// cycle starts, the old code takes an hour and the new one returns at once.
+func TestAutoRecovery_DelayEndsOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	monitor, comp := newRecoveryMonitor(t, time.Hour)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		monitor.attemptAutoRecovery(ctx, map[string]*Result{
+			comp.GetComponentName(): {Check: comp.GetComponentName(), Status: StatusUnhealthy},
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("attemptAutoRecovery is still waiting out RecoveryDelay 10s after its context was " +
+			"canceled; the inter-attempt wait is not interruptible")
+	}
+}
+
+// TestPriority_AtLeast pins the severity order, because Priority is a string and `>=` on it silently
+// compares bytes: "critical" < "high" < "low" < "medium", which is neither the declaration order nor
+// the severity order.
+func TestPriority_AtLeast(t *testing.T) {
+	t.Parallel()
+
+	// Least severe first.
+	order := []Priority{PriorityLow, PriorityMedium, PriorityHigh, PriorityCritical}
+
+	for i, p := range order {
+		for j, other := range order {
+			want := i >= j
+			if got := p.AtLeast(other); got != want {
+				t.Errorf("Priority(%q).AtLeast(%q) = %v, want %v", p, other, got, want)
+			}
+		}
+	}
+
+	// The specific case the auto-remediation gate got wrong, spelled out: byte order puts "critical"
+	// before "high", so `severity >= PriorityHigh` excluded the most severe priority there is.
+	if !PriorityCritical.AtLeast(PriorityHigh) {
+		t.Error("PriorityCritical is not AtLeast PriorityHigh, which is the inversion this method exists to prevent")
+	}
+	if PriorityMedium.AtLeast(PriorityHigh) {
+		t.Error("PriorityMedium counts as AtLeast PriorityHigh")
+	}
+
+	// An unrecognized value must not outrank a real one — it ranks 0, below Low.
+	if Priority("").AtLeast(PriorityLow) {
+		t.Error(`Priority("") counts as AtLeast PriorityLow`)
+	}
+}
+
+// TestDetectProblems_CriticalIssueRemediatesWithTheLoopsContext covers the auto-remediation path of
+// EnhancedMonitor end to end, which nothing did.
+//
+// Two defects met here. The gate read `severity >= PriorityHigh` on a string Priority, so the two
+// PriorityCritical arms of detectProblems — a critical error rate and a critical failure streak — were
+// the only issues that never triggered remediation, while PriorityMedium did. And the remediation
+// context came from context.Background(), so the problem-detection loop's context, which Start is
+// handed, reached nothing.
+func TestDetectProblems_CriticalIssueRemediatesWithTheLoopsContext(t *testing.T) {
+	t.Parallel()
+
+	monitor, err := NewEnhancedMonitor(&MonitorConfig{
+		Enabled:         true,
+		MonitorInterval: time.Hour,
+		AutoRecovery:    true,
+		HealthCheckConfig: &Config{
+			Enabled:     true,
+			Timeout:     10 * time.Second,
+			HTTPEnabled: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEnhancedMonitor() error = %v", err)
+	}
+
+	const component = "critical-comp"
+
+	// A diagnosis with an automated fix that reports the context it was handed. Preloaded so
+	// AttemptAutoRemediation does not have to run a health check to reach it.
+	fixed := make(chan any, 1)
+	monitor.diagnoses[component] = &ProblemDiagnosis{
+		Check: component,
+		Remediations: []*RemediationAction{{
+			ID:        "record-the-context",
+			Automated: true,
+			AutoFix: func(ctx context.Context) error {
+				fixed <- ctx.Value(recoveryCtxKey{})
+				return nil
+			},
+		}},
+	}
+
+	// A failure streak past FailureStreakCritical, which is the PriorityCritical arm.
+	monitor.analyzer.mu.Lock()
+	monitor.analyzer.patterns[component] = &HealthPattern{
+		ComponentName: component,
+		FailureStreak: monitor.analyzer.thresholds.FailureStreakCritical + 1,
+	}
+	monitor.analyzer.mu.Unlock()
+
+	ctx := context.WithValue(t.Context(), recoveryCtxKey{}, "from-the-detection-loop")
+	monitor.detectProblems(ctx, component)
+
+	select {
+	case got := <-fixed:
+		if got != "from-the-detection-loop" {
+			t.Errorf("the auto-fix saw context value %v, want %q: remediation does not run on the "+
+				"detection loop's context", got, "from-the-detection-loop")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no auto-remediation ran for a PriorityCritical issue with AutoRecovery enabled")
+	}
+
+	// The issue must also be recorded, and recorded as resolved once the fix succeeded.
+	issues := monitor.GetDetectedIssues(true)
+	if len(issues) != 1 {
+		t.Fatalf("GetDetectedIssues() returned %d issues, want 1", len(issues))
+	}
+	if issues[0].Severity != PriorityCritical {
+		t.Errorf("issue severity = %q, want %q", issues[0].Severity, PriorityCritical)
 	}
 }

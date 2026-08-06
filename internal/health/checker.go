@@ -134,6 +134,33 @@ const (
 	PriorityLow      Priority = "low"
 )
 
+// severityRank orders the priorities, most severe highest. Unknown values rank below Low.
+//
+// A map and not the constants' own ordering, because these are strings and `>=` on them compares
+// bytes: "critical" < "high" < "low" < "medium" is the order the language sees, which is neither the
+// declaration order nor the severity order and gets Critical and High exactly backwards.
+var severityRank = map[Priority]int{
+	PriorityCritical: 4,
+	PriorityHigh:     3,
+	PriorityMedium:   2,
+	PriorityLow:      1,
+}
+
+// AtLeast reports whether p is at least as severe as other.
+//
+// This exists because `severity >= PriorityHigh` was written once, in EnhancedMonitor's auto-remediation
+// gate, and Priority is a string: that expression asked whether the byte sequence sorted at or after
+// "high", so it was true for "high", "low" and "medium" and false for "critical" — the two Critical
+// issues detectProblems raises, a critical error rate and a critical failure streak, were the only ones
+// auto-remediation refused to act on, while a merely elevated latency got it. Verified by execution.
+//
+// [Status] is the other string enum here and is never ordered — Checker.updateStats switches on it.
+// [Category] is a label. Priority is the only one of the three with a severity order, so it is the only
+// one that needs this.
+func (p Priority) AtLeast(other Priority) bool {
+	return severityRank[p] >= severityRank[other]
+}
+
 type Status string
 
 const (

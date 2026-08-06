@@ -528,6 +528,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **Three live defects found by fixing five `contextcheck` findings** ([#179]). `contextcheck` 9 → 4.
+  The linter's complaint — background work building its own `context.Background()` instead of descending
+  from the caller's — was accurate everywhere, and in three places the code around it was wrong in ways
+  the context plumbing had been hiding.
+
+  **Auto-remediation refused to act on exactly the critical issues.** `EnhancedMonitor.createDetectedIssue`
+  gated it on `severity >= PriorityHigh`, and `Priority` is a `string`, so that expression compared bytes:
+  `"critical" < "high" < "low" < "medium"` is the order the language sees, which is neither the declaration
+  order nor the severity order. Measured by execution — `critical` → **false**, `high`/`low`/`medium` →
+  **true**. Both `PriorityCritical` arms of `detectProblems`, a critical error rate and a critical failure
+  streak, were the only issues auto-remediation skipped, while a merely elevated latency got it. There is
+  now a `Priority.AtLeast` method with an explicit rank table and a comment saying why the constants' own
+  ordering cannot be used. `Status` and `Category` are the package's other string enums; neither is ever
+  ordered, so neither needs one. Three unsynchronized writes to `issue.AutoRemediating` racing
+  `GetComponentHealthDetail`'s `RLock` are fixed in the same function.
+
+  **The S3 connection pool destroyed working clients under a least-privilege policy.** Its health probe was
+  `ListBuckets` with the verdict `err == nil`. `ListBuckets` is an account-level call gated by
+  `s3:ListAllMyBuckets` — a different permission from anything granted on the bucket the pool serves, and
+  one an institutional deployment's bucket-scoped policy does not grant. Verified against an endpoint
+  answering 403 `AccessDenied`: every probe declared its connection dead, so each round evicted up to three
+  usable clients and wrote "Found 3 unhealthy connections" into the pool's `LastError` for an operator to
+  chase — every 30 seconds, forever, while also listing every bucket in the account to learn nothing about
+  the one in use. It is now `HeadBucket` on the pool's own bucket, and the verdict is
+  `errors.As(err, &smithy.APIError)` rather than `err == nil`: a 403, a 404, a redirect or a 500 travelled
+  to S3 and came back, which is precisely what a liveness probe is asking, and only a transport failure
+  means the client cannot be reused. `NewConnectionPool` takes the bucket and a context as a result.
+
+  **`pkg/recovery` leaked a health-check goroutine per connect.** Every successful
+  `ConnectionManager.Connect` started a `healthCheckLoop`, and `Connect` is what `Reconnect` calls and what
+  the reconnect scheduler calls on each automatic attempt — so loops accumulated for the life of the
+  process. Measured: **58 probes where one loop gives ~10**, after six `Connect` calls at a 20 ms interval.
+  Each surplus loop also independently diagnosed a failure and called `scheduleReconnect`, so one broken
+  connection produced N competing reconnection schedules each driving `reconnectAttempt` toward
+  `MaxReconnectAttempts` and `StateFailed`. Guarded with a `CompareAndSwap`, because `Connect` runs
+  concurrently with itself.
+
+  The context work itself is a decision per site rather than a mechanical rewrite, and the tests pin both
+  answers. `context.WithoutCancel` where a *separate* signal ends the work — `Checker.Stop`, `Monitor.Stop`,
+  `ConnectionPool.Close`, `ConnectionManager.Close` — so a request-scoped caller cannot take health checking
+  down with it when its own call returns. Plain `ctx` where the context *is* the stop signal:
+  `problemDetectionLoop` selects on `ctx.Done()` and returns, so a five-minute remediation must not outlive
+  it. `Monitor.attemptAutoRecovery`'s inter-attempt `time.Sleep` is a `select` on `ctx.Done()`, `stopCh` and
+  the delay, so a component with a long `RecoveryDelay` no longer holds a goroutine past shutdown retrying
+  a recovery nobody is waiting for. Eight mutations were run against the new tests and each failed with the
+  predicted message, including the two plausible-looking wrong answers `contextcheck` would also have
+  accepted — a struct field instead of a parameter does not satisfy it, and binding background work to the
+  caller's cancellation satisfies it while breaking the pool.
+
 - **Every `pkg/api` handler test ran with a context nothing could cancel** ([#179]). `noctx` 31 → 0.
   Thirty of the thirty-one findings were `httptest.NewRequest`, which attaches `context.Background()`:
   a handler reading `r.Context()` in these tests saw a context carrying nothing, with a nil `Done`

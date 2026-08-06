@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 )
 
 // ConnectionPool manages a pool of S3 client connections
@@ -50,14 +52,20 @@ type PoolStats struct {
 // HealthChecker monitors connection health
 type HealthChecker struct {
 	pool     *ConnectionPool
+	bucket   string
 	interval time.Duration
 	timeout  time.Duration
 	stopCh   chan struct{}
 	stopped  chan struct{}
 }
 
-// NewConnectionPool creates a new connection pool
-func NewConnectionPool(maxSize int, factory func() (*s3.Client, error)) (*ConnectionPool, error) {
+// NewConnectionPool creates a pool of at most maxSize clients from factory.
+//
+// ctx is the parent of every health probe the pool's background checker makes, and bucket is what it
+// probes. Both were absent: the checker built each probe context from context.Background(), so nothing
+// a caller attached reached it and shutdown relied entirely on stopCh — and it probed with ListBuckets,
+// which is the wrong call. See testConnection.
+func NewConnectionPool(ctx context.Context, maxSize int, bucket string, factory func() (*s3.Client, error)) (*ConnectionPool, error) {
 	if maxSize <= 0 {
 		maxSize = 8 // Default pool size
 	}
@@ -79,14 +87,17 @@ func NewConnectionPool(maxSize int, factory func() (*s3.Client, error)) (*Connec
 	// Initialize health checker
 	pool.healthCheck = &HealthChecker{
 		pool:     pool,
+		bucket:   bucket,
 		interval: 30 * time.Second,
 		timeout:  5 * time.Second,
 		stopCh:   make(chan struct{}),
 		stopped:  make(chan struct{}),
 	}
 
-	// Start health checker
-	go pool.healthCheck.run()
+	// Start health checker. context.WithoutCancel because Close is what stops it — the pool outlives
+	// whatever call constructed it, and a request-scoped ctx would otherwise end health checking while
+	// the pool went on serving connections.
+	go pool.healthCheck.run(context.WithoutCancel(ctx))
 
 	return pool, nil
 }
@@ -413,7 +424,11 @@ func (p *ConnectionPool) reserveSlot() bool {
 
 // Health checker implementation
 
-func (hc *HealthChecker) run() {
+// run probes a sample of idle connections on a ticker until Close signals stopCh.
+//
+// parent carries the values NewConnectionPool was called with and none of its cancellation; each probe
+// derives its own timeout from it.
+func (hc *HealthChecker) run(parent context.Context) {
 	defer close(hc.stopped)
 
 	ticker := time.NewTicker(hc.interval)
@@ -424,12 +439,12 @@ func (hc *HealthChecker) run() {
 		case <-hc.stopCh:
 			return
 		case <-ticker.C:
-			hc.checkHealth()
+			hc.checkHealth(parent)
 		}
 	}
 }
 
-func (hc *HealthChecker) checkHealth() {
+func (hc *HealthChecker) checkHealth(parent context.Context) {
 	// Get a sample of connections to test
 	testCount := min(hc.pool.Stats().Idle, 3)
 
@@ -442,7 +457,7 @@ func (hc *HealthChecker) checkHealth() {
 			continue
 		}
 
-		healthy := hc.testConnection(conn)
+		healthy := hc.testConnection(parent, conn)
 		if !healthy {
 			unhealthyCount++
 			// Don't put unhealthy connection back
@@ -465,12 +480,40 @@ func (hc *HealthChecker) checkHealth() {
 	}
 }
 
-func (hc *HealthChecker) testConnection(conn *s3.Client) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), hc.timeout)
+// testConnection reports whether conn can still reach S3.
+//
+// HeadBucket on the pool's own bucket, not ListBuckets. ListBuckets is an account-level call gated by
+// s3:ListAllMyBuckets, which is a different permission from anything granted on the bucket this pool
+// serves — the least-privilege policy an institutional deployment is expected to run under grants the
+// second and not the first. Verified: against an endpoint answering 403 AccessDenied, the old check
+// returned false, so every probe declared its connection dead and checkHealth destroyed up to three
+// working clients per round, forever, while recording "Found 3 unhealthy connections" as the pool's
+// LastError. It also listed every bucket in the account every 30 seconds to learn nothing about the one
+// in use.
+//
+// An API-level answer is a healthy connection whatever it says. A 403 or a 404 traveled to S3 and came
+// back, which is precisely what this is asking; only a transport failure or a timeout means the client
+// cannot be reused. So the verdict is on whether the error is a smithy.APIError, not on whether there
+// is an error — bucket named but inaccessible, bucket deleted, and bucket in another region all leave a
+// connection perfectly usable, and destroying it fixes nothing.
+//
+// If bucket is empty — no caller in the tree does that, but the pool is constructible directly — there
+// is nothing to probe, so the connection is taken on trust rather than tested against a request that
+// cannot be well-formed.
+func (hc *HealthChecker) testConnection(parent context.Context, conn *s3.Client) bool {
+	if hc.bucket == "" {
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(parent, hc.timeout)
 	defer cancel()
 
-	// Simple health check - list buckets (requires minimal permissions)
-	// In a real implementation, you might want a more specific health check
-	_, err := conn.ListBuckets(ctx, &s3.ListBucketsInput{})
-	return err == nil
+	_, err := conn.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(hc.bucket)})
+	if err == nil {
+		return true
+	}
+
+	var apiErr smithy.APIError
+
+	return stderrors.As(err, &apiErr)
 }
