@@ -43,11 +43,13 @@ package config
 // was added, and `go list`'s trailing empty fields collapse under a plain separator, which made `tests`
 // — a package of only _test.go files, and one of the three the header has to classify — unparseable.
 //
-// The gate's report and this file's header can also disagree for a reason that is neither's fault: two
-// copies of the `flatted` npm package vendor a Go file, so on a machine that has run `npm ci` the gate
-// names eight packages rather than six. Those two are filtered here rather than floored or explained,
-// because they are not this repository's code. CI's coverage job installs no npm dependencies, so it
-// sees six either way.
+// The gate's report and this file's header used to disagree for a reason that was neither's fault: two
+// copies of the `flatted` npm package vendor a Go file, so on a machine that had run `npm ci` the gate
+// named two extra packages. This file filtered them out of the synthetic profile, which made the test
+// pass and left the noise in the gate's output — the wrong half to fix, since the gate's report is what
+// a person reads. coverage-gate.sh now skips profile paths under node_modules, and the filter here is
+// gone: the synthetic profile names those packages and the assertion that the gate does not report them
+// is the test that its exclusion works.
 
 import (
 	"bufio"
@@ -104,7 +106,7 @@ func moduleFromGoMod(t *testing.T) string {
 //
 // CgoFiles are parsed alongside GoFiles. sdks/c is the whole reason: its only non-test file is
 // main.go with an `import "C"`, so it lands in CgoFiles and a GoFiles-only walk would have called the
-// package empty and expected the gate not to report it. The gate does report it, at 11.0%.
+// package empty and expected the gate not to report it. The gate does report it, and it has a floor now.
 func packagesWithStatements(t *testing.T) (all, withStatements map[string]bool) {
 	t.Helper()
 
@@ -133,16 +135,12 @@ func packagesWithStatements(t *testing.T) (all, withStatements map[string]bool) 
 
 		importPath, dir := fields[0], fields[1]
 
-		// node_modules is skipped for the same reason .gitignore lists it: two copies of the
-		// `flatted` npm package vendor a Go file, so `go list ./...` reports them as packages of
-		// this module and the gate names them as unfloored on any machine that has run `npm ci`.
-		// They are not this repository's code and no floor should be set for them. CI's coverage job
-		// installs no npm dependencies, so its profile does not contain them — which is why the
-		// gate's output there is six packages and locally it is eight.
-		if strings.Contains(importPath, "/node_modules/") {
-			continue
-		}
-
+		// node_modules is deliberately *not* skipped here. Two copies of the `flatted` npm package
+		// vendor a Go file, so on a machine that has run `npm ci` they appear in `go list ./...` and
+		// land in the synthetic profile below — which is the point: coverage-gate.sh excludes them,
+		// and letting them into the profile is what tests that it does. Filtering them here instead
+		// is what this test used to do, and it made the gate's exclusion unfalsifiable while leaving
+		// the noise in the output a person actually reads.
 		var files []string
 
 		for _, group := range []string{fields[2], fields[3]} {
