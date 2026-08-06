@@ -671,7 +671,20 @@ func (cm *ClusterManager) refreshLocalStats(dst *NodeInfo) {
 	cm.stats.mu.RUnlock()
 }
 
-// Helper method to update node information
+// UpdateNodeInfo merges a node's reported state into the membership map, inserting it if unknown.
+//
+// The merge is selective, and which fields it leaves alone is the part worth knowing: an existing
+// entry keeps its ID, Address and Version, taking only LastSeen, Status, the four resource fields,
+// the two cache fields and Operations from info. So this cannot rename or re-address a node that is
+// already a member — a gossip message claiming a new address for a known ID updates its liveness and
+// nothing else. Metadata is merged key-by-key rather than replaced, so a key absent from info
+// survives.
+//
+// On insert, info is copied by value and its Metadata map is cloned rather than aliased, which
+// matters because of what the callers do with the same pointer: every non-test call site is in
+// gossip.go, and handleJoinMessage stores that identical *NodeInfo as gp.memberlist[nodeID].Info
+// before passing it here. Aliasing the map would leave the gossip memberlist and the cluster
+// membership map sharing one map under two different locks.
 func (cm *ClusterManager) UpdateNodeInfo(nodeID string, info *NodeInfo) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()

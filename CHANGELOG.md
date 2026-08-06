@@ -1765,6 +1765,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Six section-header comments sitting where a doc comment goes are now doc comments, and three of
+  them record something a reader would otherwise get wrong** ([#179]). `staticcheck` ST1020/ST1021
+  6 → 0. Each was a heading like `// Enums for health check categorization` above an exported type,
+  which reads as organisation and renders as documentation.
+
+  Prepending the symbol's name would have satisfied the linter and documented nothing, so each says
+  what the thing does — and three had a fact worth stating. `ClusterManager.UpdateNodeInfo` merges
+  selectively: an existing member keeps its `ID`, `Address` and `Version`, so a gossip message claiming
+  a new address for a known ID updates liveness and nothing else, and `Metadata` merges key-by-key
+  rather than replacing. `internal/health`'s `Category` is a label and not a switch — nothing branches
+  on it, so a check filed under the wrong category still runs identically. `filesystem.FilesystemError`'s
+  sentinels carry an empty `Op` and `Path`, so they are values to compare against rather than errors to
+  return: `ErrNotExist.Error()` renders as `" : file does not exist"`.
+
+  All three were verified by throwaway probe rather than by reading, and two of the four claims I first
+  wrote were wrong. `GetProtocol`'s comment said its callers are logging and metrics sites; it has no
+  callers outside this package's own test, and nothing sets `ContextKeyProtocol` either. And
+  `ErrTierNotSupported` is *not* indistinguishable from `ErrInvalid` as first written — both wrap
+  `os.ErrInvalid`, so `errors.Is` against `os.ErrInvalid` cannot separate them, but
+  `errors.Is(ErrTierNotSupported, ErrInvalid)` is false, since each is its own pointer and neither
+  wraps the other.
+
 - **Every three-clause counting loop is now an integer range, and the lint run stops reporting a
   dependency's Go files as this repository's** ([#179]). `intrange` 37 → 0 and `modernize` 2 → 0, taking
   the total from 570 to 531. Applied with `golangci-lint --fix` rather than a hand-written transform,

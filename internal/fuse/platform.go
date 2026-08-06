@@ -11,7 +11,14 @@ import (
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
-// Platform-specific filesystem interface
+// PlatformFileSystem is the mount lifecycle [CreatePlatformMountManager] returns, narrowed to what a
+// caller outside this package needs: mount it, unmount it, ask whether it is mounted, read its stats.
+//
+// "Platform-specific" names the reason it is an interface rather than what varies today. The file is
+// built for linux and darwin only, and both get the same go-fuse implementation — the second binding
+// this abstraction existed for was cgofuse, which was removed in v0.10.1 because it had never
+// compiled. It is kept because it is the seam a future NFS-loopback or WinFsp backend would bind to,
+// and because it keeps cmd/objectfs from depending on go-fuse types directly.
 type PlatformFileSystem interface {
 	Mount(ctx context.Context) error
 	Unmount() error

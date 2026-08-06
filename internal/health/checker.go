@@ -107,7 +107,13 @@ type Stats struct {
 	LastFailure   time.Time     `json:"last_failure"`
 }
 
-// Enums for health check categorization
+// Category labels which subsystem a health check covers, for grouping in reports.
+//
+// It is a label and not a switch: nothing in this package branches on a Category. It is assigned by
+// [Monitor.mapComponentTypeToCategory] from a component-type string, stored on the check, and
+// serialized — so adding a category needs no dispatch updated, and a check filed under the wrong one
+// still runs identically. [Priority] and [Status] below are the same kind of string enum; Status is
+// the one that carries meaning, being what [Checker] aggregates into an overall verdict.
 type Category string
 
 const (
