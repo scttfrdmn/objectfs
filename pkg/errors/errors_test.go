@@ -11,6 +11,8 @@ func TestNewError(t *testing.T) {
 	t.Parallel()
 
 	t.Run("creates error with all defaults", func(t *testing.T) {
+		t.Parallel()
+
 		err := NewError(ErrCodeInvalidConfig, "configuration is invalid")
 		if err == nil {
 			t.Fatal("NewError returned nil")
@@ -36,6 +38,8 @@ func TestNewError(t *testing.T) {
 	})
 
 	t.Run("sets correct retryable defaults", func(t *testing.T) {
+		t.Parallel()
+
 		retryableErr := NewError(ErrCodeConnectionTimeout, "connection timed out")
 		if !retryableErr.Retryable {
 			t.Error("ConnectionTimeout should be retryable by default")
@@ -48,6 +52,8 @@ func TestNewError(t *testing.T) {
 	})
 
 	t.Run("sets correct user-facing defaults", func(t *testing.T) {
+		t.Parallel()
+
 		userFacingErr := NewError(ErrCodeFileNotFound, "file not found")
 		if !userFacingErr.UserFacing {
 			t.Error("FileNotFound should be user-facing by default")
@@ -60,6 +66,8 @@ func TestNewError(t *testing.T) {
 	})
 
 	t.Run("sets correct HTTP status defaults", func(t *testing.T) {
+		t.Parallel()
+
 		tests := []struct {
 			code       ErrorCode
 			wantStatus int
@@ -112,6 +120,8 @@ func TestGetCategory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.code), func(t *testing.T) {
+			t.Parallel()
+
 			result := GetCategory(tt.code)
 			if result != tt.expected {
 				t.Errorf("GetCategory(%v) = %v, want %v", tt.code, result, tt.expected)
@@ -142,6 +152,8 @@ func TestIsRetryableByDefault(t *testing.T) {
 
 	for _, code := range retryableCodes {
 		t.Run(string(code)+" should be retryable", func(t *testing.T) {
+			t.Parallel()
+
 			if !IsRetryableByDefault(code) {
 				t.Errorf("%v should be retryable by default", code)
 			}
@@ -150,6 +162,8 @@ func TestIsRetryableByDefault(t *testing.T) {
 
 	for _, code := range nonRetryableCodes {
 		t.Run(string(code)+" should not be retryable", func(t *testing.T) {
+			t.Parallel()
+
 			if IsRetryableByDefault(code) {
 				t.Errorf("%v should not be retryable by default", code)
 			}
@@ -178,6 +192,8 @@ func TestIsUserFacingByDefault(t *testing.T) {
 
 	for _, code := range userFacingCodes {
 		t.Run(string(code)+" should be user-facing", func(t *testing.T) {
+			t.Parallel()
+
 			if !IsUserFacingByDefault(code) {
 				t.Errorf("%v should be user-facing by default", code)
 			}
@@ -186,6 +202,8 @@ func TestIsUserFacingByDefault(t *testing.T) {
 
 	for _, code := range internalCodes {
 		t.Run(string(code)+" should not be user-facing", func(t *testing.T) {
+			t.Parallel()
+
 			if IsUserFacingByDefault(code) {
 				t.Errorf("%v should not be user-facing by default", code)
 			}
@@ -221,6 +239,8 @@ func TestGetDefaultHTTPStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.code), func(t *testing.T) {
+			t.Parallel()
+
 			result := GetDefaultHTTPStatus(tt.code)
 			if result != tt.wantStatus {
 				t.Errorf("GetDefaultHTTPStatus(%v) = %d, want %d", tt.code, result, tt.wantStatus)
@@ -268,6 +288,8 @@ func TestObjectFSError_Error(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.err.Error()
 			if result != tt.want {
 				t.Errorf("Error() = %q, want %q", result, tt.want)

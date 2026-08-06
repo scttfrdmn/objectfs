@@ -413,6 +413,8 @@ func TestHandleHistory(t *testing.T) {
 }
 
 func TestHandleInfo(t *testing.T) {
+	t.Parallel()
+
 	t.Run("version from config", func(t *testing.T) {
 		t.Parallel()
 		cfg := DefaultServerConfig()
@@ -782,6 +784,8 @@ func TestHandleMounts_NoMountManager(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
 			req := httptest.NewRequestWithContext(t.Context(), method, "/api/v1/mounts", strings.NewReader("{}"))
 			w := httptest.NewRecorder()
 			server.handleMounts(w, req)

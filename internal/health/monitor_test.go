@@ -256,6 +256,8 @@ func TestMonitor_MapComponentTypeToCategory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.componentType, func(t *testing.T) {
+			t.Parallel()
+
 			result := monitor.mapComponentTypeToCategory(tt.componentType)
 			if result != tt.wantCategory {
 				t.Errorf("mapComponentTypeToCategory(%q) = %v, want %v",
@@ -286,6 +288,8 @@ func TestMonitor_MapComponentTypeToPriority(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.componentType, func(t *testing.T) {
+			t.Parallel()
+
 			result := monitor.mapComponentTypeToPriority(tt.componentType)
 			if result != tt.wantPriority {
 				t.Errorf("mapComponentTypeToPriority(%q) = %v, want %v",

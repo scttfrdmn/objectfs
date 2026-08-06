@@ -7,6 +7,8 @@ import (
 )
 
 func TestNewDetailedPerformanceMetrics(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(1000, true)
 
 	if dpm == nil {
@@ -27,6 +29,8 @@ func TestNewDetailedPerformanceMetrics(t *testing.T) {
 }
 
 func TestRecordOperation_BasicMetrics(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record a read operation
@@ -66,6 +70,8 @@ func TestRecordOperation_BasicMetrics(t *testing.T) {
 }
 
 func TestRecordOperation_MultipleOperations(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record multiple read operations
@@ -96,6 +102,8 @@ func TestRecordOperation_MultipleOperations(t *testing.T) {
 }
 
 func TestRecordOperation_ErrorHandling(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record operations with errors
@@ -118,6 +126,8 @@ func TestRecordOperation_ErrorHandling(t *testing.T) {
 }
 
 func TestRecordOperation_CacheSourceTracking(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record operations from different cache sources
@@ -143,6 +153,8 @@ func TestRecordOperation_CacheSourceTracking(t *testing.T) {
 }
 
 func TestRecordOperation_LatencyTracking(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	latencies := []time.Duration{
@@ -175,6 +187,8 @@ func TestRecordOperation_LatencyTracking(t *testing.T) {
 }
 
 func TestRecordOperation_FileMetrics(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, true) // Enable file tracking
 
 	// Record operations on multiple files
@@ -210,6 +224,8 @@ func TestRecordOperation_FileMetrics(t *testing.T) {
 }
 
 func TestRecordOperation_MaxTrackedFiles(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(2, true) // Only track 2 files
 
 	// Try to record operations on 3 different files
@@ -224,6 +240,8 @@ func TestRecordOperation_MaxTrackedFiles(t *testing.T) {
 }
 
 func TestRecordNetworkOperation(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record network operation
@@ -261,6 +279,8 @@ func TestRecordNetworkOperation(t *testing.T) {
 }
 
 func TestRecordNetworkOperation_PeakRates(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record multiple operations with different rates
@@ -282,6 +302,8 @@ func TestRecordNetworkOperation_PeakRates(t *testing.T) {
 }
 
 func TestRecordCost(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record cost for read operations
@@ -312,6 +334,8 @@ func TestRecordCost(t *testing.T) {
 }
 
 func TestCacheBreakdown(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record read operations from different cache sources
@@ -354,6 +378,8 @@ func TestCacheBreakdown(t *testing.T) {
 }
 
 func TestGetSummary(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, true)
 
 	// Record some operations
@@ -388,6 +414,8 @@ func TestGetSummary(t *testing.T) {
 }
 
 func TestReset(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, true)
 
 	// Record some operations
@@ -426,6 +454,8 @@ func TestReset(t *testing.T) {
 }
 
 func TestMultipleOperationTypes(t *testing.T) {
+	t.Parallel()
+
 	dpm := NewDetailedPerformanceMetrics(100, false)
 
 	// Record different operation types

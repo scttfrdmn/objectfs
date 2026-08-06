@@ -11,6 +11,8 @@ func TestNewCollector(t *testing.T) {
 	t.Parallel()
 
 	t.Run("with valid config", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -37,6 +39,8 @@ func TestNewCollector(t *testing.T) {
 	})
 
 	t.Run("with nil config uses defaults", func(t *testing.T) {
+		t.Parallel()
+
 		collector, err := NewCollector(nil)
 		if err != nil {
 			t.Fatalf("NewCollector(nil) error = %v, want nil", err)
@@ -61,6 +65,8 @@ func TestNewCollector(t *testing.T) {
 	})
 
 	t.Run("with disabled config", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled: false,
 		}
@@ -81,6 +87,8 @@ func TestRecordOperation(t *testing.T) {
 	t.Parallel()
 
 	t.Run("record successful operation", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -120,6 +128,8 @@ func TestRecordOperation(t *testing.T) {
 	})
 
 	t.Run("record failed operation", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -143,6 +153,8 @@ func TestRecordOperation(t *testing.T) {
 	})
 
 	t.Run("record multiple operations", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -179,6 +191,8 @@ func TestRecordOperation(t *testing.T) {
 	})
 
 	t.Run("disabled collector ignores operations", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled: false,
 		}
@@ -201,6 +215,8 @@ func TestRecordCacheOperations(t *testing.T) {
 	t.Parallel()
 
 	t.Run("record cache hit", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -216,6 +232,8 @@ func TestRecordCacheOperations(t *testing.T) {
 	})
 
 	t.Run("record cache miss", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -231,6 +249,8 @@ func TestRecordCacheOperations(t *testing.T) {
 	})
 
 	t.Run("disabled collector ignores cache operations", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled: false,
 		}
@@ -249,6 +269,8 @@ func TestRecordError(t *testing.T) {
 	t.Parallel()
 
 	t.Run("record error", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -264,6 +286,8 @@ func TestRecordError(t *testing.T) {
 	})
 
 	t.Run("disabled collector ignores errors", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled: false,
 		}
@@ -329,6 +353,8 @@ func TestClassifyError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := collector.classifyError(tt.err)
 			if result != tt.expectedType {
 				t.Errorf("classifyError() = %q, want %q", result, tt.expectedType)
@@ -341,6 +367,8 @@ func TestUpdateCacheSize(t *testing.T) {
 	t.Parallel()
 
 	t.Run("update cache size", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -356,6 +384,8 @@ func TestUpdateCacheSize(t *testing.T) {
 	})
 
 	t.Run("disabled collector ignores cache size", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled: false,
 		}
@@ -372,6 +402,8 @@ func TestUpdateActiveConnections(t *testing.T) {
 	t.Parallel()
 
 	t.Run("update active connections", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled:   true,
 			Addr:      "127.0.0.1:0",
@@ -387,6 +419,8 @@ func TestUpdateActiveConnections(t *testing.T) {
 	})
 
 	t.Run("disabled collector ignores connections", func(t *testing.T) {
+		t.Parallel()
+
 		config := &Config{
 			Enabled: false,
 		}
@@ -576,6 +610,8 @@ func TestContainsHelper(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := contains(tt.s, tt.substr)
 			if result != tt.want {
 				t.Errorf("contains(%q, %q) = %v, want %v", tt.s, tt.substr, result, tt.want)
@@ -621,6 +657,8 @@ func TestIndexOfHelper(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := indexOf(tt.s, tt.substr)
 			if result != tt.want {
 				t.Errorf("indexOf(%q, %q) = %d, want %d", tt.s, tt.substr, result, tt.want)

@@ -305,6 +305,8 @@ func TestCostOptimizer_AccessFrequencyCategories(t *testing.T) {
 }
 
 func TestCostOptimizer_CostCalculation(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	config := CostOptimization{}
 	backend := &Backend{currentTier: TierStandard}

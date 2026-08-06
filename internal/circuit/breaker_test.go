@@ -27,6 +27,8 @@ func TestState_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.state.String()
 			if result != tt.want {
 				t.Errorf("State.String() = %q, want %q", result, tt.want)
@@ -122,6 +124,8 @@ func TestDefaultReadyToTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := defaultReadyToTrip(tt.counts)
 			if result != tt.wantTrip {
 				t.Errorf("defaultReadyToTrip() = %v, want %v", result, tt.wantTrip)
@@ -181,6 +185,8 @@ func TestDefaultIsSuccessful(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := defaultIsSuccessful(tt.err)
 			if result != tt.want {
 				t.Errorf("defaultIsSuccessful() = %v, want %v", result, tt.want)

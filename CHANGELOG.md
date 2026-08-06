@@ -528,6 +528,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **27 test functions declared themselves parallel and then ran their subtests serially** ([#179]).
+  `tparallel` 27 → 0.
+
+  A `t.Parallel()` on a test function whose subtests do not call it buys nothing: the parent yields to
+  its siblings and the subtests still run one after another inside it. The eight affected packages —
+  `internal/metrics` (9), `pkg/errors` (6), `pkg/utils` (3), `internal/circuit` (3), `pkg/api` (2),
+  `internal/health` (2), `internal/storage/s3` (1), `internal/adapter` (1) — were paying the annotation
+  without getting the concurrency, and the two that had it inverted (`TestHandleInfo`,
+  `TestCostOptimizer_CostCalculation`) had parallel subtests under a serial parent, which serializes
+  them against nothing and blocks the package's other tests for the parent's whole duration.
+
+  Each of the 44 subtests was read rather than rewritten mechanically: every one either constructs its
+  own subject or calls a pure function, and no parent holds a `defer` that a parallel child could
+  outlive. Verified by mutation in the two largest table-driven cases, since a parallelized table test
+  that aliases its loop variable reports the wrong row: `ErrCodeTokenExpired: 401 → 418` fails as
+  `GetDefaultHTTPStatus(TOKEN_EXPIRED) = 418, want 401` under the subtest named `TOKEN_EXPIRED`, and
+  breaking `classifyError`'s permission arm fails under `permission_error`. Both name the mutated row,
+  so Go 1.22 per-iteration loop variables are doing what the rewrite assumes.
+
+  `paralleltest` fell 383 → 325 alongside it: 44 of those are the same subtests, and the remaining 15
+  are `internal/metrics/detailed_test.go`, taken here so the package finishes clean rather than being
+  left one file short. Every one of the 15 builds its own `DetailedPerformanceMetrics`.
 - **A shutting-down node kept running the S3 operations its peers had asked for** ([#179]).
   `contextcheck` 2 → 0, and this is the last of the nine that opened the batch.
 
