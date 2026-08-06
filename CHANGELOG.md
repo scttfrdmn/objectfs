@@ -528,6 +528,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **`pkg/api`'s 18 remaining serial tests now run in parallel** ([#179]). `paralleltest` 43 → 25, with
+  every remaining finding in `tests/`.
+
+  No production change was needed. Each test builds its own `Server`, its own `status.NewTracker` and
+  `health.NewTracker`, and its own `prometheus.NewRegistry`; the handlers are exercised through
+  `httptest.NewRecorder` rather than a listener, and the one test that does listen binds `localhost:0`.
+  Mutation-checked through the parallel subtests: changing `handleInfo`'s `version = "unknown"` default
+  fails `TestHandleInfo/version_defaults_to_unknown_when_not_set` by name, so a parallel table test still
+  attributes a failure to the case that produced it. Verified at `-race -count=2`.
 - **`internal/cache`'s 37 tests now run in parallel** ([#179]). `paralleltest` 80 → 43.
 
   Nothing had to change in the cache itself: every test already builds its own `LRUCache` or its own
