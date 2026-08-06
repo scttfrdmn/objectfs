@@ -11,6 +11,8 @@ import (
 )
 
 func TestRemediationEngine_DiagnoseProblem(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	tests := []struct {
@@ -72,6 +74,8 @@ func TestRemediationEngine_DiagnoseProblem(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			diagnosis := engine.DiagnoseProblem(tt.result, tt.health)
 
 			if diagnosis == nil {
@@ -98,6 +102,8 @@ func TestRemediationEngine_DiagnoseProblem(t *testing.T) {
 }
 
 func TestRemediationEngine_AutoRemediate(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	// Register a test auto-fix function
@@ -144,6 +150,8 @@ func TestRemediationEngine_AutoRemediate(t *testing.T) {
 }
 
 func TestRemediationEngine_AutoRemediateFailure(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	// Register a failing auto-fix function
@@ -188,6 +196,8 @@ func TestRemediationEngine_AutoRemediateFailure(t *testing.T) {
 }
 
 func TestRemediationEngine_NoAutomatedRemediation(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	action := &RemediationAction{
@@ -216,6 +226,8 @@ func TestRemediationEngine_NoAutomatedRemediation(t *testing.T) {
 }
 
 func TestRemediationEngine_GetRemediations(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	// Check default rules are registered
@@ -243,6 +255,8 @@ func TestRemediationEngine_GetRemediations(t *testing.T) {
 }
 
 func TestRemediationEngine_RegisterCustomRule(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	customRule := &RemediationRule{
@@ -276,6 +290,8 @@ func TestRemediationEngine_RegisterCustomRule(t *testing.T) {
 }
 
 func TestRemediationEngine_DiagnosisAnalysis(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	tests := []struct {
@@ -312,6 +328,8 @@ func TestRemediationEngine_DiagnosisAnalysis(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := &Result{
 				Check:     tt.checkName,
 				Status:    StatusUnhealthy,
@@ -339,6 +357,8 @@ func TestRemediationEngine_DiagnosisAnalysis(t *testing.T) {
 }
 
 func TestRemediationAction_ValidStructure(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	// Test all default rules have valid action structures
@@ -352,6 +372,8 @@ func TestRemediationAction_ValidStructure(t *testing.T) {
 
 	for _, checkName := range checkNames {
 		t.Run(checkName, func(t *testing.T) {
+			t.Parallel()
+
 			actions := engine.GetRemediations(checkName)
 			if actions == nil {
 				t.Fatalf("No actions found for %s", checkName)
@@ -391,6 +413,8 @@ func TestRemediationAction_ValidStructure(t *testing.T) {
 }
 
 func TestRemediationHistory(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	// Create multiple remediation attempts
@@ -428,6 +452,8 @@ func TestRemediationHistory(t *testing.T) {
 }
 
 func TestProblemDiagnosis_ConsecutiveFailures(t *testing.T) {
+	t.Parallel()
+
 	engine := NewRemediationEngine()
 
 	result := &Result{
@@ -462,6 +488,8 @@ func TestProblemDiagnosis_ConsecutiveFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			health := &pkghealth.ComponentHealth{
 				Name:              "test_check",
 				ConsecutiveErrors: tt.consecutiveErrors,

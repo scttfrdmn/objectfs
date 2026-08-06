@@ -11,6 +11,8 @@ import (
 )
 
 func TestTracker_RegisterComponent(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 
 	tracker.RegisterComponent("test-service")
@@ -22,6 +24,8 @@ func TestTracker_RegisterComponent(t *testing.T) {
 }
 
 func TestTracker_RecordSuccess(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("test-service")
 
@@ -44,6 +48,8 @@ func TestTracker_RecordSuccess(t *testing.T) {
 }
 
 func TestTracker_RecordError_Degradation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -69,6 +75,8 @@ func TestTracker_RecordError_Degradation(t *testing.T) {
 }
 
 func TestTracker_RecordError_Unavailable(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	config.UnavailableThreshold = 10
@@ -87,6 +95,8 @@ func TestTracker_RecordError_Unavailable(t *testing.T) {
 }
 
 func TestTracker_RecordError_ReadOnly(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -105,6 +115,8 @@ func TestTracker_RecordError_ReadOnly(t *testing.T) {
 }
 
 func TestTracker_GetOverallHealth(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("service-1")
 	tracker.RegisterComponent("service-2")
@@ -138,8 +150,7 @@ func TestTracker_GetOverallHealth(t *testing.T) {
 }
 
 func TestTracker_CanRead(t *testing.T) {
-	tracker := NewTracker(DefaultConfig())
-	tracker.RegisterComponent("test-service")
+	t.Parallel()
 
 	tests := []struct {
 		state    HealthState
@@ -154,9 +165,24 @@ func TestTracker_CanRead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.state.String(), func(t *testing.T) {
-			// Set state directly for testing
+			t.Parallel()
+
+			// A tracker per case, not one shared by all four. These cases put the component into a
+			// state and then read admission back, so on a shared tracker they are four writers to one
+			// field — and whichever case wrote last is the state every case reads.
+			tracker := NewTracker(DefaultConfig())
+			tracker.RegisterComponent("test-service")
+
+			// Through transitionState, not by assigning health.State directly. The direct assignment
+			// this replaces skipped the probe clock that entering a refusing state arms, leaving
+			// nextProbe at the zero time — and admissionState treats a zero nextProbe as "the probe
+			// interval has elapsed", so the very first CanRead was admitted as a probe and returned
+			// true for a component the case had just marked unavailable. Serially that was invisible:
+			// the read-only case ran first on the shared tracker and armed the clock the unavailable
+			// case then inherited. The state a test sets has to be a state the production path can
+			// actually produce.
 			tracker.mu.Lock()
-			tracker.components["test-service"].State = tt.state
+			tracker.transitionState(tracker.components["test-service"], tt.state, nil)
 			tracker.mu.Unlock()
 
 			canRead := tracker.CanRead("test-service")
@@ -173,6 +199,8 @@ func TestTracker_CanRead(t *testing.T) {
 }
 
 func TestTracker_StateChangeCallback(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -220,7 +248,15 @@ func TestTracker_StateChangeCallback(t *testing.T) {
 	}
 }
 
+// testHealthListener records what the tracker told it.
+//
+// The mutex is not decoration. Tracker.notifyStateChange spawns a goroutine per listener
+// (`go listener.OnStateChange(...)`) while OnHealthCheck is called inline on the recording
+// goroutine, so the two methods genuinely run concurrently on the same listener, and the test then
+// reads the slices from a third. Without the lock this is a data race whether the test is parallel
+// or not — -race just needs the state change and the read to land close enough together.
 type testHealthListener struct {
+	mu           sync.Mutex
 	stateChanges []stateChange
 	healthChecks []healthCheck
 }
@@ -239,14 +275,27 @@ type healthCheck struct {
 }
 
 func (l *testHealthListener) OnStateChange(component string, oldState, newState HealthState, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.stateChanges = append(l.stateChanges, stateChange{component, oldState, newState, err})
 }
 
 func (l *testHealthListener) OnHealthCheck(component string, healthy bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.healthChecks = append(l.healthChecks, healthCheck{component, healthy, err})
 }
 
+// checks returns a copy of the health-check notifications recorded so far.
+func (l *testHealthListener) checks() []healthCheck {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]healthCheck(nil), l.healthChecks...)
+}
+
 func TestTracker_HealthListener(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	tracker := NewTracker(config)
@@ -262,11 +311,12 @@ func TestTracker_HealthListener(t *testing.T) {
 	// Give listener time to be notified
 	time.Sleep(50 * time.Millisecond)
 
-	if len(listener.healthChecks) != 1 {
-		t.Errorf("Expected 1 health check notification, got %d", len(listener.healthChecks))
+	checks := listener.checks()
+	if len(checks) != 1 {
+		t.Fatalf("Expected 1 health check notification, got %d", len(checks))
 	}
 
-	if listener.healthChecks[0].healthy {
+	if checks[0].healthy {
 		t.Error("Expected healthy=false for error")
 	}
 
@@ -274,16 +324,19 @@ func TestTracker_HealthListener(t *testing.T) {
 	tracker.RecordSuccess("test-service")
 	time.Sleep(50 * time.Millisecond)
 
-	if len(listener.healthChecks) != 2 {
-		t.Errorf("Expected 2 health check notifications, got %d", len(listener.healthChecks))
+	checks = listener.checks()
+	if len(checks) != 2 {
+		t.Fatalf("Expected 2 health check notifications, got %d", len(checks))
 	}
 
-	if !listener.healthChecks[1].healthy {
+	if !checks[1].healthy {
 		t.Error("Expected healthy=true for success")
 	}
 }
 
 func TestTracker_GetAllComponents(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("service-1")
 	tracker.RegisterComponent("service-2")
@@ -303,6 +356,8 @@ func TestTracker_GetAllComponents(t *testing.T) {
 }
 
 func TestTracker_SetComponentMetadata(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("test-service")
 
@@ -324,6 +379,8 @@ func TestTracker_SetComponentMetadata(t *testing.T) {
 }
 
 func TestTracker_IsHealthy(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 	tracker.RegisterComponent("test-service")
 
@@ -342,6 +399,8 @@ func TestTracker_IsHealthy(t *testing.T) {
 }
 
 func TestTracker_StartHealthChecks(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.HealthCheckInterval = 50 * time.Millisecond
 	tracker := NewTracker(config)
@@ -372,6 +431,8 @@ func TestTracker_StartHealthChecks(t *testing.T) {
 }
 
 func TestTracker_StartHealthChecks_WithErrors(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.HealthCheckInterval = 50 * time.Millisecond
 	config.ErrorThreshold = 2
@@ -400,6 +461,8 @@ func TestTracker_StartHealthChecks_WithErrors(t *testing.T) {
 }
 
 func TestHealthState_String(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		state    HealthState
 		expected string
@@ -413,6 +476,8 @@ func TestHealthState_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.state.String()
 			if result != tt.expected {
 				t.Errorf("String() = %s, want %s", result, tt.expected)
@@ -422,6 +487,8 @@ func TestHealthState_String(t *testing.T) {
 }
 
 func TestTracker_GetComponentHealth_NotRegistered(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewTracker(DefaultConfig())
 
 	_, err := tracker.GetComponentHealth("non-existent")
@@ -431,6 +498,8 @@ func TestTracker_GetComponentHealth_NotRegistered(t *testing.T) {
 }
 
 func TestTracker_RecoveryFromDegradation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultConfig()
 	config.ErrorThreshold = 3
 	config.RecoveryThreshold = 5

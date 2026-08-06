@@ -14,6 +14,8 @@ const (
 )
 
 func TestNewDefault(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewDefault()
 
 	// Test global defaults
@@ -78,6 +80,8 @@ func TestNewDefault(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		config  func() *Configuration
@@ -138,6 +142,8 @@ func TestValidate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			cfg := tt.config()
 			err := cfg.Validate()
 			if (err != nil) != tt.wantErr {
@@ -154,6 +160,8 @@ func TestValidate(t *testing.T) {
 }
 
 func TestLoadFromFile(t *testing.T) {
+	t.Parallel()
+
 	// Create a temporary config file
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "config.yaml")
@@ -233,6 +241,8 @@ features:
 }
 
 func TestLoadFromFileNonExistent(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewDefault()
 	err := cfg.LoadFromFile("/nonexistent/config.yaml")
 	if err == nil {
@@ -240,6 +250,11 @@ func TestLoadFromFileNonExistent(t *testing.T) {
 	}
 }
 
+// Serial, and it has no choice: t.Setenv panics on a test that has called t.Parallel, because the
+// environment is process-wide and a parallel sibling reading it would see whichever test won.
+// TestLoadFromEnvGovernsTheListeners and TestLoadFromEnv_S3Region are serial for the same reason.
+//
+//nolint:paralleltest // t.Setenv forbids t.Parallel; see above
 func TestLoadFromEnv(t *testing.T) {
 	// Set up environment variables
 	testEnvVars := map[string]string{
@@ -542,6 +557,8 @@ func TestLoadFromEnv_S3Region(t *testing.T) {
 }
 
 func TestSaveToFile(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "saved_config.yaml")
 
@@ -575,6 +592,8 @@ func TestSaveToFile(t *testing.T) {
 }
 
 func TestSaveToFileCreateDirectory(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "subdir", "config.yaml")
 

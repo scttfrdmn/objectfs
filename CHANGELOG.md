@@ -528,6 +528,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **A health test only passed because its four cases shared one tracker and ran in order** ([#179]).
+  `paralleltest` 325 → 263 across seven packages, and one of those 62 turned out to be covering a real
+  gap rather than an annotation.
+
+  `pkg/health`'s `TestTracker_CanRead` asserted that an unavailable component refuses reads. It set the
+  state by assigning `ComponentHealth.State` directly, which skips `transitionState` — the only place
+  that arms `nextProbe` on entry to a refusing state. So `nextProbe` stayed at the zero time, and
+  `admissionState` reads a zero clock as *the probe interval has elapsed*: the first `CanRead` was
+  admitted as a probe and returned true for a component the test had just marked unavailable. It passed
+  anyway, because all four cases shared one tracker and the `read-only` case ran first — arming a probe
+  clock 30 seconds out that the `unavailable` case then inherited. Giving each case its own tracker,
+  which is what parallelizing requires, removed that accident and the assertion failed. The setup now
+  goes through `transitionState`, so the state a case tests is a state production can actually produce.
+  Confirmed by mutation: dropping the `nextProbe` arming in `health.go` fails as
+  `CanRead() = true, want false for state unavailable`.
+
+  `testHealthListener` also needed a mutex, independent of parallelism. `Tracker.notifyStateChange`
+  spawns a goroutine per listener while `OnHealthCheck` is called inline, so the two methods genuinely
+  run concurrently on the same listener and the test reads its slices from a third goroutine — a data
+  race that `-race` only needed the right interleaving to report.
+
+  The other 61 are annotation-only, and each was read rather than added mechanically: `pkg/retry` (13,
+  `DefaultConfig()` returns a value so no config is shared, and the exact-backoff assertions survived
+  five repeat `-race` runs), `internal/health/remediation_test.go` (14, each builds its own engine and
+  the parallel subtests only call read-only `DiagnoseProblem`/`GetRemediations`), `internal/config` (7),
+  `sdks/go/objectfs` (6, whose integration tests use disjoint key prefixes so they cannot collide in one
+  bucket), `internal/filesystem` (1), `pkg/types` (1). `internal/config`'s three `TestLoadFromEnv*`
+  functions stay serial with a documented `//nolint:paralleltest`: `t.Setenv` panics on a test that has
+  called `t.Parallel`, because the environment is process-wide.
 - **27 test functions declared themselves parallel and then ran their subtests serially** ([#179]).
   `tparallel` 27 → 0.
 

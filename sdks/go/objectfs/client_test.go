@@ -338,6 +338,8 @@ func TestSentinelErrors_Is(t *testing.T) {
 // fails where it is developed is worse than one that skips in both.
 
 func TestNew_WithDefaults(t *testing.T) {
+	t.Parallel()
+
 	bucket := requireTestBucket(t)
 	// Default region must be us-east-1; verify via defaultOptions (no S3 call needed).
 	if got := defaultOptions().region; got != "us-east-1" {
@@ -355,6 +357,8 @@ func TestNew_WithDefaults(t *testing.T) {
 }
 
 func TestNew_WithRegion(t *testing.T) {
+	t.Parallel()
+
 	bucket := requireTestBucket(t)
 	region := testRegion()
 	c, err := New(context.Background(), bucket, WithRegion(region))
@@ -368,6 +372,8 @@ func TestNew_WithRegion(t *testing.T) {
 }
 
 func TestClose_NotMounted(t *testing.T) {
+	t.Parallel()
+
 	bucket := requireTestBucket(t)
 	c, err := New(context.Background(), bucket, WithRegion(testRegion()))
 	if err != nil {
@@ -392,6 +398,8 @@ func requireTestBucket(t *testing.T) string {
 }
 
 func TestIntegration_PutGetDeleteHead(t *testing.T) {
+	t.Parallel()
+
 	bucket := requireTestBucket(t)
 	ctx := context.Background()
 
@@ -452,6 +460,8 @@ func TestIntegration_PutGetDeleteHead(t *testing.T) {
 }
 
 func TestIntegration_List(t *testing.T) {
+	t.Parallel()
+
 	bucket := requireTestBucket(t)
 	ctx := context.Background()
 
@@ -506,6 +516,8 @@ func TestIntegration_List(t *testing.T) {
 }
 
 func TestIntegration_Health(t *testing.T) {
+	t.Parallel()
+
 	bucket := requireTestBucket(t)
 	ctx := context.Background()
 
