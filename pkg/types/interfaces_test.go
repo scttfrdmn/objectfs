@@ -35,6 +35,16 @@ func (m *mockBackend) PutObject(ctx context.Context, key string, data []byte, me
 	return nil
 }
 
+// PutObjectIf refuses rather than pretending. ErrNotSupported is what the interface requires of an
+// implementation that cannot evaluate a precondition, and it is the truthful answer for a mock holding
+// no state to evaluate one against — whereas returning a fabricated ETag and nil would make any test
+// built on it agree that a precondition held, by construction.
+func (m *mockBackend) PutObjectIf(ctx context.Context, key string, data []byte, meta map[string]string,
+	cond Precondition,
+) (string, error) {
+	return "", ErrNotSupported
+}
+
 func (m *mockBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	return nil
 }

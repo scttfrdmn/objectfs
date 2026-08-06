@@ -69,6 +69,14 @@ func (m *MockPredictiveBackend) PutObject(ctx context.Context, key string, data 
 	return nil
 }
 
+// PutObjectIf refuses. The predictive cache issues no conditional writes, and ErrNotSupported is the
+// answer the interface requires of an implementation that cannot evaluate a precondition.
+func (m *MockPredictiveBackend) PutObjectIf(ctx context.Context, key string, data []byte, meta map[string]string,
+	cond types.Precondition,
+) (string, error) {
+	return "", types.ErrNotSupported
+}
+
 func (m *MockPredictiveBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

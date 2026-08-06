@@ -491,3 +491,58 @@ func ExampleRetryWithBackoff() {
 	}
 	// Output: Success
 }
+
+// TestDefaultConfigClassifiesTheTwoConditionalOutcomesDifferently pins the one asymmetry in
+// DefaultConfig's retryable set that a reader would most reasonably "tidy" into symmetry.
+//
+// The two errors a conditional write produces look alike and want opposite handling. A precondition
+// failure is a definitive answer — the object's state is not what the caller asserted, and asking
+// again with the same body cannot change that, so retrying spends MaxAttempts requests to be told the
+// same thing. On a contended lease that turns every loser into a burst of load. A conditional
+// conflict means S3 could not order the request against a concurrent one, so the caller's view may
+// still be current and the same write may simply succeed.
+//
+// This is asserted here rather than in the S3 package because Backend.PutObjectIf deliberately does
+// not wrap itself in a Retryer — a CAS caller has to re-read state and recompute its bytes, which is
+// a loop only it can run. So this classification governs callers that wrap the call themselves, and
+// nothing in internal/storage/s3 can fail if it is wrong. Verified by mutation: adding
+// ErrCodePreconditionFailed to the set below broke no test in the tree before this one existed.
+func TestDefaultConfigClassifiesTheTwoConditionalOutcomesDifferently(t *testing.T) {
+	t.Parallel()
+
+	retryer := New(DefaultConfig())
+
+	tests := []struct {
+		name string
+		code errors.ErrorCode
+		want bool
+		why  string
+	}{
+		{
+			name: "a precondition failure is definitive",
+			code: errors.ErrCodePreconditionFailed,
+			want: false,
+			why: "the assertion did not hold and the same write cannot make it hold; retrying it turns " +
+				"each loser of a contended lease into MaxAttempts requests",
+		},
+		{
+			name: "a conditional conflict may clear",
+			code: errors.ErrCodeConditionalConflict,
+			want: true,
+			why: "S3 could not order the request against a concurrent one, so the caller's view of the " +
+				"state may still be current and the same write may succeed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// attempt 1 of MaxAttempts, so the attempt cap cannot be what decides this.
+			got := retryer.shouldRetry(errors.NewError(tt.code, "under test"), 1)
+			if got != tt.want {
+				t.Errorf("shouldRetry(%s) = %v, want %v: %s", tt.code, got, tt.want, tt.why)
+			}
+		})
+	}
+}

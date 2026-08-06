@@ -24,6 +24,22 @@ type Backend interface {
 	// source of truth for the values integrity checking depends on.
 	PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error
 
+	// PutObjectIf stores data as key only if cond holds, reporting the new ETag.
+	//
+	// A precondition that does not hold is [ErrPreconditionFailed] and the stored object is unchanged —
+	// that is the mechanism, not an error path: a caller racing for a lease learns it lost by getting
+	// this back. A caller that wants an unconditional write uses PutObject.
+	//
+	// Implementations that cannot evaluate a precondition must return [ErrNotSupported] and write
+	// nothing. Falling back to an unconditional write would turn "exactly one node performs this
+	// transition" into "every node does", silently, which is the failure mode the precondition exists
+	// to prevent. See [BackendCapabilities] for how a caller learns this before relying on it.
+	//
+	// The returned ETag is the stored object's, so a compare-and-swap loop can continue from it
+	// without a HeadObject. It is empty when err is non-nil.
+	PutObjectIf(ctx context.Context, key string, data []byte, meta map[string]string,
+		cond Precondition) (etag string, err error)
+
 	// SetObjectMetadata replaces key's user metadata without rewriting its contents, preserving every
 	// other stored property — content encoding, content type, and storage class.
 	//

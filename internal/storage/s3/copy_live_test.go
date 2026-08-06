@@ -358,12 +358,16 @@ func liveBucket(t *testing.T, ctx context.Context) (*awss3.Client, string) {
 
 // liveBackend builds an ObjectFS backend against a real bucket, with compression off so the bytes on
 // the wire are the bytes under test.
-func liveBackend(t *testing.T, ctx context.Context, bucket string) *s3.Backend {
+func liveBackend(t *testing.T, ctx context.Context, bucket string, mutate ...func(*s3.Config)) *s3.Backend {
 	t.Helper()
 
 	cfg := s3.NewDefaultConfig()
 	cfg.Region = liveRegion
 	cfg.Compression.Enabled = false
+
+	for _, m := range mutate {
+		m(cfg)
+	}
 
 	backend, err := s3.NewBackend(ctx, bucket, cfg)
 	if err != nil {

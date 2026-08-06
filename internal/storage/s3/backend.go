@@ -90,6 +90,12 @@ type Backend struct {
 	// parts of an abandoned upload are billed while invisible to ListObjects.
 	singlePartCopyLimit int64
 	copyPartSize        int64
+
+	// caps records what the endpoint in front of this process was observed to support, established by
+	// attempting an operation rather than read from configuration. Probed lazily and exactly once —
+	// see Capabilities in conditional.go for why not at construction.
+	capsOnce sync.Once
+	caps     types.BackendCapabilities
 }
 
 // NewBackend creates a new S3 backend instance
@@ -851,54 +857,14 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 		return fmt.Errorf("tier validation failed: %w", err)
 	}
 
-	// Compute SHA-256 of the uncompressed canonical content before any
-	// encoding so the hash is stable regardless of storage format.
-	rawHash := sha256.Sum256(data)
-	checksumHex := hex.EncodeToString(rawHash[:])
-
-	// Apply transparent compression before upload.
-	uploadData := data
-	contentEncoding := ""
-	compressed := false
-	if b.compressor != nil {
-		compressedData, wasCompressed, comprErr := b.compressor.Compress(data)
-		if comprErr != nil {
-			return fmt.Errorf("compress object %q: %w", key, comprErr)
-		}
-		if wasCompressed {
-			uploadData = compressedData
-			contentEncoding = b.compressor.ContentEncoding()
-			compressed = true
-			b.logger.Debug("Object compressed for upload",
-				"key", key,
-				"original_size", len(data),
-				"compressed_size", len(uploadData),
-				"ratio", float64(len(uploadData))/float64(len(data)))
-		}
-	}
-
-	// Build the user metadata common to every upload path: the caller's attributes first, then the
-	// integrity keys, which are this method's to own and must not be overridable. The original size is
-	// recorded only for compressed objects, so HeadObject can report the size the kernel needs for
-	// reads rather than the compressed ContentLength.
-	objectMeta := make(map[string]string, len(meta)+2)
-	for k, v := range meta {
-		if strings.EqualFold(k, metaChecksum) || strings.EqualFold(k, metaOriginalSize) {
-			// Not an error: a caller round-tripping metadata it read from HeadObject will carry these,
-			// and refusing the write would make the obvious way to preserve attributes fail. They are
-			// simply recomputed below.
-			continue
-		}
-		objectMeta[k] = v
-	}
-	objectMeta[metaChecksum] = checksumHex
-	if compressed {
-		objectMeta[metaOriginalSize] = strconv.FormatInt(int64(len(data)), 10)
+	uploadData, contentEncoding, objectMeta, err := b.prepareUpload(key, data, meta)
+	if err != nil {
+		return err
 	}
 
 	breaker := b.circuitManager.GetBreaker("s3-put")
 
-	err := breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
+	return breaker.ExecuteWithContext(ctx, func(ctx context.Context) error {
 		// Check if we should use multipart upload based on compressed size.
 		dataSize := int64(len(uploadData))
 		if dataSize >= b.config.MultipartThreshold {
@@ -906,7 +872,9 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 				"key", key,
 				"size", dataSize,
 				"threshold", b.config.MultipartThreshold)
-			return b.putObjectMultipart(ctx, key, uploadData, effectiveTier, contentEncoding, objectMeta)
+			_, mpErr := b.putObjectMultipart(ctx, key, uploadData, effectiveTier, contentEncoding, objectMeta,
+				types.Precondition{})
+			return mpErr
 		}
 
 		// Get storage class for effective tier
@@ -969,8 +937,65 @@ func (b *Backend) PutObject(ctx context.Context, key string, data []byte, meta m
 			return nil
 		})
 	})
+}
 
-	return err
+// prepareUpload turns the caller's bytes and metadata into what goes on the wire: the body to upload,
+// the Content-Encoding header to send with it (empty when the body is not encoded), and the user
+// metadata map including the integrity keys.
+//
+// It exists so that PutObject and PutObjectIf cannot disagree. The two differ only in the
+// preconditions attached to the request; if they each computed the checksum, ran the compressor, and
+// assembled the metadata map, then a conditional write would be one edit away from storing an object
+// whose objectfs-sha256 does not describe its bytes — a seam defect of exactly the shape that made
+// 32,680 lines of tests miss ~45 of them.
+func (b *Backend) prepareUpload(key string, data []byte, meta map[string]string) (
+	uploadData []byte, contentEncoding string, objectMeta map[string]string, err error,
+) {
+	// Compute SHA-256 of the uncompressed canonical content before any
+	// encoding so the hash is stable regardless of storage format.
+	rawHash := sha256.Sum256(data)
+	checksumHex := hex.EncodeToString(rawHash[:])
+
+	// Apply transparent compression before upload.
+	uploadData = data
+	compressed := false
+	if b.compressor != nil {
+		compressedData, wasCompressed, comprErr := b.compressor.Compress(data)
+		if comprErr != nil {
+			return nil, "", nil, fmt.Errorf("compress object %q: %w", key, comprErr)
+		}
+		if wasCompressed {
+			uploadData = compressedData
+			contentEncoding = b.compressor.ContentEncoding()
+			compressed = true
+			b.logger.Debug("Object compressed for upload",
+				"key", key,
+				"original_size", len(data),
+				"compressed_size", len(uploadData),
+				"ratio", float64(len(uploadData))/float64(len(data)))
+		}
+	}
+
+	// Build the user metadata common to every upload path: the caller's attributes first, then the
+	// integrity keys, which are this method's to own and must not be overridable. The original size is
+	// recorded only for compressed objects, so HeadObject can report the size the kernel needs for
+	// reads rather than the compressed ContentLength.
+	objectMeta = make(map[string]string, len(meta)+2)
+	for k, v := range meta {
+		if strings.EqualFold(k, metaChecksum) || strings.EqualFold(k, metaOriginalSize) {
+			// Not an error: a caller round-tripping metadata it read from HeadObject will carry these,
+			// and refusing the write would make the obvious way to preserve attributes fail. They are
+			// simply recomputed below.
+			continue
+		}
+		objectMeta[k] = v
+	}
+	objectMeta[metaChecksum] = checksumHex
+	if compressed {
+		objectMeta[metaOriginalSize] = strconv.FormatInt(int64(len(data)), 10)
+	}
+
+	return uploadData, contentEncoding, objectMeta, nil
 }
 
 // SetObjectMetadata replaces key's user metadata in place, without rewriting its contents.
@@ -2765,7 +2790,9 @@ func (b *Backend) executeWithAccelerationFallback(
 // the default. It runs on a fresh context for the same reason — the common cause of a failed upload
 // is the caller's context being canceled, and an abort issued on that context cannot be sent, which
 // would leak on exactly the failure that happens most.
-func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier, contentEncoding string, objectMeta map[string]string) error {
+func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byte, tier, contentEncoding string,
+	objectMeta map[string]string, cond types.Precondition,
+) (string, error) {
 	dataSize := int64(len(data))
 	chunkSize := CalculateOptimalChunkSize(dataSize, b.config.MultipartThreshold, b.config.MultipartChunkSize)
 	storageClass := ConvertTierToStorageClass(tier)
@@ -2776,7 +2803,7 @@ func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byt
 
 	uploadID, err := b.initiateMultipartUpload(ctx, key, contentType, contentEncoding, objectMeta, storageClass)
 	if err != nil {
-		return fmt.Errorf("failed to initiate multipart upload: %w", err)
+		return "", fmt.Errorf("failed to initiate multipart upload: %w", err)
 	}
 
 	uploadState := NewMultipartUploadState(uploadID, b.bucket, key, dataSize, chunkSize)
@@ -2800,11 +2827,19 @@ func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byt
 
 	completedParts, totalBytesUploaded, err := b.uploadParts(ctx, key, uploadID, data, chunkSize, totalParts, uploadState)
 	if err != nil {
-		return fmt.Errorf("multipart upload failed: %w", err)
+		return "", fmt.Errorf("multipart upload failed: %w", err)
 	}
 
-	if err := b.completeMultipartUpload(ctx, key, uploadID, completedParts); err != nil {
-		return fmt.Errorf("failed to complete multipart upload: %w", err)
+	etag, err := b.completeMultipartUpload(ctx, key, uploadID, completedParts, cond)
+	if err != nil {
+		// Not wrapped with fmt.Errorf on the conditional paths: a caller matching
+		// [types.ErrPreconditionFailed] still would, since errors.Is walks the chain, but the message
+		// "failed to complete multipart upload" describes a malfunction and a lost race is not one.
+		// The deferred abort still runs — completed is false — so the parts do not leak.
+		if stderr.Is(err, types.ErrPreconditionFailed) || stderr.Is(err, types.ErrConditionalConflict) {
+			return "", err
+		}
+		return "", fmt.Errorf("failed to complete multipart upload: %w", err)
 	}
 
 	completed = true
@@ -2820,5 +2855,5 @@ func (b *Backend) putObjectMultipart(ctx context.Context, key string, data []byt
 		"total_parts", totalParts,
 		"bytes_uploaded", totalBytesUploaded)
 
-	return nil
+	return etag, nil
 }

@@ -175,6 +175,16 @@ func (f *fakeBackend) PutObject(_ context.Context, key string, data []byte, meta
 	return nil
 }
 
+// PutObjectIf refuses. internal/vfs issues no conditional writes — coordination is not its concern —
+// and ErrNotSupported is what the interface requires of an implementation that cannot evaluate a
+// precondition. A fake that answered with a made-up ETag would let a future caller here believe it had
+// won a race it never contended for.
+func (f *fakeBackend) PutObjectIf(_ context.Context, _ string, _ []byte, _ map[string]string,
+	_ types.Precondition,
+) (string, error) {
+	return "", types.ErrNotSupported
+}
+
 func (f *fakeBackend) SetObjectMetadata(_ context.Context, key string, meta map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

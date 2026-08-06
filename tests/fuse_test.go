@@ -69,6 +69,17 @@ func (b *MockBackend) PutObject(ctx context.Context, key string, data []byte, me
 	return nil
 }
 
+// PutObjectIf refuses rather than pretending. This mock could evaluate a precondition against its own
+// map, but an in-process map is not what a precondition is a claim about — the point of one is that a
+// *remote* store arbitrates between writers this process cannot see. Implementing it here would produce
+// a CAS that passes its tests and cannot exclude anything, which is the seam-agreement failure the
+// project uses internal/testaws to avoid. Conditional writes are tested against a real S3 endpoint.
+func (b *MockBackend) PutObjectIf(ctx context.Context, key string, data []byte, meta map[string]string,
+	cond types.Precondition,
+) (string, error) {
+	return "", types.ErrNotSupported
+}
+
 func (b *MockBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

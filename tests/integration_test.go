@@ -518,6 +518,15 @@ func (b *failingPutBackend) PutObject(ctx context.Context, key string, data []by
 	return b.err
 }
 
+// PutObjectIf fails with the same error, for the reason SetObjectMetadata does: this double exists to
+// break every route by which a flush could reach storage, and one that still worked would let a flush
+// report success through the half the test did not break.
+func (b *failingPutBackend) PutObjectIf(ctx context.Context, key string, data []byte, meta map[string]string,
+	cond types.Precondition,
+) (string, error) {
+	return "", b.err
+}
+
 // SetObjectMetadata fails too. The attribute-only write path is the other way a flush reaches storage,
 // and leaving it inherited would let a flush report success through the half the test did not break.
 func (b *failingPutBackend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {

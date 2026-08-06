@@ -79,6 +79,16 @@ const (
 	ErrCodeRetryExhausted    ErrorCode = "RETRY_EXHAUSTED"
 	ErrCodeValidationFailed  ErrorCode = "VALIDATION_FAILED"
 
+	// ErrCodePreconditionFailed is a conditional write whose assertion did not hold. It is the
+	// expected outcome for a caller racing for a lease, so it is neither retryable nor a service
+	// failure — see IsServiceFailure, and the retry note on types.ErrPreconditionFailed.
+	ErrCodePreconditionFailed ErrorCode = "PRECONDITION_FAILED"
+
+	// ErrCodeConditionalConflict is a conditional write that raced a delete or another conditional
+	// write. Unlike a precondition failure the caller's view may still be current, so retrying can
+	// succeed — it is in the default retryable set.
+	ErrCodeConditionalConflict ErrorCode = "CONDITIONAL_CONFLICT"
+
 	// Authentication/Authorization Errors (8000-8999)
 	ErrCodeAuthenticationFailed ErrorCode = "AUTHENTICATION_FAILED"
 	ErrCodeAuthorizationFailed  ErrorCode = "AUTHORIZATION_FAILED"
@@ -328,6 +338,13 @@ func IsServiceFailure(code ErrorCode) bool {
 		// The caller withdrew the request. A FUSE interrupt or an unmount arrives here, and neither
 		// says anything about S3.
 		ErrCodeOperationCanceled: true,
+
+		// A conditional write the store evaluated and declined. The request was well-formed and the
+		// service worked in order to answer it — losing a race is the mechanism, not a malfunction.
+		// Counting it as a failure would degrade s3-writes and trip the breaker under exactly the
+		// contention the precondition exists to arbitrate, so N contenders for one lease would take
+		// writes offline for all of them. ErrorThreshold is 3.
+		ErrCodePreconditionFailed: true,
 	}
 	return !notAFailure[code]
 }

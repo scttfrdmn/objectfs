@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Backend.PutObjectIf` — a write that happens only if an assertion about the key's current state
+  holds, reporting the new ETag** ([#282]). This is the primitive the coordination work is being rebuilt
+  on: `Precondition{Absent: true}` is a lease acquisition, `Precondition{ETag: current}` is a
+  compare-and-swap, and the store — not any of the contenders — decides which one proceeds. Eight
+  concurrent writers asserting absence of one key elect exactly one, verified against both the emulator
+  and real S3.
+
+  A precondition that does not hold is `types.ErrPreconditionFailed` and the stored object is unchanged.
+  That is the mechanism rather than an error path, which is what most of this change is actually about:
+  almost everything the backend wraps a request in — the retryer, the circuit breaker, the health tracker
+  — is built to treat a failed request as evidence of trouble, and `ErrorThreshold` is 3, so counting a
+  lost race as a service failure would take writes offline for every contender under exactly the
+  contention the precondition exists to arbitrate. It is therefore a non-failure in
+  `errors.IsServiceFailure`, which both the tracker and the breaker consult, and it is absent from
+  `retry.DefaultConfig`'s retryable set: the answer is definitive, and retrying spends `MaxAttempts`
+  requests to be told the same thing. `ErrConditionalConflict` — S3 could not order the write against a
+  concurrent one — is retryable, and the two being classified oppositely is now asserted in
+  `pkg/retry`, because `PutObjectIf` deliberately does not wrap itself in a retryer (a CAS caller has to
+  re-read state and recompute its bytes; that loop is only its own) and so nothing in the S3 package
+  could fail if the classification were wrong.
+
+  **An absent key is `ErrCodeObjectNotFound`, not a precondition failure**, and preserving that
+  distinction fixed a real defect found by execution rather than by reading. S3 answers 404 to an
+  `If-Match` against a missing key, but the AWS SDK does not model `NoSuchKey` among `PutObject`'s typed
+  errors — an unconditional `PutObject` has no way to produce one — so the code arrives as a bare
+  `smithy.APIError`, falls past `translateError`'s typed arms to its pessimistic default, and became
+  `ErrCodeStorageRead`: a service failure that degraded `s3-writes` and moved the breaker toward open,
+  for a key that was simply not there. A caller that cannot tell a lost race from a deleted object
+  retries forever against a key nobody is going to recreate. The same gap applied at
+  `CompleteMultipartUpload`, where a declined conditional write reported `STORAGE_READ` instead of a
+  precondition failure until a conditional translator was wired in there too.
+
+  **A conditional write above `MultipartThreshold` is still conditional.** The assertion can only be
+  evaluated at `CompleteMultipartUpload`, because parts are not an object until they are assembled — so
+  the large path carries it on a different request than the caller's data, and `completeMultipartUpload`
+  now returns the ETag it previously discarded. The cost is inherent: a losing conditional multipart
+  write has already transferred every part. The deferred abort covers that, asserted through
+  `ListMultipartUploads` against real S3, since an orphaned upload's parts are billed and invisible to
+  `ListObjects`.
+
+  **Whether the endpoint evaluates preconditions at all is established by attempt, once, and cached** —
+  not read from configuration. The probe is an `If-Match` that no object can satisfy against a key
+  expected to be absent, and the answer it wants is a 404: that shape writes nothing, and it catches the
+  dangerous direction, because a store that accepts conditional headers and ignores them answers with a
+  *success*, having created the object. Anything the probe cannot classify leaves the capability absent,
+  and `PutObjectIf` then refuses rather than falling back to an unconditional write. A fallback would
+  turn "exactly one node performs this transition" into "every node does", silently, at the moment it
+  matters most — the same reasoning the read path already follows in refusing a `Content-Encoding` it
+  cannot decode. Ceph RGW documents conditional headers for GET/HEAD only; Wasabi is unverified and
+  treated the same until probed.
+
+  `PutObject` and `PutObjectIf` share one `prepareUpload`, so they cannot disagree about the checksum,
+  the compressor, or the metadata map. Had they each computed their own, a conditional write would have
+  been one edit away from storing an object whose `objectfs-sha256` did not describe its bytes — a seam
+  defect of exactly the shape that let 32,680 lines of tests miss ~45 others.
+
+  Tested against `internal/testaws` rather than a mock, because a mock evaluating a precondition against
+  its own in-process map agrees with its caller by construction and would exclude nobody; against real
+  AWS under `-tags=integration`, because every claim here is about S3's semantics rather than ObjectFS's;
+  and against `httptest` endpoints that misbehave in specific ways, which is the only way to reach the
+  ignores-preconditions case. Mutation-verified in eight directions: dropping either header on either
+  path, delegating the 404, reclassifying a precondition failure as a service failure or as retryable,
+  removing the capability gate, and making the probe fail open each break a named test.
+
 - **A measured per-iteration allocation budget for the difftest fuzz target, and a bound on what the
   shared emulator retains** ([#193]). `TestPerIterationAllocationBudget` asserts that one worst-shaped
   iteration allocates under 16 MiB; it measures 6.3 MiB for a program of writes and reads and 7.1 MiB for
