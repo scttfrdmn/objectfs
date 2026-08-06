@@ -228,7 +228,7 @@ func TestProbeFailsClosedOnAnUnexpectedAnswer(t *testing.T) {
 // A 404 for an If-Match against an absent key means the header was read and the assertion failed
 // because there is no object — which is S3's actual behavior, verified rather than inferred. This test
 // exists because that arm is what the probe *succeeds* on, and a mutation narrowing it (dropping the
-// bare-API-error check in favour of the SDK's typed NoSuchKey, say) would make every real endpoint
+// bare-API-error check in favor of the SDK's typed NoSuchKey, say) would make every real endpoint
 // report the capability absent. That is the fail-closed direction, so nothing would break loudly —
 // conditional writes would simply stop working everywhere.
 func TestProbeAcceptsA404AsEvidenceThePreconditionWasEvaluated(t *testing.T) {

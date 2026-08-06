@@ -248,10 +248,9 @@ func TestConcurrentAbsentWritersElectExactlyOne(t *testing.T) {
 
 	start.Add(1)
 	for i := range contenders {
-		done.Add(1)
-		go func() {
-			defer done.Done()
-
+		// done.Go rather than Add/go/defer Done. start stays an explicit WaitGroup used as a gate —
+		// it is waited on inside each goroutine rather than counting them, which is not what Go models.
+		done.Go(func() {
 			// Every goroutine blocks here so the requests go out together. Staggered writes would let
 			// each contender observe the previous winner's object and pass for a reason that has nothing
 			// to do with the store arbitrating a race.
@@ -270,7 +269,7 @@ func TestConcurrentAbsentWritersElectExactlyOne(t *testing.T) {
 			default:
 				other = append(other, err)
 			}
-		}()
+		})
 	}
 
 	start.Done()

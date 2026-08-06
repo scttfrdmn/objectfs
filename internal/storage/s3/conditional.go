@@ -344,6 +344,12 @@ func (b *Backend) PutObjectIf(ctx context.Context, key string, data []byte, meta
 	// "exactly one node performs this transition" into "every node does", silently, at the moment it
 	// matters most. The read path already sets this precedent by refusing a Content-Encoding it cannot
 	// decode rather than handing back bytes it cannot interpret.
+	//nolint:contextcheck // ctx deliberately does not reach the probe. Capabilities implements
+	// [types.CapabilityReporter], which takes none, and the answer it caches through a sync.Once is
+	// process-wide: threading this caller's ctx in would tie a once-only probe's deadline to whichever
+	// conditional write happened to trigger it, so one caller's cancellation would cache "not capable"
+	// for every later writer — and the fail-closed direction makes that permanent for the process.
+	// The probe bounds itself with capabilityProbeTimeout instead.
 	if caps := b.Capabilities(); !caps.ConditionalWrite {
 		return "", errors.NewError(errors.ErrCodeOperationFailed, "this endpoint does not evaluate write preconditions").
 			WithComponent("s3-backend").
