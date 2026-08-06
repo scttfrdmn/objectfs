@@ -125,7 +125,7 @@ func TestStats_ZeroHitRate_WhenNoAccesses(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestCache(t)
 	stats := c.Stats()
-	assert.Equal(t, float64(0), stats.HitRate)
+	assert.Zero(t, stats.HitRate)
 }
 
 func TestTTLExpiry(t *testing.T) {

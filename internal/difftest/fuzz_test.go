@@ -576,11 +576,19 @@ func TestDecodeProgramIsTotal(t *testing.T) {
 // number the fuzzer never touches, and would go on passing while the shapes it actually generates got
 // arbitrarily more expensive.
 //
-// nolint:paralleltest // t.Parallel() is not omitted by oversight here and must not be added. This test
-// measures runtime.MemStats, which is process-wide: a sibling test allocating concurrently is counted
-// against this budget, and every other test in this package calls t.Parallel(). Running in parallel would
-// make the measurement report the package's total allocation rather than this program's, which fails
-// randomly and for a reason the message would not name.
+// t.Parallel() is not omitted by oversight here and must not be added. This test measures
+// runtime.MemStats, which is process-wide: a sibling test allocating concurrently is counted against
+// this budget, and every other test in this package calls t.Parallel(). Running in parallel would make
+// the measurement report the package's total allocation rather than this program's, which fails randomly
+// and for a reason the message would not name.
+//
+// The suppression below is one line on purpose. It was written as `// nolint:paralleltest`, with a
+// leading space, and the rest of this paragraph was the directive's own continuation. gofmt does not
+// recognize a space-prefixed directive, so it left it in the middle of the comment where it read as
+// prose; once the space came off, gofmt moved the directive to just above this declaration — where it
+// belongs — and would have stranded four lines of reasoning that no longer had anything to attach to.
+//
+//nolint:paralleltest // process-wide MemStats measurement; see above
 func TestPerIterationAllocationBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocation budget runs a few hundred real read-modify-write cycles")

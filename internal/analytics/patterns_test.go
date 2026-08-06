@@ -130,5 +130,5 @@ func TestPatternAnalyzer_Features_PeakHourFraction(t *testing.T) {
 func TestTopKFraction_Zero(t *testing.T) {
 	t.Parallel()
 	counts := make([]int64, 7)
-	assert.Equal(t, 0.0, topKFraction(counts, 2))
+	assert.Zero(t, topKFraction(counts, 2))
 }

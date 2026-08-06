@@ -111,27 +111,27 @@ func (suite *IntegrationTestSuite) TestS3BackendIntegration() {
 
 	// Test PutObject
 	err = backend.PutObject(suite.ctx, testKey, testData, nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Test GetObject
 	retrievedData, err := backend.GetObject(suite.ctx, testKey, 0, 0)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, testData, retrievedData)
 
 	// Test HeadObject
 	objInfo, err := backend.HeadObject(suite.ctx, testKey)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, testKey, objInfo.Key)
 	assert.Equal(t, int64(len(testData)), objInfo.Size)
 
 	// Test partial read
 	partialData, err := backend.GetObject(suite.ctx, testKey, 0, 5)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, testData[:5], partialData)
 
 	// Test DeleteObject
 	err = backend.DeleteObject(suite.ctx, testKey)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Verify deletion
 	_, err = backend.GetObject(suite.ctx, testKey, 0, 0)
@@ -191,11 +191,11 @@ func (suite *IntegrationTestSuite) TestCacheIntegration() {
 
 	// Test level-specific operations
 	l1Stats, err := mlCache.GetLevelStats("L1")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, l1Stats)
 
 	l2Stats, err := mlCache.GetLevelStats("L2")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, l2Stats)
 }
 
@@ -474,7 +474,7 @@ func (suite *IntegrationTestSuite) TestErrorHandlingAndRecovery() {
 	}
 
 	_, err := cache.NewMultiLevelCache(invalidCacheConfig)
-	assert.Error(t, err) // Should fail to create cache with invalid directory
+	require.Error(t, err) // Should fail to create cache with invalid directory
 
 	// A backend that rejects uploads must produce a flush error, and the data must stay pending.
 	//

@@ -89,17 +89,17 @@ func TestMultiLevelCacheUnit(t *testing.T) {
 
 	// Test cache management
 	err = mlCache.EnableLevel("L1")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = mlCache.DisableLevel("L1")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = mlCache.EnableLevel("L1")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Test level stats
 	l1Stats, err := mlCache.GetLevelStats("L1")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, l1Stats)
 
 	// Test invalid level
@@ -232,7 +232,7 @@ func TestConfigUnit(t *testing.T) {
 
 	// Test configuration validation
 	err := defaultConfig.Validate()
-	assert.NoError(t, err) // Default config should be valid
+	require.NoError(t, err) // Default config should be valid
 
 	// Test valid configuration.
 	//
@@ -274,7 +274,7 @@ func TestConfigUnit(t *testing.T) {
 	}
 
 	err = validConfig.Validate()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// A size written in a configuration this test declares valid parses under the parser the mount
 	// itself uses. That is the property worth asserting here, and it is the only one: the units, the
@@ -282,7 +282,7 @@ func TestConfigUnit(t *testing.T) {
 	// pkg/utils, which is where the function is. Re-testing them through a local copy is what let this
 	// file's copy disagree with the real parser without failing anything.
 	size, err := utils.ParseBytes(validConfig.Performance.CacheSize)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, int64(100*1024*1024), size)
 }
 
@@ -347,7 +347,7 @@ func TestErrorConditions(t *testing.T) {
 	}
 
 	collector, err := metrics.NewCollector(disabledConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Operations should be no-ops
 	collector.RecordOperation("test", time.Millisecond, 100, true)

@@ -71,7 +71,7 @@ func TestClassify_HotObject_AccessedToday(t *testing.T) {
 	rec := tc.Classify("k", hotFV())
 	assert.Equal(t, TierStandard, rec.Tier)
 	assert.InDelta(t, 0.95, rec.Confidence, 0.001)
-	assert.Equal(t, float64(0), rec.MonthlySavingsPerGB)
+	assert.Zero(t, rec.MonthlySavingsPerGB)
 }
 
 func TestClassify_HotObject_HighWeeklyRate(t *testing.T) {

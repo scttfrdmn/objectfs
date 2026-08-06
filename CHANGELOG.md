@@ -529,6 +529,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Eighteen error assertions that would have panicked instead of failing, and fifteen float
+  comparisons the linter's own suggestion would have weakened** ([#179]). `testifylint` 33 → 0.
+
+  The `require-error` half is a real difference in failure mode, measured rather than reasoned.
+  `internal/storage/s3/backend_test.go` asserted `assert.Error(t, err)` and then read `err.Error()` two
+  lines later; with a nil error that is a **nil-pointer panic**, which takes down the whole test binary
+  and every other test in the package, instead of one named failure. Proven both ways in a scratch test:
+  `assert` panics with `invalid memory address or nil pointer dereference`, `require` reports "An error
+  is expected but got nil" and stops. All eighteen sites have the same shape — an error assertion whose
+  following lines depend on it having held — which is also why the count is eighteen and not twenty:
+  the two that end their block (`tests/integration_test.go:138`, `tests/unit_test.go:107`) are correctly
+  left alone by the linter.
+
+  The `float-compare` half went the other way, and is the more interesting finding: **the fixer's
+  suggestion weakens the assertion.** `testifylint` says "use `assert.InEpsilon` (or `InDelta`)", but 14
+  of the 15 sites compare against exactly `0.0`, where exact equality is the *stronger* claim — a cost
+  model that returns a tiny non-zero for a zero-duration store is wrong, not approximately right.
+  Measured on real code by mutation: with `math.Max(0, durationMonths)` in
+  `internal/cost/calculator.go` changed to `math.Max(1e-300, ...)`, `assert.Zero` **fails** with "Should
+  be zero, but was 2.4696061952e-302" while the suggested `assert.InDelta(t, 0.0, cost, 1e-9)`
+  **passes**. So they are now `assert.Zero`, which the linter accepts and which keeps exact comparison.
+
+  The fifteenth is suppressed rather than satisfied, with the reason in the source:
+  `internal/cost/reporter_test.go` asserts two identical `RecordOp` calls price bit-identically, which is
+  determinism rather than approximation — and the line directly below it already uses `InDelta`, where a
+  tolerance genuinely is right because it compares a sum against a doubled value.
+
+- **A `//nolint` directive that has been one leading space away from inert since #364** ([#179]).
+  `nolintlint` 1 → 0. `internal/difftest/fuzz_test.go` carried `// nolint:paralleltest` with a space,
+  and the four lines of reasoning after it were the directive's own continuation.
+
+  Two things follow, both measured. golangci-lint does honour the spaced form here — `paralleltest` goes
+  0 → 2 on that file when the directive is deleted, so it was load-bearing and the test was never
+  silently unguarded. But gofmt does *not* recognize a spaced directive, so removing the space made gofmt
+  relocate it to just above the declaration and strand the paragraph explaining it. The comment is now
+  restructured so the prose is prose and the suppression is one self-contained line; `paralleltest` still
+  reports 384, unchanged, which is what confirms the directive survived its own reformatting.
+
 - **`TestDegradedState` asserted that Go assigns struct literal fields, and now asserts what
   `markDegraded` records** ([#179]). It built a `DegradedState` literal and read two of its own fields
   back, so its subject was its own fixture: verified by execution rather than claimed — with

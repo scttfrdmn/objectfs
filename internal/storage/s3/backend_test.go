@@ -26,7 +26,7 @@ func TestNewBackend_EmptyBucket(t *testing.T) {
 	}
 
 	backend, err := NewBackend(ctx, "", cfg)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Nil(t, backend)
 	assert.Contains(t, err.Error(), "bucket name cannot be empty")
 }

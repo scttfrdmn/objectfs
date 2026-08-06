@@ -432,7 +432,7 @@ func TestFUSEFileOperations(t *testing.T) {
 	t.Run("ErrorHandling", func(t *testing.T) {
 		// Test accessing non-existent file
 		_, err := backend.GetObject(context.Background(), "non-existent.txt", 0, 0)
-		assert.Error(t, err)
+		require.Error(t, err)
 
 		// Test reading beyond file bounds
 		testKey := "small-file.txt"

@@ -26,7 +26,7 @@ func TestPredictor_Recommend_NoHistory(t *testing.T) {
 	p := NewPredictor()
 	rec := p.Recommend("unseen-key")
 	assert.Equal(t, TierStandard, rec.Tier)
-	assert.Equal(t, float64(0), rec.Confidence)
+	assert.Zero(t, rec.Confidence)
 	assert.Equal(t, "no access history", rec.Reason)
 }
 
