@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -98,6 +97,24 @@ func NewPersistentCache(config *PersistentCacheConfig) (*PersistentCache, error)
 	// Apply defaults for zero/empty values
 	if config.IndexFile == "" {
 		config.IndexFile = "cache-index.json"
+	}
+
+	// IndexFile names a file inside the cache directory, so it must be a relative path that stays
+	// there. Rejected here, at construction, rather than at each use.
+	//
+	// loadIndex and saveIndex each carried `strings.HasPrefix(filepath.Clean(indexPath),
+	// filepath.Clean(c.directory))`, and a prefix compare on strings is not a containment check on
+	// paths: with Directory "/tmp/objectfs-cache", an IndexFile of "../objectfs-cache-evil" joins to
+	// "/tmp/objectfs-cache-evil", which passes the prefix test while being outside the directory
+	// entirely — as does "../objectfs-cacheXYZ/i.json". Both measured. Only "../../etc/passwd", which
+	// escapes far enough to lose the prefix, was caught, and that is the one case the existing test
+	// happened to use.
+	//
+	// filepath.IsLocal is the right predicate and did not exist when this was written (Go 1.20): it is
+	// false for anything absolute, anything that escapes upward, and on Windows for reserved device
+	// names. Note it accepts "a/../b", which is fine — that resolves inside.
+	if !filepath.IsLocal(config.IndexFile) {
+		return nil, fmt.Errorf("index_file must be a relative path within the cache directory, got %q", config.IndexFile)
 	}
 	if config.CleanupInterval <= 0 {
 		config.CleanupInterval = 10 * time.Minute
@@ -714,14 +731,12 @@ func (c *PersistentCache) readFromFile(item *persistentItem) ([]byte, error) {
 }
 
 func (c *PersistentCache) loadIndex() error {
+	// No path check here: NewPersistentCache rejects an IndexFile that is not filepath.IsLocal, which
+	// is the only way a value reaches c.config. The check this replaced was a strings.HasPrefix on the
+	// joined path, which accepted "../objectfs-cache-evil" — see the constructor.
 	indexPath := filepath.Join(c.directory, c.config.IndexFile)
 
-	// Validate path is within the cache directory
-	if !strings.HasPrefix(filepath.Clean(indexPath), filepath.Clean(c.directory)) {
-		return fmt.Errorf("invalid index file path: %s", indexPath)
-	}
-
-	file, err := os.Open(indexPath)
+	file, err := os.Open(indexPath) // #nosec G304 -- IsLocal-validated relative name under the configured cache directory
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No existing index, start fresh
@@ -768,19 +783,12 @@ func (c *PersistentCache) loadIndex() error {
 }
 
 func (c *PersistentCache) saveIndex() error {
+	// Validated at construction; see loadIndex. The second check this dropped was on indexPath+".tmp",
+	// which cannot escape a directory that indexPath does not escape.
 	indexPath := filepath.Join(c.directory, c.config.IndexFile)
-
-	// Validate path is within the cache directory
-	if !strings.HasPrefix(filepath.Clean(indexPath), filepath.Clean(c.directory)) {
-		return fmt.Errorf("invalid index file path: %s", indexPath)
-	}
-
 	tmpPath := indexPath + ".tmp"
-	// Validate tmp path is still within cache directory
-	if !strings.HasPrefix(filepath.Clean(tmpPath), filepath.Clean(c.directory)) {
-		return fmt.Errorf("invalid tmp index file path: %s", tmpPath)
-	}
-	file, err := os.Create(tmpPath)
+
+	file, err := os.Create(tmpPath) // #nosec G304 -- IsLocal-validated relative name under the configured cache directory
 	if err != nil {
 		return err
 	}

@@ -950,12 +950,7 @@ func (ce *ConsensusEngine) executeProposal(proposal *ConsensusProposal) {
 // lock and Stop reads under the write lock; every caller — Start, startElection, and
 // handleNetworkAppendEntries — holds it.
 func (ce *ConsensusEngine) resetElectionTimer() {
-	// Random timeout between 150ms and 300ms (scaled by ElectionTimeout)
-	timeoutMs := 150 + (rand.Intn(150))
-	timeout := time.Duration(timeoutMs) * time.Millisecond
-	if ce.config.ElectionTimeout > 0 {
-		timeout = ce.config.ElectionTimeout + time.Duration(rand.Intn(int(ce.config.ElectionTimeout.Milliseconds())))
-	}
+	timeout := electionTimeout(ce.config.ElectionTimeout)
 
 	// Use time.NewTimer (not time.AfterFunc) so that the .C channel is
 	// populated.  time.AfterFunc leaves .C == nil, which caused electionLoop
@@ -964,6 +959,39 @@ func (ce *ConsensusEngine) resetElectionTimer() {
 		ce.electionTimer.Stop()
 	}
 	ce.electionTimer = time.NewTimer(timeout)
+}
+
+// electionTimeout returns base plus up to 100% of base of random jitter, or a value in
+// [150ms, 300ms) when base is not positive.
+//
+// Split out from resetElectionTimer so the arithmetic is testable: the timer that method builds does
+// not expose the duration it was built with, so a spread this function got wrong was unobservable
+// from outside. And it was wrong. It read
+//
+//	base + time.Duration(rand.Intn(int(base.Milliseconds())))
+//
+// where the two units disagree: Milliseconds() yields a count, which then became a Duration in
+// *nanoseconds*. The default 5s timeout therefore got between 0 and 4999ns of spread — measured at
+// 4.69µs, 4.16µs and 690ns against a 5s base, a jitter of about one part in a million. Randomized
+// election timeouts exist so that followers whose timers expire together do not all become candidates
+// in the same instant and split the vote; a spread that small is not randomization, and a split vote
+// is precisely what Raft §5.2 introduces this jitter to avoid.
+//
+// It also panicked outright below one millisecond. Milliseconds() truncates, so a sub-ms base made
+// the argument 0, and rand.Intn(0) is "invalid argument to Intn" — verified. NewClusterManager
+// defaults the field to 5s so no shipped config reaches it, but `election_timeout: 500us` from a test
+// or an operator would take the panic on the first timer reset, on the consensus goroutine.
+//
+// math/rand is right here and the gosec G404 finding is noise: this picks a timer spread, not a
+// secret. Reading crypto/rand on every AppendEntries would put a syscall on the consensus hot path to
+// defend against an adversary that does not exist — a node able to influence its own election timeout
+// can simply decline to vote.
+func electionTimeout(base time.Duration) time.Duration {
+	if base <= 0 {
+		base = 150 * time.Millisecond
+	}
+
+	return base + time.Duration(rand.Int63n(int64(base))) // #nosec G404 -- timer spread, not a secret
 }
 
 func (ce *ConsensusEngine) getLastLogIndex() uint64 {

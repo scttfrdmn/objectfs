@@ -528,6 +528,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **Election timeouts were jittered by about one part in a million, and panicked below one
+  millisecond** ([#179]). The expression mixed units: `base + rand.Intn(int(base.Milliseconds()))`
+  takes a millisecond *count* and uses it as a nanosecond `Duration`. Against the 5s default, measured
+  spreads were 4.69µs, 4.16µs and 690ns. Randomized election timeouts exist so followers whose timers
+  expire together do not all become candidates in the same instant and split the vote — a spread six
+  orders of magnitude too small is not randomization, and a split vote is exactly what Raft §5.2
+  introduces the jitter to prevent. Below 1ms, `Milliseconds()` truncated to 0 and `rand.Intn(0)`
+  panicked on the consensus goroutine; `election_timeout: 500us` was enough to reach it.
+
+  The arithmetic moved into an `electionTimeout` function so it is testable at all: the timer
+  `resetElectionTimer` builds does not expose the duration it was built with, which is why a spread
+  this wrong went unobserved. The new test asserts the *distribution* rather than any single draw —
+  a fixed expected value could only be written by reproducing the formula, which would pass for the
+  broken one too. Verified in both directions: restoring the old expression panics, and a
+  units-only mutation with the zero case guarded reports `spread over 200 draws = 4.959µs, want at
+  least 2.5s`.
+
+- **The persistent cache's index-path check accepted a sibling directory, and an absolute path**
+  ([#179]). `loadIndex` and `saveIndex` each carried
+  `strings.HasPrefix(filepath.Clean(indexPath), filepath.Clean(directory))`, and a string prefix is
+  not path containment. With `directory: /tmp/objectfs-cache`, an `index_file` of
+  `../objectfs-cache-evil` joins to `/tmp/objectfs-cache-evil` — outside the directory, but still
+  carrying the prefix. `../objectfs-cacheXYZ/index.json` and `/etc/passwd` passed too. Only an escape
+  far enough to lose the prefix was caught, and that was the single case the existing test used, so
+  the test passed while three others went through. `index_file` is now validated once at construction
+  with `filepath.IsLocal`, which did not exist when the check was written. The test is a table of
+  eight cases, and the three escapes fail against the restored prefix check.
+
+- **Log files and their directory were world-readable** ([#179]). `pkg/utils`'s rotator created the
+  directory 0755 and the file 0644, and rotated backups through `os.Create` at 0666-and-umask. What
+  ObjectFS logs is not public: an object key is the path of a user's file, and the error strings carry
+  the bucket and the key, so on the multi-user systems this filesystem is built for a 0644 log hands
+  every account on the host a listing of what the mount owner has been reading. This is #211's mistake
+  in a second place. Now 0750 and 0640 — group-readable so an operations group can read them without
+  sudo, which is the case a umask cannot express once `O_CREATE` has picked a mode. Pinned by a test
+  asserting the world bits are clear, verified against a mutation of each mode.
+
+- **`health.Checker` discarded the context `Start` was given** ([#179], `gosec` G118 14 → 0).
+  `Start(ctx)` launched `go c.checkLoop()`, and every round built its own context from
+  `context.Background()` — so a trace ID, a deadline-bearing parent, or a test's `t.Context` was
+  invisible to every check function the loop ever ran. The loop now derives from
+  `context.WithoutCancel(ctx)`, the idiom `serveHealth` twenty lines below already applies to the HTTP
+  listener for the same lifetime mismatch: `Stop` is what ends the loop, so binding the caller's
+  cancellation directly would let a request-scoped caller take health checking down with it.
+
+  The remaining `gosec` findings were noise, and are suppressed with the reason rather than
+  satisfied: the two `math/rand` sites pick a timer spread and a backoff spread, not a secret, and
+  reading `crypto/rand` on the consensus hot path or on every S3 error would defend against no
+  adversary. Per `.golangci.yml`, `#nosec` and not `//nolint:gosec` — only the former also satisfies
+  the standalone run that feeds GitHub code scanning.
+
 
 - **Eleven unchecked type assertions, one of them on an HTTP request path** ([#179]). `errcheck` 11 → 0.
   Every finding was a single-value assertion rather than a discarded error, so each one panics where it

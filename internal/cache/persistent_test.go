@@ -759,34 +759,109 @@ func TestPersistentCache_EmptyData(t *testing.T) {
 	}
 }
 
-// TestPersistentCache_PathValidation tests security of path validation
+// TestPersistentCache_PathValidation tests security of path validation.
+//
+// It used to assert one case, "../../../etc/passwd", and that was the one case the old check happened
+// to get right. The check was `strings.HasPrefix(filepath.Clean(join(dir, IndexFile)), Clean(dir))`,
+// and a string prefix is not path containment: with dir "/tmp/objectfs-cache", an IndexFile of
+// "../objectfs-cache-evil" joins to "/tmp/objectfs-cache-evil", which keeps the prefix while leaving
+// the directory. Only an escape far enough to drop the prefix — like the /etc/passwd case — was
+// caught, so the test passed while the sibling-directory escape went through.
+//
+// The sibling cases below are the ones that mattered, and they are why this is a table now: a single
+// case cannot distinguish "rejects traversal" from "rejects one spelling of traversal".
 func TestPersistentCache_PathValidation(t *testing.T) {
-	tmpDir := t.TempDir()
+	t.Parallel()
 
-	// Test that config with suspicious index file is rejected during load
-	// First create a cache with malicious index file path
-	_, err := NewPersistentCache(&PersistentCacheConfig{
-		Directory: tmpDir,
+	for _, tc := range []struct {
+		name       string
+		indexFile  string
+		wantReject bool
+	}{
+		{"upward traversal", "../../../etc/passwd", true},
+		{"absolute path", "/etc/passwd", true},
+		{"sibling directory sharing the prefix", "../objectfs-cache-evil", true},
+		{"sibling directory with a longer name", "../objectfs-cacheXYZ/index.json", true},
+		{"bare parent", "..", true},
+		{"plain name", "cache-index.json", false},
+		{"nested name", "sub/index.json", false},
+		{"resolves back inside", "a/../index.json", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A directory whose own name is a prefix of the sibling names above, which is what the old
+			// prefix compare needed in order to be fooled.
+			dir := filepath.Join(t.TempDir(), "objectfs-cache")
+
+			cache, err := NewPersistentCache(&PersistentCacheConfig{
+				Directory: dir,
+				MaxSize:   10 * 1024 * 1024,
+				TTL:       time.Hour,
+				IndexFile: tc.indexFile,
+			})
+			if cache != nil {
+				defer func() { _ = cache.Close() }()
+			}
+
+			if tc.wantReject {
+				if err == nil {
+					t.Fatalf("IndexFile %q was accepted; it resolves to %q, outside %q",
+						tc.indexFile, filepath.Clean(filepath.Join(dir, tc.indexFile)), dir)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("IndexFile %q is inside the cache directory and must be accepted: %v", tc.indexFile, err)
+			}
+		})
+	}
+}
+
+// TestPersistentCache_IndexFileStaysInsideTheDirectory asserts on the filesystem rather than on the
+// error, because an accepted-but-escaping path writes a real file somewhere it should not.
+//
+// saveIndex writes indexPath+".tmp" and renames it, so an escaping IndexFile leaves two artifacts
+// outside the cache directory. Walking the parent is what catches that; a test that only inspects the
+// returned error cannot tell an escape that was rejected from one that succeeded quietly.
+func TestPersistentCache_IndexFileStaysInsideTheDirectory(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "objectfs-cache")
+
+	cache, err := NewPersistentCache(&PersistentCacheConfig{
+		Directory: dir,
 		MaxSize:   10 * 1024 * 1024,
 		TTL:       time.Hour,
-		IndexFile: "../../../etc/passwd", // Path traversal attempt
+		IndexFile: "cache-index.json",
 	})
-
-	// Should fail with path validation error
-	if err == nil {
-		t.Error("should reject path traversal in index file")
+	if err != nil {
+		t.Fatalf("NewPersistentCache: %v", err)
 	}
-	if err != nil && !filepath.IsAbs(err.Error()) {
-		// Check error message contains path validation
-		if err.Error() == "" || len(err.Error()) < 10 {
-			t.Errorf("unexpected error: %v", err)
+	defer func() { _ = cache.Close() }()
+
+	cache.Put("obj", 0, []byte("payload"))
+
+	cache.mu.Lock()
+	saveErr := cache.saveIndex()
+	cache.mu.Unlock()
+
+	if saveErr != nil {
+		t.Fatalf("saveIndex: %v", saveErr)
+	}
+
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatalf("reading the parent directory: %v", err)
+	}
+
+	for _, e := range entries {
+		if e.Name() != "objectfs-cache" {
+			t.Errorf("the cache wrote %q into its parent directory; everything it creates belongs under %q",
+				filepath.Join(parent, e.Name()), dir)
 		}
-	}
-
-	// Verify no file was created outside cache directory
-	parentDir := filepath.Dir(tmpDir)
-	etcPath := filepath.Join(parentDir, "etc", "passwd")
-	if _, err := os.Stat(etcPath); err == nil {
-		t.Error("should not create file outside cache directory")
 	}
 }

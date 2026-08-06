@@ -214,8 +214,17 @@ func (c *Checker) Start(ctx context.Context) error {
 	c.started = true
 	c.lastUpdate = time.Now()
 
-	// Start background check loop
-	go c.checkLoop()
+	// Start the background check loop, on the caller's context values but not its cancellation.
+	//
+	// It used to build each round's context from context.Background(), which discarded ctx entirely:
+	// anything the caller attached — a trace ID, a deadline-bearing parent, a test's t.Context — was
+	// invisible to every check function this loop ever ran, even though Start was handed it. Deriving
+	// from ctx directly is the other wrong answer, because Stop is what ends this loop and a
+	// request-scoped caller would otherwise silently take health checking down with it.
+	//
+	// context.WithoutCancel is the same reasoning serveHealth below applies to the HTTP listener, for
+	// the same lifetime mismatch. The per-round timeout is still derived in checkLoop.
+	go c.checkLoop(context.WithoutCancel(ctx))
 
 	// Start the HTTP endpoint if enabled.
 	//
@@ -423,7 +432,12 @@ func (c *Checker) executeCheck(ctx context.Context, check *Check) (*Result, erro
 	return result, nil
 }
 
-func (c *Checker) checkLoop() {
+// checkLoop runs every registered check on a ticker until Stop closes stopCh.
+//
+// parent carries the values Start was called with and none of its cancellation — see Start for why the
+// two are separated. Each round gets its own timeout derived from it, so a check function that hangs
+// bounds one round rather than the loop.
+func (c *Checker) checkLoop(parent context.Context) {
 	interval := c.config.CheckInterval
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -437,7 +451,7 @@ func (c *Checker) checkLoop() {
 		case <-c.stopCh:
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout*2)
+			ctx, cancel := context.WithTimeout(parent, c.config.Timeout*2)
 			_, _ = c.RunAllChecks(ctx) // Ignore periodic check errors
 			cancel()
 		}
