@@ -10,6 +10,8 @@ import (
 )
 
 func TestConfig_Defaults(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{}
 
 	// Test that defaults are applied appropriately
@@ -20,6 +22,8 @@ func TestConfig_Defaults(t *testing.T) {
 }
 
 func TestNewBackend_EmptyBucket(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	cfg := &Config{
 		Region: "us-east-1",
@@ -46,6 +50,8 @@ func TestNewBackend_EmptyBucket(t *testing.T) {
 // call may or may not fail depending on whether the environment supplies a region and credentials —
 // both outcomes are legitimate here and neither is what this test is about.
 func TestNewBackend_NilConfig(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 
 	backend, err := NewBackend(ctx, "test-bucket", nil)
@@ -68,6 +74,8 @@ func TestNewBackend_NilConfig(t *testing.T) {
 }
 
 func TestBackendMetrics_InitialState(t *testing.T) {
+	t.Parallel()
+
 	metrics := BackendMetrics{}
 
 	assert.Equal(t, int64(0), metrics.Requests)
@@ -80,6 +88,8 @@ func TestBackendMetrics_InitialState(t *testing.T) {
 }
 
 func TestDetectContentType(t *testing.T) {
+	t.Parallel()
+
 	backend := &Backend{}
 
 	tests := []struct {
@@ -100,6 +110,8 @@ func TestDetectContentType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
+			t.Parallel()
+
 			result := backend.detectContentType(tt.key)
 			assert.Equal(t, tt.expected, result)
 		})
@@ -107,6 +119,8 @@ func TestDetectContentType(t *testing.T) {
 }
 
 func TestBackend_recordMetrics(t *testing.T) {
+	t.Parallel()
+
 	metricsCollector := NewMetricsCollector()
 	backend := &Backend{
 		metricsCollector: metricsCollector,
@@ -136,6 +150,8 @@ func TestBackend_recordMetrics(t *testing.T) {
 }
 
 func TestBackend_recordError(t *testing.T) {
+	t.Parallel()
+
 	metricsCollector := NewMetricsCollector()
 	backend := &Backend{
 		metricsCollector: metricsCollector,
@@ -151,6 +167,8 @@ func TestBackend_recordError(t *testing.T) {
 }
 
 func TestBackend_GetMetrics(t *testing.T) {
+	t.Parallel()
+
 	metricsCollector := NewMetricsCollector()
 	backend := &Backend{
 		metricsCollector: metricsCollector,
@@ -170,10 +188,14 @@ func TestBackend_GetMetrics(t *testing.T) {
 
 // Mock tests for operations that require S3 connection
 func TestBackend_Operations_Mock(t *testing.T) {
+	t.Parallel()
+
 	// These are mock tests that demonstrate the interface
 	// without requiring actual S3 credentials
 
 	t.Run("GetObjects_EmptyKeys", func(t *testing.T) {
+		t.Parallel()
+
 		backend := &Backend{
 			config: &Config{PoolSize: 4},
 		}
@@ -186,6 +208,8 @@ func TestBackend_Operations_Mock(t *testing.T) {
 	})
 
 	t.Run("PutObjects_EmptyObjects", func(t *testing.T) {
+		t.Parallel()
+
 		backend := &Backend{
 			config: &Config{PoolSize: 4},
 		}

@@ -557,6 +557,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bucket), `internal/filesystem` (1), `pkg/types` (1). `internal/config`'s three `TestLoadFromEnv*`
   functions stay serial with a documented `//nolint:paralleltest`: `t.Setenv` panics on a test that has
   called `t.Parallel`, because the environment is process-wide.
+- **`internal/storage/s3`'s tests now run in parallel, all 69 of them** ([#179]). `paralleltest` 194 →
+  126 for the package, which was the largest remaining cluster: `pricing_manager_test.go` (20),
+  `multipart_test.go` (15), `backend_test.go` (12), `cost_optimizer_test.go` (11), `tier_test.go` (8),
+  `acceleration_test.go` (6).
+
+  Two subjects are shared across newly-parallel subtests, and both were checked rather than assumed.
+  `PricingManager` holds no mutable state after `NewPricingManager` — `GetTierPricing`, `StorageRate`
+  and `GetPricingSummary` only read `config` and `region` — and `CostOptimizer.accessPatterns` is
+  guarded by `co.mu`, with the subtests reaching it through `patternFor`/`putPattern`/`PatternCount`
+  rather than indexing the map. `Config.ShouldUseMultipart` and `GetOptimalChunkSize` are pure.
+
+  One real hazard was removed on the way: `TestPricingManager_ExternalDiscountConfig` had a
+  `defer os.Remove(tempFile.Name())` and hands that path to two subtests. A plain `defer` in a parent
+  runs when the parent returns, which is *before* its parallel children finish — so the file would have
+  been deleted out from under the tests reading it. The file already lives in `t.TempDir()`, which the
+  framework cleans up after the parallel subtests complete, so the `defer` was redundant as well as
+  wrong.
+
+  Verified by mutation in two of the parallelized table tests, since a parallel table test that aliases
+  its loop variable reports the wrong row: widening `ShouldUseMultipart`'s comparison to `>=` fails as
+  `ShouldUseMultipart(33554432) = true, want false` under `file_exactly_at_threshold`, and making
+  `GetTierPricing` ignore its `CustomPricing` override fails under both `Uses_Custom_Pricing` and
+  `Multiple_Discounts_Applied` — the two subtests that share a manager.
 - **27 test functions declared themselves parallel and then ran their subtests serially** ([#179]).
   `tparallel` 27 → 0.
 

@@ -8,6 +8,8 @@ import (
 
 // Test multipart configuration
 func TestConfig_MultipartConfiguration(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewDefaultConfig()
 
 	// Test default values
@@ -25,6 +27,8 @@ func TestConfig_MultipartConfiguration(t *testing.T) {
 }
 
 func TestConfig_ShouldUseMultipart(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewDefaultConfig()
 
 	tests := []struct {
@@ -56,6 +60,8 @@ func TestConfig_ShouldUseMultipart(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := cfg.ShouldUseMultipart(tt.fileSize)
 			if result != tt.expected {
 				t.Errorf("ShouldUseMultipart(%d) = %v, want %v", tt.fileSize, result, tt.expected)
@@ -65,6 +71,8 @@ func TestConfig_ShouldUseMultipart(t *testing.T) {
 }
 
 func TestCalculateOptimalChunkSize(t *testing.T) {
+	t.Parallel()
+
 	threshold := int64(32 * 1024 * 1024)     // 32MB
 	baseChunkSize := int64(16 * 1024 * 1024) // 16MB
 
@@ -107,6 +115,8 @@ func TestCalculateOptimalChunkSize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := CalculateOptimalChunkSize(tt.fileSize, threshold, baseChunkSize)
 			if result != tt.expectedChunk {
 				t.Errorf("CalculateOptimalChunkSize(%d) = %d, want %d",
@@ -117,6 +127,8 @@ func TestCalculateOptimalChunkSize(t *testing.T) {
 }
 
 func TestCalculatePartCount(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		fileSize      int64
@@ -151,6 +163,8 @@ func TestCalculatePartCount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := CalculatePartCount(tt.fileSize, tt.chunkSize)
 			if result != tt.expectedParts {
 				t.Errorf("CalculatePartCount(%d, %d) = %d, want %d",
@@ -161,6 +175,8 @@ func TestCalculatePartCount(t *testing.T) {
 }
 
 func TestConfig_GetOptimalChunkSize(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewDefaultConfig()
 
 	fileSize := int64(500 * 1024 * 1024) // 500MB
@@ -174,6 +190,8 @@ func TestConfig_GetOptimalChunkSize(t *testing.T) {
 
 // Test multipart metrics
 func TestMetricsCollector_MultipartMetrics(t *testing.T) {
+	t.Parallel()
+
 	mc := NewMetricsCollector()
 
 	// Record multipart upload start
@@ -215,6 +233,8 @@ func TestMetricsCollector_MultipartMetrics(t *testing.T) {
 }
 
 func TestMetricsCollector_MultipartRates(t *testing.T) {
+	t.Parallel()
+
 	mc := NewMetricsCollector()
 
 	// Set up some requests for rate calculation
@@ -244,6 +264,8 @@ func TestMetricsCollector_MultipartRates(t *testing.T) {
 }
 
 func TestMetricsCollector_AveragePartsPerUpload(t *testing.T) {
+	t.Parallel()
+
 	mc := NewMetricsCollector()
 
 	// Upload 1: 4 parts
@@ -267,6 +289,8 @@ func TestMetricsCollector_AveragePartsPerUpload(t *testing.T) {
 
 // Test multipart upload state
 func TestMultipartUploadState(t *testing.T) {
+	t.Parallel()
+
 	uploadID := "test-upload-123"
 	bucket := "test-bucket"
 	key := "test-key"
@@ -348,6 +372,8 @@ func TestMultipartUploadState(t *testing.T) {
 }
 
 func TestMultipartStateManager(t *testing.T) {
+	t.Parallel()
+
 	manager := NewMultipartStateManager()
 
 	// Create and track multiple uploads
@@ -513,6 +539,8 @@ func TestPartSlice(t *testing.T) {
 }
 
 func TestMultipartUploadStatus(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		status      MultipartUploadStatus
 		isCompleted bool
@@ -526,6 +554,8 @@ func TestMultipartUploadStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.status.IsCompleted()
 			if result != tt.isCompleted {
 				t.Errorf("Expected IsCompleted()=%v for status %s, got %v",

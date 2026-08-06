@@ -191,6 +191,8 @@ func optimizerOnTierWithPricing(t *testing.T, tier string, pricing PricingConfig
 }
 
 func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	config := CostOptimization{
@@ -207,6 +209,8 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 	optimizer := NewCostOptimizer(backend, config, logger)
 
 	t.Run("Records Access Pattern", func(t *testing.T) {
+		t.Parallel()
+
 		// Record multiple accesses
 		optimizer.RecordAccess("test.txt", 1024)
 		optimizer.RecordAccess("test.txt", 1024)
@@ -230,6 +234,8 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 	})
 
 	t.Run("Skips Recording When Disabled", func(t *testing.T) {
+		t.Parallel()
+
 		disabledConfig := CostOptimization{
 			MonitorAccessPatterns: false,
 		}
@@ -250,6 +256,8 @@ func TestCostOptimizer_AccessPatternRecording(t *testing.T) {
 }
 
 func TestCostOptimizer_AccessFrequencyCategories(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	config := CostOptimization{}
 	backend := &Backend{currentTier: TierStandard}
@@ -290,6 +298,8 @@ func TestCostOptimizer_AccessFrequencyCategories(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			pattern := &AccessPattern{
 				AccessCount:     tt.accessCount,
 				FirstAccessTime: time.Now().Add(-tt.objectAge),
@@ -426,6 +436,8 @@ func TestCostOptimizer_CostCalculation(t *testing.T) {
 }
 
 func TestCostOptimizer_OptimalTierSelection(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	config := CostOptimization{}
 	backend := &Backend{currentTier: TierStandard}
@@ -472,6 +484,8 @@ func TestCostOptimizer_OptimalTierSelection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			pattern := &AccessPattern{
 				ObjectSize: tt.objectSize,
 			}
@@ -485,6 +499,8 @@ func TestCostOptimizer_OptimalTierSelection(t *testing.T) {
 }
 
 func TestCostOptimizer_StandardTierOverheadEstimation(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	config := CostOptimization{}
 	backend := &Backend{currentTier: TierStandardIA}
@@ -492,6 +508,8 @@ func TestCostOptimizer_StandardTierOverheadEstimation(t *testing.T) {
 	optimizer := NewCostOptimizer(backend, config, logger)
 
 	t.Run("Standard More Expensive Than IA", func(t *testing.T) {
+		t.Parallel()
+
 		// For large objects, Standard is more expensive than IA
 		overhead := optimizer.EstimateStandardTierOverhead(1024*1024*1024, TierStandardIA) // 1GB
 
@@ -501,6 +519,8 @@ func TestCostOptimizer_StandardTierOverheadEstimation(t *testing.T) {
 	})
 
 	t.Run("No Overhead When Standard is Cheaper", func(t *testing.T) {
+		t.Parallel()
+
 		// For small objects where IA has minimum charges, no overhead
 		overhead := optimizer.EstimateStandardTierOverhead(64*1024, TierStandardIA) // 64KB
 
@@ -511,6 +531,8 @@ func TestCostOptimizer_StandardTierOverheadEstimation(t *testing.T) {
 }
 
 func TestCostOptimizer_OptimizationReport(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	config := CostOptimization{
 		CostThreshold: 0.000001, // Very low threshold for testing (1 micro-dollar)
