@@ -615,7 +615,7 @@ func (ap *AccessPredictor) updateModel() {
 	for _, example := range examples {
 		// Calculate prediction without holding lock
 		prediction := ap.model.predict(example.Features)
-		error := example.Target - prediction
+		residual := example.Target - prediction
 
 		// Now acquire lock to update weights
 		ap.model.mu.Lock()
@@ -625,11 +625,11 @@ func (ap *AccessPredictor) updateModel() {
 			if _, exists := ap.model.weights[featureName]; !exists {
 				ap.model.weights[featureName] = 0.0
 			}
-			ap.model.weights[featureName] += ap.model.learningRate * error * feature * example.Weight
+			ap.model.weights[featureName] += ap.model.learningRate * residual * feature * example.Weight
 		}
 
 		// Update bias
-		ap.model.bias += ap.model.learningRate * error * example.Weight
+		ap.model.bias += ap.model.learningRate * residual * example.Weight
 		ap.model.mu.Unlock()
 	}
 }

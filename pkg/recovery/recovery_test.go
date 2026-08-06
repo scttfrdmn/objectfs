@@ -3,6 +3,9 @@ package recovery
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -415,20 +418,91 @@ func TestRecoveryManager_Shutdown(t *testing.T) {
 	}
 }
 
+// TestDegradedState asserts what markDegraded records, which is not what this test used to do.
+//
+// It built a DegradedState literal and read two of its fields back — so it asserted that Go
+// assigns struct literal fields, and would have passed against any implementation of this package
+// including an empty one. govet's unusedwrite found it by noticing that two of the four fields it
+// set were never read, which is the visible symptom of a test whose subject is its own fixture.
+//
+// The gap that mattered is that markDegraded sets Component, Reason, Since, AttemptCount,
+// LastAttempt, NextAttempt and OriginalError, and *nothing in the suite asserted any of them*.
+// Three existing tests call it, and all three then ask only isComponentDegraded or a count. The
+// Reason format string, the attempt counter's increment on a second call, and the ObjectFSError
+// type assertion were all uncovered.
 func TestDegradedState(t *testing.T) {
-	state := &DegradedState{
-		Component:    "test",
-		Reason:       "test reason",
-		Since:        time.Now(),
-		AttemptCount: 3,
+	t.Parallel()
+
+	config := DefaultRecoveryConfig()
+	config.EnableAutoRecovery = false // no background recovery racing the assertions
+	rm := NewRecoveryManager(config)
+
+	before := time.Now()
+	rm.markDegraded("test-component", "read-object", errors.New("boom"))
+
+	degraded := rm.GetDegradedComponents()
+
+	state, ok := degraded["test-component"]
+	if !ok {
+		t.Fatalf("markDegraded recorded nothing for test-component; got keys %v", slices.Sorted(maps.Keys(degraded)))
 	}
 
-	if state.Component != "test" {
-		t.Errorf("Expected component 'test', got %s", state.Component)
+	if state.Component != "test-component" {
+		t.Errorf("Component = %q, want %q", state.Component, "test-component")
 	}
 
-	if state.AttemptCount != 3 {
-		t.Errorf("Expected 3 attempts, got %d", state.AttemptCount)
+	// The operation and the error are both folded into Reason by a format string, and a caller
+	// reading GetDegradedComponents has no other way to learn which operation failed.
+	if want := "read-object: boom"; state.Reason != want {
+		t.Errorf("Reason = %q, want %q", state.Reason, want)
+	}
+
+	if state.AttemptCount != 1 {
+		t.Errorf("AttemptCount = %d, want 1 after one call", state.AttemptCount)
+	}
+
+	if state.Since.Before(before) {
+		t.Errorf("Since = %v, want at or after %v", state.Since, before)
+	}
+
+	if !state.NextAttempt.After(state.LastAttempt) {
+		t.Errorf("NextAttempt (%v) should be after LastAttempt (%v) by RecoveryBackoff (%v)",
+			state.NextAttempt, state.LastAttempt, config.RecoveryBackoff)
+	}
+
+	// A plain error leaves OriginalError nil: markDegraded only populates it on a type assertion
+	// to *errors.ObjectFSError succeeding.
+	if state.OriginalError != nil {
+		t.Errorf("OriginalError = %v for a plain error, want nil", state.OriginalError)
+	}
+
+	// A second failure on the same component updates the existing record rather than replacing it,
+	// so Since must be preserved while AttemptCount advances.
+	firstSince := state.Since
+
+	rm.markDegraded("test-component", "write-object", pkgerrors.NewError(
+		pkgerrors.ErrCodeStorageWrite, "denied"))
+
+	state, ok = rm.GetDegradedComponents()["test-component"]
+	if !ok {
+		t.Fatal("the second markDegraded dropped the component's record")
+	}
+
+	if state.AttemptCount != 2 {
+		t.Errorf("AttemptCount = %d, want 2 after two calls", state.AttemptCount)
+	}
+
+	if !state.Since.Equal(firstSince) {
+		t.Errorf("Since = %v, want it preserved at %v across the second call", state.Since, firstSince)
+	}
+
+	if want := "write-object: denied"; !strings.Contains(state.Reason, "write-object") {
+		t.Errorf("Reason = %q, want it to name the second operation as in %q", state.Reason, want)
+	}
+
+	if state.OriginalError == nil {
+		t.Error("OriginalError is nil for an *errors.ObjectFSError, so the type assertion in " +
+			"markDegraded did not fire")
 	}
 }
 

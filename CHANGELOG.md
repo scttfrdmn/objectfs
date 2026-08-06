@@ -529,6 +529,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`TestDegradedState` asserted that Go assigns struct literal fields, and now asserts what
+  `markDegraded` records** ([#179]). It built a `DegradedState` literal and read two of its own fields
+  back, so its subject was its own fixture: verified by execution rather than claimed — with
+  `markDegraded` replaced by an empty function body, the old test still passes.
+
+  `govet`'s `unusedwrite` is what surfaced it, by noticing that two of the four fields the literal set
+  were never read. That is the visible symptom, and the gap behind it is larger than the lint finding:
+  `markDegraded` sets `Component`, `Reason`, `Since`, `AttemptCount`, `LastAttempt`, `NextAttempt` and
+  `OriginalError`, and **nothing in the suite asserted any of them**. Three tests call it and all three
+  then ask only `isComponentDegraded` or a count, so the `Reason` format string, the attempt counter's
+  behaviour on a second failure, and the `*errors.ObjectFSError` type assertion were uncovered.
+
+  The replacement drives the real producer and checks five properties, each mutation-verified against
+  `markDegraded` itself: dropping the operation prefix from `Reason`, pinning `AttemptCount` to 1,
+  resetting `Since` on the second call, disabling the `OriginalError` type assertion, and removing the
+  `RecoveryBackoff` gap between `LastAttempt` and `NextAttempt` each fail it. The second-call assertions
+  are the ones the shape of the old test made impossible to write: updating an existing record while
+  preserving `Since` is a property of two calls, not of one literal.
+
+- **Four variables named `copy` and one named `error`, all shadowing predeclared identifiers**
+  ([#179]). `predeclared` 5 → 0. `Operation.Copy` and `Progress.Copy` in `pkg/status` each named their
+  result `copy`; both are now `dup`. Neither needed the builtin — the map copy goes through `maps.Copy`,
+  which is package-qualified and unaffected — so this is a readability fix rather than a bug fix, and
+  saying so is the point: a shadow that forced a workaround would have been a different entry.
+
+  `internal/cache/predictive.go`'s gradient-descent loop named its error term `error`. Renamed to
+  `residual`, which is both the unshadowed name and the accurate one. Checked before renaming that the
+  shadow was not concealing a dropped failure: there is no `err` anywhere in that function's scope, so
+  nothing was hidden by it.
+
 - **Error classification for Transfer Acceleration no longer disables the accelerated endpoint on
   unrelated failures** ([#187]).
 

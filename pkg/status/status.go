@@ -504,7 +504,7 @@ func (o *Operation) Copy() *Operation {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 
-	copy := &Operation{
+	dup := &Operation{
 		ID:        o.ID,
 		Type:      o.Type,
 		Status:    o.Status,
@@ -514,13 +514,13 @@ func (o *Operation) Copy() *Operation {
 		Metadata:  make(map[string]any),
 	}
 
-	maps.Copy(copy.Metadata, o.Metadata)
+	maps.Copy(dup.Metadata, o.Metadata)
 
 	if o.Progress != nil {
-		copy.Progress = o.Progress.Copy()
+		dup.Progress = o.Progress.Copy()
 	}
 
-	return copy
+	return dup
 }
 
 // Update updates progress metrics
@@ -562,7 +562,7 @@ func (p *Progress) Copy() *Progress {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	copy := &Progress{
+	dup := &Progress{
 		Current:     p.Current,
 		Total:       p.Total,
 		Unit:        p.Unit,
@@ -576,10 +576,10 @@ func (p *Progress) Copy() *Progress {
 
 	if p.ETA != nil {
 		eta := *p.ETA
-		copy.ETA = &eta
+		dup.ETA = &eta
 	}
 
-	return copy
+	return dup
 }
 
 // generateOperationID generates a unique operation ID

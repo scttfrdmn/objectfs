@@ -430,22 +430,22 @@ func TestProgress_Copy(t *testing.T) {
 	eta := 5 * time.Second
 	original.ETA = &eta
 
-	copy := original.Copy()
+	dup := original.Copy()
 
-	if copy.Current != original.Current {
+	if dup.Current != original.Current {
 		t.Error("Current value not copied correctly")
 	}
 
-	if copy.ETA == nil {
+	if dup.ETA == nil {
 		t.Error("ETA not copied")
 	}
 
-	if *copy.ETA != *original.ETA {
+	if *dup.ETA != *original.ETA {
 		t.Error("ETA value not copied correctly")
 	}
 
-	// Modify copy to ensure it's independent
-	copy.Current = 75
+	// Modify dup to ensure it's independent
+	dup.Current = 75
 	if original.Current == 75 {
 		t.Error("Copy is not independent from original")
 	}
@@ -468,27 +468,27 @@ func TestOperation_Copy(t *testing.T) {
 		},
 	}
 
-	copy := original.Copy()
+	dup := original.Copy()
 
-	if copy.ID != original.ID {
+	if dup.ID != original.ID {
 		t.Error("ID not copied correctly")
 	}
 
-	if copy.Progress == nil {
+	if dup.Progress == nil {
 		t.Error("Progress not copied")
 	}
 
-	if copy.Progress.Current != original.Progress.Current {
+	if dup.Progress.Current != original.Progress.Current {
 		t.Error("Progress values not copied correctly")
 	}
 
-	// Modify copy to ensure it's independent
-	copy.Progress.Current = 75
+	// Modify dup to ensure it's independent
+	dup.Progress.Current = 75
 	if original.Progress.Current == 75 {
 		t.Error("Copy is not independent from original")
 	}
 
-	copy.Metadata["key"] = "modified"
+	dup.Metadata["key"] = "modified"
 	if original.Metadata["key"] == "modified" {
 		t.Error("Metadata is not independent")
 	}
