@@ -113,7 +113,22 @@ jobs:
           go-version-file: ${{ env.GO_VERSION_FILE }}
           cache: true
 
+      # CGO_ENABLED is stated rather than inherited (#361). It was neither set nor unset here, so the
+      # job took the runner's default of cgo *on*, and sdks/c — the one package whose coverage depends
+      # on it — appeared in the profile at 11.0% because of that default rather than because of a
+      # decision. A floor read off an inherited value is a claim about a configuration no workflow
+      # states.
+      #
+      # On, not off, and the direction matters. sdks/c/main.go carries `import "C"`, so with cgo off
+      # the package does not fall back to a build-tag-excluded variant — `go test` fails to compile,
+      # because main_test.go references codeFromErr and fillCStr and neither declaration is built.
+      # CGO_ENABLED=0 here would turn a coverage question into a compile failure in the job whose
+      # output is a coverage number, which is a much worse failure to read. The cross-build matrix and
+      # the release build set 0 deliberately, because there the point is a static binary; here the
+      # point is measuring every package, so the value that compiles every package is the right one.
       - name: Measure per-package coverage
+        env:
+          CGO_ENABLED: 1
         run: go test -covermode=atomic -coverprofile=coverage.out -timeout 20m ./...
 
       - name: Enforce per-package floors

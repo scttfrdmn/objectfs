@@ -16,7 +16,9 @@
 # with `t.Log("No alerts generated (may be normal...)")`, so deleting the branch entirely left it
 # green. A gate with zero margin is what made that visible. Widen the test, not the margin.
 #
-# CLAUDE.md's target is 80%+ per package. Sixteen of the thirty below are there. Two of the four
+# CLAUDE.md's target is 80%+ per package. Twenty-three of the thirty-five below are there — counted
+# from the file rather than remembered, since this sentence said "sixteen of the thirty" for several
+# releases after both numbers moved. Two of the four
 # packages this file originally listed as furthest from it have since been rewritten, and both moved
 # for a structural reason rather than by anyone writing tests harder — which is the useful thing to
 # record, because it says where the remaining two are actually blocked:
@@ -29,13 +31,14 @@
 #   pkg/errors          48.3%          mostly classification tables; needs table tests, not design
 #                                      work
 #
-# Floors are deliberately absent for six packages, and the gate names all six in every run so the
+# Floors are deliberately absent for four packages, and the gate names all four in every run so the
 # omission stays visible instead of looking like a decision. TestUnfloorablePackagesAreExplained in
 # internal/config/coverage_floors_test.go asserts that the set the gate reports and the set this
 # block explains are the same set, in both directions, so this list cannot drift out of agreement
-# with the gate the way it had.
+# with the gate the way it had. It was six until #360 gave pkg/archive tests of its own and a floor
+# and #361 made the coverage job's cgo posture explicit enough to floor sdks/c.
 #
-# All six report 0.0% or near it, and for five of them that number is an artifact rather than a
+# All four report 0.0%, and in every case that number is an artifact rather than a
 # measurement — which is the thing to understand before reading a floor into it. `go test
 # -coverprofile` instruments only the package under test, so a package with no test files of its own
 # gets a profile full of count-0 lines even when every statement in it executes under a sibling
@@ -44,12 +47,18 @@
 #   internal/cache/cachetest        0.0% reported, 81.9% under internal/cache + internal/cache/redis
 #   internal/testhttp               0.0% reported, 75.6% under internal/adapter
 #   pkg/compression                 0.0% reported, 88.9% under internal/compression
-#   pkg/archive                     0.0% reported, 48.6% under internal/archive
 #   internal/awsrates/…/offertest   0.0% reported, 48.9% under internal/awsrates/...
 #
-# So a floor here would not be a weak gate, it would be a broken one: it would have to be 0 to pass,
-# and 0 is not a gate. The real check for each is that its consumers' suites fail when it changes,
+# So a floor for any of those four would not be a weak gate, it would be a broken one: it would have
+# to be 0 to pass, and 0 is not a gate. The real check for each is that its consumers' suites fail when it changes,
 # which is what their own floors above already enforce.
+#
+# Two more packages used to appear in the gate's unfloored list and no longer do: `flatted`, an npm
+# dependency of docs-platform and sdks/javascript, ships a Go port inside its package directory, so
+# `go list ./...` reports it twice once anything has run `npm install`. The gate now skips any profile
+# path under node_modules. They are gitignored and the coverage job never installs npm packages, so
+# they were visible only on a developer machine — noise in the one place a gate's output is read most
+# often, and not actionable by either a floor or a test, because the code is not this repository's.
 #
 # no-floor: internal/cache/cachetest
 #     no tests, deliberately: it is the shared conformance suite five cache implementations are
@@ -60,14 +69,6 @@
 #     that use it. A test for FreeAddr would assert that an address is free by binding it, which is
 #     what the function does — a tautology. Its real check is that deleting adapter.Start's metrics
 #     call fails the tests built on it, which it does, with the message it exists to print
-# no-floor: pkg/archive
-#     no tests of its own. It is *not* dead code — this line said "dead code pending a decision
-#     (Part 4)" and internal/archive imports it from five files, so the claim was wrong in the
-#     direction that matters: it read as a reason not to test a package that a floored package
-#     depends on. Its ArchiveFormat table and IsArchive run under internal/archive (floored at 90),
-#     reaching 48.6% of it. The uncovered half is metadata.go's index construction, which
-#     internal/archive does not exercise — worth its own tests, tracked rather than floored, because
-#     a floor set from the artifact number gates nothing
 # no-floor: pkg/compression
 #     no tests in this package; its constants and SupportedAlgorithms list are exercised from
 #     internal/compression, which is at 88.6%. SupportedAlgorithms is load-bearing there since #230
@@ -79,16 +80,6 @@
 #     its own would assert that a fixture it just built contains what it put in — the
 #     self-consistency failure the Glacier PUT defect had. Its real check is that the suites using
 #     it fail when a rule changes
-# no-floor: sdks/c
-#     11.0%, and unfloorable for a different reason than the five above: the number depends on
-#     CGO_ENABLED. main.go is a CgoFile, so `CGO_ENABLED=0 go test ./sdks/c/` does not fall back to
-#     a build-tag-excluded variant — it fails to compile, because main_test.go references
-#     codeFromErr and fillCStr and neither declaration is built. CI's Go jobs set CGO_ENABLED=0 for
-#     the cross-build matrix and the release build, so a floor here would be a claim about a file
-#     set part of CI does not compile — the mistake internal/network's note below records, arriving
-#     through cgo rather than through //go:build. The 11.0% is stable (three runs, and identical
-#     under the full-repo profile), so this is a floor worth setting once the coverage job's cgo
-#     posture is explicit rather than incidental
 #
 # `pkg/types` was in this block as `no-statements` and is now floored above. #282 gave it its first
 # function bodies — Precondition.Validate and IsZero — and TestNoStatementPackagesStillHaveNone caught
@@ -331,6 +322,26 @@ internal/fuse            67
 # which implementation a configuration selects rather than only that one was returned.
 internal/cache           85
 
+# 100, and the only floor in this file set at 100 on purpose rather than because a package happens to
+# be small. pkg/archive is 189 lines of declarations plus IsArchive and four index methods; there is
+# no error path, no I/O, and no concurrency in it, so every statement is reachable from a table entry
+# and a floor below 100 would permit a regression with nothing to justify it.
+#
+# It had no floor until #360. The note that used to stand here said its statements ran under
+# internal/archive, reaching 48.6% — true, and the weaker of the two available positions, because the
+# uncovered 51.4% was ListDirectory and its two helpers, which no consumer calls at all. Testing the
+# package directly rather than reaching it from internal/archive was the deliberate choice #360 asked
+# for: ArchiveIndex is exported, so its contract should not depend on which consumer happens to exist.
+#
+# Reaching 100 turned up the thing worth knowing. ListDirectory's second disjunct requires an entry
+# whose Path ends in '/', and internal/archive.BuildIndexFromBytes runs every tar name through
+# path.Clean, which strips exactly that — so that branch, and containsSlashExceptLast which only it
+# calls, are unreachable from the only producer in the repository. They are covered rather than
+# deleted because a caller outside this repository may build an index using tar's own convention,
+# where a directory name keeps its slash. The test says which convention each half serves, so
+# removing the branch stays a decision about the exported surface.
+pkg/archive              100
+
 pkg/api                  73
 pkg/errors               48
 pkg/health               93
@@ -349,6 +360,28 @@ pkg/status               93
 pkg/types                100
 
 pkg/utils                82
+
+# sdks/c measures 12.1%, and the floor is 12 rather than 11 for a reason worth recording: 11.0% was
+# what this file claimed while it argued the package was unfloorable, and that number was already
+# stale when it was written. #355 added the tests that took it from 11.0% to 12.1%; the note was
+# authored on a branch cut before #355 merged, so it recorded a measurement its own commit had
+# invalidated. Verified rather than reasoned — `sdks/c` has no commits touching it since, and the
+# package measures 11.0% at f6f2ae5^ and 12.1% at HEAD.
+#
+# The number depends on CGO_ENABLED, which is why this floor waited on #361. main.go is a CgoFile, so
+# `CGO_ENABLED=0 go test ./sdks/c/` does not fall back to a build-tag-excluded variant — it fails to
+# compile, because main_test.go references codeFromErr, fillCStr, maxPutLength and more, and none of
+# those declarations are built. Part of CI sets CGO_ENABLED=0 deliberately (the cross-build matrix
+# and the release build, where the point is a static binary), so a floor read off an inherited value
+# would have been a claim about a file set some jobs do not compile. The coverage job now states
+# CGO_ENABLED=1, so this floor is about a configuration a workflow declares.
+#
+# 12.1% is low and stays low by design: the covered part is the pure-Go logic reachable without a
+# live C caller (codeFromErr, fillCStr, bytesToCacheString, the length and limit error builders), and
+# the rest is //export cgo entry points whose parameters are C pointers. Exercising those needs the
+# C test suite in sdks/c/tests, which links the shared library and is not a `go test` target. The
+# floor is a ratchet on the Go-testable half, not a coverage target for the SDK.
+sdks/c                   12
 
 # sdks/go/objectfs measures 54.1% with AWS credentials present and 43.5% without, because several
 # of its tests call requireAWS and skip. CI has no credentials, so the floor is set for the
