@@ -2201,15 +2201,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **substrate v0.87.0 → v0.92.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
+- **substrate v0.87.0 → v0.93.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
   `go.sum` are the whole diff.
 
-  The S3 conditional-write behaviour that [#282] is built on was re-probed on the new version rather
-  than assumed to be stable across five releases: `If-None-Match: *` succeeds on an absent key and
+  The S3 conditional-write behaviour that [#282] is built on was re-probed on each new version rather
+  than assumed to be stable across releases: `If-None-Match: *` succeeds on an absent key and
   answers 412 on a present one, a failed precondition leaves the stored bytes unmodified, `If-Match`
   succeeds on a current ETag and answers 412 on a stale one, and `If-Match` against an absent key
   answers **404 rather than 412** — the distinction #282 makes load-bearing, since a lost race and a
-  vanished object need different recovery. Identical on both versions.
+  vanished object need different recovery. Identical on v0.87.0, v0.92.0 and v0.93.0.
+
+  v0.93.0's probe added one case the earlier ones did not cover: `If-None-Match: *` and `If-Match`
+  sent **together** answer 412, confirming S3 evaluates both headers rather than choosing between
+  them, so such a request can never succeed. That is why `types.Precondition.Validate` rejects the
+  combination locally — as a caller error at the call site, rather than as a remote 412 a caller
+  cannot distinguish from a genuinely lost race.
 
   `internal/testaws`, `internal/storage/s3`, and `internal/difftest` all pass at `-race`, as does the
   full suite. [scttfrdmn/substrate#540] — the third conditional-write outcome, 409 Conflict from a
