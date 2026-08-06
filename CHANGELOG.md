@@ -528,6 +528,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **A test backend counted its own calls without synchronization** ([#179]). `paralleltest` 25 → 0,
+  closing out the lint burn-down.
+
+  `tests.MockPredictiveBackend.GetObject` incremented a plain `int64` while holding only `mu.RLock()`.
+  An `RLock` is held by every concurrent reader at once, so that increment is a race between two
+  readers rather than a protected write — `-race` reports it as a read at `GetObject` against a write
+  at the same line. `PredictiveCache`'s prefetch workers call the backend concurrently with the test's
+  own goroutines, so `TestPredictiveCache_ConcurrentAccess` reaches it; it survived a suite that runs
+  entirely under `-race` because no test reads `GetStats`, which left the increment with no observable
+  effect other than the race itself. Both counters are now `atomic.Int64`.
+
+  Making the `tests` package parallel also required moving `fuse_test.go`'s
+  `defer writeBuffer.Close()` to `t.Cleanup`. A parent test's deferred functions run when the parent
+  function returns, which for a test with parallel subtests is *before* those subtests resume —
+  verified by execution, not inferred: a parallel subtest observes a variable set by the parent's
+  `defer`, while `t.Cleanup` runs after. `vfs.Writer.Close` is only `FlushAll` today, so the `defer`
+  form happened not to break anything, but it left the subtests writing through a closed writer by
+  contract.
+
+  Mutation-checked at the shape the write path exists to prevent: dropping the destination offset in
+  `ExtentList.Splice` — the H7 bug in its original form — fails `TestWriteBufferUnit` on the appended
+  `"sync data"` reading back as nine zero bytes. Two narrower mutations to the same function were
+  identity transforms because adjacent extents coalesce, which is worth recording: a mutation that
+  changes nothing proves nothing about the test.
 - **`pkg/api`'s 18 remaining serial tests now run in parallel** ([#179]). `paralleltest` 43 → 25, with
   every remaining finding in `tests/`.
 

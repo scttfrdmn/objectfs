@@ -8,6 +8,8 @@ import (
 )
 
 func TestMultiLevelCacheWithPredictive(t *testing.T) {
+	t.Parallel()
+
 	config := &cache.MultiLevelConfig{
 		L1Config: &cache.L1Config{
 			Enabled:    true,
@@ -86,6 +88,8 @@ func TestMultiLevelCacheWithPredictive(t *testing.T) {
 }
 
 func TestMultiLevelCache_LevelStats(t *testing.T) {
+	t.Parallel()
+
 	config := &cache.MultiLevelConfig{
 		L1Config: &cache.L1Config{
 			Enabled:    true,

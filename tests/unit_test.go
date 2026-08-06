@@ -18,6 +18,8 @@ import (
 
 // Unit tests for cache system
 func TestLRUCacheUnit(t *testing.T) {
+	t.Parallel()
+
 	cacheConfig := &cache.CacheConfig{
 		MaxSize:    1024 * 1024, // 1MB
 		MaxEntries: 100,
@@ -58,6 +60,8 @@ func TestLRUCacheUnit(t *testing.T) {
 }
 
 func TestMultiLevelCacheUnit(t *testing.T) {
+	t.Parallel()
+
 	config := &cache.MultiLevelConfig{
 		L1Config: &cache.L1Config{
 			Enabled:    true,
@@ -114,6 +118,8 @@ func TestMultiLevelCacheUnit(t *testing.T) {
 // both true while the flush was replacing whole objects with fragments, because the callback never saw
 // the offset the test would have had to check.
 func TestWriteBufferUnit(t *testing.T) {
+	t.Parallel()
+
 	backend := NewMockBackend()
 	ctx := context.Background()
 
@@ -157,6 +163,8 @@ func TestWriteBufferUnit(t *testing.T) {
 
 // Unit tests for metrics system
 func TestMetricsCollectorUnit(t *testing.T) {
+	t.Parallel()
+
 	config := &metrics.Config{
 		Enabled:        true,
 		Addr:           "127.0.0.1:0", // the kernel picks a free port; Collector.Addr reports which
@@ -219,6 +227,8 @@ func TestMetricsCollectorUnit(t *testing.T) {
 
 // Unit tests for configuration system
 func TestConfigUnit(t *testing.T) {
+	t.Parallel()
+
 	// Test default configuration
 	defaultConfig := config.NewDefault()
 	require.NotNil(t, defaultConfig)
@@ -288,6 +298,8 @@ func TestConfigUnit(t *testing.T) {
 
 // Unit tests for utility functions and edge cases
 func TestUtilityFunctions(t *testing.T) {
+	t.Parallel()
+
 	// Test cache key generation and validation
 	testCases := []struct {
 		key    string
@@ -313,6 +325,8 @@ func TestUtilityFunctions(t *testing.T) {
 
 // Test error conditions and edge cases
 func TestErrorConditions(t *testing.T) {
+	t.Parallel()
+
 	// Test cache with zero size
 	config := &cache.CacheConfig{
 		MaxSize:    0,
@@ -357,6 +371,8 @@ func TestErrorConditions(t *testing.T) {
 
 // Concurrent access tests
 func TestConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		t.Skip("Skipping concurrent test in short mode")
 	}

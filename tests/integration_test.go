@@ -555,6 +555,8 @@ func (suite *IntegrationTestSuite) cleanupTestData() {
 
 // Run the integration test suite
 func TestIntegrationSuite(t *testing.T) {
+	t.Parallel()
+
 	suite.Run(t, new(IntegrationTestSuite))
 }
 
