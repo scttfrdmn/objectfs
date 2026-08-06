@@ -529,6 +529,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Eleven unchecked type assertions, one of them on an HTTP request path** ([#179]). `errcheck` 11 → 0.
+  Every finding was a single-value assertion rather than a discarded error, so each one panics where it
+  should fail — and in a test, a panic is a crashed binary that takes the package's other tests with it,
+  reported as a stack trace rather than as this test failing on this field.
+
+  The production one is `pkg/api`'s `/info` handler, which built its endpoint list as
+  `append(info["endpoints"].([]string), "/metrics")` — asserting through a `map[string]any` it had
+  populated fifteen lines earlier. Correct today, and correct only for as long as nobody edits the
+  literal above it. The slice is now built before the map, so there is nothing to assert.
+
+  In `pkg/api`'s tests, four sites read `int(response["count"].(float64))` out of a decoded JSON body;
+  they now go through a `jsonInt` helper that distinguishes a missing field from a wrongly-typed one.
+  Verified by mutating the handler both ways: emitting `count` as a string reports
+  `response["count"] = "2" (string), want a JSON number`, and removing the field reports
+  `response has no "count" field; got fields [history limit timestamp]`.
+
+  `internal/metrics`'s four were the inconsistent minority in their own file — the same assertion
+  appears twice more in `collector_test.go` already using the checked form, so this aligns them.
+  `pkg/recovery`'s discarded two things on one line, `GetConnection`'s error and the concrete type of
+  what it returned, in a test whose actual subject is a field on that concrete type.
+
 - **A cluster node whose status this build does not recognize was counted in the total, counted in
   none of the breakdowns, and never reaped** ([#179]). Found by `exhaustive`, which reported eight
   incomplete switches; six were deliberate subsets and now say so, and two were this defect.

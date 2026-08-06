@@ -329,8 +329,17 @@ func TestConnectionManager_Close(t *testing.T) {
 		t.Fatalf("Expected successful connection, got %v", err)
 	}
 
-	conn, _ := cm.GetConnection()
-	mc := conn.(*mockConnection)
+	// Both results checked, because this test's real subject is mc.closed below: a nil conn or a
+	// different concrete type would panic here instead of failing, and a discarded GetConnection error
+	// would leave that panic with no explanation.
+	conn, err := cm.GetConnection()
+	if err != nil {
+		t.Fatalf("GetConnection after a successful Connect: %v", err)
+	}
+	mc, ok := conn.(*mockConnection)
+	if !ok {
+		t.Fatalf("GetConnection returned %T, want *mockConnection", conn)
+	}
 
 	// Close
 	err = cm.Close()

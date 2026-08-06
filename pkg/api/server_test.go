@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,34 @@ import (
 	"github.com/scttfrdmn/objectfs/pkg/health"
 	"github.com/scttfrdmn/objectfs/pkg/status"
 )
+
+// jsonInt reads an integer field out of a decoded JSON object, failing the test if it is absent or not
+// a number.
+//
+// The four call sites were each `int(response["count"].(float64))`, a single-value type assertion that
+// panics on a response shaped differently than expected — and a panic in a test is a crashed binary that
+// takes every other test in the package with it, reported as a stack trace rather than as this test
+// failing on this field. Both wrong shapes are worth distinguishing and neither is hypothetical: a
+// handler that stops emitting the field gives the missing case, and one that emits a string gives the
+// type case.
+//
+// float64 because that is what encoding/json produces for every JSON number decoded into an `any`;
+// there is no integer case to handle.
+func jsonInt(t *testing.T, obj map[string]any, field string) int {
+	t.Helper()
+
+	raw, ok := obj[field]
+	if !ok {
+		t.Fatalf("response has no %q field; got fields %v", field, slices.Sorted(maps.Keys(obj)))
+	}
+
+	f, ok := raw.(float64)
+	if !ok {
+		t.Fatalf("response[%q] = %#v (%T), want a JSON number", field, raw, raw)
+	}
+
+	return int(f)
+}
 
 func TestNewServer(t *testing.T) {
 	config := DefaultServerConfig()
@@ -283,7 +313,7 @@ func TestHandleOperations(t *testing.T) {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 
-	count := int(response["count"].(float64))
+	count := jsonInt(t, response, "count")
 	if count != 2 {
 		t.Errorf("Expected 2 operations, got %d", count)
 	}
@@ -371,12 +401,12 @@ func TestHandleHistory(t *testing.T) {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 
-	count := int(response["count"].(float64))
+	count := jsonInt(t, response, "count")
 	if count != 2 {
 		t.Errorf("Expected 2 history entries, got %d", count)
 	}
 
-	limit := int(response["limit"].(float64))
+	limit := jsonInt(t, response, "limit")
 	if limit != 2 {
 		t.Errorf("Expected limit=2, got %d", limit)
 	}
@@ -783,7 +813,7 @@ func TestHandleMounts_List(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if count := int(response["count"].(float64)); count != 1 {
+	if count := jsonInt(t, response, "count"); count != 1 {
 		t.Errorf("Expected count=1, got %d", count)
 	}
 }

@@ -372,27 +372,33 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		version = "unknown"
 	}
 
+	// Built before the map rather than appended through it. This was
+	// `append(info["endpoints"].([]string), "/metrics")` — an unchecked type assertion through a
+	// map[string]any, which panics rather than erroring if the value's type ever stops matching, and
+	// this handler runs on an HTTP request. It is correct today only because the literal is fifteen
+	// lines above it, which is exactly the kind of correctness that does not survive an edit.
+	endpoints := []string{
+		"/health",
+		"/health/components",
+		"/health/live",
+		"/health/ready",
+		"/status",
+		"/status/operations",
+		"/status/operations/{id}",
+		"/status/history",
+		"/api/v1/mounts",
+		"/api/v1/mounts/{point}",
+		"/info",
+	}
+	if s.config.EnableMetrics {
+		endpoints = append(endpoints, "/metrics")
+	}
+
 	info := map[string]any{
 		"service":   "ObjectFS API",
 		"version":   version,
 		"timestamp": time.Now(),
-		"endpoints": []string{
-			"/health",
-			"/health/components",
-			"/health/live",
-			"/health/ready",
-			"/status",
-			"/status/operations",
-			"/status/operations/{id}",
-			"/status/history",
-			"/api/v1/mounts",
-			"/api/v1/mounts/{point}",
-			"/info",
-		},
-	}
-
-	if s.config.EnableMetrics {
-		info["endpoints"] = append(info["endpoints"].([]string), "/metrics")
+		"endpoints": endpoints,
 	}
 
 	s.respondJSON(w, http.StatusOK, info)
