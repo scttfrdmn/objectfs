@@ -529,6 +529,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cluster node whose status this build does not recognize was counted in the total, counted in
+  none of the breakdowns, and never reaped** ([#179]). Found by `exhaustive`, which reported eight
+  incomplete switches; six were deliberate subsets and now say so, and two were this defect.
+
+  `NodeStatus` is a string, and `UpdateNodeInfo` assigns it straight from a `json.Unmarshal` of a gossip
+  message — so the value does not have to be one of the five declared constants. A peer running a
+  different version, or anything that can reach the gossip port, can put an arbitrary string there.
+  Measured on a two-node manager with one peer at status `"from-the-wire"`: `calculateClusterStats`
+  reported `total=2 alive=1 suspect=0 dead=0`, losing the second node from a breakdown that is supposed
+  to partition the total, and `performHealthChecks` left it at that status across every pass no matter
+  how stale — an hour, or forever — because the switch simply fell through.
+
+  Reaping is the half that reaches beyond the tally: quorum in `consensus.go` tests
+  `== NodeStatusAlive` in three places, so a node stuck at an unrecognized status can neither vote nor
+  be counted while remaining in the membership map, and nothing ever removes it. Both switches now have
+  a `default` that treats the node as suspect — it has been heard from, so what is unknown is its state
+  rather than its existence, and the existing suspect arm reaps it on the next pass. Its `CacheSize` and
+  `CacheHitRate` are deliberately still excluded from the cluster aggregates, for the reason a dead
+  node's are: an unknown state is not capacity this cluster can serve from.
+
+  `NodeStatusJoining` and `NodeStatusLeaving` arrive at the same arm, and are worth naming because they
+  are declared in `cluster.go` and **assigned nowhere in the repository** — so what looked like two
+  missing switch cases was two dead enum values plus one real wire-data gap. `EntryTypeSnapshot` in
+  `consensus.go` is the same: declared, appended by nothing, and #151 — which would have added
+  snapshotting — was closed for that reason.
+
+  Covered by `TestUnrecognizedNodeStatus_IsCountedAndReaped`, verified against each arm separately:
+  removing the stats `default` fails the partition assertion, removing the health-check `default` fails
+  the reap assertion, and neither mutation fails the other's.
+
 - **Eighteen error assertions that would have panicked instead of failing, and fifteen float
   comparisons the linter's own suggestion would have weakened** ([#179]). `testifylint` 33 → 0.
 

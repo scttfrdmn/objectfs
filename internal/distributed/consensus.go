@@ -847,6 +847,20 @@ func (ce *ConsensusEngine) applyLogEntry(entry *LogEntry) {
 		// Apply configuration change
 	case EntryTypeOperation:
 		// Apply operation
+
+	// Every arm of this switch is empty, which is the honest state of it: this engine replicates and
+	// commits log entries and then applies none of them. Nothing appends an EntryTypeOperation, and
+	// executeLocally in coordinator.go goes to the backend directly without consulting the log or
+	// leadership, so there is no state machine for an apply to advance. The arms are kept because the
+	// log entries they name are real and do get committed.
+	//
+	// EntryTypeNoop is appended once, at index 0, by newConsensusEngine — a Raft no-op to anchor the
+	// log — and applying it is correctly a no-op. EntryTypeSnapshot is declared in this file and
+	// appended nowhere: there is no snapshotting in this engine, so an entry of that type cannot exist
+	// to be applied — #151, which would have added it, was closed for exactly that reason. On the
+	// direction here: #169 decided coordination moves to S3 conditional writes rather than this Raft
+	// implementation, with #284 the live follow-up. So these arms are not a to-do list.
+	case EntryTypeNoop, EntryTypeSnapshot:
 	}
 }
 

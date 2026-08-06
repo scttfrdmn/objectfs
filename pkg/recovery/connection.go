@@ -472,6 +472,14 @@ func (cm *ConnectionManager) Wait(ctx context.Context) error {
 			case StateFailed:
 				return errors.NewError(errors.ErrCodeConnectionFailed, "connection failed permanently").
 					WithComponent(cm.name)
+
+			// The other three states are what this function exists to wait through, so falling to the
+			// next tick is the whole behavior and not an omission. Disconnected and Reconnecting are
+			// transient by construction — the manager's retry loop drives them toward Connected or
+			// Failed — and Connecting is the first attempt in progress. The caller's context deadline
+			// is what bounds the wait; an arm here that returned an error on any of them would turn
+			// "not yet" into "never".
+			case StateDisconnected, StateConnecting, StateReconnecting:
 			}
 		}
 	}

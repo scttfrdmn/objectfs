@@ -196,6 +196,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	case health.StateDegraded, health.StateReadOnly:
 		statusCode = http.StatusPartialContent
+
+	// Healthy is the initialized value above, named here so the mapping is complete in one place: a
+	// reader checking what this endpoint returns for a healthy service should not have to notice that
+	// the answer is the variable's initializer rather than an arm of this switch.
+	case health.StateHealthy:
+		statusCode = http.StatusOK
 	}
 
 	s.respondJSON(w, statusCode, response)
