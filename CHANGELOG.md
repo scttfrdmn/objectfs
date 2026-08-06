@@ -528,6 +528,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **A shutting-down node kept running the S3 operations its peers had asked for** ([#179]).
+  `contextcheck` 2 → 0, and this is the last of the nine that opened the batch.
+
+  `Coordinator.executeLocally` applied `op.Timeout` to `context.Background()`, so neither of its callers
+  could stop an operation once it reached S3. `executeOnNode` had the caller's context and dropped it.
+  The other caller, `handleNetworkOperation`, is reached from the gossip receive loop, whose context is
+  the cluster's own lifetime — so a node being shut down carried on issuing the GETs, PUTs and DELETEs
+  peers had requested, bounded only by a 30-second default, writing each result into a gossip socket
+  that was closing. The context now runs from `GossipProtocol.Start` through the receive loop,
+  `handleIncomingMessage`, and `handleNetworkOperation` to the backend call.
+
+  Verified as two separate mutations, because either frame alone passing the test would be misleading:
+  reverting `executeLocally` to `context.Background()` reports *"the backend received a live context
+  from a canceled caller"*, and making `handleNetworkOperation` drop the context it was just given
+  reports *"a peer-requested operation ran under a live context after the cluster's context was
+  canceled, so gossip's receive-loop context is not reaching the S3 call"*. A context threaded through
+  three frames and dropped in the fourth is exactly the shape of the defect, so one assertion per frame.
 - **The Redis invalidation subscriber's deletes now honour the subscription's context** ([#179]).
   `contextcheck` 3 → 2.
 

@@ -491,7 +491,7 @@ func (c *Coordinator) executeOnNode(ctx context.Context, nodeID string, op *Dist
 	// Local execution path.
 	if nodeID == c.cluster.GetNodeID() ||
 		c.cluster.gossip == nil || c.cluster.gossip.conn == nil {
-		return c.executeLocally(nodeID, op)
+		return c.executeLocally(ctx, nodeID, op)
 	}
 
 	// Remote execution path — send the operation over UDP and wait for a reply.
@@ -563,7 +563,14 @@ func (c *Coordinator) executeOnNode(ctx context.Context, nodeID string, op *Dist
 // executeLocally runs the operation in-process using the configured S3 backend.
 // When no backend is configured it returns an error result so callers can detect
 // the misconfiguration rather than silently returning placeholder data.
-func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *NodeResult {
+//
+// parent is what op.Timeout is applied to. It used to be context.Background(), which meant neither
+// caller could stop an operation once it reached S3: [Coordinator.executeOnNode] had the caller's
+// context and dropped it, and [Coordinator.handleNetworkOperation] is reached from the gossip receive
+// loop, whose context is the cluster's lifetime. Either way a 30-second default timeout was the only
+// bound, so a shutting-down node kept issuing GETs and PUTs a peer had asked for against a backend
+// being closed underneath it.
+func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *DistributedOperation) *NodeResult {
 	start := time.Now()
 	result := &NodeResult{NodeID: nodeID}
 
@@ -577,7 +584,7 @@ func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *N
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	switch op.Type {
@@ -618,14 +625,19 @@ func (c *Coordinator) executeLocally(nodeID string, op *DistributedOperation) *N
 }
 
 // handleNetworkOperation processes an incoming NodeOperationMessage from a peer.
-func (c *Coordinator) handleNetworkOperation(msg *GossipMessage) {
+//
+// ctx is the gossip receive loop's, which is the cluster's lifetime: it descends from the context passed
+// to [GossipProtocol.Start] and is canceled when the cluster shuts down. It reaches the S3 call
+// [Coordinator.executeLocally] makes, so an operation a peer asked for is abandoned when this node is
+// going away instead of running its full 30-second timeout against a backend being closed underneath it.
+func (c *Coordinator) handleNetworkOperation(ctx context.Context, msg *GossipMessage) {
 	var nm NodeOperationMessage
 	if err := json.Unmarshal(msg.Data, &nm); err != nil {
 		slog.Warn("failed to unmarshal NodeOperationMessage", "error", err)
 		return
 	}
 
-	result := c.executeLocally(c.cluster.GetNodeID(), nm.Operation)
+	result := c.executeLocally(ctx, c.cluster.GetNodeID(), nm.Operation)
 
 	resp := &NodeOperationRespMessage{
 		RequestID: nm.RequestID,

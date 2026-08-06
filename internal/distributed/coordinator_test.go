@@ -2,6 +2,7 @@ package distributed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -761,7 +762,7 @@ func TestSelectTargetNodes_ExcludesDeadNodes(t *testing.T) {
 func TestCoordinator_ExecuteLocally_NilBackend(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithNode(t, "nil-be-node") // no SetBackend call
-	result := cm.coordinator.executeLocally("nil-be-node", &DistributedOperation{
+	result := cm.coordinator.executeLocally(t.Context(), "nil-be-node", &DistributedOperation{
 		Type: OpTypeGet,
 		Key:  "k",
 	})
@@ -778,7 +779,7 @@ func TestCoordinator_ExecuteLocally_NilBackend(t *testing.T) {
 func TestCoordinator_ExecuteLocally_Get(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithBackend(t, "loc-get-node")
-	result := cm.coordinator.executeLocally("loc-get-node", &DistributedOperation{
+	result := cm.coordinator.executeLocally(t.Context(), "loc-get-node", &DistributedOperation{
 		Type: OpTypeGet,
 		Key:  "mykey",
 	})
@@ -795,7 +796,7 @@ func TestCoordinator_ExecuteLocally_Get(t *testing.T) {
 func TestCoordinator_ExecuteLocally_Put(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithBackend(t, "loc-put-node")
-	result := cm.coordinator.executeLocally("loc-put-node", &DistributedOperation{
+	result := cm.coordinator.executeLocally(t.Context(), "loc-put-node", &DistributedOperation{
 		Type: OpTypePut,
 		Key:  "mykey",
 		Data: []byte("value"),
@@ -810,7 +811,7 @@ func TestCoordinator_ExecuteLocally_Put(t *testing.T) {
 func TestCoordinator_ExecuteLocally_Delete(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithBackend(t, "loc-del-node")
-	result := cm.coordinator.executeLocally("loc-del-node", &DistributedOperation{
+	result := cm.coordinator.executeLocally(t.Context(), "loc-del-node", &DistributedOperation{
 		Type: OpTypeDelete,
 		Key:  "mykey",
 	})
@@ -825,7 +826,7 @@ func TestCoordinator_ExecuteLocally_BackendError(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithNode(t, "loc-err-node")
 	cm.SetBackend(&errBackend{err: errors.New("s3: connection refused")})
-	result := cm.coordinator.executeLocally("loc-err-node", &DistributedOperation{
+	result := cm.coordinator.executeLocally(t.Context(), "loc-err-node", &DistributedOperation{
 		Type: OpTypeGet,
 		Key:  "mykey",
 	})
@@ -834,6 +835,135 @@ func TestCoordinator_ExecuteLocally_BackendError(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "s3: connection refused") {
 		t.Errorf("error %q should contain backend error", result.Error)
+	}
+}
+
+// ctxReportingBackend records whether the context each call receives was already canceled, and how many
+// calls arrived. Embedding mockBackend supplies the other nine types.Backend methods.
+type ctxReportingBackend struct {
+	mockBackend
+
+	mu        sync.Mutex
+	calls     int
+	sawCancel bool
+}
+
+func (b *ctxReportingBackend) GetObject(ctx context.Context, _ string, _, _ int64) ([]byte, error) {
+	b.mu.Lock()
+	b.calls++
+	if ctx.Err() != nil {
+		b.sawCancel = true
+	}
+	b.mu.Unlock()
+
+	// The real backend would fail on a canceled context; do the same rather than succeed regardless,
+	// so the result this produces is the one production would produce.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return []byte("mock-data"), nil
+}
+
+func (b *ctxReportingBackend) snapshot() (calls int, sawCancel bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.calls, b.sawCancel
+}
+
+// TestCoordinator_ExecuteLocally_DerivesItsTimeoutFromTheCaller is the assertion behind the two
+// contextcheck findings on this path.
+//
+// executeLocally applied op.Timeout to context.Background(), so neither of its callers could stop an
+// operation once it reached S3. executeOnNode had the caller's context and dropped it; the other caller,
+// handleNetworkOperation, is reached from the gossip receive loop, whose context is the cluster's
+// lifetime. Either way a 30-second default was the only bound, so a shutting-down node kept issuing the
+// GETs and PUTs a peer had asked for against a backend being closed underneath it.
+//
+// Asserting the backend observes the cancellation, rather than that the result merely failed, is what
+// makes this fail against context.Background(): under the old code the operation succeeds, because a
+// canceled parent it never consulted cannot affect it.
+func TestCoordinator_ExecuteLocally_DerivesItsTimeoutFromTheCaller(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "ctx-node")
+	be := &ctxReportingBackend{}
+	cm.SetBackend(be)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result := cm.coordinator.executeLocally(ctx, "ctx-node", &DistributedOperation{
+		Type: OpTypeGet,
+		Key:  "mykey",
+	})
+
+	calls, sawCancel := be.snapshot()
+	if calls != 1 {
+		t.Fatalf("backend received %d GetObject calls, want 1; this is not measuring what it thinks "+
+			"it is", calls)
+	}
+
+	if !sawCancel {
+		t.Error("the backend received a live context from a canceled caller, so op.Timeout is still " +
+			"being applied to context.Background() and no caller can stop an operation in flight")
+	}
+
+	if result.Success {
+		t.Error("executeLocally reported success for an operation whose context was already canceled")
+	}
+}
+
+// TestCoordinator_HandleNetworkOperation_PassesItsContextToTheBackend covers the other half of the
+// chain: that the context reaching executeLocally is the gossip receive loop's and not one manufactured
+// in between.
+//
+// Verifying the two separately is the point. executeLocally respecting a canceled parent is worth
+// nothing if its caller hands it context.Background(), and the caller passing one along is worth nothing
+// if the callee ignores it — the pre-fix code would have satisfied a test that only checked one of them,
+// which is how a context comes to be threaded through three frames and dropped in the fourth.
+//
+// This is not a test that a peer's operation *should* be abandoned on shutdown. It should: the response
+// goes back over a gossip socket that is closing, so the work is unobservable by the node that asked for
+// it, and finishing a 30-second S3 call to write into a socket nobody will read is strictly worse than
+// stopping.
+func TestCoordinator_HandleNetworkOperation_PassesItsContextToTheBackend(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "net-ctx-node")
+	be := &ctxReportingBackend{}
+	cm.SetBackend(be)
+
+	payload, err := json.Marshal(&NodeOperationMessage{
+		RequestID: "req-1",
+		From:      "peer-node",
+		Operation: &DistributedOperation{Type: OpTypeGet, Key: "mykey"},
+	})
+	if err != nil {
+		t.Fatalf("marshal NodeOperationMessage: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// The response send fails — "peer-node" is not a known node — which is fine and is not what this
+	// asserts. What matters is the context the operation itself ran under, before any reply.
+	cm.coordinator.handleNetworkOperation(ctx, &GossipMessage{
+		Type: MessageTypeNodeOperation,
+		From: "peer-node",
+		Data: payload,
+	})
+
+	calls, sawCancel := be.snapshot()
+	if calls != 1 {
+		t.Fatalf("backend received %d GetObject calls, want 1; the operation never reached the backend, "+
+			"so this asserts nothing about its context", calls)
+	}
+
+	if !sawCancel {
+		t.Error("a peer-requested operation ran under a live context after the cluster's context was " +
+			"canceled, so gossip's receive-loop context is not reaching the S3 call")
 	}
 }
 
