@@ -73,6 +73,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path, delegating the 404, reclassifying a precondition failure as a service failure or as retryable,
   removing the capability gate, and making the probe fail open each break a named test.
 
+- **278 of the `paralleltest`/`tparallel` backlog cleared: the lint total is 570 → 299** ([#179]).
+  `t.Parallel()` on every test and subtest in seventeen files across `pkg/errors`, `pkg/status`,
+  `pkg/health`, `pkg/recovery`, `pkg/retry`, `pkg/api`, `pkg/utils`, `pkg/types`, `internal/cache` and
+  `internal/metrics`. CLAUDE.md already required this; the finding count was the gap between the
+  requirement and the tree. Each package was run under `-race -count=2` after the change and its
+  coverage checked against its floor, because parallelizing a test that shares state is a way to make
+  it pass less often rather than a way to make it faster.
+
+  **Two packages resisted, and both are the point of doing this rather than suppressing it.**
+  `pkg/health`'s `TestTracker_CanRead` had a genuine order dependency, described under Fixed below.
+  `pkg/utils/debug_mode_test.go`'s 19 findings cannot be fixed by a `t.Parallel()` at all —
+  `DebugManager` is a `sync.Once` singleton with no exported constructor, and `RecordEvent` fans every
+  event out to *all* open sessions, so a session's event count depends on what every concurrently-open
+  session recorded. Measured: `Expected 1 event, got 17`, and five other counts inflated by siblings'
+  traffic, with no data race — the locking is correct and the broadcast is doing what it is written to
+  do. Excluded in `.golangci.yml` with that reasoning recorded and filed as [#373], rather than
+  silenced with a `t.Parallel()` that would leave the tests sequential in effect and the lint green.
+
 - **`pkg/archive` has tests of its own and a 100% floor** ([#360]). The package had none: its
   coverage was reported entirely through `internal/archive`, at 48.6%, which is a number about a
   consumer rather than about this package. `metadata_test.go` takes it to 100.0% and the floor is set
@@ -720,9 +738,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller can be recording into it while that line formats. `StartTrace` read `session.enabled` with no
   lock at all, racing any concurrent `StopSession`. Both now read under the lock that writes them.
 
-  #373's fix plan also called for deleting a `.golangci.yml` exclusion for `debug_mode_test.go`. There is
-  no such exclusion — `grep debug_mode .golangci.yml` finds nothing — so the 56 findings were never
-  suppressed and there was nothing to remove.
+  #373's fix plan also called for deleting a `.golangci.yml` exclusion for `debug_mode_test.go`, and
+  whether there was one to delete depended on merge order. [#374] added the exclusion, recording #373 as
+  the fix that would make it removable; this change is that fix, so the exclusion was deleted when #374
+  reached this branch. Had the two landed the other way round, #374 would have reintroduced a
+  suppression for tests that no longer need it — a `paralleltest` exclusion over a file with 19
+  `t.Parallel()` calls, silently suppressing nothing. Verified after the merge: `make lint` reports 0
+  issues with the exclusion gone.
 - **A health test only passed because its four cases shared one tracker and ran in order** ([#179]).
   `paralleltest` 325 → 263 across seven packages, and one of those 62 turned out to be covering a real
   gap rather than an annotation.
@@ -1109,6 +1131,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shadow was not concealing a dropped failure: there is no `err` anywhere in that function's scope, so
   nothing was hidden by it.
 
+- **`TestTracker_CanRead` was passing on the order its subtests happened to run in** — found by
+  parallelizing it, and the more useful half of that change ([#179]).
+
+  The test wrote a component's `State` directly and asserted what `CanRead`/`CanWrite` answered. But
+  `State` alone does not decide that: `admissionState` admits one probe against a refusing component
+  once `nextProbe` has elapsed, and reports `StateDegraded` to get that probe past the gate. So
+  `State=StateUnavailable` with a **zero-value `nextProbe`**, which is always in the past, reads as
+  *readable* — a combination the tracker never produces, since `RecordError` sets both fields and the
+  test set one.
+
+  One tracker shared across the table concealed it. The first subtest to reach a refusing state took
+  the probe path, which pushed `nextProbe` `ProbeAfter` into the future, and every later subtest then
+  read raw state and agreed with the table. Giving each subtest its own tracker — the isolation
+  `t.Parallel()` requires — removed the accident and the unavailable case failed immediately with
+  `CanRead() = true, want false`. Fixed by setting `nextProbe` alongside `State`, in the shape
+  `RecordError` leaves it; verified by deleting that line and watching the case fail.
+
+  No production defect here: the tracker's own code path sets both fields together. What was broken is
+  a test that could not have caught it if they came apart.
+
 - **Error classification for Transfer Acceleration no longer disables the accelerated endpoint on
   unrelated failures** ([#187]).
 
@@ -1478,11 +1520,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
   ([#353]).
 
+[#179]: https://github.com/scttfrdmn/objectfs/issues/179
 [#187]: https://github.com/scttfrdmn/objectfs/issues/187
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#199]: https://github.com/scttfrdmn/objectfs/issues/199
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
 [#235]: https://github.com/scttfrdmn/objectfs/issues/235
+[#373]: https://github.com/scttfrdmn/objectfs/issues/373
+[#374]: https://github.com/scttfrdmn/objectfs/pull/374
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
 [#360]: https://github.com/scttfrdmn/objectfs/issues/360
 [#361]: https://github.com/scttfrdmn/objectfs/issues/361
