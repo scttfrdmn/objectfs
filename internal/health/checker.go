@@ -107,7 +107,13 @@ type Stats struct {
 	LastFailure   time.Time     `json:"last_failure"`
 }
 
-// Enums for health check categorization
+// Category labels which subsystem a health check covers, for grouping in reports.
+//
+// It is a label and not a switch: nothing in this package branches on a Category. It is assigned by
+// [Monitor.mapComponentTypeToCategory] from a component-type string, stored on the check, and
+// serialized — so adding a category needs no dispatch updated, and a check filed under the wrong one
+// still runs identically. [Priority] and [Status] below are the same kind of string enum; Status is
+// the one that carries meaning, being what [Checker] aggregates into an overall verdict.
 type Category string
 
 const (
@@ -127,6 +133,33 @@ const (
 	PriorityMedium   Priority = "medium"
 	PriorityLow      Priority = "low"
 )
+
+// severityRank orders the priorities, most severe highest. Unknown values rank below Low.
+//
+// A map and not the constants' own ordering, because these are strings and `>=` on them compares
+// bytes: "critical" < "high" < "low" < "medium" is the order the language sees, which is neither the
+// declaration order nor the severity order and gets Critical and High exactly backwards.
+var severityRank = map[Priority]int{
+	PriorityCritical: 4,
+	PriorityHigh:     3,
+	PriorityMedium:   2,
+	PriorityLow:      1,
+}
+
+// AtLeast reports whether p is at least as severe as other.
+//
+// This exists because `severity >= PriorityHigh` was written once, in EnhancedMonitor's auto-remediation
+// gate, and Priority is a string: that expression asked whether the byte sequence sorted at or after
+// "high", so it was true for "high", "low" and "medium" and false for "critical" — the two Critical
+// issues detectProblems raises, a critical error rate and a critical failure streak, were the only ones
+// auto-remediation refused to act on, while a merely elevated latency got it. Verified by execution.
+//
+// [Status] is the other string enum here and is never ordered — Checker.updateStats switches on it.
+// [Category] is a label. Priority is the only one of the three with a severity order, so it is the only
+// one that needs this.
+func (p Priority) AtLeast(other Priority) bool {
+	return severityRank[p] >= severityRank[other]
+}
 
 type Status string
 
@@ -208,8 +241,17 @@ func (c *Checker) Start(ctx context.Context) error {
 	c.started = true
 	c.lastUpdate = time.Now()
 
-	// Start background check loop
-	go c.checkLoop()
+	// Start the background check loop, on the caller's context values but not its cancellation.
+	//
+	// It used to build each round's context from context.Background(), which discarded ctx entirely:
+	// anything the caller attached — a trace ID, a deadline-bearing parent, a test's t.Context — was
+	// invisible to every check function this loop ever ran, even though Start was handed it. Deriving
+	// from ctx directly is the other wrong answer, because Stop is what ends this loop and a
+	// request-scoped caller would otherwise silently take health checking down with it.
+	//
+	// context.WithoutCancel is the same reasoning serveHealth below applies to the HTTP listener, for
+	// the same lifetime mismatch. The per-round timeout is still derived in checkLoop.
+	go c.checkLoop(context.WithoutCancel(ctx))
 
 	// Start the HTTP endpoint if enabled.
 	//
@@ -417,7 +459,12 @@ func (c *Checker) executeCheck(ctx context.Context, check *Check) (*Result, erro
 	return result, nil
 }
 
-func (c *Checker) checkLoop() {
+// checkLoop runs every registered check on a ticker until Stop closes stopCh.
+//
+// parent carries the values Start was called with and none of its cancellation — see Start for why the
+// two are separated. Each round gets its own timeout derived from it, so a check function that hangs
+// bounds one round rather than the loop.
+func (c *Checker) checkLoop(parent context.Context) {
 	interval := c.config.CheckInterval
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -431,7 +478,7 @@ func (c *Checker) checkLoop() {
 		case <-c.stopCh:
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout*2)
+			ctx, cancel := context.WithTimeout(parent, c.config.Timeout*2)
 			_, _ = c.RunAllChecks(ctx) // Ignore periodic check errors
 			cancel()
 		}

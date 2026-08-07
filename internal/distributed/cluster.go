@@ -556,6 +556,26 @@ func (cm *ClusterManager) performHealthChecks(ctx context.Context) {
 					}()
 				}
 			}
+
+		// Anything else is unreapable without this arm, and NodeStatus is a string that arrives over
+		// the wire: UpdateNodeInfo assigns info.Status straight from a json.Unmarshal of a gossip
+		// message, so a peer running a different version — or anything at all speaking to this port —
+		// can put a value here that no arm above names. Probed on a three-node manager: a peer at
+		// Status "from-the-wire", last seen an hour ago, kept that status across performHealthChecks
+		// forever, because the switch simply fell through. It also counted in TotalNodes while
+		// appearing in none of alive/suspect/dead — the tally read total=3 alive=1 suspect=0 dead=0.
+		//
+		// Suspect rather than dead: this node has been heard from, so what is unknown is its state and
+		// not its existence, and the suspect arm above will reap it on the next pass if it stays quiet.
+		// NodeStatusJoining and NodeStatusLeaving reach here too. They are declared in this file and
+		// assigned nowhere in the repository, so today this arm is what would handle them if anything
+		// ever did.
+		default:
+			if timeSinceLastSeen > deadlineTimeout {
+				slog.Warn("node has an unrecognized status and is being treated as suspect",
+					"node_id", nodeID, "status", node.Status, "last_seen_ago", timeSinceLastSeen)
+				node.Status = NodeStatusSuspect
+			}
 		}
 	}
 }
@@ -612,6 +632,19 @@ func (cm *ClusterManager) calculateClusterStats() {
 			suspectNodes++
 		case NodeStatusDead:
 			deadNodes++
+
+		// Counted somewhere rather than nowhere. Without this arm a node whose status no arm names is
+		// included in TotalNodes and in none of the three breakdowns, so the numbers a reader would
+		// naturally expect to add up do not: a probe of three nodes, one of them at a status arriving
+		// from a gossip message, reported total=3 alive=1 suspect=0 dead=0 and lost the third silently.
+		//
+		// Suspect is where it belongs for the same reason performHealthChecks now puts it there, and
+		// consistency between the two matters more than the individual choice — the health check reaps
+		// on the suspect timer, so a node counted suspect here is a node that is actually on the path
+		// this count implies. Its CacheSize and CacheHitRate are deliberately not summed: those
+		// aggregates describe capacity this cluster can use, and a node in an unknown state is not it.
+		default:
+			suspectNodes++
 		}
 	}
 	cm.mu.RUnlock()
@@ -671,7 +704,20 @@ func (cm *ClusterManager) refreshLocalStats(dst *NodeInfo) {
 	cm.stats.mu.RUnlock()
 }
 
-// Helper method to update node information
+// UpdateNodeInfo merges a node's reported state into the membership map, inserting it if unknown.
+//
+// The merge is selective, and which fields it leaves alone is the part worth knowing: an existing
+// entry keeps its ID, Address and Version, taking only LastSeen, Status, the four resource fields,
+// the two cache fields and Operations from info. So this cannot rename or re-address a node that is
+// already a member — a gossip message claiming a new address for a known ID updates its liveness and
+// nothing else. Metadata is merged key-by-key rather than replaced, so a key absent from info
+// survives.
+//
+// On insert, info is copied by value and its Metadata map is cloned rather than aliased, which
+// matters because of what the callers do with the same pointer: every non-test call site is in
+// gossip.go, and handleJoinMessage stores that identical *NodeInfo as gp.memberlist[nodeID].Info
+// before passing it here. Aliasing the map would leave the gossip memberlist and the cluster
+// membership map sharing one map under two different locks.
 func (cm *ClusterManager) UpdateNodeInfo(nodeID string, info *NodeInfo) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()

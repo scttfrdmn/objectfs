@@ -722,6 +722,70 @@ func TestCalculateClusterStats_TalliesUnderTheLock(t *testing.T) {
 	}
 }
 
+// TestUnrecognizedNodeStatus_IsCountedAndReaped covers a status that no switch arm in this file names.
+//
+// NodeStatus is a string, and UpdateNodeInfo assigns info.Status directly from a json.Unmarshal of a
+// gossip message — so the value here does not have to be one of the five constants. A peer running a
+// different version, or anything at all that can reach the gossip port, can put an arbitrary string in
+// this field. NodeStatusJoining and NodeStatusLeaving arrive at the same place: both are declared in
+// cluster.go and assigned nowhere in the repository, so they are unrecognized in practice too.
+//
+// Two things went wrong before the default arms, and this asserts both because they are independent:
+// calculateClusterStats counted such a node in TotalNodes and in none of alive/suspect/dead, so the
+// breakdown did not add up to the total; and performHealthChecks never reaped it, at any staleness,
+// because the switch fell through. Measured on the defect: total=2 alive=1 suspect=0 dead=0, and a node
+// last seen an hour ago still reporting its original status afterwards.
+//
+// Reaping matters beyond the tally. Quorum in consensus.go tests `== NodeStatusAlive` in three places,
+// so a node stuck at an unrecognized status is permanently invisible to elections while remaining in
+// the membership map — it can neither vote nor be counted, and nothing ever removes it.
+func TestUnrecognizedNodeStatus_IsCountedAndReaped(t *testing.T) {
+	t.Parallel()
+	cm := makeClusterWithNode(t, "unknown-status-host")
+
+	// Deliberately not one of the five constants: this is what arrives over the wire from a peer this
+	// build does not know about.
+	const fromTheWire = NodeStatus("from-the-wire")
+
+	cm.mu.Lock()
+	cm.nodes["martian"] = &NodeInfo{
+		ID:        "martian",
+		Status:    fromTheWire,
+		LastSeen:  time.Now().Add(-time.Hour),
+		CacheSize: 222,
+		Metadata:  map[string]string{},
+	}
+	cm.mu.Unlock()
+
+	cm.calculateClusterStats()
+
+	stats := cm.GetStats()
+	if got, want := stats.AliveNodes+stats.SuspectNodes+stats.DeadNodes, stats.TotalNodes; got != want {
+		t.Errorf("alive+suspect+dead = %d, want TotalNodes = %d: a node was counted in the total and in "+
+			"none of the breakdowns (alive=%d suspect=%d dead=%d)",
+			got, want, stats.AliveNodes, stats.SuspectNodes, stats.DeadNodes)
+	}
+
+	// Its cache is deliberately excluded, for the reason a dead node's is: an unknown state is not
+	// capacity this cluster can serve from. The self node reports zero, so the total is zero.
+	if stats.TotalCacheSize != 0 {
+		t.Errorf("TotalCacheSize = %d, want 0 (an unrecognized node's 222 must not be summed)",
+			stats.TotalCacheSize)
+	}
+
+	cm.performHealthChecks(t.Context())
+
+	cm.mu.Lock()
+	got := cm.nodes["martian"].Status
+	cm.mu.Unlock()
+
+	if got != NodeStatusSuspect {
+		t.Errorf("status after a health check on a node last seen an hour ago = %q, want %q: an "+
+			"unrecognized status must be reapable, or the node stays in the membership map forever",
+			got, NodeStatusSuspect)
+	}
+}
+
 // ── Operation success accounting (#269) ───────────────────────────────────────
 //
 // These assert on the pair (err, result.Success) rather than on either alone. The defect they pin

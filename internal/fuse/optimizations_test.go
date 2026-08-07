@@ -13,7 +13,9 @@ import (
 // newTestRAM builds a ReadAheadManager with ConcurrentReads=0 so the prefetch
 // workers are never started.  The fs pointer is nil; no code path in
 // pattern-detection dereferences it.
-func newTestRAM(minSeq int, ttl time.Duration) *ReadAheadManager {
+func newTestRAM(t *testing.T, minSeq int, ttl time.Duration) *ReadAheadManager {
+	t.Helper()
+
 	cfg := &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 * 1024,
@@ -21,7 +23,7 @@ func newTestRAM(minSeq int, ttl time.Duration) *ReadAheadManager {
 		ConcurrentReads: 0, // no prefetch workers → nil fs is safe
 		TTL:             ttl,
 	}
-	return NewReadAheadManager(nil, cfg)
+	return NewReadAheadManager(t.Context(), nil, cfg)
 }
 
 func TestReadAheadManager_DefaultConfig(t *testing.T) {
@@ -36,7 +38,7 @@ func TestReadAheadManager_DefaultConfig(t *testing.T) {
 		ConcurrentReads: 0,
 		TTL:             5 * time.Minute,
 	}
-	ram := NewReadAheadManager(nil, cfg)
+	ram := NewReadAheadManager(t.Context(), nil, cfg)
 	defer ram.Stop()
 
 	if !ram.config.Enabled {
@@ -53,7 +55,7 @@ func TestReadAheadManager_DefaultConfig(t *testing.T) {
 func TestReadAheadManager_FirstRead_CreatesPattern(t *testing.T) {
 	t.Parallel()
 
-	ram := newTestRAM(3, 5*time.Minute)
+	ram := newTestRAM(t, 3, 5*time.Minute)
 	defer ram.Stop()
 
 	ram.OnRead("data.bin", 0, 1024)
@@ -79,7 +81,7 @@ func TestReadAheadManager_FirstRead_CreatesPattern(t *testing.T) {
 func TestReadAheadManager_SequentialIncrementsHits(t *testing.T) {
 	t.Parallel()
 
-	ram := newTestRAM(3, 5*time.Minute)
+	ram := newTestRAM(t, 3, 5*time.Minute)
 	defer ram.Stop()
 
 	// 4 sequential reads: offsets 0, 1024, 2048, 3072
@@ -101,7 +103,7 @@ func TestReadAheadManager_SequentialIncrementsHits(t *testing.T) {
 func TestReadAheadManager_NonSequential_ResetsPattern(t *testing.T) {
 	t.Parallel()
 
-	ram := newTestRAM(3, 5*time.Minute)
+	ram := newTestRAM(t, 3, 5*time.Minute)
 	defer ram.Stop()
 
 	// Build up some sequential hits.
@@ -130,7 +132,7 @@ func TestReadAheadManager_Disabled_NoPatterns(t *testing.T) {
 		ConcurrentReads: 0,
 		TTL:             5 * time.Minute,
 	}
-	ram := NewReadAheadManager(nil, cfg)
+	ram := NewReadAheadManager(t.Context(), nil, cfg)
 	defer ram.Stop()
 
 	ram.OnRead("disabled.bin", 0, 1024)
@@ -169,7 +171,7 @@ func TestReadAheadManager_PrefetchScheduled_AfterEnoughHits(t *testing.T) {
 		hitRead = minSeq
 	)
 
-	ram := newTestRAM(minSeq, 5*time.Minute)
+	ram := newTestRAM(t, minSeq, 5*time.Minute)
 	defer ram.Stop()
 
 	// Reads up to but not including the one that reaches the threshold.
@@ -205,7 +207,7 @@ func TestReadAheadManager_PrefetchScheduled_AfterEnoughHits(t *testing.T) {
 func TestReadAheadManager_PatternTTL_Cleanup(t *testing.T) {
 	t.Parallel()
 
-	ram := newTestRAM(3, 10*time.Millisecond) // very short TTL
+	ram := newTestRAM(t, 3, 10*time.Millisecond) // very short TTL
 	defer ram.Stop()
 
 	ram.OnRead("short.bin", 0, 1024)
@@ -329,7 +331,7 @@ func TestReadAheadConfig_DefaultValues(t *testing.T) {
 	t.Parallel()
 
 	// NewReadAheadManager fills in nil config with the canonical defaults.
-	ram := NewReadAheadManager(nil, nil)
+	ram := NewReadAheadManager(t.Context(), nil, nil)
 	defer ram.Stop()
 
 	want := ReadAheadConfig{
@@ -375,7 +377,7 @@ func TestNewFileSystemPassesTheConfiguredReadAhead(t *testing.T) {
 		TTL:             90 * time.Second,
 	}
 
-	fs := NewFileSystem(nil, nil, nil, nil, &Config{
+	fs := NewFileSystem(t.Context(), nil, nil, nil, nil, &Config{
 		MountPoint: t.TempDir(),
 		ReadAhead:  &want,
 	})
@@ -404,7 +406,7 @@ func TestNewFileSystemPassesTheConfiguredReadAhead(t *testing.T) {
 func TestNewFileSystemFallsBackWhenReadAheadIsUnset(t *testing.T) {
 	t.Parallel()
 
-	fs := NewFileSystem(nil, nil, nil, nil, &Config{MountPoint: t.TempDir()})
+	fs := NewFileSystem(t.Context(), nil, nil, nil, nil, &Config{MountPoint: t.TempDir()})
 	t.Cleanup(fs.readAhead.Stop)
 
 	if fs.readAhead == nil || fs.readAhead.config == nil {

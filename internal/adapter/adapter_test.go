@@ -170,6 +170,8 @@ func TestNew(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("valid configuration", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := createTestConfig()
 		adapter, err := New(ctx, "s3://test-bucket", "/mnt/test", cfg)
 		if err != nil {
@@ -193,6 +195,8 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("invalid storage URI", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := createTestConfig()
 		_, err := New(ctx, "gcs://invalid", "/mnt/test", cfg)
 		if err == nil {
@@ -204,6 +208,8 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("empty bucket name", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := createTestConfig()
 		_, err := New(ctx, "s3://", "/mnt/test", cfg)
 		if err == nil {
@@ -219,6 +225,8 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("invalid configuration", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := &config.Configuration{
 			// Invalid config with missing required fields
 			Performance: config.PerformanceConfig{
@@ -236,6 +244,8 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("URI with path prefix", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := createTestConfig()
 		adapter, err := New(ctx, "s3://test-bucket/path/prefix", "/mnt/test", cfg)
 		if err != nil {
@@ -247,6 +257,8 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("bucket with dots", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := createTestConfig()
 		adapter, err := New(ctx, "s3://my.bucket.with.dots", "/mnt/test", cfg)
 		if err != nil {

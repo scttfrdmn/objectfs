@@ -115,6 +115,15 @@ type ConnectionManager struct {
 	reconnectAttempt atomic.Int32
 	reconnectDelay   time.Duration
 
+	// healthLoopStarted guards the health-check goroutine, which was started by every successful
+	// Connect. Connect is called by Reconnect and by the scheduler on every automatic attempt, so
+	// loops accumulated: measured at 58 probes where one loop gives ~10, after six Connect calls at
+	// a 20ms interval. Each of those loops also held a shutdownWg slot, and each independently
+	// diagnosed a failure and called scheduleReconnect — so a single broken connection produced N
+	// concurrent reconnection schedules, each incrementing reconnectAttempt toward
+	// MaxReconnectAttempts.
+	healthLoopStarted atomic.Bool
+
 	shutdownCh chan struct{}
 	shutdownWg sync.WaitGroup
 	shutdown   atomic.Int32
@@ -169,6 +178,15 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 	cm.state = StateConnecting
 	cm.mu.Unlock()
 
+	// The context background work descends from: the caller's values, none of its cancellation.
+	//
+	// The automatic reconnect below and every probe the health loop makes used to build their own
+	// context from context.Background(), so nothing a caller of Connect attached — a trace ID, a
+	// deadline-bearing parent, a test's context — was visible to work this type does on that caller's
+	// behalf. Passing ctx itself is the other wrong answer: Connect is a call that returns, background
+	// reconnection and health checking outlive it by design, and Close is what ends them.
+	bg := context.WithoutCancel(ctx)
+
 	cm.logger.Info("Establishing connection", map[string]any{
 		"name": cm.name,
 	})
@@ -191,7 +209,7 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 
 		// Start automatic reconnection if enabled
 		if cm.config.EnableAutoReconnect {
-			cm.scheduleReconnect()
+			cm.scheduleReconnect(bg)
 		}
 
 		return errors.NewError(errors.ErrCodeConnectionFailed, "failed to establish connection").
@@ -212,10 +230,12 @@ func (cm *ConnectionManager) Connect(ctx context.Context) error {
 		"name": cm.name,
 	})
 
-	// Start health check monitoring
-	if cm.config.HealthCheckInterval > 0 && cm.health != nil {
+	// Start health check monitoring, once. CompareAndSwap and not a plain check: Connect runs
+	// concurrently with itself — the reconnect scheduler calls it from its own goroutine while a
+	// caller may call it directly — and two loops is exactly what this prevents.
+	if cm.config.HealthCheckInterval > 0 && cm.health != nil && cm.healthLoopStarted.CompareAndSwap(false, true) {
 		cm.shutdownWg.Add(1)
-		go cm.healthCheckLoop()
+		go cm.healthCheckLoop(bg)
 	}
 
 	return nil
@@ -289,8 +309,12 @@ func (cm *ConnectionManager) Reconnect(ctx context.Context) error {
 	return cm.Connect(ctx)
 }
 
-// scheduleReconnect schedules an automatic reconnection attempt
-func (cm *ConnectionManager) scheduleReconnect() {
+// scheduleReconnect schedules an automatic reconnection attempt.
+//
+// parent is the caller's context with its cancellation removed — see Connect. The reconnect it
+// eventually performs derives a ConnectionTimeout from it; the wait before that is bounded by
+// shutdownCh, not by parent, because Close is what cancels a pending reconnect.
+func (cm *ConnectionManager) scheduleReconnect(parent context.Context) {
 	attempt := cm.reconnectAttempt.Add(1)
 
 	// Check if we've exceeded max attempts
@@ -332,7 +356,7 @@ func (cm *ConnectionManager) scheduleReconnect() {
 			cm.state = StateReconnecting
 			cm.mu.Unlock()
 
-			ctx, cancel := context.WithTimeout(context.Background(), cm.config.ConnectionTimeout)
+			ctx, cancel := context.WithTimeout(parent, cm.config.ConnectionTimeout)
 			err := cm.Connect(ctx)
 			cancel()
 
@@ -351,8 +375,11 @@ func (cm *ConnectionManager) scheduleReconnect() {
 	})
 }
 
-// healthCheckLoop periodically checks connection health
-func (cm *ConnectionManager) healthCheckLoop() {
+// healthCheckLoop probes the connection on a ticker until Close signals shutdownCh.
+//
+// parent carries the values Connect was called with and none of its cancellation; each probe derives
+// its own HealthCheckTimeout from it.
+func (cm *ConnectionManager) healthCheckLoop(parent context.Context) {
 	defer cm.shutdownWg.Done()
 
 	ticker := time.NewTicker(cm.config.HealthCheckInterval)
@@ -365,7 +392,7 @@ func (cm *ConnectionManager) healthCheckLoop() {
 				return
 			}
 
-			cm.performHealthCheck()
+			cm.performHealthCheck(parent)
 
 		case <-cm.shutdownCh:
 			return
@@ -373,8 +400,8 @@ func (cm *ConnectionManager) healthCheckLoop() {
 	}
 }
 
-// performHealthCheck performs a single health check
-func (cm *ConnectionManager) performHealthCheck() {
+// performHealthCheck performs a single health check.
+func (cm *ConnectionManager) performHealthCheck(parent context.Context) {
 	cm.mu.RLock()
 	if cm.state != StateConnected || cm.connection == nil {
 		cm.mu.RUnlock()
@@ -383,7 +410,7 @@ func (cm *ConnectionManager) performHealthCheck() {
 	conn := cm.connection
 	cm.mu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), cm.config.HealthCheckTimeout)
+	ctx, cancel := context.WithTimeout(parent, cm.config.HealthCheckTimeout)
 	defer cancel()
 
 	err := cm.health(ctx, conn)
@@ -401,7 +428,7 @@ func (cm *ConnectionManager) performHealthCheck() {
 
 		// Trigger reconnection
 		if cm.config.EnableAutoReconnect {
-			cm.scheduleReconnect()
+			cm.scheduleReconnect(parent)
 		}
 	}
 }
@@ -472,6 +499,14 @@ func (cm *ConnectionManager) Wait(ctx context.Context) error {
 			case StateFailed:
 				return errors.NewError(errors.ErrCodeConnectionFailed, "connection failed permanently").
 					WithComponent(cm.name)
+
+			// The other three states are what this function exists to wait through, so falling to the
+			// next tick is the whole behavior and not an omission. Disconnected and Reconnecting are
+			// transient by construction — the manager's retry loop drives them toward Connected or
+			// Failed — and Connecting is the first attempt in progress. The caller's context deadline
+			// is what bounds the wait; an arm here that returned an error on any of them would turn
+			// "not yet" into "never".
+			case StateDisconnected, StateConnecting, StateReconnecting:
 			}
 		}
 	}

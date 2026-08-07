@@ -89,7 +89,7 @@ func newOptionsFixture(t *testing.T, configure func(*Config)) (*FileSystem, *tes
 		configure(cfg)
 	}
 
-	return NewFileSystem(srv.Backend(), nil, writer, nil, cfg), srv
+	return NewFileSystem(t.Context(), srv.Backend(), nil, writer, nil, cfg), srv
 }
 
 // TestOpenFlagsReachTheKernel is the assertion the nine removed fields never had.
@@ -236,7 +236,7 @@ func TestMountOptionsReachTheOpenFlags(t *testing.T) {
 			opts.FSName = "objectfs"
 			opts.MaxWrite = 128 * 1024
 
-			pfs := CreatePlatformMountManager(srv.Backend(), nil, writer, nil, &MountConfig{
+			pfs := CreatePlatformMountManager(t.Context(), srv.Backend(), nil, writer, nil, &MountConfig{
 				MountPoint: t.TempDir(),
 				Options:    &opts,
 			})

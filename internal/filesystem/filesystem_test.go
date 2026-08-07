@@ -114,6 +114,8 @@ func (h *mockFileHandle) LastModified() time.Time            { return time.Time{
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 func TestMockFilesystem_InterfaceSatisfied(t *testing.T) {
+	t.Parallel()
+
 	// The compile-time assertion at the top of the file is the primary check.
 	// This test provides a named entry in the test output to confirm the
 	// interface constraint was satisfied at build time.

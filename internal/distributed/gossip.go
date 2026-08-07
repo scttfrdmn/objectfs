@@ -401,11 +401,17 @@ func (gp *GossipProtocol) receiveMessages(ctx context.Context) {
 			continue
 		}
 
-		gp.handleIncomingMessage(buffer[:n], addr)
+		gp.handleIncomingMessage(ctx, buffer[:n], addr)
 	}
 }
 
-func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) {
+// handleIncomingMessage authenticates, decodes, and dispatches one datagram.
+//
+// ctx is this loop's, so it is the cluster's lifetime — it descends from the context given to
+// [GossipProtocol.Start]. Only one dispatch arm uses it: a NodeOperation asks this node to perform an S3
+// operation on a peer's behalf, and that is the one handler here that does I/O rather than updating
+// in-memory membership state. See [Coordinator.executeLocally].
+func (gp *GossipProtocol) handleIncomingMessage(ctx context.Context, data []byte, addr *net.UDPAddr) {
 	// Authenticate before parsing (#206). A datagram that does not verify never reaches the JSON
 	// decoding of any message type, let alone a handler, so an unauthenticated host cannot join the
 	// cluster or announce cache ownership.
@@ -488,7 +494,7 @@ func (gp *GossipProtocol) handleIncomingMessage(data []byte, addr *net.UDPAddr) 
 	// Coordinator messages
 	case MessageTypeNodeOperation:
 		if gp.cluster.coordinator != nil {
-			gp.cluster.coordinator.handleNetworkOperation(msg)
+			gp.cluster.coordinator.handleNetworkOperation(ctx, msg)
 		}
 	case MessageTypeNodeOperationResp:
 		if gp.cluster.coordinator != nil {

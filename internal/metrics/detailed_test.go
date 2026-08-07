@@ -403,7 +403,10 @@ func TestGetSummary(t *testing.T) {
 	}
 
 	// Error rate should be ~4.76% (5/105)
-	errorRate := summary["overall_error_rate"].(float64)
+	errorRate, ok := summary["overall_error_rate"].(float64)
+	if !ok {
+		t.Fatalf("summary[\"overall_error_rate\"] = %#v (%T), want float64", summary["overall_error_rate"], summary["overall_error_rate"])
+	}
 	expectedErrorRate := 5.0 / 105.0
 	if errorRate < expectedErrorRate-0.01 || errorRate > expectedErrorRate+0.01 {
 		t.Errorf("Expected error rate ~4.76%%, got %f%%", errorRate*100)

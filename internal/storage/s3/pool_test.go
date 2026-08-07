@@ -16,7 +16,7 @@ import (
 func newTestPool(t *testing.T, maxSize int) *ConnectionPool {
 	t.Helper()
 
-	p, err := NewConnectionPool(maxSize, func() (*s3.Client, error) {
+	p, err := NewConnectionPool(t.Context(), maxSize, "test-bucket", func() (*s3.Client, error) {
 		return &s3.Client{}, nil
 	})
 	if err != nil {
@@ -129,7 +129,7 @@ func TestPoolConcurrentPutAndCloseIsSafe(t *testing.T) {
 	t.Parallel()
 
 	for range 50 {
-		p, err := NewConnectionPool(4, func() (*s3.Client, error) {
+		p, err := NewConnectionPool(t.Context(), 4, "test-bucket", func() (*s3.Client, error) {
 			return &s3.Client{}, nil
 		})
 		if err != nil {
@@ -174,7 +174,7 @@ func TestPoolConcurrentPutAndCloseIsSafe(t *testing.T) {
 func TestPoolCloseIsIdempotentAndWakesWaiters(t *testing.T) {
 	t.Parallel()
 
-	p, err := NewConnectionPool(1, func() (*s3.Client, error) {
+	p, err := NewConnectionPool(t.Context(), 1, "test-bucket", func() (*s3.Client, error) {
 		return &s3.Client{}, nil
 	})
 	if err != nil {
@@ -267,7 +267,7 @@ func TestPoolFactoryErrorSurfaces(t *testing.T) {
 	t.Parallel()
 
 	sentinel := errors.New("no credentials")
-	p, err := NewConnectionPool(2, func() (*s3.Client, error) {
+	p, err := NewConnectionPool(t.Context(), 2, "test-bucket", func() (*s3.Client, error) {
 		return nil, sentinel
 	})
 	if err != nil {
@@ -452,7 +452,7 @@ func TestPoolWarmupBoundsAndErrors(t *testing.T) {
 
 		sentinel := errors.New("no credentials")
 		var calls int
-		p, err := NewConnectionPool(2, func() (*s3.Client, error) {
+		p, err := NewConnectionPool(t.Context(), 2, "test-bucket", func() (*s3.Client, error) {
 			calls++
 			// Fail the warm, then succeed, so we can prove the failed attempt did not
 			// consume capacity.
@@ -519,7 +519,7 @@ func TestPoolWarmupBoundsAndErrors(t *testing.T) {
 func TestNewConnectionPoolRejectsNilFactory(t *testing.T) {
 	t.Parallel()
 
-	if _, err := NewConnectionPool(4, nil); err == nil {
+	if _, err := NewConnectionPool(t.Context(), 4, "test-bucket", nil); err == nil {
 		t.Error("NewConnectionPool accepted a nil factory")
 	}
 }
@@ -530,7 +530,7 @@ func TestNewConnectionPoolDefaultsNonPositiveSize(t *testing.T) {
 	t.Parallel()
 
 	for _, size := range []int{0, -1} {
-		p, err := NewConnectionPool(size, func() (*s3.Client, error) {
+		p, err := NewConnectionPool(t.Context(), size, "test-bucket", func() (*s3.Client, error) {
 			return &s3.Client{}, nil
 		})
 		if err != nil {

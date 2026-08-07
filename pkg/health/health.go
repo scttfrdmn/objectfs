@@ -514,7 +514,19 @@ func isServiceFailure(err error) bool {
 	return true
 }
 
-// isWriteError checks if an error indicates a write failure but reads may still work
+// isWriteError reports whether err is a failure of writing specifically, leaving reads plausible.
+//
+// The caller uses this to choose between StateReadOnly and StateDegraded once a component crosses
+// ErrorThreshold, so a true here is a claim that reads will still succeed. Only three codes support
+// that claim, and the listed direction is deliberate: an unlisted code returns false and the component
+// goes to StateDegraded, which restricts more than read-only does. A code added later therefore fails
+// toward caution, and the mistake it can produce is a component that stops serving reads it could have
+// served — recoverable on the probe timer — rather than one that keeps serving reads from a service
+// that cannot be read.
+//
+// This is the opposite listing direction from [errors.IsServiceFailure], which enumerates the
+// *non*-failures for the same reason: in both cases the enumerated set is the one whose membership is
+// a positive assertion about the service's state.
 func (t *Tracker) isWriteError(err error) bool {
 	if err == nil {
 		return false
@@ -528,6 +540,13 @@ func (t *Tracker) isWriteError(err error) bool {
 			errors.ErrCodeStorageWrite,
 			errors.ErrCodePermissionDenied:
 			return true
+
+		// Every other code, of the ~50 in pkg/errors. Naming them individually is what exhaustive
+		// would otherwise ask for here, and it would be a list that has to be edited whenever a code
+		// is added while changing nothing about the behavior — see the doc comment for why the
+		// unlisted direction is the safe one.
+		default:
+			return false
 		}
 	}
 

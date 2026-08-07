@@ -596,6 +596,472 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **A test backend counted its own calls without synchronization** ([#179]). `paralleltest` 25 → 0,
+  closing out the lint burn-down.
+
+  `tests.MockPredictiveBackend.GetObject` incremented a plain `int64` while holding only `mu.RLock()`.
+  An `RLock` is held by every concurrent reader at once, so that increment is a race between two
+  readers rather than a protected write — `-race` reports it as a read at `GetObject` against a write
+  at the same line. `PredictiveCache`'s prefetch workers call the backend concurrently with the test's
+  own goroutines, so `TestPredictiveCache_ConcurrentAccess` reaches it; it survived a suite that runs
+  entirely under `-race` because no test reads `GetStats`, which left the increment with no observable
+  effect other than the race itself. Both counters are now `atomic.Int64`.
+
+  Making the `tests` package parallel also required moving `fuse_test.go`'s
+  `defer writeBuffer.Close()` to `t.Cleanup`. A parent test's deferred functions run when the parent
+  function returns, which for a test with parallel subtests is *before* those subtests resume —
+  verified by execution, not inferred: a parallel subtest observes a variable set by the parent's
+  `defer`, while `t.Cleanup` runs after. `vfs.Writer.Close` is only `FlushAll` today, so the `defer`
+  form happened not to break anything, but it left the subtests writing through a closed writer by
+  contract.
+
+  Mutation-checked at the shape the write path exists to prevent: dropping the destination offset in
+  `ExtentList.Splice` — the H7 bug in its original form — fails `TestWriteBufferUnit` on the appended
+  `"sync data"` reading back as nine zero bytes. Two narrower mutations to the same function were
+  identity transforms because adjacent extents coalesce, which is worth recording: a mutation that
+  changes nothing proves nothing about the test.
+- **`pkg/api`'s 18 remaining serial tests now run in parallel** ([#179]). `paralleltest` 43 → 25, with
+  every remaining finding in `tests/`.
+
+  No production change was needed. Each test builds its own `Server`, its own `status.NewTracker` and
+  `health.NewTracker`, and its own `prometheus.NewRegistry`; the handlers are exercised through
+  `httptest.NewRecorder` rather than a listener, and the one test that does listen binds `localhost:0`.
+  Mutation-checked through the parallel subtests: changing `handleInfo`'s `version = "unknown"` default
+  fails `TestHandleInfo/version_defaults_to_unknown_when_not_set` by name, so a parallel table test still
+  attributes a failure to the case that produced it. Verified at `-race -count=2`.
+- **`internal/cache`'s 37 tests now run in parallel** ([#179]). `paralleltest` 80 → 43.
+
+  Nothing had to change in the cache itself: every test already builds its own `LRUCache` or its own
+  `PersistentCache` under `t.TempDir()`, so the annotations were the whole of it. That is worth stating
+  rather than assuming, because the two packages before this one each hid a real defect behind their
+  serial ordering. Verified at `-race -count=4`, and mutation-checked in both table tests — changing the
+  default eviction policy fails `TestNewLRUCache/nil_config_uses_defaults` by value, and changing the
+  default cleanup interval fails `TestNewPersistentCache/zero_values_get_defaults`, each naming the
+  single case that produced it.
+- **A recovery goroutine read an attempt counter it had already released the lock on** ([#179]).
+  `paralleltest` 138 → 80 across `pkg/recovery` and `pkg/status`.
+
+  `markDegraded` starts `attemptAutoRecovery` in a goroutine and then keeps writing `AttemptCount` under
+  the manager's lock on every later failure for the same component. `attemptAutoRecovery` copied
+  `NextAttempt` under the lock, released it, and then read `AttemptCount` off the shared pointer to
+  format a log line — a plain unsynchronized read of a mutex-guarded field, which the race detector
+  reports the moment a component fails twice with auto-recovery enabled. The whole suite runs under
+  `-race` and never saw it, because every test marks each component exactly once; the one test that
+  marks twice disables auto-recovery, so there was no goroutine to race with. Both fields are copied
+  under the lock now, and `TestRecoveryManager_RepeatedDegradationWithAutoRecovery` produces the shape
+  that was missing. Verified in both directions: restoring the unlocked read fails that test with a data
+  race at `recovery.go`, and the fix is clean at `-count=5`.
+
+  Nothing in `pkg/status` needed changing; its 21 tests each build their own tracker already.
+- **`pkg/utils`' debug tests could not be parallelized because there was no way to own a debug
+  manager** ([#373], [#179]). `paralleltest` 194 → 138; the package's 56 findings are now 0.
+
+  `GetDebugManager` returned a process-wide singleton and was the only way to get a manager, so every
+  test recorded into the same one. `RecordEvent` fans each event out to *every* open session — that is
+  what a global trace facility is for, since a caller deep in the read path records an event without
+  knowing which sessions are open — so two tests holding that manager see each other's events and
+  neither can assert an event count. A mutex does not help: the broadcast is doing what it is written to
+  do. `NewDebugManager` now returns a manager that shares nothing, `StartTrace` has a method form that
+  traces a session on a given manager, and the fan-out is documented where a reader will meet it rather
+  than being something you deduce from a failing count. The two tests that assert the *global* behaviour
+  — the singleton identity and the nil trace for an absent session — still use it deliberately.
+  Confirmed by mutation: reverting the tests to the shared manager reproduces the failures #373 reported,
+  including `Expected 1 event, got 3` and `Expected 3 events in stats, got 8`.
+
+  Reading that code for the constructor turned up two unguarded reads worth fixing on their own account.
+  `StopSession` set `enabled`/`endTime` under the session lock and then read `endTime`, `events` and
+  `profiles` back *after* unlocking, to format a log line — and it returns the session pointer, so a
+  caller can be recording into it while that line formats. `StartTrace` read `session.enabled` with no
+  lock at all, racing any concurrent `StopSession`. Both now read under the lock that writes them.
+
+  #373's fix plan also called for deleting a `.golangci.yml` exclusion for `debug_mode_test.go`. There is
+  no such exclusion — `grep debug_mode .golangci.yml` finds nothing — so the 56 findings were never
+  suppressed and there was nothing to remove.
+- **A health test only passed because its four cases shared one tracker and ran in order** ([#179]).
+  `paralleltest` 325 → 263 across seven packages, and one of those 62 turned out to be covering a real
+  gap rather than an annotation.
+
+  `pkg/health`'s `TestTracker_CanRead` asserted that an unavailable component refuses reads. It set the
+  state by assigning `ComponentHealth.State` directly, which skips `transitionState` — the only place
+  that arms `nextProbe` on entry to a refusing state. So `nextProbe` stayed at the zero time, and
+  `admissionState` reads a zero clock as *the probe interval has elapsed*: the first `CanRead` was
+  admitted as a probe and returned true for a component the test had just marked unavailable. It passed
+  anyway, because all four cases shared one tracker and the `read-only` case ran first — arming a probe
+  clock 30 seconds out that the `unavailable` case then inherited. Giving each case its own tracker,
+  which is what parallelizing requires, removed that accident and the assertion failed. The setup now
+  goes through `transitionState`, so the state a case tests is a state production can actually produce.
+  Confirmed by mutation: dropping the `nextProbe` arming in `health.go` fails as
+  `CanRead() = true, want false for state unavailable`.
+
+  `testHealthListener` also needed a mutex, independent of parallelism. `Tracker.notifyStateChange`
+  spawns a goroutine per listener while `OnHealthCheck` is called inline, so the two methods genuinely
+  run concurrently on the same listener and the test reads its slices from a third goroutine — a data
+  race that `-race` only needed the right interleaving to report.
+
+  The other 61 are annotation-only, and each was read rather than added mechanically: `pkg/retry` (13,
+  `DefaultConfig()` returns a value so no config is shared, and the exact-backoff assertions survived
+  five repeat `-race` runs), `internal/health/remediation_test.go` (14, each builds its own engine and
+  the parallel subtests only call read-only `DiagnoseProblem`/`GetRemediations`), `internal/config` (7),
+  `sdks/go/objectfs` (6, whose integration tests use disjoint key prefixes so they cannot collide in one
+  bucket), `internal/filesystem` (1), `pkg/types` (1). `internal/config`'s three `TestLoadFromEnv*`
+  functions stay serial with a documented `//nolint:paralleltest`: `t.Setenv` panics on a test that has
+  called `t.Parallel`, because the environment is process-wide.
+- **`internal/storage/s3`'s tests now run in parallel, all 69 of them** ([#179]). `paralleltest` 194 →
+  126 for the package, which was the largest remaining cluster: `pricing_manager_test.go` (20),
+  `multipart_test.go` (15), `backend_test.go` (12), `cost_optimizer_test.go` (11), `tier_test.go` (8),
+  `acceleration_test.go` (6).
+
+  Two subjects are shared across newly-parallel subtests, and both were checked rather than assumed.
+  `PricingManager` holds no mutable state after `NewPricingManager` — `GetTierPricing`, `StorageRate`
+  and `GetPricingSummary` only read `config` and `region` — and `CostOptimizer.accessPatterns` is
+  guarded by `co.mu`, with the subtests reaching it through `patternFor`/`putPattern`/`PatternCount`
+  rather than indexing the map. `Config.ShouldUseMultipart` and `GetOptimalChunkSize` are pure.
+
+  One real hazard was removed on the way: `TestPricingManager_ExternalDiscountConfig` had a
+  `defer os.Remove(tempFile.Name())` and hands that path to two subtests. A plain `defer` in a parent
+  runs when the parent returns, which is *before* its parallel children finish — so the file would have
+  been deleted out from under the tests reading it. The file already lives in `t.TempDir()`, which the
+  framework cleans up after the parallel subtests complete, so the `defer` was redundant as well as
+  wrong.
+
+  Verified by mutation in two of the parallelized table tests, since a parallel table test that aliases
+  its loop variable reports the wrong row: widening `ShouldUseMultipart`'s comparison to `>=` fails as
+  `ShouldUseMultipart(33554432) = true, want false` under `file_exactly_at_threshold`, and making
+  `GetTierPricing` ignore its `CustomPricing` override fails under both `Uses_Custom_Pricing` and
+  `Multiple_Discounts_Applied` — the two subtests that share a manager.
+- **27 test functions declared themselves parallel and then ran their subtests serially** ([#179]).
+  `tparallel` 27 → 0.
+
+  A `t.Parallel()` on a test function whose subtests do not call it buys nothing: the parent yields to
+  its siblings and the subtests still run one after another inside it. The eight affected packages —
+  `internal/metrics` (9), `pkg/errors` (6), `pkg/utils` (3), `internal/circuit` (3), `pkg/api` (2),
+  `internal/health` (2), `internal/storage/s3` (1), `internal/adapter` (1) — were paying the annotation
+  without getting the concurrency, and the two that had it inverted (`TestHandleInfo`,
+  `TestCostOptimizer_CostCalculation`) had parallel subtests under a serial parent, which serializes
+  them against nothing and blocks the package's other tests for the parent's whole duration.
+
+  Each of the 44 subtests was read rather than rewritten mechanically: every one either constructs its
+  own subject or calls a pure function, and no parent holds a `defer` that a parallel child could
+  outlive. Verified by mutation in the two largest table-driven cases, since a parallelized table test
+  that aliases its loop variable reports the wrong row: `ErrCodeTokenExpired: 401 → 418` fails as
+  `GetDefaultHTTPStatus(TOKEN_EXPIRED) = 418, want 401` under the subtest named `TOKEN_EXPIRED`, and
+  breaking `classifyError`'s permission arm fails under `permission_error`. Both name the mutated row,
+  so Go 1.22 per-iteration loop variables are doing what the rewrite assumes.
+
+  `paralleltest` fell 383 → 325 alongside it: 44 of those are the same subtests, and the remaining 15
+  are `internal/metrics/detailed_test.go`, taken here so the package finishes clean rather than being
+  left one file short. Every one of the 15 builds its own `DetailedPerformanceMetrics`.
+- **A shutting-down node kept running the S3 operations its peers had asked for** ([#179]).
+  `contextcheck` 2 → 0, and this is the last of the nine that opened the batch.
+
+  `Coordinator.executeLocally` applied `op.Timeout` to `context.Background()`, so neither of its callers
+  could stop an operation once it reached S3. `executeOnNode` had the caller's context and dropped it.
+  The other caller, `handleNetworkOperation`, is reached from the gossip receive loop, whose context is
+  the cluster's own lifetime — so a node being shut down carried on issuing the GETs, PUTs and DELETEs
+  peers had requested, bounded only by a 30-second default, writing each result into a gossip socket
+  that was closing. The context now runs from `GossipProtocol.Start` through the receive loop,
+  `handleIncomingMessage`, and `handleNetworkOperation` to the backend call.
+
+  Verified as two separate mutations, because either frame alone passing the test would be misleading:
+  reverting `executeLocally` to `context.Background()` reports *"the backend received a live context
+  from a canceled caller"*, and making `handleNetworkOperation` drop the context it was just given
+  reports *"a peer-requested operation ran under a live context after the cluster's context was
+  canceled, so gossip's receive-loop context is not reaching the S3 call"*. A context threaded through
+  three frames and dropped in the fourth is exactly the shape of the defect, so one assertion per frame.
+- **The Redis invalidation subscriber's deletes now honour the subscription's context** ([#179]).
+  `contextcheck` 3 → 2.
+
+  `types.Cache` assigns no context to any of its methods, so `redis.Cache.Delete` ran under
+  `context.Background()` — and so did the delete the pub/sub invalidation subscriber performs on every
+  message it receives. That one is different from the rest: it is a Redis round trip on the same
+  connection pool the subscription holds, so a canceled subscription could leave a `DEL` in flight
+  against a client being closed underneath it. `Cache.DeleteContext` is the same operation with the
+  caller's context restored, and the subscriber uses it.
+
+  `Delete` itself keeps `context.Background()`, documented rather than left implicit. The alternatives
+  are worse: a context stored on the `Cache` at construction is a startup context outliving its scope,
+  which `NewCache` already explains it deliberately avoids, and there is no per-call context to descend
+  from. go-redis applies its own 5s dial and 3s read timeouts, so it is bounded — just not cancelable.
+  Putting a context on `types.Cache` is a change across four implementations and every `internal/fuse`
+  call site, which is a decision to take on its own merits and not by way of a lint finding.
+
+  Verified by mutation: making `DeleteContext` ignore its context reports *"DeleteContext on a canceled
+  context still reached Redis, so the context is decorative"*. The test also asserts the same call on a
+  live context does delete, so the first assertion is about cancellation rather than about the method
+  being broken.
+
+  Found while doing this: the `Invalidator` that owns that subscriber has no production caller at all,
+  so a Redis cache is shared across nodes and its cross-node invalidation is never started. Filed as
+  [#377], since whether that is a bug or a deletion depends on whether any configuration puts a local
+  tier in front of the Redis one.
+- **Read-ahead leaked five goroutines per mount, for the life of the process** ([#179]).
+  `contextcheck` 4 → 3, and the fourth finding was sitting on the fourth live defect of this batch.
+
+  `ReadAheadManager.Stop` exists, is `sync.Once`-guarded, and is documented "safe to call multiple
+  times". Nothing outside tests calls it — not `MountManager.Unmount`, not `Adapter.Stop`, not anything
+  on the unmount path. So the goroutines the constructor starts, `ConcurrentReads` prefetch workers plus
+  a cleanup ticker, ran until the process exited. Measured: **2 → 27 goroutines after five
+  `NewFileSystem` calls**, five per filesystem at the default `ConcurrentReads: 4`. Each holds its
+  `FileSystem`, and through it the backend and the cache, reachable — so a long-running host that
+  remounts, which is what the mount watcher does on a lost mount, accumulates both goroutines and heap.
+
+  The fix is not a new `Stop` call on each unmount path, because that is the same kind of obligation
+  that was already being missed. `NewReadAheadManager` now takes the mount's context, and both workers
+  select on `mount.Done()` alongside `stopCh` — so the `cancelMount()` the adapter *already* performs
+  on unmount is what stops them, with nothing new for a future caller to remember. `NewFileSystem` and
+  `CreatePlatformMountManager` take the same context and document that it is the mount's lifetime
+  rather than the constructing call's. `Stop` itself is now reachable only from tests, which is a
+  smaller inconsistency and is filed as [#376] rather than resolved here.
+
+  Each prefetch also derived its 5-second budget from `context.Background()`. Five seconds is the right
+  scope for a speculative read either way; what changes is that a prefetch in flight when the mount
+  goes away is now canceled, instead of running to its own deadline against a backend being closed
+  underneath it, and that a value the mount was configured with reaches the reads made on its behalf.
+
+  Both halves are verified by mutation. Removing `mount.Done()` from the worker selects reports
+  *"25 goroutines still running after every mount context was canceled"*; restoring the
+  `context.Background()` prefetch budget reports *"a prefetch on a canceled mount context issued 1
+  GET(s), want 0"*.
+
+  The leak test counts goroutines by the frame names of the two worker functions rather than by
+  `runtime.NumGoroutine()`. The first version measured the process total, which in this package sits
+  near 960 because of the substrate servers and S3 clients its other tests stand up, and it flaked on
+  1 run in 6 — reading 24 started goroutines where 25 had started. A delta between two numbers that
+  are each only accurate to whatever a sibling test happened to be doing is not a measurement.
+- **Three live defects found by fixing five `contextcheck` findings** ([#179]). `contextcheck` 9 → 4.
+  The linter's complaint — background work building its own `context.Background()` instead of descending
+  from the caller's — was accurate everywhere, and in three places the code around it was wrong in ways
+  the context plumbing had been hiding.
+
+  **Auto-remediation refused to act on exactly the critical issues.** `EnhancedMonitor.createDetectedIssue`
+  gated it on `severity >= PriorityHigh`, and `Priority` is a `string`, so that expression compared bytes:
+  `"critical" < "high" < "low" < "medium"` is the order the language sees, which is neither the declaration
+  order nor the severity order. Measured by execution — `critical` → **false**, `high`/`low`/`medium` →
+  **true**. Both `PriorityCritical` arms of `detectProblems`, a critical error rate and a critical failure
+  streak, were the only issues auto-remediation skipped, while a merely elevated latency got it. There is
+  now a `Priority.AtLeast` method with an explicit rank table and a comment saying why the constants' own
+  ordering cannot be used. `Status` and `Category` are the package's other string enums; neither is ever
+  ordered, so neither needs one. Three unsynchronized writes to `issue.AutoRemediating` racing
+  `GetComponentHealthDetail`'s `RLock` are fixed in the same function.
+
+  **The S3 connection pool destroyed working clients under a least-privilege policy.** Its health probe was
+  `ListBuckets` with the verdict `err == nil`. `ListBuckets` is an account-level call gated by
+  `s3:ListAllMyBuckets` — a different permission from anything granted on the bucket the pool serves, and
+  one an institutional deployment's bucket-scoped policy does not grant. Verified against an endpoint
+  answering 403 `AccessDenied`: every probe declared its connection dead, so each round evicted up to three
+  usable clients and wrote "Found 3 unhealthy connections" into the pool's `LastError` for an operator to
+  chase — every 30 seconds, forever, while also listing every bucket in the account to learn nothing about
+  the one in use. It is now `HeadBucket` on the pool's own bucket, and the verdict is
+  `errors.As(err, &smithy.APIError)` rather than `err == nil`: a 403, a 404, a redirect or a 500 travelled
+  to S3 and came back, which is precisely what a liveness probe is asking, and only a transport failure
+  means the client cannot be reused. `NewConnectionPool` takes the bucket and a context as a result.
+
+  **`pkg/recovery` leaked a health-check goroutine per connect.** Every successful
+  `ConnectionManager.Connect` started a `healthCheckLoop`, and `Connect` is what `Reconnect` calls and what
+  the reconnect scheduler calls on each automatic attempt — so loops accumulated for the life of the
+  process. Measured: **58 probes where one loop gives ~10**, after six `Connect` calls at a 20 ms interval.
+  Each surplus loop also independently diagnosed a failure and called `scheduleReconnect`, so one broken
+  connection produced N competing reconnection schedules each driving `reconnectAttempt` toward
+  `MaxReconnectAttempts` and `StateFailed`. Guarded with a `CompareAndSwap`, because `Connect` runs
+  concurrently with itself.
+
+  The context work itself is a decision per site rather than a mechanical rewrite, and the tests pin both
+  answers. `context.WithoutCancel` where a *separate* signal ends the work — `Checker.Stop`, `Monitor.Stop`,
+  `ConnectionPool.Close`, `ConnectionManager.Close` — so a request-scoped caller cannot take health checking
+  down with it when its own call returns. Plain `ctx` where the context *is* the stop signal:
+  `problemDetectionLoop` selects on `ctx.Done()` and returns, so a five-minute remediation must not outlive
+  it. `Monitor.attemptAutoRecovery`'s inter-attempt `time.Sleep` is a `select` on `ctx.Done()`, `stopCh` and
+  the delay, so a component with a long `RecoveryDelay` no longer holds a goroutine past shutdown retrying
+  a recovery nobody is waiting for. Eight mutations were run against the new tests and each failed with the
+  predicted message, including the two plausible-looking wrong answers `contextcheck` would also have
+  accepted — a struct field instead of a parameter does not satisfy it, and binding background work to the
+  caller's cancellation satisfies it while breaking the pool.
+
+- **Every `pkg/api` handler test ran with a context nothing could cancel** ([#179]). `noctx` 31 → 0.
+  Thirty of the thirty-one findings were `httptest.NewRequest`, which attaches `context.Background()`:
+  a handler reading `r.Context()` in these tests saw a context carrying nothing, with a nil `Done`
+  channel, that no test could cancel. They now use `httptest.NewRequestWithContext` with `t.Context()`
+  — `b.Context()` in the two benchmarks. Asserted rather than assumed, because a mechanical rewrite
+  that compiles and changes nothing observable would also report `noctx: 0`: the new test compares
+  `req.Context()` against the test's own and checks `Done()` is non-nil, and reverting one call site
+  reports `request context = context.Background, want the test's own context`.
+
+  The thirty-first was `net.Listen` in `internal/network`'s echo-server test, which has nothing to
+  cancel it if the bind blocks and would hang to the package timeout, reported against whichever test
+  happened to be running. It is `(&net.ListenConfig{}).Listen(t.Context(), ...)` now, the shape
+  `internal/health`'s `listenHealth` already uses, and the two `wrapped(context.Background(), ...)`
+  dials in the same file are on `t.Context()` too.
+
+- **Election timeouts were jittered by about one part in a million, and panicked below one
+  millisecond** ([#179]). The expression mixed units: `base + rand.Intn(int(base.Milliseconds()))`
+  takes a millisecond *count* and uses it as a nanosecond `Duration`. Against the 5s default, measured
+  spreads were 4.69µs, 4.16µs and 690ns. Randomized election timeouts exist so followers whose timers
+  expire together do not all become candidates in the same instant and split the vote — a spread six
+  orders of magnitude too small is not randomization, and a split vote is exactly what Raft §5.2
+  introduces the jitter to prevent. Below 1ms, `Milliseconds()` truncated to 0 and `rand.Intn(0)`
+  panicked on the consensus goroutine; `election_timeout: 500us` was enough to reach it.
+
+  The arithmetic moved into an `electionTimeout` function so it is testable at all: the timer
+  `resetElectionTimer` builds does not expose the duration it was built with, which is why a spread
+  this wrong went unobserved. The new test asserts the *distribution* rather than any single draw —
+  a fixed expected value could only be written by reproducing the formula, which would pass for the
+  broken one too. Verified in both directions: restoring the old expression panics, and a
+  units-only mutation with the zero case guarded reports `spread over 200 draws = 4.959µs, want at
+  least 2.5s`.
+
+- **The persistent cache's index-path check accepted a sibling directory, and an absolute path**
+  ([#179]). `loadIndex` and `saveIndex` each carried
+  `strings.HasPrefix(filepath.Clean(indexPath), filepath.Clean(directory))`, and a string prefix is
+  not path containment. With `directory: /tmp/objectfs-cache`, an `index_file` of
+  `../objectfs-cache-evil` joins to `/tmp/objectfs-cache-evil` — outside the directory, but still
+  carrying the prefix. `../objectfs-cacheXYZ/index.json` and `/etc/passwd` passed too. Only an escape
+  far enough to lose the prefix was caught, and that was the single case the existing test used, so
+  the test passed while three others went through. `index_file` is now validated once at construction
+  with `filepath.IsLocal`, which did not exist when the check was written. The test is a table of
+  eight cases, and the three escapes fail against the restored prefix check.
+
+- **Log files and their directory were world-readable** ([#179]). `pkg/utils`'s rotator created the
+  directory 0755 and the file 0644, and rotated backups through `os.Create` at 0666-and-umask. What
+  ObjectFS logs is not public: an object key is the path of a user's file, and the error strings carry
+  the bucket and the key, so on the multi-user systems this filesystem is built for a 0644 log hands
+  every account on the host a listing of what the mount owner has been reading. This is #211's mistake
+  in a second place. Now 0750 and 0640 — group-readable so an operations group can read them without
+  sudo, which is the case a umask cannot express once `O_CREATE` has picked a mode. Pinned by a test
+  asserting the world bits are clear, verified against a mutation of each mode.
+
+- **`health.Checker` discarded the context `Start` was given** ([#179], `gosec` G118 14 → 0).
+  `Start(ctx)` launched `go c.checkLoop()`, and every round built its own context from
+  `context.Background()` — so a trace ID, a deadline-bearing parent, or a test's `t.Context` was
+  invisible to every check function the loop ever ran. The loop now derives from
+  `context.WithoutCancel(ctx)`, the idiom `serveHealth` twenty lines below already applies to the HTTP
+  listener for the same lifetime mismatch: `Stop` is what ends the loop, so binding the caller's
+  cancellation directly would let a request-scoped caller take health checking down with it.
+
+  The remaining `gosec` findings were noise, and are suppressed with the reason rather than
+  satisfied: the two `math/rand` sites pick a timer spread and a backoff spread, not a secret, and
+  reading `crypto/rand` on the consensus hot path or on every S3 error would defend against no
+  adversary. Per `.golangci.yml`, `#nosec` and not `//nolint:gosec` — only the former also satisfies
+  the standalone run that feeds GitHub code scanning.
+
+
+- **Eleven unchecked type assertions, one of them on an HTTP request path** ([#179]). `errcheck` 11 → 0.
+  Every finding was a single-value assertion rather than a discarded error, so each one panics where it
+  should fail — and in a test, a panic is a crashed binary that takes the package's other tests with it,
+  reported as a stack trace rather than as this test failing on this field.
+
+  The production one is `pkg/api`'s `/info` handler, which built its endpoint list as
+  `append(info["endpoints"].([]string), "/metrics")` — asserting through a `map[string]any` it had
+  populated fifteen lines earlier. Correct today, and correct only for as long as nobody edits the
+  literal above it. The slice is now built before the map, so there is nothing to assert.
+
+  In `pkg/api`'s tests, four sites read `int(response["count"].(float64))` out of a decoded JSON body;
+  they now go through a `jsonInt` helper that distinguishes a missing field from a wrongly-typed one.
+  Verified by mutating the handler both ways: emitting `count` as a string reports
+  `response["count"] = "2" (string), want a JSON number`, and removing the field reports
+  `response has no "count" field; got fields [history limit timestamp]`.
+
+  `internal/metrics`'s four were the inconsistent minority in their own file — the same assertion
+  appears twice more in `collector_test.go` already using the checked form, so this aligns them.
+  `pkg/recovery`'s discarded two things on one line, `GetConnection`'s error and the concrete type of
+  what it returned, in a test whose actual subject is a field on that concrete type.
+
+- **A cluster node whose status this build does not recognize was counted in the total, counted in
+  none of the breakdowns, and never reaped** ([#179]). Found by `exhaustive`, which reported eight
+  incomplete switches; six were deliberate subsets and now say so, and two were this defect.
+
+  `NodeStatus` is a string, and `UpdateNodeInfo` assigns it straight from a `json.Unmarshal` of a gossip
+  message — so the value does not have to be one of the five declared constants. A peer running a
+  different version, or anything that can reach the gossip port, can put an arbitrary string there.
+  Measured on a two-node manager with one peer at status `"from-the-wire"`: `calculateClusterStats`
+  reported `total=2 alive=1 suspect=0 dead=0`, losing the second node from a breakdown that is supposed
+  to partition the total, and `performHealthChecks` left it at that status across every pass no matter
+  how stale — an hour, or forever — because the switch simply fell through.
+
+  Reaping is the half that reaches beyond the tally: quorum in `consensus.go` tests
+  `== NodeStatusAlive` in three places, so a node stuck at an unrecognized status can neither vote nor
+  be counted while remaining in the membership map, and nothing ever removes it. Both switches now have
+  a `default` that treats the node as suspect — it has been heard from, so what is unknown is its state
+  rather than its existence, and the existing suspect arm reaps it on the next pass. Its `CacheSize` and
+  `CacheHitRate` are deliberately still excluded from the cluster aggregates, for the reason a dead
+  node's are: an unknown state is not capacity this cluster can serve from.
+
+  `NodeStatusJoining` and `NodeStatusLeaving` arrive at the same arm, and are worth naming because they
+  are declared in `cluster.go` and **assigned nowhere in the repository** — so what looked like two
+  missing switch cases was two dead enum values plus one real wire-data gap. `EntryTypeSnapshot` in
+  `consensus.go` is the same: declared, appended by nothing, and #151 — which would have added
+  snapshotting — was closed for that reason.
+
+  Covered by `TestUnrecognizedNodeStatus_IsCountedAndReaped`, verified against each arm separately:
+  removing the stats `default` fails the partition assertion, removing the health-check `default` fails
+  the reap assertion, and neither mutation fails the other's.
+
+- **Eighteen error assertions that would have panicked instead of failing, and fifteen float
+  comparisons the linter's own suggestion would have weakened** ([#179]). `testifylint` 33 → 0.
+
+  The `require-error` half is a real difference in failure mode, measured rather than reasoned.
+  `internal/storage/s3/backend_test.go` asserted `assert.Error(t, err)` and then read `err.Error()` two
+  lines later; with a nil error that is a **nil-pointer panic**, which takes down the whole test binary
+  and every other test in the package, instead of one named failure. Proven both ways in a scratch test:
+  `assert` panics with `invalid memory address or nil pointer dereference`, `require` reports "An error
+  is expected but got nil" and stops. All eighteen sites have the same shape — an error assertion whose
+  following lines depend on it having held — which is also why the count is eighteen and not twenty:
+  the two that end their block (`tests/integration_test.go:138`, `tests/unit_test.go:107`) are correctly
+  left alone by the linter.
+
+  The `float-compare` half went the other way, and is the more interesting finding: **the fixer's
+  suggestion weakens the assertion.** `testifylint` says "use `assert.InEpsilon` (or `InDelta`)", but 14
+  of the 15 sites compare against exactly `0.0`, where exact equality is the *stronger* claim — a cost
+  model that returns a tiny non-zero for a zero-duration store is wrong, not approximately right.
+  Measured on real code by mutation: with `math.Max(0, durationMonths)` in
+  `internal/cost/calculator.go` changed to `math.Max(1e-300, ...)`, `assert.Zero` **fails** with "Should
+  be zero, but was 2.4696061952e-302" while the suggested `assert.InDelta(t, 0.0, cost, 1e-9)`
+  **passes**. So they are now `assert.Zero`, which the linter accepts and which keeps exact comparison.
+
+  The fifteenth is suppressed rather than satisfied, with the reason in the source:
+  `internal/cost/reporter_test.go` asserts two identical `RecordOp` calls price bit-identically, which is
+  determinism rather than approximation — and the line directly below it already uses `InDelta`, where a
+  tolerance genuinely is right because it compares a sum against a doubled value.
+
+- **A `//nolint` directive that has been one leading space away from inert since #364** ([#179]).
+  `nolintlint` 1 → 0. `internal/difftest/fuzz_test.go` carried `// nolint:paralleltest` with a space,
+  and the four lines of reasoning after it were the directive's own continuation.
+
+  Two things follow, both measured. golangci-lint does honour the spaced form here — `paralleltest` goes
+  0 → 2 on that file when the directive is deleted, so it was load-bearing and the test was never
+  silently unguarded. But gofmt does *not* recognize a spaced directive, so removing the space made gofmt
+  relocate it to just above the declaration and strand the paragraph explaining it. The comment is now
+  restructured so the prose is prose and the suppression is one self-contained line; `paralleltest` still
+  reports 384, unchanged, which is what confirms the directive survived its own reformatting.
+
+- **`TestDegradedState` asserted that Go assigns struct literal fields, and now asserts what
+  `markDegraded` records** ([#179]). It built a `DegradedState` literal and read two of its own fields
+  back, so its subject was its own fixture: verified by execution rather than claimed — with
+  `markDegraded` replaced by an empty function body, the old test still passes.
+
+  `govet`'s `unusedwrite` is what surfaced it, by noticing that two of the four fields the literal set
+  were never read. That is the visible symptom, and the gap behind it is larger than the lint finding:
+  `markDegraded` sets `Component`, `Reason`, `Since`, `AttemptCount`, `LastAttempt`, `NextAttempt` and
+  `OriginalError`, and **nothing in the suite asserted any of them**. Three tests call it and all three
+  then ask only `isComponentDegraded` or a count, so the `Reason` format string, the attempt counter's
+  behaviour on a second failure, and the `*errors.ObjectFSError` type assertion were uncovered.
+
+  The replacement drives the real producer and checks five properties, each mutation-verified against
+  `markDegraded` itself: dropping the operation prefix from `Reason`, pinning `AttemptCount` to 1,
+  resetting `Since` on the second call, disabling the `OriginalError` type assertion, and removing the
+  `RecoveryBackoff` gap between `LastAttempt` and `NextAttempt` each fail it. The second-call assertions
+  are the ones the shape of the old test made impossible to write: updating an existing record while
+  preserving `Since` is a property of two calls, not of one literal.
+
+- **Four variables named `copy` and one named `error`, all shadowing predeclared identifiers**
+  ([#179]). `predeclared` 5 → 0. `Operation.Copy` and `Progress.Copy` in `pkg/status` each named their
+  result `copy`; both are now `dup`. Neither needed the builtin — the map copy goes through `maps.Copy`,
+  which is package-qualified and unaffected — so this is a readability fix rather than a bug fix, and
+  saying so is the point: a shadow that forced a workaround would have been a different entry.
+
+  `internal/cache/predictive.go`'s gradient-descent loop named its error term `error`. Renamed to
+  `residual`, which is both the unshadowed name and the accurate one. Checked before renaming that the
+  shadow was not concealing a dropped failure: there is no `err` anywhere in that function's scope, so
+  nothing was hidden by it.
 
 - **`TestTracker_CanRead` was passing on the order its subtests happened to run in** — found by
   parallelizing it, and the more useful half of that change ([#179]).
@@ -1826,6 +2292,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **substrate v0.87.0 → v0.92.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
+  `go.sum` are the whole diff.
+
+  The S3 conditional-write behaviour that [#282] is built on was re-probed on the new version rather
+  than assumed to be stable across five releases: `If-None-Match: *` succeeds on an absent key and
+  answers 412 on a present one, a failed precondition leaves the stored bytes unmodified, `If-Match`
+  succeeds on a current ETag and answers 412 on a stale one, and `If-Match` against an absent key
+  answers **404 rather than 412** — the distinction #282 makes load-bearing, since a lost race and a
+  vanished object need different recovery. Identical on both versions.
+
+  `internal/testaws`, `internal/storage/s3`, and `internal/difftest` all pass at `-race`, as does the
+  full suite. [scttfrdmn/substrate#540] — the third conditional-write outcome, 409 Conflict from a
+  delete interleaving a conditional write — is still open, and is not a blocker for #282.
+- **Six section-header comments sitting where a doc comment goes are now doc comments, and three of
+  them record something a reader would otherwise get wrong** ([#179]). `staticcheck` ST1020/ST1021
+  6 → 0. Each was a heading like `// Enums for health check categorization` above an exported type,
+  which reads as organisation and renders as documentation.
+
+  Prepending the symbol's name would have satisfied the linter and documented nothing, so each says
+  what the thing does — and three had a fact worth stating. `ClusterManager.UpdateNodeInfo` merges
+  selectively: an existing member keeps its `ID`, `Address` and `Version`, so a gossip message claiming
+  a new address for a known ID updates liveness and nothing else, and `Metadata` merges key-by-key
+  rather than replacing. `internal/health`'s `Category` is a label and not a switch — nothing branches
+  on it, so a check filed under the wrong category still runs identically. `filesystem.FilesystemError`'s
+  sentinels carry an empty `Op` and `Path`, so they are values to compare against rather than errors to
+  return: `ErrNotExist.Error()` renders as `" : file does not exist"`.
+
+  All three were verified by throwaway probe rather than by reading, and two of the four claims I first
+  wrote were wrong. `GetProtocol`'s comment said its callers are logging and metrics sites; it has no
+  callers outside this package's own test, and nothing sets `ContextKeyProtocol` either. And
+  `ErrTierNotSupported` is *not* indistinguishable from `ErrInvalid` as first written — both wrap
+  `os.ErrInvalid`, so `errors.Is` against `os.ErrInvalid` cannot separate them, but
+  `errors.Is(ErrTierNotSupported, ErrInvalid)` is false, since each is its own pointer and neither
+  wraps the other.
+
+- **Every three-clause counting loop is now an integer range, and the lint run stops reporting a
+  dependency's Go files as this repository's** ([#179]). `intrange` 37 → 0 and `modernize` 2 → 0, taking
+  the total from 570 to 531. Applied with `golangci-lint --fix` rather than a hand-written transform,
+  because the fixer knows which loops it cannot safely rewrite and a regex over `for i := 0;` does not.
+
+  Eight of those 39 findings were never ours. The `flatted` npm package ships a Go port under its own
+  package directory, so once anything runs `npm install` in `docs-platform` or `sdks/javascript`, `./...`
+  picks up two copies of it — six `intrange` and both `modernize` findings, in a file nobody here can
+  edit. `.golangci.yml` now excludes `/node_modules/` by path, which is the same exclusion
+  `scripts/coverage-gate.sh` grew for the same two directories, and that one is what made these visible:
+  the copies showed up as unfloored packages at 0.0% first. Verified in the way that distinguishes the
+  exclusion from the fixer: after the run, both vendored files still contain their three old-style loops
+  each, so the findings went away without `--fix` rewriting a dependency's source.
+
+  Twenty-nine of the 31 in-repo sites are `for i := 0; i < b.N; i++` in benchmarks, and the choice not to
+  write `for b.Loop()` instead was settled by probe rather than by preference. `b.Loop` is the Go 1.24+
+  form and it would also make the adjacent `b.ResetTimer()` calls redundant, but that is a semantic change
+  to what each benchmark measures, and the concern that would have forced it does not apply: `modernize`'s
+  `bloop` analyzer is present in the bundled binary and does not fire on `range b.N` even when explicitly
+  enabled, so this does not trade one finding for another. The benchmarks were run rather than assumed to
+  still iterate — `-benchtime=10x` reports 10 iterations and real per-op timings across the touched
+  packages.
+
+  The two sites that are not benchmarks are the ones where a transform can change behaviour, and both are
+  the outer loop of an adjacent-comparison sort over `len(x)-1`: `range` evaluates its bound once, where
+  the three-clause form re-evaluated it every iteration. Equivalent here because the bodies swap elements
+  without changing length, and `range` over a negative int does zero iterations exactly as `i < -1` would —
+  measured, since an empty slice makes that bound `-1`. Both were then mutation-verified: neutering the
+  `LoadBalancer` sort fails `TestLoadBalancer_LeastLoad` with `got [n1], want [n2]`, and inverting the
+  alert-ordering assertion fails `TestAlertManager_GetRecentAlerts`. The second needed a probe first — a
+  mutation that deletes an assertion loop passes by construction, so the useful check was that the loop
+  runs at all, and it makes two comparisons over three alerts rather than being vacuous.
+
+[#179]: https://github.com/scttfrdmn/objectfs/issues/179
+[#373]: https://github.com/scttfrdmn/objectfs/issues/373
+[#376]: https://github.com/scttfrdmn/objectfs/issues/376
+[#377]: https://github.com/scttfrdmn/objectfs/issues/377
 
 - **`eventemitter3` 4.0.7 → 5.0.4 in the JavaScript SDK.** A major bump, taken by hand rather than by
   merging [#346], because that pull request carried four unrelated *downgrades* alongside it: `jest`

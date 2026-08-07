@@ -48,7 +48,7 @@ func liveMount(t *testing.T, opts *MountOptions) (string, *MountManager) {
 
 	mountPoint := t.TempDir()
 
-	pfs := CreatePlatformMountManager(srv.Backend(), nil, writer, nil, &MountConfig{
+	pfs := CreatePlatformMountManager(t.Context(), srv.Backend(), nil, writer, nil, &MountConfig{
 		MountPoint: mountPoint,
 		Options:    opts,
 	})

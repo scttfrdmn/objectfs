@@ -81,7 +81,7 @@ func TestUnauthenticatedJoinIsRejected(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 99), Port: 8080}
 
 	// Sealed with a different secret — an attacker who knows the wire format but not the key.
-	gp.handleIncomingMessage(joinDatagram(t, []byte(strings.Repeat("x", minSecretLen)), "intruder"), addr)
+	gp.handleIncomingMessage(t.Context(), joinDatagram(t, []byte(strings.Repeat("x", minSecretLen)), "intruder"), addr)
 
 	if _, joined := gp.cluster.GetNodes()["intruder"]; joined {
 		t.Error("a node holding the wrong cluster secret joined the cluster")
@@ -103,7 +103,7 @@ func TestUnauthenticatedJoinIsRejected(t *testing.T) {
 		t.Fatalf("marshaling the bare message: %v", err)
 	}
 
-	gp.handleIncomingMessage(bare, addr)
+	gp.handleIncomingMessage(t.Context(), bare, addr)
 
 	if _, joined := gp.cluster.GetNodes()["plaintext"]; joined {
 		t.Error("a node sending an unauthenticated message joined the cluster")
@@ -136,7 +136,7 @@ func TestAuthenticatedJoinIsAccepted(t *testing.T) {
 	gp := cm.gossip
 	data := joinDatagram(t, gp.auth.secret, "node-b")
 
-	gp.handleIncomingMessage(data, &net.UDPAddr{IP: net.IPv4(10, 0, 0, 99), Port: 8080})
+	gp.handleIncomingMessage(t.Context(), data, &net.UDPAddr{IP: net.IPv4(10, 0, 0, 99), Port: 8080})
 
 	if _, joined := cm.GetNodes()["node-b"]; !joined {
 		t.Fatal("a node holding the correct cluster secret failed to join")
@@ -157,8 +157,8 @@ func TestReplayedAnnouncementIsRejected(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 99), Port: 8080}
 	data := joinDatagram(t, gp.auth.secret, "node-b")
 
-	gp.handleIncomingMessage(data, addr)
-	gp.handleIncomingMessage(data, addr) // the same datagram, captured and sent again
+	gp.handleIncomingMessage(t.Context(), data, addr)
+	gp.handleIncomingMessage(t.Context(), data, addr) // the same datagram, captured and sent again
 
 	stats := gp.GetStats()
 	if stats.MessagesReplayed != 1 {

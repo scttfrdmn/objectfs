@@ -46,14 +46,21 @@ func (inv *Invalidator) Subscribe(ctx context.Context) {
 				if !ok {
 					return
 				}
-				inv.handle(msg.Payload)
+				inv.handle(ctx, msg.Payload)
 			}
 		}
 	}()
 }
 
 // handle processes a single invalidation message payload.
-func (inv *Invalidator) handle(payload string) {
+//
+// ctx is the subscription's, and it is the reason this takes one at all: the delete it performs is a
+// Redis round trip on the same connection pool the subscription uses, so a canceled subscription should
+// not leave a DEL running against a client being closed underneath it. [Cache.Delete] cannot accept one
+// — types.Cache assigns no context to any of its methods — so this calls [Cache.DeleteContext], which
+// is the same operation with the context restored. That interface gap is a real constraint and not one
+// to resolve by way of a lint finding; see the note on Cache.Delete.
+func (inv *Invalidator) handle(ctx context.Context, payload string) {
 	before, after, ok := strings.Cut(payload, ":")
 	if !ok {
 		slog.Warn("redis invalidation: malformed message", "payload", payload)
@@ -65,6 +72,6 @@ func (inv *Invalidator) handle(payload string) {
 		return // skip our own broadcasts — we already deleted locally
 	}
 	if inv.cache != nil {
-		inv.cache.Delete(key)
+		inv.cache.DeleteContext(ctx, key)
 	}
 }

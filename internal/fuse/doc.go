@@ -133,11 +133,13 @@ The operator-facing names are [config.FUSEConfig]'s.
 
 Basic filesystem mounting:
 
-	// Create filesystem
-	filesystem := fuse.NewFileSystem(backend, cache, writeBuffer, metrics, config)
+	// Create filesystem. mountCtx is the mount's lifetime, not this call's: canceling it is what
+	// stops the read-ahead manager's prefetch workers.
+	filesystem := fuse.NewFileSystem(mountCtx, backend, cache, writeBuffer, metrics, config)
 
 	// Create mount manager
 	mountManager := fuse.CreatePlatformMountManager(
+		mountCtx,
 		backend,
 		cache,
 		writeBuffer,

@@ -159,6 +159,19 @@ linters:
   exclusions:
     generated: lax
 
+    paths:
+      # Go files vendored inside npm dependencies are not this repository's code. The `flatted`
+      # package ships a Go port under its own directory, so once anything runs `npm install` in
+      # docs-platform or sdks/javascript, `./...` picks up two copies of it and the lint run grows
+      # eight findings — six intrange, two modernize — in a file nobody here can edit. They are
+      # gitignored and absent from a fresh checkout, so they appear only on a developer machine,
+      # which is the worst place for a gate to grow noise nobody can act on: the fix is not a
+      # nolint directive in someone else's package, it is not linting it.
+      #
+      # scripts/coverage-gate.sh skips the same paths for the same reason, and that exclusion is
+      # what made these visible — the two copies showed up as unfloored packages at 0.0% first.
+      - '/node_modules/'
+
     rules:
       # Fuzz targets and the seed-corpus guards are deliberately loose about a few things a
       # production path must not be. A fuzzer discards most inputs, so an error it does not check
@@ -203,24 +216,6 @@ linters:
       - path: 'sdks/'
         linters:
           - unused
-
-      # pkg/utils' debug-mode tests cannot run in parallel, and the obstacle is the design rather
-      # than the tests (#373).
-      #
-      # DebugManager is a package-level singleton behind a sync.Once with no exported constructor, so
-      # every test observes the same instance — but that alone would be workable, since each test
-      # already uses a distinct session ID. The blocker is DebugManager.RecordEvent: it fans every
-      # event out to *all* open sessions, so a session's event count is a function of what every
-      # other concurrently-open session recorded. Adding t.Parallel here produces exactly that,
-      # measured rather than predicted: "Expected 1 event, got 17", "Expected 2 storage events, got
-      # 6", and four other counts inflated by siblings' traffic.
-      #
-      # Suppressed rather than silenced with a false t.Parallel, which would leave the tests
-      # sequential in effect and the lint green — the worst of both. #373 tracks giving the manager a
-      # constructor so each test can own one, which is the fix that makes the exclusion removable.
-      - path: 'pkg/utils/debug_mode_test\.go'
-        linters:
-          - paralleltest
 
 issues:
   # Report everything. A cap that hides findings is how a lint gate becomes decorative.

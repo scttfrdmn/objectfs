@@ -47,7 +47,7 @@ const errXattrMissing = syscall.Errno(fuse.ENOATTR)
 func rootBridge(t *testing.T) fuse.RawFileSystem {
 	t.Helper()
 
-	filesystem := NewFileSystem(nil, nil, nil, nil, nil)
+	filesystem := NewFileSystem(t.Context(), nil, nil, nil, nil, nil)
 
 	return gofuse.NewNodeFS(filesystem.Root(), &gofuse.Options{})
 }
@@ -156,7 +156,7 @@ func TestUnimplementedOperationsReturnTheDocumentedErrno(t *testing.T) {
 func TestRenameIsDispatchedRatherThanDefaulted(t *testing.T) {
 	t.Parallel()
 
-	filesystem := NewFileSystem(nil, nil, nil, nil, &Config{ReadOnly: true})
+	filesystem := NewFileSystem(t.Context(), nil, nil, nil, nil, &Config{ReadOnly: true})
 	raw := gofuse.NewNodeFS(filesystem.Root(), &gofuse.Options{})
 
 	in := &fuse.RenameIn{InHeader: rootHeader(), Newdir: 1}
@@ -268,7 +268,7 @@ func TestLocksAreNotForwardedToTheFilesystem(t *testing.T) {
 	t.Parallel()
 
 	// The real mount path, with the default config NewMountManager builds when given nil.
-	opts := NewMountManager(NewFileSystem(nil, nil, nil, nil, nil), nil).buildFUSEOptions()
+	opts := NewMountManager(NewFileSystem(t.Context(), nil, nil, nil, nil, nil), nil).buildFUSEOptions()
 
 	if opts.EnableLocks {
 		t.Error("EnableLocks is set, so the kernel now forwards lock requests to ObjectFS — but no " +

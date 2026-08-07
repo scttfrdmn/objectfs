@@ -263,13 +263,16 @@ func (em *EnhancedMonitor) problemDetectionLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			em.analyzeHealthPatterns()
+			em.analyzeHealthPatterns(ctx)
 		}
 	}
 }
 
-// analyzeHealthPatterns analyzes health patterns and detects issues
-func (em *EnhancedMonitor) analyzeHealthPatterns() {
+// analyzeHealthPatterns analyzes health patterns and detects issues.
+//
+// ctx reaches the auto-remediation goroutine createDetectedIssue may start — see there for why it is
+// threaded through three functions that do no I/O themselves.
+func (em *EnhancedMonitor) analyzeHealthPatterns(ctx context.Context) {
 	// Get all current health check results
 	status := em.checker.GetStatus()
 	checks, ok := status["checks"].(map[string]*Result)
@@ -279,7 +282,7 @@ func (em *EnhancedMonitor) analyzeHealthPatterns() {
 
 	for checkName, result := range checks {
 		em.updateHealthPattern(checkName, result)
-		em.detectProblems(checkName)
+		em.detectProblems(ctx, checkName)
 	}
 }
 
@@ -375,8 +378,8 @@ func (em *EnhancedMonitor) calculatePatternMetrics(pattern *HealthPattern) {
 	}
 }
 
-// detectProblems detects problems based on health patterns
-func (em *EnhancedMonitor) detectProblems(checkName string) {
+// detectProblems detects problems based on health patterns.
+func (em *EnhancedMonitor) detectProblems(ctx context.Context, checkName string) {
 	em.analyzer.mu.Lock()
 	defer em.analyzer.mu.Unlock()
 
@@ -387,40 +390,47 @@ func (em *EnhancedMonitor) detectProblems(checkName string) {
 
 	// Check for high error rate
 	if pattern.ErrorRate >= em.analyzer.thresholds.ErrorRateCritical {
-		em.createDetectedIssue(checkName, "high_error_rate", PriorityCritical,
+		em.createDetectedIssue(ctx, checkName, "high_error_rate", PriorityCritical,
 			fmt.Sprintf("Error rate %.1f%% exceeds critical threshold", pattern.ErrorRate*100),
 			pattern)
 	} else if pattern.ErrorRate >= em.analyzer.thresholds.ErrorRateWarning {
-		em.createDetectedIssue(checkName, "elevated_error_rate", PriorityHigh,
+		em.createDetectedIssue(ctx, checkName, "elevated_error_rate", PriorityHigh,
 			fmt.Sprintf("Error rate %.1f%% exceeds warning threshold", pattern.ErrorRate*100),
 			pattern)
 	}
 
 	// Check for failure streak
 	if pattern.FailureStreak >= em.analyzer.thresholds.FailureStreakCritical {
-		em.createDetectedIssue(checkName, "failure_streak", PriorityCritical,
+		em.createDetectedIssue(ctx, checkName, "failure_streak", PriorityCritical,
 			fmt.Sprintf("%d consecutive failures detected", pattern.FailureStreak),
 			pattern)
 	} else if pattern.FailureStreak >= em.analyzer.thresholds.FailureStreakWarning {
-		em.createDetectedIssue(checkName, "failure_streak", PriorityHigh,
+		em.createDetectedIssue(ctx, checkName, "failure_streak", PriorityHigh,
 			fmt.Sprintf("%d consecutive failures detected", pattern.FailureStreak),
 			pattern)
 	}
 
 	// Check for increasing latency
 	if pattern.LatencyTrend == "increasing" && pattern.AvgLatency > em.analyzer.thresholds.LatencyCritical {
-		em.createDetectedIssue(checkName, "latency_degradation", PriorityHigh,
+		em.createDetectedIssue(ctx, checkName, "latency_degradation", PriorityHigh,
 			fmt.Sprintf("Latency increasing, avg %v exceeds critical threshold", pattern.AvgLatency),
 			pattern)
 	} else if pattern.LatencyTrend == "increasing" && pattern.AvgLatency > em.analyzer.thresholds.LatencyWarning {
-		em.createDetectedIssue(checkName, "latency_degradation", PriorityMedium,
+		em.createDetectedIssue(ctx, checkName, "latency_degradation", PriorityMedium,
 			fmt.Sprintf("Latency increasing, avg %v exceeds warning threshold", pattern.AvgLatency),
 			pattern)
 	}
 }
 
-// createDetectedIssue creates a detected issue if it doesn't already exist
-func (em *EnhancedMonitor) createDetectedIssue(component, issueType string, severity Priority, description string, pattern *HealthPattern) {
+// createDetectedIssue creates a detected issue if it doesn't already exist.
+//
+// ctx is the problem-detection loop's, which is Start's caller's: it is the parent of the remediation
+// deadline below, so a caller who gives up stops the remediation it asked for. That context used to be
+// context.Background(), which is why this and its two callers took a parameter they otherwise have no
+// use for.
+//
+// Must be called with analyzer.mu held; detectProblems holds it.
+func (em *EnhancedMonitor) createDetectedIssue(ctx context.Context, component, issueType string, severity Priority, description string, pattern *HealthPattern) {
 	// Check if issue already exists and is not resolved
 	issueID := fmt.Sprintf("%s-%s", component, issueType)
 	for _, existingIssue := range em.analyzer.detectedIssues {
@@ -448,22 +458,36 @@ func (em *EnhancedMonitor) createDetectedIssue(component, issueType string, seve
 	em.analyzer.detectedIssues = append(em.analyzer.detectedIssues, issue)
 
 	// If auto-recovery enabled, attempt remediation
-	if em.config.AutoRecovery && severity >= PriorityHigh {
+	// severity.AtLeast, not `severity >= PriorityHigh`: Priority is a string, so that comparison ran
+	// on bytes and "critical" sorts before "high". It was therefore false for both PriorityCritical
+	// arms in detectProblems above — a critical error rate and a critical failure streak got no
+	// auto-remediation — and true for PriorityMedium, the least severe issue this type raises.
+	if em.config.AutoRecovery && severity.AtLeast(PriorityHigh) {
+		// Derived from ctx and not context.WithoutCancel(ctx), unlike the two lifetimes in Monitor and
+		// Checker: problemDetectionLoop's own stop signal *is* this ctx — it selects on ctx.Done() and
+		// returns — so canceling it means shutdown, and a remediation that outlived it would be up to
+		// five minutes of a goroutine acting on a monitor nobody is reading.
+		remediateCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+
+		// Set here, where analyzer.mu is already held by detectProblems, rather than as the goroutine's
+		// first statement. That is where it used to be, unlocked, while GetComponentHealthDetail reads
+		// the same field under RLock — and the two clearing writes at the end of the goroutine were
+		// unlocked too, one of them outside the Lock/Unlock pair three lines above it.
+		issue.AutoRemediating = true
+
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 
-			issue.AutoRemediating = true
-			if err := em.AttemptAutoRemediation(ctx, component); err == nil {
-				// Mark issue as resolved
-				em.analyzer.mu.Lock()
+			err := em.AttemptAutoRemediation(remediateCtx, component)
+
+			em.analyzer.mu.Lock()
+			defer em.analyzer.mu.Unlock()
+
+			issue.AutoRemediating = false
+			if err == nil {
 				issue.Resolved = true
 				now := time.Now()
 				issue.ResolvedAt = &now
-				issue.AutoRemediating = false
-				em.analyzer.mu.Unlock()
-			} else {
-				issue.AutoRemediating = false
 			}
 		}()
 	}

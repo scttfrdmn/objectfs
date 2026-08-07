@@ -222,7 +222,13 @@ type AccessPattern struct {
 	AccessTrend         string // "increasing", "decreasing", "stable"
 }
 
-// Protocol-specific context keys for passing additional information
+// ContextKey is the type of the keys this package uses with [context.WithValue], carrying
+// per-request information a protocol handler knows and the filesystem operations below do not.
+//
+// A named string type rather than a bare string, for the reason the context documentation gives: a
+// bare string key collides silently with any other package that happens to use the same word, and
+// "protocol" is not an unlikely word. The constants below group by protocol, and only the ContextKey*
+// values in the Common block are meaningful across all of them.
 type ContextKey string
 
 const (
@@ -246,7 +252,16 @@ const (
 	ContextKeyRequestID ContextKey = "request_id"
 )
 
-// Helper functions for protocol handlers
+// GetProtocol returns the protocol name a request arrived over — "fuse", "smb" or "nfs" — or
+// "unknown" if the context carries no [ContextKeyProtocol] value or one that is not a string.
+//
+// It returns a sentinel rather than a (value, ok) pair, which suits a logging or metrics label and
+// makes "the key was absent" indistinguishable from "the protocol is literally unknown". That is
+// worth knowing before the first real caller exists, and as of now there is none outside this
+// package's own test — nor does anything set [ContextKeyProtocol] outside it. The same holds for
+// [GetClientIP] and [GetRequestID], which return "" for want of a non-empty sentinel. This is a
+// declared surface rather than a used one, like the rest of the file; the package comment is the
+// authority on that and README.md's supported-operations table on what actually works.
 func GetProtocol(ctx context.Context) string {
 	if protocol, ok := ctx.Value(ContextKeyProtocol).(string); ok {
 		return protocol
@@ -268,7 +283,17 @@ func GetRequestID(ctx context.Context) string {
 	return ""
 }
 
-// Error types specific to filesystem operations
+// FilesystemError is an operation, a path, and the underlying error, in the shape [os.PathError] uses.
+//
+// It implements Unwrap, so the sentinels below compare with [errors.Is] against the [os] error values
+// they wrap — ErrNotExist matches os.ErrNotExist. Those sentinels carry an empty Op and Path, so they
+// are values to compare against and not errors to return: returning one loses the operation and path
+// that are this type's reason for existing, and Error() would render as " : file does not exist".
+//
+// Note that ErrTierNotSupported and ErrInvalid both wrap [os.ErrInvalid], so errors.Is against
+// os.ErrInvalid cannot tell them apart — though it does distinguish the two from each other, since
+// each is its own pointer and neither wraps the other. Measured, not inferred: Is(ErrTierNotSupported,
+// os.ErrInvalid) is true and Is(ErrTierNotSupported, ErrInvalid) is false.
 type FilesystemError struct {
 	Op   string
 	Path string

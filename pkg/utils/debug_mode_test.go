@@ -7,6 +7,8 @@ import (
 )
 
 func TestGetDebugManager(t *testing.T) {
+	t.Parallel()
+
 	dm1 := GetDebugManager()
 	dm2 := GetDebugManager()
 
@@ -16,7 +18,9 @@ func TestGetDebugManager(t *testing.T) {
 }
 
 func TestStartStopSession(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-1"
 	components := []string{"storage", "cache"}
@@ -57,7 +61,9 @@ func TestStartStopSession(t *testing.T) {
 }
 
 func TestRecordEvent(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-2"
 	components := []string{"storage"}
@@ -98,7 +104,9 @@ func TestRecordEvent(t *testing.T) {
 }
 
 func TestComponentFiltering(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-3"
 	components := []string{"storage"} // Only track storage
@@ -124,7 +132,9 @@ func TestComponentFiltering(t *testing.T) {
 }
 
 func TestRecordEventWithDuration(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-4"
 	session := dm.StartSession(sessionID, nil, 1000)
@@ -144,7 +154,9 @@ func TestRecordEventWithDuration(t *testing.T) {
 }
 
 func TestGetEventsByComponent(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-5"
 	session := dm.StartSession(sessionID, nil, 1000)
@@ -170,7 +182,9 @@ func TestGetEventsByComponent(t *testing.T) {
 }
 
 func TestMaxEvents(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-6"
 	maxEvents := 5
@@ -189,7 +203,9 @@ func TestMaxEvents(t *testing.T) {
 }
 
 func TestListSessions(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	// Start multiple sessions
 	session1ID := "session-list-1"
@@ -223,7 +239,9 @@ func TestListSessions(t *testing.T) {
 }
 
 func TestGetStats(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-7"
 	components := []string{"storage", "cache"}
@@ -268,7 +286,9 @@ func TestGetStats(t *testing.T) {
 }
 
 func TestCaptureProfile(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-8"
 	session := dm.StartSession(sessionID, nil, 1000)
@@ -292,7 +312,9 @@ func TestCaptureProfile(t *testing.T) {
 }
 
 func TestCaptureProfile_InvalidType(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-9"
 	session := dm.StartSession(sessionID, nil, 1000)
@@ -306,7 +328,9 @@ func TestCaptureProfile_InvalidType(t *testing.T) {
 }
 
 func TestDebugTrace(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-10"
 	session := dm.StartSession(sessionID, nil, 1000)
@@ -316,7 +340,7 @@ func TestDebugTrace(t *testing.T) {
 	fields := map[string]any{
 		"operation_id": "op-123",
 	}
-	trace := StartTrace(sessionID, "storage", "write", fields)
+	trace := dm.StartTrace(sessionID, "storage", "write", fields)
 
 	if trace == nil {
 		t.Fatal("Failed to start trace")
@@ -344,14 +368,16 @@ func TestDebugTrace(t *testing.T) {
 }
 
 func TestDebugTrace_WithError(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-11"
 	session := dm.StartSession(sessionID, nil, 1000)
 	defer dm.StopSession(sessionID)
 
 	// Start trace
-	trace := StartTrace(sessionID, "storage", "read", nil)
+	trace := dm.StartTrace(sessionID, "storage", "read", nil)
 
 	// Simulate work with error
 	time.Sleep(5 * time.Millisecond)
@@ -376,6 +402,8 @@ func TestDebugTrace_WithError(t *testing.T) {
 }
 
 func TestDebugTrace_NoSession(t *testing.T) {
+	t.Parallel()
+
 	// Try to start trace with non-existent session
 	trace := StartTrace("non-existent-session", "test", "op", nil)
 
@@ -385,7 +413,9 @@ func TestDebugTrace_NoSession(t *testing.T) {
 }
 
 func TestContextIntegration(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-12"
 	dm.StartSession(sessionID, nil, 1000)
@@ -404,6 +434,8 @@ func TestContextIntegration(t *testing.T) {
 }
 
 func TestContextIntegration_NoSession(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 
 	// Try to extract from context without session
@@ -415,7 +447,9 @@ func TestContextIntegration_NoSession(t *testing.T) {
 }
 
 func TestSetLogger(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	// Create a test logger
 	config := DefaultStructuredLoggerConfig()
@@ -435,7 +469,9 @@ func TestSetLogger(t *testing.T) {
 }
 
 func TestRecordEvent_AfterStop(t *testing.T) {
-	dm := GetDebugManager()
+	t.Parallel()
+
+	dm := NewDebugManager()
 
 	sessionID := "test-session-14"
 	session := dm.StartSession(sessionID, nil, 1000)
@@ -456,6 +492,8 @@ func TestRecordEvent_AfterStop(t *testing.T) {
 }
 
 func TestGoroutineID(t *testing.T) {
+	t.Parallel()
+
 	id := getGoroutineID()
 
 	if id <= 0 {

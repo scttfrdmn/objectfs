@@ -14,6 +14,8 @@ func abs(x float64) float64 {
 }
 
 func TestPricingManager_CustomPricing(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// Create pricing config with custom pricing
@@ -39,6 +41,8 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Uses Custom Pricing", func(t *testing.T) {
+		t.Parallel()
+
 		pricing, err := manager.GetTierPricing(TierStandard)
 		if err != nil {
 			t.Fatalf("Failed to get tier pricing: %v", err)
@@ -57,6 +61,8 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 	})
 
 	t.Run("Falls Back to Defaults", func(t *testing.T) {
+		t.Parallel()
+
 		// Test tier not in custom pricing
 		pricing, err := manager.GetTierPricing(TierStandardIA)
 		if err != nil {
@@ -77,6 +83,8 @@ func TestPricingManager_CustomPricing(t *testing.T) {
 }
 
 func TestPricingManager_VolumeDiscounts(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	config := PricingConfig{
@@ -153,6 +161,8 @@ func TestPricingManager_VolumeDiscounts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			discountedCost := manager.CalculateVolumeDiscount(tt.tier, tt.sizeGB, tt.baseCost)
 			expectedCost := tt.baseCost * (1.0 - tt.expectedDiscount/100.0)
 
@@ -164,6 +174,8 @@ func TestPricingManager_VolumeDiscounts(t *testing.T) {
 }
 
 func TestPricingManager_MultipleDiscounts(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	config := PricingConfig{
@@ -185,6 +197,8 @@ func TestPricingManager_MultipleDiscounts(t *testing.T) {
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Multiple Discounts Applied", func(t *testing.T) {
+		t.Parallel()
+
 		pricing, err := manager.GetTierPricing(TierStandardIA)
 		if err != nil {
 			t.Fatalf("Failed to get tier pricing: %v", err)
@@ -210,6 +224,8 @@ func TestPricingManager_MultipleDiscounts(t *testing.T) {
 }
 
 func TestPricingManager_DefaultPricing(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// Minimal config - should use all defaults
@@ -220,6 +236,8 @@ func TestPricingManager_DefaultPricing(t *testing.T) {
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Uses Default Pricing", func(t *testing.T) {
+		t.Parallel()
+
 		pricing, err := manager.GetTierPricing(TierStandard)
 		if err != nil {
 			t.Fatalf("Failed to get tier pricing: %v", err)
@@ -238,6 +256,8 @@ func TestPricingManager_DefaultPricing(t *testing.T) {
 	})
 
 	t.Run("Handles Minimum Sizes", func(t *testing.T) {
+		t.Parallel()
+
 		pricing, err := manager.GetTierPricing(TierStandardIA)
 		if err != nil {
 			t.Fatalf("Failed to get tier pricing: %v", err)
@@ -256,6 +276,8 @@ func TestPricingManager_DefaultPricing(t *testing.T) {
 }
 
 func TestPricingManager_PricingSummary(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	config := PricingConfig{
@@ -270,6 +292,8 @@ func TestPricingManager_PricingSummary(t *testing.T) {
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Generates Summary", func(t *testing.T) {
+		t.Parallel()
+
 		summary := manager.GetPricingSummary()
 
 		if summary.Region != "us-west-2" {
@@ -296,6 +320,8 @@ func TestPricingManager_PricingSummary(t *testing.T) {
 }
 
 func TestPricingManager_ErrorHandling(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	config := PricingConfig{
@@ -306,6 +332,8 @@ func TestPricingManager_ErrorHandling(t *testing.T) {
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Falls Back on API Failure", func(t *testing.T) {
+		t.Parallel()
+
 		// Should fall back to defaults when API fails
 		pricing, err := manager.GetTierPricing(TierStandard)
 		if err != nil {
@@ -320,6 +348,8 @@ func TestPricingManager_ErrorHandling(t *testing.T) {
 }
 
 func TestPricingManager_CurrencyAndRegion(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	config := PricingConfig{
@@ -330,6 +360,8 @@ func TestPricingManager_CurrencyAndRegion(t *testing.T) {
 	manager := NewPricingManager(config, logger)
 
 	t.Run("Respects Currency and Region", func(t *testing.T) {
+		t.Parallel()
+
 		summary := manager.GetPricingSummary()
 
 		if summary.Currency != "EUR" {
@@ -342,6 +374,8 @@ func TestPricingManager_CurrencyAndRegion(t *testing.T) {
 	})
 
 	t.Run("Defaults Currency and Region", func(t *testing.T) {
+		t.Parallel()
+
 		emptyConfig := PricingConfig{}
 		defaultManager := NewPricingManager(emptyConfig, logger)
 		summary := defaultManager.GetPricingSummary()
@@ -357,6 +391,8 @@ func TestPricingManager_CurrencyAndRegion(t *testing.T) {
 }
 
 func TestPricingManager_ExternalDiscountConfig(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// Create temporary external discount config file
@@ -364,7 +400,9 @@ func TestPricingManager_ExternalDiscountConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer func() { _ = os.Remove(tempFile.Name()) }()
+	// No defer removing this file. It lives in t.TempDir(), which the framework deletes after the
+	// test *and its parallel subtests* finish; a plain defer here would run when this function
+	// returns, which is before a parallel child has read the path it was handed.
 
 	externalConfig := `
 enable_volume_discounts: true
@@ -389,6 +427,8 @@ custom_discounts:
 	_ = tempFile.Close()
 
 	t.Run("Loads External Discount Config", func(t *testing.T) {
+		t.Parallel()
+
 		config := PricingConfig{
 			DiscountConfigFile: tempFile.Name(),
 			DiscountConfig: DiscountConfig{
@@ -420,6 +460,8 @@ custom_discounts:
 	})
 
 	t.Run("Handles Missing External File", func(t *testing.T) {
+		t.Parallel()
+
 		config := PricingConfig{
 			DiscountConfigFile: "/non/existent/file.yaml",
 			DiscountConfig: DiscountConfig{

@@ -164,8 +164,21 @@ func (m *Monitor) Start(ctx context.Context) error {
 
 	m.started = true
 
-	// Start monitoring loops
-	go m.monitorLoop()
+	// Start monitoring loops on the caller's context values but not its cancellation.
+	//
+	// monitorLoop used to take no context at all, and every cycle it ran built one from
+	// context.Background() — so ctx, which Start is handed and passes straight to m.checker.Start on
+	// the line above, reached the checker's loop and not this one. Anything a caller attached was
+	// visible to one of the two loops it started and invisible to the other.
+	//
+	// context.WithoutCancel for the same reason Checker.Start uses it: Stop closing m.stopCh is what
+	// ends this loop, so binding a request-scoped ctx directly would let a caller that finished its
+	// request take monitoring and auto-recovery down with it. Per-cycle timeouts are still derived
+	// below, from this parent instead of from Background.
+	//
+	// reportLoop takes none because generateHealthReport does no I/O — it reads GetStatus and
+	// discards it. Give it a context when it grows something to cancel.
+	go m.monitorLoop(context.WithoutCancel(ctx))
 
 	if m.config.ReportingEnabled {
 		go m.reportLoop()
@@ -357,7 +370,10 @@ func (m *Monitor) mapComponentTypeToPriority(componentType string) Priority {
 	}
 }
 
-func (m *Monitor) monitorLoop() {
+// monitorLoop runs a monitoring cycle on a ticker until Stop closes stopCh.
+//
+// parent carries the values Start was called with and none of its cancellation — see Start.
+func (m *Monitor) monitorLoop(parent context.Context) {
 	interval := m.config.MonitorInterval
 	if interval <= 0 {
 		interval = time.Minute
@@ -371,13 +387,14 @@ func (m *Monitor) monitorLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			m.performMonitoringCycle()
+			m.performMonitoringCycle(parent)
 		}
 	}
 }
 
-func (m *Monitor) performMonitoringCycle() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// performMonitoringCycle runs every check once and acts on the results, bounded by 30 seconds.
+func (m *Monitor) performMonitoringCycle(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
 	// Run all health checks
@@ -394,7 +411,11 @@ func (m *Monitor) performMonitoringCycle() {
 
 	// Attempt auto-recovery if enabled
 	if m.config.AutoRecovery {
-		m.attemptAutoRecovery(results)
+		// parent, not ctx: ctx is this cycle's 30-second check budget, already partly spent by
+		// RunAllChecks above, and recovery is a separate piece of work that sleeps RecoveryDelay
+		// between up to RecoveryAttempts tries per component. Handing it the checks' leftover would
+		// make how many attempts a component gets depend on how slow the checks were.
+		m.attemptAutoRecovery(parent, results)
 	}
 }
 
@@ -417,7 +438,10 @@ func (m *Monitor) processResultsForAlerts(results map[string]*Result) {
 	}
 }
 
-func (m *Monitor) attemptAutoRecovery(results map[string]*Result) {
+// attemptAutoRecovery retries Recover on every unhealthy component that implements Recoverable.
+//
+// Each component gets its own 30-second budget derived from parent, covering all of its attempts.
+func (m *Monitor) attemptAutoRecovery(parent context.Context, results map[string]*Result) {
 	maxAttempts := m.config.RecoveryAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -442,7 +466,7 @@ func (m *Monitor) attemptAutoRecovery(results map[string]*Result) {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			if err := recoverable.Recover(ctx); err != nil {
@@ -452,8 +476,16 @@ func (m *Monitor) attemptAutoRecovery(results map[string]*Result) {
 					"attempt", attempt,
 					"max_attempts", maxAttempts,
 					"error", err)
+				// Wait out RecoveryDelay, or stop early if the budget above expires or Stop is
+				// called. A bare time.Sleep here held the loop past a canceled ctx and past
+				// shutdown, so a component configured with a long delay kept a goroutine alive
+				// retrying a recovery nobody was waiting for.
 				if attempt < maxAttempts && delay > 0 {
-					time.Sleep(delay)
+					select {
+					case <-ctx.Done():
+					case <-m.stopCh:
+					case <-time.After(delay):
+					}
 				}
 			} else {
 				lastErr = nil

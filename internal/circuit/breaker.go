@@ -225,6 +225,12 @@ func (cb *CircuitBreaker) onFailure(state State, now time.Time) {
 		}
 	case StateHalfOpen:
 		cb.setState(StateOpen, now)
+
+	// StateOpen is not reachable here and the empty arm records that rather than leaving it to be
+	// re-derived: beforeRequest returns ErrOpenState without calling fn, so afterRequest — the only
+	// caller of this function — never runs while open. The state is also re-read under the same lock
+	// in afterRequest, so it cannot have changed between the two.
+	case StateOpen:
 	}
 }
 
@@ -240,6 +246,12 @@ func (cb *CircuitBreaker) currentState(now time.Time) (State, time.Time) {
 		if cb.expiry.Before(now) {
 			cb.setState(StateHalfOpen, now)
 		}
+
+	// Half-open has no timer to expire. It ends on the first result — onSuccess closes the breaker,
+	// onFailure reopens it — and beforeRequest caps how many requests may be in flight meanwhile via
+	// MaxRequests. So there is nothing for this function to advance, and an arm that reset counts or
+	// re-armed expiry here would discard the trial in progress.
+	case StateHalfOpen:
 	}
 	return cb.state, cb.expiry
 }

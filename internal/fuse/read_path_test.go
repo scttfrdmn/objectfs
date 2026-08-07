@@ -62,7 +62,7 @@ func newReadPathFixture(t *testing.T) *readPathFixture {
 	})
 	t.Cleanup(func() { _ = byteCache.Close() })
 
-	fs := NewFileSystem(backend, byteCache, writer, nil, &Config{
+	fs := NewFileSystem(t.Context(), backend, byteCache, writer, nil, &Config{
 		DefaultMode: 0o644,
 		DefaultUID:  1000,
 		DefaultGID:  1000,
@@ -516,7 +516,7 @@ func TestCacheHitsAreReportedToTheDetector(t *testing.T) {
 	// prefetch workers out of the picture entirely so nothing else can populate or race it. What remains
 	// is exactly the question under test — does a hit reach the detector.
 	f.fs.readAhead.Stop()
-	f.fs.readAhead = NewReadAheadManager(f.fs, &ReadAheadConfig{
+	f.fs.readAhead = NewReadAheadManager(t.Context(), f.fs, &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 * 1024,
 		MinSequential:   3,
@@ -928,7 +928,7 @@ func TestPrefetchDropsARangeAlreadyEntirelyInFlight(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.fs.readAhead.performPrefetch(&PrefetchRequest{path: "inflight.dat", offset: 1024, size: 4096})
+		f.fs.readAhead.performPrefetch(t.Context(), &PrefetchRequest{path: "inflight.dat", offset: 1024, size: 4096})
 	}()
 
 	select {

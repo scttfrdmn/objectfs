@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,15 +15,21 @@ import (
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
-// MockPredictiveBackend implements types.Backend for predictive cache testing
+// MockPredictiveBackend implements types.Backend for predictive cache testing.
+//
+// The counters are atomics rather than fields under mu, because GetObject reads the object map under
+// RLock and an RLock is held by every concurrent reader at once — so incrementing a plain int64 there
+// is a data race between two readers, not a protected write. Confirmed with -race: eight goroutines
+// calling GetObject report a read at this file's GetObject against a write at the same line. The
+// prefetch workers in PredictiveCache call the backend concurrently with the test's own goroutines, so
+// TestPredictiveCache_ConcurrentAccess reaches it; it survived because no test reads GetStats, which
+// left the increment's only observable effect the race itself.
 type MockPredictiveBackend struct {
 	mu      sync.RWMutex
 	objects map[string][]byte
 	meta    map[string]map[string]string
-	stats   struct {
-		gets int64
-		puts int64
-	}
+	gets    atomic.Int64
+	puts    atomic.Int64
 }
 
 func NewMockPredictiveBackend() *MockPredictiveBackend {
@@ -35,7 +42,7 @@ func NewMockPredictiveBackend() *MockPredictiveBackend {
 func (m *MockPredictiveBackend) GetObject(ctx context.Context, key string, offset, size int64) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	m.stats.gets++
+	m.gets.Add(1)
 
 	data, exists := m.objects[key]
 	if !exists {
@@ -54,7 +61,7 @@ func (m *MockPredictiveBackend) GetObject(ctx context.Context, key string, offse
 func (m *MockPredictiveBackend) PutObject(ctx context.Context, key string, data []byte, meta map[string]string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.stats.puts++
+	m.puts.Add(1)
 
 	m.objects[key] = make([]byte, len(data))
 	copy(m.objects[key], data)
@@ -154,7 +161,7 @@ func (m *MockPredictiveBackend) PutObjects(ctx context.Context, objects map[stri
 	defer m.mu.Unlock()
 
 	for key, data := range objects {
-		m.stats.puts++
+		m.puts.Add(1)
 		m.objects[key] = make([]byte, len(data))
 		copy(m.objects[key], data)
 	}
@@ -162,9 +169,7 @@ func (m *MockPredictiveBackend) PutObjects(ctx context.Context, objects map[stri
 }
 
 func (m *MockPredictiveBackend) GetStats() (int64, int64) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.stats.gets, m.stats.puts
+	return m.gets.Load(), m.puts.Load()
 }
 
 // MockBaseCache implements a simple in-memory cache for testing
@@ -263,6 +268,8 @@ func (c *MockBaseCache) Stats() types.CacheStats {
 }
 
 func TestPredictiveCache_BasicOperations(t *testing.T) {
+	t.Parallel()
+
 	baseCache := NewMockBaseCache()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:           baseCache,
@@ -294,6 +301,8 @@ func TestPredictiveCache_BasicOperations(t *testing.T) {
 }
 
 func TestPredictiveCache_SequentialPrediction(t *testing.T) {
+	t.Parallel()
+
 	baseCache := NewMockBaseCache()
 	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
@@ -347,6 +356,8 @@ func TestPredictiveCache_SequentialPrediction(t *testing.T) {
 }
 
 func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	baseCache := NewMockBaseCache()
 	backend := NewMockPredictiveBackend()
 	config := &cache.PredictiveCacheConfig{
@@ -412,6 +423,8 @@ func TestPredictiveCache_ConcurrentAccess(t *testing.T) {
 }
 
 func TestPredictiveCache_EvictionIntelligence(t *testing.T) {
+	t.Parallel()
+
 	baseCache := NewMockBaseCache()
 	config := &cache.PredictiveCacheConfig{
 		BaseCache:                 baseCache,
@@ -498,7 +511,7 @@ func BenchmarkPredictiveCache_SequentialRead(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		blockIndex := int64(i % int(numBlocks))
 		data := pc.Get(key, blockIndex*blockSize, blockSize)
 		if data == nil {
@@ -537,7 +550,7 @@ func BenchmarkPredictiveCache_RandomRead(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		keyIndex := rand.Intn(numKeys)
 		data := pc.Get(keys[keyIndex], 0, blockSize)
 		if data == nil {

@@ -47,7 +47,7 @@ func BenchmarkMultiLevelCache_Get_HotPath(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(int64(len(payload)))
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = c.Get("hot-key", 0, int64(len(payload)))
 	}
 }
@@ -57,7 +57,7 @@ func BenchmarkMultiLevelCache_Get_Miss(b *testing.B) {
 	c := newBenchCache(b)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := fmt.Sprintf("miss-key-%d", i)
 		_ = c.Get(key, 0, 4096)
 	}
@@ -87,7 +87,7 @@ func BenchmarkMultiLevelCache_Set_Eviction(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(int64(len(payload)))
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := fmt.Sprintf("evict-key-%d", i%200)
 		c.Put(key, 0, payload)
 	}
@@ -105,7 +105,7 @@ func BenchmarkMultiLevelCache_Warmup_10keys(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = c.Warmup(keys)
 	}
 }

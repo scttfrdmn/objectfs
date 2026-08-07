@@ -167,27 +167,22 @@ func TestTracker_CanRead(t *testing.T) {
 		t.Run(tt.state.String(), func(t *testing.T) {
 			t.Parallel()
 
-			// A tracker per subtest, and nextProbe set alongside State rather than left at its zero
-			// value. Both are needed, and the first is what made the second visible.
-			//
-			// State alone does not decide what CanRead answers. admissionState admits one probe
-			// against a refusing component once nextProbe has elapsed, and reports StateDegraded to
-			// get that probe past the gate — so State=StateUnavailable with a zero-value nextProbe,
-			// which is always in the past, reads as *readable*. The tracker never produces that
-			// combination: RecordError sets both fields, and this test set one.
-			//
-			// A single shared tracker concealed it. The first subtest to reach a refusing state took
-			// the probe path, which pushed nextProbe ProbeAfter into the future, and every later
-			// subtest then read raw state and agreed with the table — so the assertion held on the
-			// order its siblings happened to run in. Verified by deleting the nextProbe line below:
-			// the unavailable case fails.
+			// A tracker per case, not one shared by all four. These cases put the component into a
+			// state and then read admission back, so on a shared tracker they are four writers to one
+			// field — and whichever case wrote last is the state every case reads.
 			tracker := NewTracker(DefaultConfig())
 			tracker.RegisterComponent("test-service")
 
-			// Set state directly for testing, in the shape RecordError would leave it.
+			// Through transitionState, not by assigning health.State directly. The direct assignment
+			// this replaces skipped the probe clock that entering a refusing state arms, leaving
+			// nextProbe at the zero time — and admissionState treats a zero nextProbe as "the probe
+			// interval has elapsed", so the very first CanRead was admitted as a probe and returned
+			// true for a component the case had just marked unavailable. Serially that was invisible:
+			// the read-only case ran first on the shared tracker and armed the clock the unavailable
+			// case then inherited. The state a test sets has to be a state the production path can
+			// actually produce.
 			tracker.mu.Lock()
-			tracker.components["test-service"].State = tt.state
-			tracker.components["test-service"].nextProbe = time.Now().Add(DefaultConfig().ProbeAfter)
+			tracker.transitionState(tracker.components["test-service"], tt.state, nil)
 			tracker.mu.Unlock()
 
 			canRead := tracker.CanRead("test-service")
@@ -253,7 +248,15 @@ func TestTracker_StateChangeCallback(t *testing.T) {
 	}
 }
 
+// testHealthListener records what the tracker told it.
+//
+// The mutex is not decoration. Tracker.notifyStateChange spawns a goroutine per listener
+// (`go listener.OnStateChange(...)`) while OnHealthCheck is called inline on the recording
+// goroutine, so the two methods genuinely run concurrently on the same listener, and the test then
+// reads the slices from a third. Without the lock this is a data race whether the test is parallel
+// or not — -race just needs the state change and the read to land close enough together.
 type testHealthListener struct {
+	mu           sync.Mutex
 	stateChanges []stateChange
 	healthChecks []healthCheck
 }
@@ -272,11 +275,22 @@ type healthCheck struct {
 }
 
 func (l *testHealthListener) OnStateChange(component string, oldState, newState HealthState, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.stateChanges = append(l.stateChanges, stateChange{component, oldState, newState, err})
 }
 
 func (l *testHealthListener) OnHealthCheck(component string, healthy bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.healthChecks = append(l.healthChecks, healthCheck{component, healthy, err})
+}
+
+// checks returns a copy of the health-check notifications recorded so far.
+func (l *testHealthListener) checks() []healthCheck {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]healthCheck(nil), l.healthChecks...)
 }
 
 func TestTracker_HealthListener(t *testing.T) {
@@ -297,11 +311,12 @@ func TestTracker_HealthListener(t *testing.T) {
 	// Give listener time to be notified
 	time.Sleep(50 * time.Millisecond)
 
-	if len(listener.healthChecks) != 1 {
-		t.Errorf("Expected 1 health check notification, got %d", len(listener.healthChecks))
+	checks := listener.checks()
+	if len(checks) != 1 {
+		t.Fatalf("Expected 1 health check notification, got %d", len(checks))
 	}
 
-	if listener.healthChecks[0].healthy {
+	if checks[0].healthy {
 		t.Error("Expected healthy=false for error")
 	}
 
@@ -309,11 +324,12 @@ func TestTracker_HealthListener(t *testing.T) {
 	tracker.RecordSuccess("test-service")
 	time.Sleep(50 * time.Millisecond)
 
-	if len(listener.healthChecks) != 2 {
-		t.Errorf("Expected 2 health check notifications, got %d", len(listener.healthChecks))
+	checks = listener.checks()
+	if len(checks) != 2 {
+		t.Fatalf("Expected 2 health check notifications, got %d", len(checks))
 	}
 
-	if !listener.healthChecks[1].healthy {
+	if !checks[1].healthy {
 		t.Error("Expected healthy=true for success")
 	}
 }
@@ -522,7 +538,7 @@ func BenchmarkTracker_RecordSuccess(b *testing.B) {
 	tracker.RegisterComponent("test-service")
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		tracker.RecordSuccess("test-service")
 	}
 }
@@ -533,7 +549,7 @@ func BenchmarkTracker_RecordError(b *testing.B) {
 	testErr := fmt.Errorf("test error")
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		tracker.RecordError("test-service", testErr)
 	}
 }
@@ -543,7 +559,7 @@ func BenchmarkTracker_GetState(b *testing.B) {
 	tracker.RegisterComponent("test-service")
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = tracker.GetState("test-service")
 	}
 }

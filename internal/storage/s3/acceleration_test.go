@@ -168,6 +168,8 @@ func TestBackend_isAccelerationError_WrappedInvalidRequestStillMatches(t *testin
 }
 
 func TestBackend_executeWithAccelerationFallback(t *testing.T) {
+	t.Parallel()
+
 	// This test verifies the executeWithAccelerationFallback function exists
 	// and can be called. Full integration testing requires a real ClientManager
 	// and AWS credentials, which are tested in integration tests.
@@ -176,6 +178,8 @@ func TestBackend_executeWithAccelerationFallback(t *testing.T) {
 
 	// Test case 1: Basic existence test
 	t.Run("function_callable", func(t *testing.T) {
+		t.Parallel()
+
 		// Verify function can be referenced and called
 		// Full testing requires ClientManager setup
 		t.Skip("Full testing requires mock ClientManager - tested via integration tests")
@@ -183,16 +187,22 @@ func TestBackend_executeWithAccelerationFallback(t *testing.T) {
 
 	// Test case 2: When acceleration fails with acceleration error, falls back
 	t.Run("acceleration_error_fallback", func(t *testing.T) {
+		t.Parallel()
+
 		t.Skip("Requires mock client manager for full integration test")
 	})
 
 	// Test case 3: When acceleration succeeds, records metrics
 	t.Run("acceleration_success", func(t *testing.T) {
+		t.Parallel()
+
 		t.Skip("Requires mock client manager for full integration test")
 	})
 }
 
 func TestMetricsCollector_AccelerationMetrics(t *testing.T) {
+	t.Parallel()
+
 	mc := NewMetricsCollector()
 
 	// Test acceleration enabled/disabled
@@ -246,6 +256,8 @@ func TestMetricsCollector_AccelerationMetrics(t *testing.T) {
 }
 
 func TestClientManager_AccelerationMethods(t *testing.T) {
+	t.Parallel()
+
 	// Test IsAccelerationActive, DisableAcceleration, EnableAcceleration
 	// This would require a real ClientManager instance
 	// Skipping for now as it requires AWS credentials and bucket setup

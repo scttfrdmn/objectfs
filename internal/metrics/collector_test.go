@@ -142,7 +142,10 @@ func TestRecordOperation(t *testing.T) {
 
 		collector.RecordOperation("write", 50*time.Millisecond, 512, false)
 
-		operations := collector.GetMetrics()["operations"].(map[string]*OperationMetrics)
+		operations, ok := collector.GetMetrics()["operations"].(map[string]*OperationMetrics)
+		if !ok {
+			t.Fatal("operations is not map[string]*OperationMetrics")
+		}
 		op := operations["write"]
 		if op.Errors != 1 {
 			t.Errorf("op.Errors = %d, want 1", op.Errors)
@@ -167,7 +170,10 @@ func TestRecordOperation(t *testing.T) {
 		collector.RecordOperation("read", 200*time.Millisecond, 2000, true)
 		collector.RecordOperation("read", 300*time.Millisecond, 3000, false)
 
-		operations := collector.GetMetrics()["operations"].(map[string]*OperationMetrics)
+		operations, ok := collector.GetMetrics()["operations"].(map[string]*OperationMetrics)
+		if !ok {
+			t.Fatal("operations is not map[string]*OperationMetrics")
+		}
 		op := operations["read"]
 		if op.Count != 3 {
 			t.Errorf("op.Count = %d, want 3", op.Count)
@@ -499,7 +505,10 @@ func TestResetMetrics(t *testing.T) {
 
 	// Verify operations are recorded
 	metrics := collector.GetMetrics()
-	operations := metrics["operations"].(map[string]*OperationMetrics)
+	operations, ok := metrics["operations"].(map[string]*OperationMetrics)
+	if !ok {
+		t.Fatal("before reset: operations is not map[string]*OperationMetrics")
+	}
 	if len(operations) != 2 {
 		t.Errorf("before reset: len(operations) = %d, want 2", len(operations))
 	}
@@ -512,7 +521,10 @@ func TestResetMetrics(t *testing.T) {
 
 	// Verify metrics are cleared
 	metrics = collector.GetMetrics()
-	operations = metrics["operations"].(map[string]*OperationMetrics)
+	operations, ok = metrics["operations"].(map[string]*OperationMetrics)
+	if !ok {
+		t.Fatal("after reset: operations is not map[string]*OperationMetrics")
+	}
 	if len(operations) != 0 {
 		t.Errorf("after reset: len(operations) = %d, want 0", len(operations))
 	}

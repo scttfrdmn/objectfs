@@ -81,8 +81,8 @@ func TestCalculator_GetRequest_Standard(t *testing.T) {
 	c := newCalc(t)
 	cost := c.Calculate(OpGet, TierStandard, 0, 0)
 	assert.InDelta(t, DefaultPrices[TierStandard].GetRequest, cost.RequestCost, 1e-10)
-	assert.Equal(t, 0.0, cost.TransferCost)
-	assert.Equal(t, 0.0, cost.EgressCost)
+	assert.Zero(t, cost.TransferCost)
+	assert.Zero(t, cost.EgressCost)
 	assert.InDelta(t, cost.RequestCost, cost.TotalCost, 1e-10)
 }
 
@@ -91,8 +91,8 @@ func TestCalculator_PutRequest_Standard(t *testing.T) {
 	c := newCalc(t)
 	cost := c.Calculate(OpPut, TierStandard, 1024*1024, 0) // 1 MiB put
 	assert.InDelta(t, DefaultPrices[TierStandard].PutRequest, cost.RequestCost, 1e-10)
-	assert.Equal(t, 0.0, cost.TransferCost) // PUT has no retrieval fee
-	assert.Equal(t, 0.0, cost.EgressCost)
+	assert.Zero(t, cost.TransferCost) // PUT has no retrieval fee
+	assert.Zero(t, cost.EgressCost)
 }
 
 func TestCalculator_ListRequest(t *testing.T) {
@@ -106,8 +106,8 @@ func TestCalculator_DeleteRequest_Free(t *testing.T) {
 	t.Parallel()
 	c := newCalc(t)
 	cost := c.Calculate(OpDelete, TierStandard, 0, 0)
-	assert.Equal(t, 0.0, cost.RequestCost)
-	assert.Equal(t, 0.0, cost.TotalCost)
+	assert.Zero(t, cost.RequestCost)
+	assert.Zero(t, cost.TotalCost)
 }
 
 func TestCalculator_HeadRequest(t *testing.T) {
@@ -156,14 +156,14 @@ func TestCalculator_StorageCost_ZeroDuration(t *testing.T) {
 	t.Parallel()
 	c := newCalc(t)
 	cost := c.CalculateStorageCost(TierStandard, 1024*1024*1024, 0)
-	assert.Equal(t, 0.0, cost)
+	assert.Zero(t, cost)
 }
 
 func TestCalculator_StorageCost_NegativeDuration(t *testing.T) {
 	t.Parallel()
 	c := newCalc(t)
 	cost := c.CalculateStorageCost(TierStandard, 1024*1024*1024, -1)
-	assert.Equal(t, 0.0, cost)
+	assert.Zero(t, cost)
 }
 
 func TestOpType_String(t *testing.T) {

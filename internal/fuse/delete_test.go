@@ -50,7 +50,7 @@ func newDeleteFixture(t *testing.T) *deleteFixture {
 	})
 	t.Cleanup(func() { _ = byteCache.Close() })
 
-	fs := NewFileSystem(backend, byteCache, writer, nil, &Config{
+	fs := NewFileSystem(t.Context(), backend, byteCache, writer, nil, &Config{
 		DefaultMode:    0o644,
 		DefaultDirMode: 0o755,
 		DefaultUID:     1000,

@@ -11,7 +11,14 @@ import (
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
-// Platform-specific filesystem interface
+// PlatformFileSystem is the mount lifecycle [CreatePlatformMountManager] returns, narrowed to what a
+// caller outside this package needs: mount it, unmount it, ask whether it is mounted, read its stats.
+//
+// "Platform-specific" names the reason it is an interface rather than what varies today. The file is
+// built for linux and darwin only, and both get the same go-fuse implementation — the second binding
+// this abstraction existed for was cgofuse, which was removed in v0.10.1 because it had never
+// compiled. It is kept because it is the seam a future NFS-loopback or WinFsp backend would bind to,
+// and because it keeps cmd/objectfs from depending on go-fuse types directly.
 type PlatformFileSystem interface {
 	Mount(ctx context.Context) error
 	Unmount() error
@@ -35,7 +42,10 @@ const defaultAttrTTL = time.Minute
 // happened to be user 1000 on that host, and no permission setting in any config file had any effect.
 // It also hardcoded ReadOnly to false, which meant read_only: true mounted a writable filesystem: the
 // one setting whose failure a user cannot detect until something has already been overwritten.
-func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeBuffer *vfs.Writer,
+// ctx is the mount's lifetime and is retained: it bounds the read-ahead manager's prefetch GETs and is
+// what stops its goroutines. Pass the same context whose cancellation means "this mount is going away"
+// — internal/adapter passes its mountCtx — not the context of the call that happens to construct this.
+func CreatePlatformMountManager(ctx context.Context, backend types.Backend, cache types.Cache, writeBuffer *vfs.Writer,
 	metrics types.MetricsCollector, config *MountConfig) PlatformFileSystem {
 	fuseConfig := &Config{
 		MountPoint: config.MountPoint,
@@ -90,7 +100,7 @@ func CreatePlatformMountManager(backend types.Backend, cache types.Cache, writeB
 		}
 	}
 
-	filesystem := NewFileSystem(backend, cache, writeBuffer, metrics, fuseConfig)
+	filesystem := NewFileSystem(ctx, backend, cache, writeBuffer, metrics, fuseConfig)
 
 	return NewMountManager(filesystem, config)
 }

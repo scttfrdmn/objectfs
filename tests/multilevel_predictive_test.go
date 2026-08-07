@@ -8,6 +8,8 @@ import (
 )
 
 func TestMultiLevelCacheWithPredictive(t *testing.T) {
+	t.Parallel()
+
 	config := &cache.MultiLevelConfig{
 		L1Config: &cache.L1Config{
 			Enabled:    true,
@@ -86,6 +88,8 @@ func TestMultiLevelCacheWithPredictive(t *testing.T) {
 }
 
 func TestMultiLevelCache_LevelStats(t *testing.T) {
+	t.Parallel()
+
 	config := &cache.MultiLevelConfig{
 		L1Config: &cache.L1Config{
 			Enabled:    true,
@@ -167,7 +171,7 @@ func BenchmarkMultiLevelCache_PredictiveEnabled(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		keyIndex := i % numKeys
 		data := mlCache.Get(keys[keyIndex], 0, blockSize)
 		if data == nil {
@@ -210,7 +214,7 @@ func BenchmarkMultiLevelCache_PredictiveDisabled(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		keyIndex := i % numKeys
 		data := mlCache.Get(keys[keyIndex], 0, blockSize)
 		if data == nil {

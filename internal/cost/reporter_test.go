@@ -22,6 +22,13 @@ func TestReporter_RecordOp_AccumulatesCost(t *testing.T) {
 	r := newReporter(t)
 	c1 := r.RecordOp("alice", OpGet, TierStandard, 0, 0)
 	c2 := r.RecordOp("alice", OpGet, TierStandard, 0, 0)
+
+	// Exact equality on purpose, and testifylint's float-compare is suppressed rather than satisfied.
+	// The claim is that two identical operations price bit-identically — determinism, not
+	// approximation — and InEpsilon would let a pricing path that returned a slightly different number
+	// for the same inputs pass. The InDelta below is the case where a tolerance *is* right: it compares
+	// a sum against a doubled value, so it carries one floating-point addition's worth of error.
+	//nolint:testifylint // exact: identical inputs must price identically, not merely closely
 	assert.Equal(t, c1.TotalCost, c2.TotalCost)
 
 	rep := r.Report("alice", 0)
@@ -59,7 +66,7 @@ func TestReporter_Report_UnknownTenant_ReturnsEmpty(t *testing.T) {
 	r := newReporter(t)
 	rep := r.Report("nobody", 0)
 	assert.Equal(t, "nobody", rep.TenantID)
-	assert.Equal(t, 0.0, rep.TotalCost)
+	assert.Zero(t, rep.TotalCost)
 	assert.NotNil(t, rep.OpBreakdown)
 	assert.NotNil(t, rep.OpCounts)
 }
@@ -102,7 +109,7 @@ func TestReporter_Reset_ClearsData(t *testing.T) {
 	r.RecordOp("alice", OpGet, TierStandard, 0, 0)
 	r.Reset()
 	rep := r.Report("alice", 0)
-	assert.Equal(t, 0.0, rep.TotalCost)
+	assert.Zero(t, rep.TotalCost)
 }
 
 func TestReporter_ROI_SavingsPositive(t *testing.T) {

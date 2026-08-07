@@ -170,10 +170,15 @@ func (r *Retryer) calculateDelay(attempt int) time.Duration {
 		delay = float64(r.config.MaxDelay)
 	}
 
-	// Apply jitter to prevent thundering herd
+	// Apply jitter to prevent thundering herd.
+	//
+	// ±20% of the delay, and math/rand is the right generator: the gosec G404 finding is noise here.
+	// This value decides when one client re-sends a request, not anything an adversary gains from
+	// predicting — and it is computed on the error path of every S3 operation, where a crypto/rand
+	// syscall would buy nothing. The arithmetic is a fraction of delay in delay's own units, unlike
+	// the election-timer jitter in internal/distributed, which mixed milliseconds into nanoseconds.
 	if r.config.Jitter {
-		// Add random jitter of ±20%
-		jitter := delay * 0.2 * (rand.Float64()*2 - 1)
+		jitter := delay * 0.2 * (rand.Float64()*2 - 1) // #nosec G404 -- backoff spread, not a secret
 		delay += jitter
 	}
 

@@ -47,12 +47,29 @@ var (
 	debugManagerOnce   sync.Once
 )
 
-// GetDebugManager returns the global debug manager
+// NewDebugManager returns a debug manager that shares nothing with any other.
+//
+// Most production callers want [GetDebugManager]: a debug facility that arbitrary code paths record
+// into is the right shape for a process-wide singleton, since the alternative is threading a handle
+// through every layer that might want to trace. This constructor exists for callers that need a
+// manager of their own, which in practice means tests — [DebugManager.RecordEvent] fans each event
+// out to every open session, so two tests holding the same manager see each other's events and
+// neither can assert an event count. That is not a locking problem and a mutex does not help: the
+// broadcast is doing what it is written to do, and the only way to be isolated from it is to own the
+// manager.
+func NewDebugManager() *DebugManager {
+	return &DebugManager{
+		sessions: make(map[string]*DebugSession),
+	}
+}
+
+// GetDebugManager returns the global debug manager.
+//
+// Every caller gets the same instance, and every event recorded through it reaches every open
+// session — see [DebugManager.RecordEvent]. Use [NewDebugManager] when that sharing is not wanted.
 func GetDebugManager() *DebugManager {
 	debugManagerOnce.Do(func() {
-		globalDebugManager = &DebugManager{
-			sessions: make(map[string]*DebugSession),
-		}
+		globalDebugManager = NewDebugManager()
 	})
 	return globalDebugManager
 }
@@ -110,17 +127,22 @@ func (dm *DebugManager) StopSession(id string) *DebugSession {
 		return nil
 	}
 
+	// The values the log line wants are read under the same lock that sets them, rather than off the
+	// session after unlocking. The session stays reachable through the pointer this function returns,
+	// so a caller holding it can be recording into it while the log line formats.
 	session.mu.Lock()
 	session.enabled = false
 	session.endTime = time.Now()
+	duration := session.endTime.Sub(session.startTime)
+	eventCount, profileCount := len(session.events), len(session.profiles)
 	session.mu.Unlock()
 
 	if dm.logger != nil {
 		dm.logger.Info("Debug session stopped", map[string]any{
 			"session_id":    id,
-			"duration":      session.endTime.Sub(session.startTime),
-			"event_count":   len(session.events),
-			"profile_count": len(session.profiles),
+			"duration":      duration,
+			"event_count":   eventCount,
+			"profile_count": profileCount,
 		})
 	}
 
@@ -146,7 +168,15 @@ func (dm *DebugManager) ListSessions() []string {
 	return sessions
 }
 
-// RecordEvent records a debug event in active sessions
+// RecordEvent records a debug event in every open session, not only the one that caused it.
+//
+// The fan-out is deliberate — this is a global trace facility, and a caller deep in the read path
+// records an event without knowing which sessions are open — but it has a consequence worth stating
+// where a reader will see it: a session's event count is a function of what every *other* open
+// session's components generated too. So [DebugSession.GetStats] on a session started for "storage"
+// reports storage traffic from the whole process, and two sessions open at once each observe the
+// other's events. Filtering happens per session in [DebugSession.RecordEvent], against the component
+// list that session was started with; a session started with no components accepts everything.
 func (dm *DebugManager) RecordEvent(component, operation, message string, fields map[string]any) {
 	dm.mu.RLock()
 	sessions := make([]*DebugSession, 0, len(dm.sessions))
@@ -346,12 +376,30 @@ type DebugTrace struct {
 	fields    map[string]any
 }
 
-// StartTrace starts a debug trace
+// StartTrace starts a debug trace against a session on the global debug manager.
+//
+// Returns nil when no such session is open or the session has been stopped, so that a caller can
+// trace unconditionally without checking whether debugging is on — the nil *DebugTrace's End and
+// EndWithError are no-ops. Use [DebugManager.StartTrace] to trace a session on a manager other than
+// the global one.
 func StartTrace(sessionID, component, operation string, fields map[string]any) *DebugTrace {
-	dm := GetDebugManager()
-	session := dm.GetSession(sessionID)
+	return GetDebugManager().StartTrace(sessionID, component, operation, fields)
+}
 
-	if session == nil || !session.enabled {
+// StartTrace starts a debug trace against a session on this manager.
+func (dm *DebugManager) StartTrace(sessionID, component, operation string, fields map[string]any) *DebugTrace {
+	session := dm.GetSession(sessionID)
+	if session == nil {
+		return nil
+	}
+
+	// Under the session's lock: StopSession writes enabled from whatever goroutine calls it, so an
+	// unguarded read here is a data race with any concurrent stop.
+	session.mu.RLock()
+	enabled := session.enabled
+	session.mu.RUnlock()
+
+	if !enabled {
 		return nil
 	}
 

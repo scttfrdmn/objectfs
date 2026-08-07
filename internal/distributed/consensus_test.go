@@ -3,6 +3,7 @@ package distributed
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -647,4 +648,52 @@ func TestConsensusEngine_StopRacesAnInboundHeartbeat(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	<-done
+}
+
+// TestElectionTimeout_JitterIsAFractionOfTheBase is the regression test for a jitter that was six
+// orders of magnitude too small to do its job, and for a panic below one millisecond.
+//
+// The old expression mixed units — `base + rand.Intn(int(base.Milliseconds()))`, a millisecond count
+// used as a nanosecond Duration. Against the 5s default that produced spreads of 4.69µs, 4.16µs and
+// 690ns: every follower in a cluster whose timers expired together would still become a candidate
+// within microseconds of every other one, which is the split vote randomized timeouts exist to
+// prevent. Below 1ms, Milliseconds() truncated to 0 and rand.Intn(0) panicked.
+//
+// The assertions are on the *distribution*, not on any single draw, because a correct implementation
+// is random: a fixed expected value could only be written by reproducing the formula, which would
+// pass for the broken one too. So this asserts the range every draw must satisfy, and that the draws
+// actually spread across it — the property the old code violated while satisfying the range.
+func TestElectionTimeout_JitterIsAFractionOfTheBase(t *testing.T) {
+	t.Parallel()
+
+	for _, base := range []time.Duration{
+		500 * time.Microsecond, // panicked before: Milliseconds() == 0
+		time.Millisecond,
+		5 * time.Second, // the NewClusterManager default
+		0,               // the unconfigured arm, which uses 150ms
+	} {
+		want := base
+		if want <= 0 {
+			want = 150 * time.Millisecond
+		}
+
+		var lo, hi time.Duration = math.MaxInt64, 0
+		for range 200 {
+			got := electionTimeout(base)
+			if got < want || got >= 2*want {
+				t.Fatalf("electionTimeout(%v) = %v, want [%v, %v)", base, got, want, 2*want)
+			}
+			lo = min(lo, got)
+			hi = max(hi, got)
+		}
+
+		// Half the base, spread over 200 draws from a range of exactly the base: the probability of a
+		// correct implementation failing this is negligible, while the old one's ~1e-6 relative spread
+		// misses it by six orders of magnitude.
+		if spread := hi - lo; spread < want/2 {
+			t.Errorf("electionTimeout(%v) spread over 200 draws = %v, want at least %v; "+
+				"draws ranged [%v, %v] — a jitter this narrow does not separate candidates",
+				base, spread, want/2, lo, hi)
+		}
+	}
 }

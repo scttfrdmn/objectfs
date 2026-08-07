@@ -17,6 +17,8 @@ import (
 )
 
 func TestStorageTiers(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name            string
 		tier            string
@@ -61,6 +63,8 @@ func TestStorageTiers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			tierInfo, exists := StorageTiers[tt.tier]
 			if !exists {
 				t.Fatalf("Tier %s not found in StorageTiers", tt.tier)
@@ -275,9 +279,13 @@ func TestTierSizeThresholdsMatchWhatAWSPublishes(t *testing.T) {
 }
 
 func TestTierValidator(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	t.Run("Standard Tier Validation", func(t *testing.T) {
+		t.Parallel()
+
 		validator := NewTierValidator(awsrates.DefaultRegion, TierStandard, TierConstraints{}, logger)
 
 		// Should allow any size object
@@ -294,6 +302,8 @@ func TestTierValidator(t *testing.T) {
 	})
 
 	t.Run("Standard-IA Tier Validation", func(t *testing.T) {
+		t.Parallel()
+
 		validator := NewTierValidator(awsrates.DefaultRegion, TierStandardIA, TierConstraints{}, logger)
 
 		// Allowed, and this assertion is the reverse of what it used to be. AWS's 128 KiB minimum is a
@@ -327,6 +337,8 @@ func TestTierValidator(t *testing.T) {
 	})
 
 	t.Run("Custom Constraints Override", func(t *testing.T) {
+		t.Parallel()
+
 		constraints := TierConstraints{
 			MinObjectSize:   256 * 1024,          // 256KB custom minimum
 			DeletionEmbargo: 60 * 24 * time.Hour, // 60 days custom embargo
@@ -348,6 +360,8 @@ func TestTierValidator(t *testing.T) {
 }
 
 func TestTierRecommendations(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// The size-based recommendation, on both sides of the crossover and on a tier that has no floor.
@@ -423,6 +437,8 @@ func TestTierRecommendations(t *testing.T) {
 	})
 
 	t.Run("Access Pattern Recommendations", func(t *testing.T) {
+		t.Parallel()
+
 		validator := NewTierValidator(awsrates.DefaultRegion, TierStandard, TierConstraints{}, logger)
 
 		// Infrequent access should recommend IA tiers
@@ -435,6 +451,8 @@ func TestTierRecommendations(t *testing.T) {
 }
 
 func TestStorageClassConversion(t *testing.T) {
+	t.Parallel()
+
 	// Test AWS SDK conversion
 	if ConvertTierToStorageClass(TierStandard) != s3types.StorageClassStandard {
 		t.Error("Standard tier should convert to STANDARD storage class")

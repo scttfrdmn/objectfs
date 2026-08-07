@@ -188,7 +188,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	// HeadObject, DeleteObject, ListObjects, and HealthCheck all draw from this pool, so a factory
 	// that skips the endpoint sends them to real AWS S3 while the rest of the backend talks to the
 	// configured endpoint.
-	pool, err := NewConnectionPool(cfg.PoolSize, func() (*s3.Client, error) {
+	pool, err := NewConnectionPool(ctx, cfg.PoolSize, bucket, func() (*s3.Client, error) {
 		return s3.NewFromConfig(awsCfg, clientOptions(cfg)), nil
 	})
 	if err != nil {

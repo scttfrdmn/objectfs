@@ -189,6 +189,8 @@ func (b *MockBackend) Close() error {
 
 // TestFUSEOptimizations tests the optimized FUSE implementation
 func TestFUSEOptimizations(t *testing.T) {
+	t.Parallel()
+
 	// Create test components
 	backend := NewMockBackend()
 
@@ -207,7 +209,7 @@ func TestFUSEOptimizations(t *testing.T) {
 
 	writeBuffer, err := vfs.NewWriter(context.Background(), backend)
 	require.NoError(t, err)
-	defer func() { _ = writeBuffer.Close() }()
+	t.Cleanup(func() { _ = writeBuffer.Close() })
 
 	metricsConfig := &metrics.Config{
 		Enabled:   true,
@@ -224,11 +226,13 @@ func TestFUSEOptimizations(t *testing.T) {
 		DefaultMode: 0644,
 	}
 
-	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, fuseConfig)
+	filesystem := fuse.NewFileSystem(t.Context(), backend, mlCache, writeBuffer, collector, fuseConfig)
 
 	// Test filesystem operations
 	_ = filesystem // Use filesystem to avoid unused variable
 	t.Run("TestReadAheadOptimization", func(t *testing.T) {
+		t.Parallel()
+
 		// Create test data in backend
 		testKey := "test-readahead.txt"
 		testData := make([]byte, 1024*1024) // 1MB of test data
@@ -258,6 +262,8 @@ func TestFUSEOptimizations(t *testing.T) {
 	})
 
 	t.Run("TestWriteCoalescing", func(t *testing.T) {
+		t.Parallel()
+
 		testKey := "test-coalesce.txt"
 
 		// Perform multiple small writes that should be coalesced
@@ -294,6 +300,8 @@ func TestFUSEOptimizations(t *testing.T) {
 	})
 
 	t.Run("TestCacheOptimization", func(t *testing.T) {
+		t.Parallel()
+
 		testKey := "test-cache.txt"
 		testData := []byte("This data should be cached for fast access")
 
@@ -318,6 +326,8 @@ func TestFUSEOptimizations(t *testing.T) {
 	})
 
 	t.Run("TestMetricsCollection", func(t *testing.T) {
+		t.Parallel()
+
 		// Record some operations
 		collector.RecordOperation("read", 50*time.Millisecond, 1024, true)
 		collector.RecordOperation("write", 30*time.Millisecond, 2048, true)
@@ -331,6 +341,8 @@ func TestFUSEOptimizations(t *testing.T) {
 	})
 
 	t.Run("TestPerformanceBenchmark", func(t *testing.T) {
+		t.Parallel()
+
 		if testing.Short() {
 			t.Skip("Skipping benchmark in short mode")
 		}
@@ -366,6 +378,8 @@ func TestFUSEOptimizations(t *testing.T) {
 
 // TestFUSEFileOperations tests basic file operations
 func TestFUSEFileOperations(t *testing.T) {
+	t.Parallel()
+
 	backend := NewMockBackend()
 
 	cacheConfig := &cache.MultiLevelConfig{
@@ -381,15 +395,17 @@ func TestFUSEFileOperations(t *testing.T) {
 
 	writeBuffer, err := vfs.NewWriter(context.Background(), backend)
 	require.NoError(t, err)
-	defer func() { _ = writeBuffer.Close() }()
+	t.Cleanup(func() { _ = writeBuffer.Close() })
 
 	collector, err := metrics.NewCollector(&metrics.Config{Enabled: true})
 	require.NoError(t, err)
 
-	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, nil)
+	filesystem := fuse.NewFileSystem(t.Context(), backend, mlCache, writeBuffer, collector, nil)
 	_ = filesystem // Use filesystem to avoid unused variable
 
 	t.Run("FileCreationAndAccess", func(t *testing.T) {
+		t.Parallel()
+
 		// Test file creation
 		testKey := "created-file.txt"
 		testContent := []byte("This file was created through FUSE")
@@ -409,6 +425,8 @@ func TestFUSEFileOperations(t *testing.T) {
 	})
 
 	t.Run("DirectoryOperations", func(t *testing.T) {
+		t.Parallel()
+
 		// Create directory structure
 		files := []string{
 			"dir1/file1.txt",
@@ -430,9 +448,11 @@ func TestFUSEFileOperations(t *testing.T) {
 	})
 
 	t.Run("ErrorHandling", func(t *testing.T) {
+		t.Parallel()
+
 		// Test accessing non-existent file
 		_, err := backend.GetObject(context.Background(), "non-existent.txt", 0, 0)
-		assert.Error(t, err)
+		require.Error(t, err)
 
 		// Test reading beyond file bounds
 		testKey := "small-file.txt"
@@ -462,7 +482,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 	defer func() { _ = writeBuffer.Close() }()
 
 	collector, _ := metrics.NewCollector(&metrics.Config{Enabled: false})
-	filesystem := fuse.NewFileSystem(backend, mlCache, writeBuffer, collector, nil)
+	filesystem := fuse.NewFileSystem(b.Context(), backend, mlCache, writeBuffer, collector, nil)
 	_ = filesystem // Use filesystem to avoid unused variable
 
 	// Prepare test data
@@ -478,7 +498,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			_, err := backend.GetObject(context.Background(), testKey, 0, int64(len(testData)))
 			if err != nil {
 				b.Fatal(err)
@@ -492,7 +512,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
-		for i := 0; i < b.N; i++ {
+		for i := range b.N {
 			testKey := "bench-write-" + string(rune(i%100)) // Cycle through 100 keys
 			err := backend.PutObject(context.Background(), testKey, testData, nil)
 			if err != nil {
@@ -511,7 +531,7 @@ func BenchmarkFUSEOperations(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			data := mlCache.Get(testKey, 0, int64(len(testData)))
 			if data == nil {
 				b.Fatal("Cache miss")
