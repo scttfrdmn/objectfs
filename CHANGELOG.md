@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **278 of the `paralleltest`/`tparallel` backlog cleared: the lint total is 570 → 299** ([#179]).
+  `t.Parallel()` on every test and subtest in seventeen files across `pkg/errors`, `pkg/status`,
+  `pkg/health`, `pkg/recovery`, `pkg/retry`, `pkg/api`, `pkg/utils`, `pkg/types`, `internal/cache` and
+  `internal/metrics`. CLAUDE.md already required this; the finding count was the gap between the
+  requirement and the tree. Each package was run under `-race -count=2` after the change and its
+  coverage checked against its floor, because parallelizing a test that shares state is a way to make
+  it pass less often rather than a way to make it faster.
+
+  **Two packages resisted, and both are the point of doing this rather than suppressing it.**
+  `pkg/health`'s `TestTracker_CanRead` had a genuine order dependency, described under Fixed below.
+  `pkg/utils/debug_mode_test.go`'s 19 findings cannot be fixed by a `t.Parallel()` at all —
+  `DebugManager` is a `sync.Once` singleton with no exported constructor, and `RecordEvent` fans every
+  event out to *all* open sessions, so a session's event count depends on what every concurrently-open
+  session recorded. Measured: `Expected 1 event, got 17`, and five other counts inflated by siblings'
+  traffic, with no data race — the locking is correct and the broadcast is doing what it is written to
+  do. Excluded in `.golangci.yml` with that reasoning recorded and filed as [#373], rather than
+  silenced with a `t.Parallel()` that would leave the tests sequential in effect and the lint green.
+
+- **`pkg/archive` has tests of its own and a 100% floor** ([#360]). The package had none: its
+  coverage was reported entirely through `internal/archive`, at 48.6%, which is a number about a
+  consumer rather than about this package. `metadata_test.go` takes it to 100.0% and the floor is set
+  there.
+
+  The issue offered a choice between testing the package directly and folding it into its consumer,
+  and the premise had shifted since it was filed — `internal/archive` now builds an index and reads it
+  back, so the genuinely unreached code was `ListDirectory` and its two helpers, which no consumer
+  calls at all. Testing directly was the only option that covers them.
+
+  Reaching 100% surfaced something worth recording rather than deleting: `ListDirectory`'s second
+  disjunct requires an entry whose `Path` ends in `/`, and `internal/archive.BuildIndexFromBytes` runs
+  every tar name through `path.Clean`, which strips exactly that. So that branch, and
+  `containsSlashExceptLast` which only it calls, are **unreachable from the only producer in this
+  repository**. They are covered rather than removed because `ArchiveIndex` is exported and an outside
+  caller may build an index by hand using tar's own convention, where a directory name keeps its
+  slash — the test names which convention each half serves, so dropping the branch stays a decision
+  about the exported surface instead of a coverage cleanup. Two other behaviors are now pinned rather
+  than assumed: `TotalFiles` counts directories while `TotalSize` does not, and a repeated path
+  replaces the entry without rolling either counter back.
+
+- **A coverage floor for `sdks/c`, and an explicit cgo posture in the job that measures it**
+  ([#361]). The coverage job set no `CGO_ENABLED`, so it took the runner's default; `sdks/c` is the one
+  package whose coverage depends on that, and its number came from an inherited value no workflow
+  stated. The job now sets `CGO_ENABLED: 1`, and the direction matters — `sdks/c/main.go` carries
+  `import "C"`, so with cgo off the package does not fall back to a tag-excluded variant, it **fails to
+  compile**, because `main_test.go` references `codeFromErr`, `fillCStr`, `maxPutLength` and more and
+  none of those declarations are built. `CGO_ENABLED=0` would have turned a coverage question into a
+  compile failure in the job whose output is a coverage number.
+
+  With that stated, the floor is set at 12. `.coverage-floors` claimed 11.0% while arguing the package
+  was unfloorable, and that number was already stale when written: #355 added the tests that took it to
+  12.1%, and the note was authored on a branch cut before #355 merged, so it recorded a measurement its
+  own commit had invalidated. Verified rather than reasoned — `sdks/c` has no commits touching it
+  since, and it measures 11.0% at `f6f2ae5^` and 12.1% at `HEAD`. The floor is a ratchet on the
+  Go-testable half of the SDK, not a coverage target for it: the rest is `//export` cgo entry points
+  whose parameters are C pointers, which the C suite under `sdks/c/tests` exercises and `go test`
+  cannot.
+
+- **The coverage gate no longer measures Go files vendored inside npm dependencies.** Two copies of
+  the `flatted` package ship a Go port under their package directory, so once anything has run `npm
+  install` in `docs-platform` or `sdks/javascript`, `go list ./...` reports two more packages and the
+  gate named them as unfloored at 0.0%. They are gitignored, absent from a fresh checkout, and never
+  installed by the coverage job — so they appeared only on a developer machine, which is the worst
+  place for a gate to grow noise, and neither a floor nor a test is the fix, because the code is not
+  this repository's. `TestUnfloorablePackagesAreExplained` previously filtered them out of its own
+  synthetic profile, which made the test pass while leaving the noise in the output a person reads;
+  that filter is gone, so the synthetic profile now names them and the assertion that the gate does not
+  report them is what tests the exclusion. Verified by mutation in both directions.
+
 - **A measured per-iteration allocation budget for the difftest fuzz target, and a bound on what the
   shared emulator retains** ([#193]). `TestPerIterationAllocationBudget` asserts that one worst-shaped
   iteration allocates under 16 MiB; it measures 6.3 MiB for a program of writes and reads and 7.1 MiB for
@@ -995,6 +1063,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shadow was not concealing a dropped failure: there is no `err` anywhere in that function's scope, so
   nothing was hidden by it.
 
+- **`TestTracker_CanRead` was passing on the order its subtests happened to run in** — found by
+  parallelizing it, and the more useful half of that change ([#179]).
+
+  The test wrote a component's `State` directly and asserted what `CanRead`/`CanWrite` answered. But
+  `State` alone does not decide that: `admissionState` admits one probe against a refusing component
+  once `nextProbe` has elapsed, and reports `StateDegraded` to get that probe past the gate. So
+  `State=StateUnavailable` with a **zero-value `nextProbe`**, which is always in the past, reads as
+  *readable* — a combination the tracker never produces, since `RecordError` sets both fields and the
+  test set one.
+
+  One tracker shared across the table concealed it. The first subtest to reach a refusing state took
+  the probe path, which pushed `nextProbe` `ProbeAfter` into the future, and every later subtest then
+  read raw state and agreed with the table. Giving each subtest its own tracker — the isolation
+  `t.Parallel()` requires — removed the accident and the unavailable case failed immediately with
+  `CanRead() = true, want false`. Fixed by setting `nextProbe` alongside `State`, in the shape
+  `RecordError` leaves it; verified by deleting that line and watching the case fail.
+
+  No production defect here: the tracker's own code path sets both fields together. What was broken is
+  a test that could not have caught it if they came apart.
+
 - **Error classification for Transfer Acceleration no longer disables the accelerated endpoint on
   unrelated failures** ([#187]).
 
@@ -1364,12 +1452,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OBJECTFS.md`; they were filed rather than fixed here, and are fixed above in the same release
   ([#353]).
 
+[#179]: https://github.com/scttfrdmn/objectfs/issues/179
 [#187]: https://github.com/scttfrdmn/objectfs/issues/187
 [#198]: https://github.com/scttfrdmn/objectfs/issues/198
 [#199]: https://github.com/scttfrdmn/objectfs/issues/199
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
 [#235]: https://github.com/scttfrdmn/objectfs/issues/235
+[#373]: https://github.com/scttfrdmn/objectfs/issues/373
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
+[#360]: https://github.com/scttfrdmn/objectfs/issues/360
+[#361]: https://github.com/scttfrdmn/objectfs/issues/361
 [#362]: https://github.com/scttfrdmn/objectfs/issues/362
 
 - **Every build tag is compiled in CI, and the two tagged files that had stopped compiling now
