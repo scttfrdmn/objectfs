@@ -12,6 +12,8 @@ import (
 
 // TestNewPersistentCache tests cache creation with various configurations
 func TestNewPersistentCache(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -88,6 +90,8 @@ func TestNewPersistentCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			cache, err := NewPersistentCache(tt.config)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewPersistentCache() error = %v, wantErr %v", err, tt.wantErr)
@@ -108,6 +112,8 @@ func TestNewPersistentCache(t *testing.T) {
 
 // TestPersistentCache_PutGet tests basic Put and Get operations
 func TestPersistentCache_PutGet(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory:   tmpDir,
@@ -154,6 +160,8 @@ func TestPersistentCache_PutGet(t *testing.T) {
 
 // TestPersistentCache_GetMiss tests cache miss behavior
 func TestPersistentCache_GetMiss(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -179,6 +187,8 @@ func TestPersistentCache_GetMiss(t *testing.T) {
 
 // TestPersistentCache_Compression tests compression functionality
 func TestPersistentCache_Compression(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -200,6 +210,8 @@ func TestPersistentCache_Compression(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			cache, err := NewPersistentCache(&PersistentCacheConfig{
 				Directory:   filepath.Join(tmpDir, tt.name),
 				MaxSize:     10 * 1024 * 1024,
@@ -247,6 +259,8 @@ func TestPersistentCache_Compression(t *testing.T) {
 // Stamping the timestamp after the write would also fix the flake, but TTL-measured-from-write-start
 // is the defensible semantic — the entry is as old as its data — so the test is what changes.
 func TestPersistentCache_TTLExpiration(t *testing.T) {
+	t.Parallel()
+
 	const ttl = 2 * time.Second
 
 	tmpDir := t.TempDir()
@@ -286,6 +300,8 @@ func expiryWait(ttl time.Duration) {
 
 // TestPersistentCache_Delete tests Delete operation
 func TestPersistentCache_Delete(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -317,6 +333,8 @@ func TestPersistentCache_Delete(t *testing.T) {
 
 // TestPersistentCache_Eviction tests eviction when cache is full
 func TestPersistentCache_Eviction(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -346,6 +364,8 @@ func TestPersistentCache_Eviction(t *testing.T) {
 
 // TestPersistentCache_EvictManual tests manual Evict operation
 func TestPersistentCache_EvictManual(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -379,6 +399,8 @@ func TestPersistentCache_EvictManual(t *testing.T) {
 
 // TestPersistentCache_Clear tests Clear operation
 func TestPersistentCache_Clear(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -416,6 +438,8 @@ func TestPersistentCache_Clear(t *testing.T) {
 // against a 100ms budget is a coin flip on a loaded runner, and losing it looks like Optimize
 // evicting a fresh entry.
 func TestPersistentCache_Optimize(t *testing.T) {
+	t.Parallel()
+
 	const ttl = 2 * time.Second
 
 	tmpDir := t.TempDir()
@@ -455,6 +479,8 @@ func TestPersistentCache_Optimize(t *testing.T) {
 
 // TestPersistentCache_IndexPersistence tests that index is saved and loaded
 func TestPersistentCache_IndexPersistence(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	// Create cache and add data
@@ -500,6 +526,8 @@ func TestPersistentCache_IndexPersistence(t *testing.T) {
 
 // TestPersistentCache_ChecksumValidation tests checksum verification
 func TestPersistentCache_ChecksumValidation(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory:   tmpDir,
@@ -652,6 +680,8 @@ func TestPersistentCache_ChecksumIsWhatCatchesWrongBytes(t *testing.T) {
 
 // TestPersistentCache_ConcurrentAccess tests thread-safety
 func TestPersistentCache_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -701,6 +731,8 @@ func TestPersistentCache_ConcurrentAccess(t *testing.T) {
 
 // TestPersistentCache_Stats tests statistics tracking
 func TestPersistentCache_Stats(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -741,6 +773,8 @@ func TestPersistentCache_Stats(t *testing.T) {
 
 // TestPersistentCache_EmptyData tests that empty data is ignored
 func TestPersistentCache_EmptyData(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	cache, err := NewPersistentCache(&PersistentCacheConfig{
 		Directory: tmpDir,
@@ -761,6 +795,8 @@ func TestPersistentCache_EmptyData(t *testing.T) {
 
 // TestPersistentCache_PathValidation tests security of path validation
 func TestPersistentCache_PathValidation(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	// Test that config with suspicious index file is rejected during load

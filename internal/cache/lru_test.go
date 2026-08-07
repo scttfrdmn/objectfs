@@ -8,6 +8,8 @@ import (
 
 // TestNewLRUCache tests cache creation with various configurations
 func TestNewLRUCache(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		config *CacheConfig
@@ -52,6 +54,8 @@ func TestNewLRUCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			cache := NewLRUCache(tt.config)
 			if cache == nil {
 				t.Fatal("NewLRUCache returned nil")
@@ -69,6 +73,8 @@ func TestNewLRUCache(t *testing.T) {
 
 // TestLRUCache_PutGet tests basic Put and Get operations
 func TestLRUCache_PutGet(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    1024 * 1024,
 		MaxEntries: 100,
@@ -102,6 +108,8 @@ func TestLRUCache_PutGet(t *testing.T) {
 
 // TestLRUCache_GetMiss tests cache miss behavior
 func TestLRUCache_GetMiss(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
 		TTL:     time.Hour,
@@ -122,6 +130,8 @@ func TestLRUCache_GetMiss(t *testing.T) {
 
 // TestLRUCache_PutEmpty tests that empty data is ignored
 func TestLRUCache_PutEmpty(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
 	})
@@ -136,6 +146,8 @@ func TestLRUCache_PutEmpty(t *testing.T) {
 
 // TestLRUCache_UpdateExisting tests updating an existing cache entry
 func TestLRUCache_UpdateExisting(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
 		TTL:     time.Hour,
@@ -168,6 +180,8 @@ func TestLRUCache_UpdateExisting(t *testing.T) {
 
 // TestLRUCache_Eviction tests LRU eviction when cache is full
 func TestLRUCache_Eviction(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    100, // Small cache
 		MaxEntries: 3,   // Max 3 entries
@@ -209,6 +223,8 @@ func TestLRUCache_Eviction(t *testing.T) {
 
 // TestLRUCache_EvictionBySize tests eviction based on size limit
 func TestLRUCache_EvictionBySize(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    50, // 50 bytes
 		MaxEntries: 100,
@@ -244,6 +260,8 @@ func TestLRUCache_EvictionBySize(t *testing.T) {
 // of the bug is identical, and a test that only usually passes is worth the same as one that
 // usually fails.
 func TestLRUCache_TTLExpiration(t *testing.T) {
+	t.Parallel()
+
 	const ttl = 2 * time.Second
 
 	cache := NewLRUCache(&CacheConfig{
@@ -278,6 +296,8 @@ func TestLRUCache_TTLExpiration(t *testing.T) {
 
 // TestLRUCache_Delete tests Delete operation
 func TestLRUCache_Delete(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
 		TTL:     time.Hour,
@@ -307,6 +327,8 @@ func TestLRUCache_Delete(t *testing.T) {
 
 // TestLRUCache_Clear tests Clear operation
 func TestLRUCache_Clear(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
 		TTL:     time.Hour,
@@ -333,6 +355,8 @@ func TestLRUCache_Clear(t *testing.T) {
 
 // TestLRUCache_ConcurrentAccess tests thread-safety
 func TestLRUCache_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    10 * 1024 * 1024,
 		MaxEntries: 1000,
@@ -378,6 +402,8 @@ func TestLRUCache_ConcurrentAccess(t *testing.T) {
 
 // TestLRUCache_Stats tests statistics tracking
 func TestLRUCache_Stats(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    1024,
 		MaxEntries: 10,
@@ -422,6 +448,8 @@ func TestLRUCache_Stats(t *testing.T) {
 
 // TestLRUCache_Resize tests cache resize operation
 func TestLRUCache_Resize(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    1000,
 		MaxEntries: 100,
@@ -451,6 +479,8 @@ func TestLRUCache_Resize(t *testing.T) {
 
 // TestLRUCache_Evict tests manual eviction
 func TestLRUCache_Evict(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize:    1024,
 		MaxEntries: 100,
@@ -480,6 +510,8 @@ func TestLRUCache_Evict(t *testing.T) {
 
 // TestLRUCache_GetKeys tests GetKeys helper
 func TestLRUCache_GetKeys(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024,
 		TTL:     time.Hour,
@@ -518,6 +550,8 @@ func TestLRUCache_GetKeys(t *testing.T) {
 
 // TestWeightedLRUCache_Creation tests weighted LRU cache creation
 func TestWeightedLRUCache_Creation(t *testing.T) {
+	t.Parallel()
+
 	cache := NewWeightedLRUCache(&CacheConfig{
 		MaxSize: 1024 * 1024,
 	})
@@ -532,6 +566,8 @@ func TestWeightedLRUCache_Creation(t *testing.T) {
 
 // TestWeightedLRUCache_EvictByWeight tests weight-based eviction
 func TestWeightedLRUCache_EvictByWeight(t *testing.T) {
+	t.Parallel()
+
 	cache := NewWeightedLRUCache(&CacheConfig{
 		MaxSize:    1024,
 		MaxEntries: 100,
@@ -567,6 +603,8 @@ func TestWeightedLRUCache_EvictByWeight(t *testing.T) {
 
 // TestLRUCache_AccessTimeUpdate tests that access time is updated on Get
 func TestLRUCache_AccessTimeUpdate(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024,
 		TTL:     time.Hour,
@@ -599,6 +637,8 @@ func TestLRUCache_AccessTimeUpdate(t *testing.T) {
 
 // TestLRUCache_DataIsolation tests that returned data is a copy
 func TestLRUCache_DataIsolation(t *testing.T) {
+	t.Parallel()
+
 	cache := NewLRUCache(&CacheConfig{
 		MaxSize: 1024,
 		TTL:     time.Hour,

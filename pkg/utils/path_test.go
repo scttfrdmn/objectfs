@@ -73,6 +73,8 @@ func TestValidatePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			err := ValidatePath(tt.path, tt.allowAbsolute)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidatePath() error = %v, wantErr %v", err, tt.wantErr)
@@ -160,6 +162,8 @@ func TestValidatePathWithinBase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			// Skip tests with hardcoded Unix paths on Windows
 			if runtime.GOOS == "windows" && strings.HasPrefix(tt.base, "/") {
 				t.Skip("Skipping Unix path test on Windows")
@@ -243,6 +247,8 @@ func TestSecureJoin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			// Skip tests with hardcoded Unix paths on Windows
 			if runtime.GOOS == "windows" && strings.HasPrefix(tt.base, "/") {
 				t.Skip("Skipping Unix path test on Windows")

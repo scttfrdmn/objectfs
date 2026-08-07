@@ -7,6 +7,8 @@ import (
 )
 
 func TestParseLogLevel(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -59,6 +61,8 @@ func TestParseLogLevel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result, err := ParseLogLevel(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseLogLevel() error = %v, wantErr %v", err, tt.wantErr)
@@ -72,6 +76,8 @@ func TestParseLogLevel(t *testing.T) {
 }
 
 func TestLogLevelString(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		level    LogLevel
 		expected string
@@ -85,6 +91,8 @@ func TestLogLevelString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
+			t.Parallel()
+
 			result := tt.level.String()
 			if result != tt.expected {
 				t.Errorf("LogLevel.String() = %v, want %v", result, tt.expected)
@@ -94,6 +102,8 @@ func TestLogLevelString(t *testing.T) {
 }
 
 func TestLogger(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := NewLogger(DEBUG, &buf)
 
@@ -125,6 +135,8 @@ func TestLogger(t *testing.T) {
 }
 
 func TestLoggerLevelFiltering(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := NewLogger(WARN, &buf)
 
@@ -158,6 +170,8 @@ func TestLoggerLevelFiltering(t *testing.T) {
 }
 
 func TestFormatBytes(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		bytes    int64
@@ -202,6 +216,8 @@ func TestFormatBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := FormatBytes(tt.bytes)
 			if result != tt.expected {
 				t.Errorf("FormatBytes() = %v, want %v", result, tt.expected)
@@ -211,6 +227,8 @@ func TestFormatBytes(t *testing.T) {
 }
 
 func TestParseBytes(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -420,6 +438,8 @@ func TestParseBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result, err := ParseBytes(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseBytes() error = %v, wantErr %v", err, tt.wantErr)

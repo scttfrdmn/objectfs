@@ -8,6 +8,8 @@ import (
 
 // TestInterfaces verifies that our interfaces are properly structured
 func TestInterfaces(t *testing.T) {
+	t.Parallel()
+
 	// Test that we can define variables of interface types
 	var (
 		_ Backend           = (*mockBackend)(nil)
