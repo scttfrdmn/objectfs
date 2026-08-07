@@ -81,20 +81,21 @@
 #     self-consistency failure the Glacier PUT defect had. Its real check is that the suites using
 #     it fail when a rule changes
 #
-# Three packages are absent from the gate's report entirely, and that is correct rather than a gap.
+# `pkg/types` was in this block as `no-statements` and is now floored above. #282 gave it its first
+# function bodies — Precondition.Validate and IsZero — and TestNoStatementPackagesStillHaveNone caught
+# the transition on the commit that made it, which is what that test exists for.
+#
+# Two packages are absent from the gate's report entirely, and that is correct rather than a gap.
 # They contain no statements at all, so they produce no profile lines for the gate to match, and
 # `go test` reports them as `coverage: [no statements]` rather than 0.0%:
 #
-# no-statements: pkg/types
-#     three files of interface and struct declarations, no function bodies. Its doc.go example is in
-#     a comment
 # no-statements: tests
 #     five _test.go files and no non-test Go files, so there is nothing in the package for a profile
 #     to be about. Three of the five are behind build tags (aws_s3, distributed, e2e)
 # no-statements: test/benchmarks
 #     behind //go:build benchmark, so `go list ./...` does not report it either
 #
-# A floor for any of these three fails the gate rather than weakening it — verified, not assumed:
+# A floor for either of these fails the gate rather than weakening it — verified, not assumed:
 # adding `pkg/types 50` produces "FAIL pkg/types — a floor of 50% is set but the coverage profile has
 # no data for it" and exits 1, via the stale-floor arm in coverage-gate.sh. That arm is correct and
 # should stay; the consequence is just that a zero-statement package cannot be floored, which is why
@@ -347,6 +348,17 @@ pkg/health               93
 pkg/recovery             86
 pkg/retry                87
 pkg/status               93
+
+# pkg/types enters at 100, from `no-statements`. That is not an achievement — the package is four
+# files of interface and struct declarations plus, since #282, exactly two function bodies:
+# Precondition.Validate and IsZero. Both are fully covered, so the floor is the measurement.
+#
+# 100 is the right ratchet here rather than a hostage: anything added to this package is either
+# another declaration, which does not move the number, or logic, which should arrive with its tests.
+# The one live risk is a floor at 100 flaking, and it cannot — there is no timing-dependent statement
+# to vary, which is the failure mode this file's header warns about.
+pkg/types                100
+
 pkg/utils                82
 
 # sdks/c measures 12.1%, and the floor is 12 rather than 11 for a reason worth recording: 11.0% was

@@ -31,6 +31,14 @@ func (m *mockBackend) GetObject(_ context.Context, key string, _, _ int64) ([]by
 func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
 	return nil
 }
+
+// PutObjectIf refuses rather than pretending: nothing in this package issues a conditional write, and
+// ErrNotSupported is the answer the interface requires of an implementation that cannot evaluate one.
+func (m *mockBackend) PutObjectIf(_ context.Context, _ string, _ []byte, _ map[string]string,
+	_ types.Precondition,
+) (string, error) {
+	return "", types.ErrNotSupported
+}
 func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return nil
 }

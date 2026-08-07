@@ -8,7 +8,10 @@ package s3
 // that used the harness would be an import cycle.
 
 import (
+	"context"
+
 	"github.com/scttfrdmn/objectfs/internal/circuit"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // SetPoolSizeForTest overwrites a live backend's pool size.
@@ -62,4 +65,20 @@ func SetCopyThresholdsForTest(b *Backend, singlePartLimit, partSize int64) {
 // opens the breaker before the first request. So the test needs to see the nil.
 func ReadyToTripForTest(cfg CircuitBreakerConfig) func(circuit.Counts) bool {
 	return readyToTrip(cfg)
+}
+
+// CapabilityProbeKeyForTest is the key the conditional-write probe asserts against.
+//
+// A test asserting the probe left nothing behind has to name the key, and hardcoding the literal in the
+// test would let the two drift: renaming the constant would leave the test checking that an object does
+// not exist at a key nothing ever writes to, which passes for the wrong reason.
+const CapabilityProbeKeyForTest = capabilityProbeKey
+
+// ProbeConditionalWriteForTest runs the capability probe against b's endpoint, bypassing the cache.
+//
+// Capabilities() caches through a sync.Once, so a test that needs to probe a *particular* endpoint —
+// notably one that accepts conditional headers and ignores them — cannot get at the probe through the
+// public method without constructing a fresh backend per case.
+func ProbeConditionalWriteForTest(b *Backend) types.BackendCapabilities {
+	return b.probeConditionalWrite(context.Background())
 }

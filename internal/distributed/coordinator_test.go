@@ -54,6 +54,16 @@ func (m *mockBackend) GetObject(_ context.Context, _ string, _, _ int64) ([]byte
 func (m *mockBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
 	return nil
 }
+
+// PutObjectIf refuses rather than pretending, which is the load-bearing choice in this package
+// specifically. A CAS is the coordination primitive that replaces the consensus code here, so a mock
+// that answered a precondition with a fabricated ETag and nil would let a coordination test conclude
+// exactly-one-writer against a stub that never excluded anybody.
+func (m *mockBackend) PutObjectIf(_ context.Context, _ string, _ []byte, _ map[string]string,
+	_ types.Precondition,
+) (string, error) {
+	return "", types.ErrNotSupported
+}
 func (m *mockBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return nil
 }
@@ -83,6 +93,15 @@ func (e *errBackend) GetObject(_ context.Context, _ string, _, _ int64) ([]byte,
 }
 func (e *errBackend) PutObject(_ context.Context, _ string, _ []byte, _ map[string]string) error {
 	return e.err
+}
+
+// PutObjectIf returns this backend's configured error, like every other method. It is not
+// ErrNotSupported: the whole point of errBackend is that every operation fails the same way, and a
+// method that failed differently would be a hole in that.
+func (e *errBackend) PutObjectIf(_ context.Context, _ string, _ []byte, _ map[string]string,
+	_ types.Precondition,
+) (string, error) {
+	return "", e.err
 }
 func (e *errBackend) SetObjectMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return e.err

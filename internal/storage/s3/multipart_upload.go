@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // partSlice returns the byte slice for part partNum (1-indexed) given chunkSize.
@@ -220,26 +222,61 @@ func (b *Backend) abortMultipartUpload(ctx context.Context, key, uploadID string
 	})
 }
 
-// completeMultipartUpload calls CompleteMultipartUpload to assemble all parts
-// into the final S3 object.
+// completeMultipartUpload calls CompleteMultipartUpload to assemble all parts into the final S3
+// object, reporting the assembled object's ETag.
+//
+// cond, when non-zero, is evaluated here rather than at CreateMultipartUpload — which is the only
+// place it can be. Parts are not visible as an object until this call, so the assertion has to be
+// made against the key at the moment the object appears; asserting it earlier would leave a window
+// in which another writer creates the key between the assertion and the assembly. The cost is that
+// a losing conditional multipart write has already transferred every part, which is why a caller
+// racing for a lease should be writing a small object.
 func (b *Backend) completeMultipartUpload(
 	ctx context.Context,
 	key, uploadID string,
 	parts []s3types.CompletedPart,
-) error {
-	return b.executeWithAccelerationFallback(ctx, "CompleteMultipartUpload", func(client *s3.Client) error {
-		_, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	cond types.Precondition,
+) (string, error) {
+	var etag string
+
+	err := b.executeWithAccelerationFallback(ctx, "CompleteMultipartUpload", func(client *s3.Client) error {
+		etag = ""
+
+		input := &s3.CompleteMultipartUploadInput{
 			Bucket:   aws.String(b.bucket),
 			Key:      aws.String(key),
 			UploadId: aws.String(uploadID),
 			MultipartUpload: &s3types.CompletedMultipartUpload{
 				Parts: parts,
 			},
-		})
+		}
+		applyPrecondition(input, cond)
+
+		out, err := client.CompleteMultipartUpload(ctx, input)
 		if err != nil {
 			b.metricsCollector.RecordError(err)
+
+			// Which translator depends on whether anything was asserted, and the difference is not
+			// cosmetic. translateError has no arm for PreconditionFailed — it cannot, since an
+			// unconditional Complete has no way to produce one — so it lands on the pessimistic
+			// ErrCodeStorageRead default: a lost race would read as a service failure, degrade
+			// s3-writes, move the breaker toward open, and reach the caller as something it cannot
+			// match [types.ErrPreconditionFailed] against. Found by execution: the first run of
+			// TestPutObjectIfAbsentAboveTheMultipartThresholdIsStillConditional reported exactly that
+			// STORAGE_READ, with substrate having correctly declined the write.
+			//
+			// Guarded on IsZero rather than called unconditionally so the unconditional multipart path
+			// keeps the classification it has always had, including for NoSuchUpload.
+			if !cond.IsZero() {
+				return b.translateConditionalError(err, "CompleteMultipartUpload", key, cond)
+			}
+
 			return b.translateError(err, "CompleteMultipartUpload", key)
 		}
+
+		etag = aws.ToString(out.ETag)
 		return nil
 	})
+
+	return etag, err
 }

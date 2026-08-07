@@ -53,6 +53,11 @@ func DefaultConfig() Config {
 			errors.ErrCodeResourceExhausted,
 			errors.ErrCodeWorkerBusy,
 			errors.ErrCodeInternalError,
+
+			// A conditional write that raced a delete. Distinct from a precondition failure, which
+			// is deliberately absent from this list: that answer is definitive and retrying it only
+			// spends requests to be told the same thing, whereas a conflict may clear on its own.
+			errors.ErrCodeConditionalConflict,
 		},
 	}
 }

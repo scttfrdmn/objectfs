@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Backend.PutObjectIf` — a write that happens only if an assertion about the key's current state
+  holds, reporting the new ETag** ([#282]). This is the primitive the coordination work is being rebuilt
+  on: `Precondition{Absent: true}` is a lease acquisition, `Precondition{ETag: current}` is a
+  compare-and-swap, and the store — not any of the contenders — decides which one proceeds. Eight
+  concurrent writers asserting absence of one key elect exactly one, verified against both the emulator
+  and real S3.
+
+  A precondition that does not hold is `types.ErrPreconditionFailed` and the stored object is unchanged.
+  That is the mechanism rather than an error path, which is what most of this change is actually about:
+  almost everything the backend wraps a request in — the retryer, the circuit breaker, the health tracker
+  — is built to treat a failed request as evidence of trouble, and `ErrorThreshold` is 3, so counting a
+  lost race as a service failure would take writes offline for every contender under exactly the
+  contention the precondition exists to arbitrate. It is therefore a non-failure in
+  `errors.IsServiceFailure`, which both the tracker and the breaker consult, and it is absent from
+  `retry.DefaultConfig`'s retryable set: the answer is definitive, and retrying spends `MaxAttempts`
+  requests to be told the same thing. `ErrConditionalConflict` — S3 could not order the write against a
+  concurrent one — is retryable, and the two being classified oppositely is now asserted in
+  `pkg/retry`, because `PutObjectIf` deliberately does not wrap itself in a retryer (a CAS caller has to
+  re-read state and recompute its bytes; that loop is only its own) and so nothing in the S3 package
+  could fail if the classification were wrong.
+
+  **An absent key is `ErrCodeObjectNotFound`, not a precondition failure**, and preserving that
+  distinction fixed a real defect found by execution rather than by reading. S3 answers 404 to an
+  `If-Match` against a missing key, but the AWS SDK does not model `NoSuchKey` among `PutObject`'s typed
+  errors — an unconditional `PutObject` has no way to produce one — so the code arrives as a bare
+  `smithy.APIError`, falls past `translateError`'s typed arms to its pessimistic default, and became
+  `ErrCodeStorageRead`: a service failure that degraded `s3-writes` and moved the breaker toward open,
+  for a key that was simply not there. A caller that cannot tell a lost race from a deleted object
+  retries forever against a key nobody is going to recreate. The same gap applied at
+  `CompleteMultipartUpload`, where a declined conditional write reported `STORAGE_READ` instead of a
+  precondition failure until a conditional translator was wired in there too.
+
+  **A conditional write above `MultipartThreshold` is still conditional.** The assertion can only be
+  evaluated at `CompleteMultipartUpload`, because parts are not an object until they are assembled — so
+  the large path carries it on a different request than the caller's data, and `completeMultipartUpload`
+  now returns the ETag it previously discarded. The cost is inherent: a losing conditional multipart
+  write has already transferred every part. The deferred abort covers that, asserted through
+  `ListMultipartUploads` against real S3, since an orphaned upload's parts are billed and invisible to
+  `ListObjects`.
+
+  **Whether the endpoint evaluates preconditions at all is established by attempt, once, and cached** —
+  not read from configuration. The probe is an `If-Match` that no object can satisfy against a key
+  expected to be absent, and the answer it wants is a 404: that shape writes nothing, and it catches the
+  dangerous direction, because a store that accepts conditional headers and ignores them answers with a
+  *success*, having created the object. Anything the probe cannot classify leaves the capability absent,
+  and `PutObjectIf` then refuses rather than falling back to an unconditional write. A fallback would
+  turn "exactly one node performs this transition" into "every node does", silently, at the moment it
+  matters most — the same reasoning the read path already follows in refusing a `Content-Encoding` it
+  cannot decode. Ceph RGW documents conditional headers for GET/HEAD only; Wasabi is unverified and
+  treated the same until probed.
+
+  `PutObject` and `PutObjectIf` share one `prepareUpload`, so they cannot disagree about the checksum,
+  the compressor, or the metadata map. Had they each computed their own, a conditional write would have
+  been one edit away from storing an object whose `objectfs-sha256` did not describe its bytes — a seam
+  defect of exactly the shape that let 32,680 lines of tests miss ~45 others.
+
+  Tested against `internal/testaws` rather than a mock, because a mock evaluating a precondition against
+  its own in-process map agrees with its caller by construction and would exclude nobody; against real
+  AWS under `-tags=integration`, because every claim here is about S3's semantics rather than ObjectFS's;
+  and against `httptest` endpoints that misbehave in specific ways, which is the only way to reach the
+  ignores-preconditions case. Mutation-verified in eight directions: dropping either header on either
+  path, delegating the 404, reclassifying a precondition failure as a service failure or as retryable,
+  removing the capability gate, and making the probe fail open each break a named test.
+
 - **278 of the `paralleltest`/`tparallel` backlog cleared: the lint total is 570 → 299** ([#179]).
   `t.Parallel()` on every test and subtest in seventeen files across `pkg/errors`, `pkg/status`,
   `pkg/health`, `pkg/recovery`, `pkg/retry`, `pkg/api`, `pkg/utils`, `pkg/types`, `internal/cache` and
@@ -674,9 +738,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller can be recording into it while that line formats. `StartTrace` read `session.enabled` with no
   lock at all, racing any concurrent `StopSession`. Both now read under the lock that writes them.
 
-  #373's fix plan also called for deleting a `.golangci.yml` exclusion for `debug_mode_test.go`. There is
-  no such exclusion — `grep debug_mode .golangci.yml` finds nothing — so the 56 findings were never
-  suppressed and there was nothing to remove.
+  #373's fix plan also called for deleting a `.golangci.yml` exclusion for `debug_mode_test.go`, and
+  whether there was one to delete depended on merge order. [#374] added the exclusion, recording #373 as
+  the fix that would make it removable; this change is that fix, so the exclusion was deleted when #374
+  reached this branch. Had the two landed the other way round, #374 would have reintroduced a
+  suppression for tests that no longer need it — a `paralleltest` exclusion over a file with 19
+  `t.Parallel()` calls, silently suppressing nothing. Verified after the merge: `make lint` reports 0
+  issues with the exclusion gone.
 - **A health test only passed because its four cases shared one tracker and ran in order** ([#179]).
   `paralleltest` 325 → 263 across seven packages, and one of those 62 turned out to be covering a real
   gap rather than an annotation.
@@ -1459,6 +1527,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#200]: https://github.com/scttfrdmn/objectfs/issues/200
 [#235]: https://github.com/scttfrdmn/objectfs/issues/235
 [#373]: https://github.com/scttfrdmn/objectfs/issues/373
+[#374]: https://github.com/scttfrdmn/objectfs/pull/374
 [#353]: https://github.com/scttfrdmn/objectfs/issues/353
 [#360]: https://github.com/scttfrdmn/objectfs/issues/360
 [#361]: https://github.com/scttfrdmn/objectfs/issues/361
@@ -2293,15 +2362,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **substrate v0.87.0 → v0.92.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
+- **substrate v0.87.0 → v0.93.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
   `go.sum` are the whole diff.
 
-  The S3 conditional-write behaviour that [#282] is built on was re-probed on the new version rather
-  than assumed to be stable across five releases: `If-None-Match: *` succeeds on an absent key and
+  The S3 conditional-write behaviour that [#282] is built on was re-probed on each new version rather
+  than assumed to be stable across releases: `If-None-Match: *` succeeds on an absent key and
   answers 412 on a present one, a failed precondition leaves the stored bytes unmodified, `If-Match`
   succeeds on a current ETag and answers 412 on a stale one, and `If-Match` against an absent key
   answers **404 rather than 412** — the distinction #282 makes load-bearing, since a lost race and a
-  vanished object need different recovery. Identical on both versions.
+  vanished object need different recovery. Identical on v0.87.0, v0.92.0 and v0.93.0.
+
+  v0.93.0's probe added one case the earlier ones did not cover: `If-None-Match: *` and `If-Match`
+  sent **together** answer 412, confirming S3 evaluates both headers rather than choosing between
+  them, so such a request can never succeed. That is why `types.Precondition.Validate` rejects the
+  combination locally — as a caller error at the call site, rather than as a remote 412 a caller
+  cannot distinguish from a genuinely lost race.
 
   `internal/testaws`, `internal/storage/s3`, and `internal/difftest` all pass at `-race`, as does the
   full suite. [scttfrdmn/substrate#540] — the third conditional-write outcome, 409 Conflict from a
