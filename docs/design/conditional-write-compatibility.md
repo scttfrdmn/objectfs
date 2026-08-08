@@ -36,6 +36,7 @@ indistinguishable until it matters.
 | AWS S3 | `us-west-2`, 2026-08-08 | the real service; each test creates its own bucket and removes it |
 | MinIO | `RELEASE.2025-09-07T16-13-09Z` (commit `07c3a429bfed433e49018cb0f78a52145d4bedeb`) | container, local |
 | Ceph RGW | `19.2.0 squid` (commit `16063ff2022298c9300e49a547a16ffda59baf13`) | `quay.io/ceph/demo`, local |
+| RustFS | `1.0.0-beta.12` (revision `8601179c3989d131fb68fa311fd517fe281270fe`, image digest `sha256:186743df6fdf85c1f10ce246bbee5fb22f1d35c3ec1a73fc9058c560c5f6b505`) | `docker.io/rustfs/rustfs`, local |
 | Wasabi | — | **not probed.** No endpoint was available. See [Wasabi](#wasabi) below. |
 
 ## The matrix
@@ -44,20 +45,20 @@ Cells are the HTTP status and S3 error code as returned, because that pair is wh
 `translateConditionalError` dispatches on. A row naming a code is a row a mapping can be checked
 against; a row naming a message is not, since message text is not stable.
 
-| Check | AWS S3 | MinIO | Ceph RGW 19.2.0 |
-|---|---|---|---|
-| `If-None-Match: *`, key absent | success | success | success |
-| `If-None-Match: *`, key exists | `412 PreconditionFailed`, holder's bytes intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact |
-| `If-Match` with the **quoted** ETag the store just returned | success | success | **`412 PreconditionFailed`** |
-| `If-Match` with the bare hex digest | success | success | success |
-| `If-Match: *` | **`501 NotImplemented`** | success | success |
-| `If-Match` with a **stale** ETag | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` |
-| `If-Match`, key **absent** | `404 NoSuchKey` | `404 NoSuchKey` | **`412 PreconditionFailed`** |
-| 8 concurrent `If-None-Match: *` on one key | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` |
-| Precondition on `CompleteMultipartUpload`, key exists | `412`, holder intact | `412`, holder intact | **success — contender's bytes land** |
-| Multipart ETag (`<hex>-<N>`) reused in a later `If-Match` | — | success | success |
-| `DeleteObject` with a stale `If-Match` | `412 PreconditionFailed`, object survives | **success — object deleted** | **success — object deleted** |
-| **ObjectFS capability probe verdict** | supported | supported | **unsupported** |
+| Check | AWS S3 | MinIO | Ceph RGW 19.2.0 | RustFS 1.0.0-beta.12 |
+|---|---|---|---|---|
+| `If-None-Match: *`, key absent | success | success | success | success |
+| `If-None-Match: *`, key exists | `412 PreconditionFailed`, holder's bytes intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact |
+| `If-Match` with the **quoted** ETag the store just returned | success | success | **`412 PreconditionFailed`** | success |
+| `If-Match` with the bare hex digest | success | success | success | success |
+| `If-Match: *` | **`501 NotImplemented`** | success | success | success |
+| `If-Match` with a **stale** ETag | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` |
+| `If-Match`, key **absent** | `404 NoSuchKey` | `404 NoSuchKey` | **`412 PreconditionFailed`** | `404 NoSuchKey` |
+| 8 concurrent `If-None-Match: *` on one key | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` |
+| Precondition on `CompleteMultipartUpload`, key exists | `412`, holder intact | `412`, holder intact | **success — contender's bytes land** | `412`, holder intact |
+| Multipart ETag (`<hex>-<N>`) reused in a later `If-Match` | — | success | success | success |
+| `DeleteObject` with a stale `If-Match` | `412 PreconditionFailed`, object survives | **success — object deleted** | **success — object deleted** | `412 PreconditionFailed`, object survives |
+| **ObjectFS capability probe verdict** | supported | supported | **unsupported** | supported |
 
 ## What the exceptional cells mean
 
@@ -101,15 +102,19 @@ compare-and-swap on RGW cannot be performed at all, independent of the two findi
 ### AWS answers 501 to `If-Match: *`
 
 `If-Match: *` — "an object exists here, whatever it is" — is `501 NotImplemented` on AWS S3 and
-accepted by both MinIO and RGW. ObjectFS does not send it (`Precondition` has `Absent` and `ETag`, and
-neither maps to `If-Match: *`), and it should stay that way: the portable form of that assertion is
-`If-Match` with a specific ETag.
+accepted by MinIO, RGW, and RustFS alike. ObjectFS does not send it (`Precondition` has `Absent` and
+`ETag`, and neither maps to `If-Match: *`), and it should stay that way: the portable form of that
+assertion is `If-Match` with a specific ETag.
+
+This is the one cell where **AWS is the odd one out and the others agree**, which is worth noting on a
+page organized around AWS as the reference. It changes nothing here, because the cell every
+implementation agrees on is the one ObjectFS uses.
 
 ### MinIO and RGW ignore `If-Match` on `DeleteObject`
 
 AWS answers `412 PreconditionFailed` and leaves the object in place — probed, not taken from the
 documentation. MinIO and RGW both accept the header, ignore it, and delete the object: success, and a
-following `HEAD` returns 404.
+following `HEAD` returns 404. RustFS answers `412` and the object survives, matching AWS.
 
 **Not a live defect.** Nothing in ObjectFS issues a conditional delete; `If-Match` appears only on
 `PutObject` and `CompleteMultipartUpload`. It is recorded because the failure mode is invisible — a
@@ -117,6 +122,31 @@ conditional delete that drops its condition looks exactly like one that honored 
 lease that *released* by conditional delete would be unsafe on both endpoints with nothing reporting
 it. `TestCompatConditionalDeleteIsNotReliedUpon` exists to keep that from being discovered the hard
 way.
+
+### RustFS matches AWS on every cell that ObjectFS depends on
+
+RustFS `1.0.0-beta.12` is the only non-AWS endpoint probed so far that agrees with AWS on all of them,
+including the two that MinIO and RGW get wrong:
+
+- **`If-Match` against an absent key is `404 NoSuchKey`**, not `412`. This is the distinction the CAS
+  series is built on — *the object is gone, stop* versus *you lost a race, retry* — and it is the cell
+  RGW fails.
+- **Preconditions on `CompleteMultipartUpload` are evaluated**, so a conditional write above the
+  multipart threshold stays conditional. This is the dangerous cell: RGW answers success there and the
+  contender's bytes land.
+- **A conditional `DeleteObject` is honored**, where MinIO and RGW both drop the condition.
+
+It also accepts the quoted ETag it returned, so `PutObjectIf` works with the value the store gave it
+and no client-side reformatting is needed. Its multipart ETags are dash-suffixed (`<hex>-<N>`) as on
+AWS and are usable in a later `If-Match`.
+
+**Read the version before reading the result.** `1.0.0-beta.12` is a pre-release — the image labels it
+`build-type=prerelease` — and this row says what that build did on 2026-08-08, not what RustFS
+guarantees. The capability probe is what protects a deployment either way: it establishes the answer
+from the endpoint in front of the process, so a regression in a later beta shows up as coordination
+declining to start rather than as two lease holders. Nothing about this row changes ObjectFS's
+posture, which is that AWS S3 is the target and an S3-compatible endpoint gets best-effort support —
+what it changes is that a RustFS deployment is not expected to lose coordination.
 
 ### Wasabi
 
@@ -160,6 +190,7 @@ where the failure is loud.
 | **AWS S3** | Coordination features work. This is the reference implementation. |
 | **MinIO** ≥ `RELEASE.2025-09-07` | Coordination features work. Enforcement is real, verified here rather than assumed — but it is an extension of the S3 API, not a contract, so the version above is part of the claim. |
 | **Ceph RGW** ≤ 19.2.0 | Coordination features **refuse to start**, correctly. Conditional writes are partially implemented in a way that cannot be worked around from the client: no CAS (ETag rejected), and multipart writes unconditional. Use a coordination backend other than the object store. |
+| **RustFS** `1.0.0-beta.12` | Coordination features work. It matched AWS on every cell probed, including the two RGW fails. It is a pre-release, so re-run the suite against the build you deploy rather than trusting this row — the probe will refuse at mount time if a later beta regresses. |
 | **anything else** | The probe decides at mount time. If it reports unsupported, `ConditionalWriteDetail` says what the endpoint did; add a row here by running the `s3compat` suite against it. |
 
 ## Keeping this page honest

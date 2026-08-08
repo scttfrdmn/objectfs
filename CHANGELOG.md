@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RustFS `1.0.0-beta.12` probed and added to the conditional-write compatibility matrix.** Run, not
+  read: the same `s3compat` suite that produced the AWS, MinIO and RGW rows, pointed at a local
+  container, with each of the four cells the suite does not print measured on its own key. It is the
+  first non-AWS endpoint to match AWS on **every** cell, including the two RGW gets wrong — `If-Match`
+  against an absent key is `404 NoSuchKey` rather than `412` (the distinction every CAS loop is built
+  on), and a precondition on `CompleteMultipartUpload` is evaluated, so a conditional write above the
+  multipart threshold stays conditional. It also honors a conditional `DeleteObject`, where MinIO and
+  RGW both accept the header and delete anyway, and it accepts the quoted ETag it returned, so
+  `PutObjectIf` works with the value the store gave it. The capability probe reports
+  `ConditionalWrite=true`, and `TestCompatCapabilityProbeMatchesObservedBehavior` confirms the probe
+  agrees with the endpoint. Recorded with the image digest and revision because `beta.12` is a
+  pre-release: the row says what that build did on 2026-08-08, and the mount-time probe is what
+  protects a deployment if a later beta regresses.
+
+### Changed
+
+- **The support posture is now stated as a thesis rather than left implicit: AWS S3 is the primary
+  backend and ObjectFS uses every S3 capability that benefits it; S3-compatible endpoints are
+  best-effort and get a fallback or a lesser capability.** This was already how the code behaved —
+  the capability probe, `ErrNotSupported` on an endpoint that fails it, and Transfer Acceleration's
+  silent fallback are all v0.12.0 and earlier — but nothing said it, so the next capability had no
+  rule to follow and the docs drifted the other way. `README.md` and `CLAUDE.md` now name the two
+  degradation rules that the existing code already distinguishes: a **performance** capability falls
+  back silently, because slower is a correct outcome, and a **correctness** capability fails closed,
+  because a precondition an endpoint silently drops tells every contender for a lease that it won.
+  Capabilities are established by probing the endpoint, never from a config flag, an endpoint-URL
+  heuristic, or a version string.
+- **`docs/index.md` no longer claims "Universal compatibility: works with AWS S3, MinIO, Ceph, and
+  all S3-compatible storage."** It was the exact claim the thesis rejects, and it was also false in a
+  way this repository had already measured: Ceph RGW 19.2.0 fails the conditional-write probe, so
+  coordination declines to start there. The page's title and overview said "S3-Compatible Object
+  Storage" where the project targets AWS S3. Replaced with what varies, which is coordination, and a
+  link to the probed matrix — plain filesystem use is unaffected on any S3-compatible endpoint.
+
 ### Fixed
 
 - **A flaky test that failed a CI run, in a helper written to make tests reliable.**
