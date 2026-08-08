@@ -13,14 +13,16 @@ import (
 // TestReadAhead_MountCancellationStopsTheWorkers is the defect behind this package's contextcheck
 // finding, which was not about the context.
 //
-// [ReadAheadManager.Stop] exists, is documented as safe to call twice, and is called by nothing outside
-// tests: not [MountManager.Unmount], not Adapter.Stop, not anything on the unmount path. So every mount
-// left ConcurrentReads prefetch workers plus a cleanup ticker running for the life of the process, each
-// holding its FileSystem — and through it the backend and the cache — reachable. Measured before the
-// fix: five goroutines per NewFileSystem, surviving every unmount.
+// The manager had a `Stop`, exported and documented as safe to call twice, and called by nothing
+// outside tests: not [MountManager.Unmount], not Adapter.Stop, not anything on the unmount path. So
+// every mount left ConcurrentReads prefetch workers plus a cleanup ticker running for the life of the
+// process, each holding its FileSystem — and through it the backend and the cache — reachable. Measured
+// before the fix: five goroutines per NewFileSystem, surviving every unmount.
 //
-// The fix is not a new Stop call someone has to remember to make on each path. The mount context is now
-// a second stop signal, so the cancelMount() the adapter already performs on unmount stops them.
+// The fix is not a new stop call someone has to remember to make on each path. The mount context is the
+// stop signal, so the cancelMount() the adapter already performs on unmount stops them — and `Stop` and
+// its channel are gone (#376), so this is now the only shutdown mechanism there is and the assertion
+// below is a test of the real one.
 //
 // Deliberately serial, and it is the only test in this package that has to be. Counting goroutines by
 // frame name (see [readAheadGoroutines]) makes this immune to the substrate servers and S3 clients the
@@ -62,7 +64,7 @@ func TestReadAhead_MountCancellationStopsTheWorkers(t *testing.T) {
 			"least %d; this is not measuring what it thinks it is", running, mounts, workers, want)
 	}
 
-	// What the unmount path does. Nothing calls Stop.
+	// What the unmount path does, and now the only thing that stops these at all.
 	for _, cancel := range mountCtxs {
 		cancel()
 	}
@@ -70,10 +72,9 @@ func TestReadAhead_MountCancellationStopsTheWorkers(t *testing.T) {
 	after := settledReadAheadGoroutines(func(n int) bool { return n <= before })
 	if after > before {
 		t.Errorf("%d read-ahead goroutines still running after every mount context was canceled "+
-			"(%d → %d → %d across %d managers of %d workers each). Nothing in the tree calls "+
-			"ReadAheadManager.Stop, so cancellation is the only thing that ends these — a "+
-			"mount/unmount cycle that leaves them behind holds its FileSystem, backend and cache "+
-			"reachable for the life of the process.",
+			"(%d → %d → %d across %d managers of %d workers each). Cancellation is the only thing that "+
+			"ends these — a mount/unmount cycle that leaves them behind holds its FileSystem, backend "+
+			"and cache reachable for the life of the process.",
 			after-before, before, running, after, mounts, workers)
 	}
 }
@@ -93,7 +94,7 @@ func TestPerformPrefetch_UsesTheMountsContext(t *testing.T) {
 	f.srv.SeedRandom(path, 8192)
 
 	// No workers: this test calls performPrefetch directly, so a queue nothing drains is what it wants.
-	f.fs.readAhead.Stop()
+	f.stopReadAhead()
 	f.fs.readAhead = NewReadAheadManager(t.Context(), f.fs, &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 << 10,
@@ -101,7 +102,6 @@ func TestPerformPrefetch_UsesTheMountsContext(t *testing.T) {
 		ConcurrentReads: 0,
 		TTL:             time.Minute,
 	})
-	t.Cleanup(f.fs.readAhead.Stop)
 
 	mount, cancel := context.WithCancel(t.Context())
 	cancel()

@@ -1,4 +1,32 @@
 // Package redis provides a Redis-backed distributed cache implementing types.Cache.
+//
+// There is one copy of every cached byte, held by Redis, and every node reads and writes that copy.
+// That is the whole coherence story, and it is why this package has no invalidation protocol: a node
+// that mutates an object calls [Cache.Delete], the key leaves the shared keyspace, and every other
+// node's next Get is a miss. No node holds a private copy that could go stale, so there is nothing for
+// a second node to be told.
+//
+// It did have one, and #377 deleted it. `Invalidator` published "<nodeID>:<key>" on an
+// `objectfs:invalidation` pub/sub channel and ran a subscriber that deleted received keys, skipping
+// its own broadcasts — exported, documented, covered by three tests, and started by nothing outside
+// them. Wiring it up was the other option and was rejected on two findings, either of which is
+// sufficient:
+//
+// The mechanism did not do what its name says. The subscriber's delete was [Cache.Delete] on *this*
+// type, which is `DEL` against Redis. So a received invalidation deleted the shared copy every node
+// reads from, rather than a local copy — a cluster-wide cache flush triggered by one node's write,
+// which is strictly worse than the DEL that node had already performed itself. The test that appeared
+// to prove it worked pointed both nodes at one miniredis, so what it actually established was that
+// node2 could empty node1's cache.
+//
+// And no configuration produces the state it was for. Invalidation is necessary when a node holds a
+// local tier in front of the shared one; cache.NewFromConfig chooses this cache *or* the in-process
+// MultiLevelCache, never one in front of the other, and MultiLevelCache builds only L1 (memory) and L2
+// (on-disk) — there is no Redis tier for a local tier to sit ahead of. Should that change, the
+// invalidation this package needs is not this one: it would have to reach the local tiers, which a
+// `DEL` cannot, and carry the ETag it was computed from so it cannot be applied out of order relative
+// to the write that caused it (see docs/design/conditional-writes-vs-raft.md, R4). Reviving 50 lines
+// that delete from the wrong cache is not a head start on that.
 package redis
 
 import (
@@ -129,27 +157,27 @@ func (c *Cache) Put(key string, offset int64, data []byte) {
 	_ = c.client.Set(ctx, c.rkey(key), data, c.cfg.TTL).Err()
 }
 
-// Delete removes key from the cache.
+// Delete removes key from the cache, and with it every node's view of those bytes.
+//
+// This is the whole of this package's coherence mechanism — see the package doc. internal/fuse calls it
+// on every mutation, and because there is one shared copy, that single DEL is what makes the write
+// visible to the rest of the cluster.
 //
 // context.Background() because types.Cache assigns no context to Delete, and the alternatives are worse
 // than this one: a context stored on the Cache at construction would be a startup context outliving its
 // own scope (see [NewCache]), and there is no per-call one to descend from. go-redis applies its own
 // DialTimeout and ReadTimeout defaults, 5s and 3s, so this is bounded rather than unbounded — it is
-// simply not cancelable by the caller. A caller that does have a context should use
-// [Cache.DeleteContext].
-func (c *Cache) Delete(key string) {
-	c.DeleteContext(context.Background(), key)
-}
-
-// DeleteContext removes key from the cache under ctx.
+// simply not cancelable by the caller.
 //
-// This exists for the one caller inside this package that holds a context worth respecting: the pub/sub
-// invalidation subscriber, whose deletes are round trips on the same connection pool its subscription
-// uses. Not part of types.Cache — adding a context to that interface is a change across four
-// implementations and every call site in internal/fuse, which is its own decision and not one to make
-// by way of a lint finding.
-func (c *Cache) DeleteContext(ctx context.Context, key string) {
-	_ = c.client.Del(ctx, c.rkey(key)).Err()
+// There was a DeleteContext beside this, added by #179 so the pub/sub invalidation subscriber could
+// pass its subscription's context to the delete it performed. That subscriber is gone (#377) and this
+// method took its only caller with it, so it went too rather than staying as an exported second way to
+// do the same thing with no caller — which is the shape of defect #377 and #376 both closed. Giving
+// types.Cache a context is still worth doing, and is still a change across four implementations and
+// every call site in internal/fuse; it is not a change to make by way of one method a lint finding
+// produced.
+func (c *Cache) Delete(key string) {
+	_ = c.client.Del(context.Background(), c.rkey(key)).Err()
 }
 
 // Evict asks Redis to free at least size bytes. Redis manages its own eviction
@@ -200,9 +228,4 @@ func (c *Cache) Stats() types.CacheStats {
 // Close releases the Redis connection.
 func (c *Cache) Close() error {
 	return c.client.Close()
-}
-
-// Client returns the underlying go-redis client, e.g. for use with an Invalidator.
-func (c *Cache) Client() *goredis.Client {
-	return c.client
 }

@@ -565,6 +565,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`internal/cache/redis.Invalidator`, its pub/sub protocol, and `Cache.DeleteContext` and
+  `Cache.Client` with it** ([#377]). `Publish` broadcast `"<nodeID>:<key>"` on an
+  `objectfs:invalidation` channel and `Subscribe` ran a goroutine that deleted received keys while
+  skipping the node's own broadcasts — exported, documented, covered by three tests, and started by
+  nothing outside them. `NewFromConfig` builds the `Cache` on `cluster.redis.enabled`, so the shipped
+  behaviour was: nodes share a Redis cache, no node publishes, no node subscribes.
+
+  **Wiring it up was the other option and two findings refuted it, either one sufficient.**
+
+  It did not do what its name says. The subscriber's delete was `Cache.DeleteContext`, which is
+  `DEL` against **Redis** — so a received invalidation deleted the shared copy every node reads
+  from, not a local copy. That is a cluster-wide cache flush caused by one node's write, strictly
+  worse than the `DEL` that node had already performed itself, and the fix for it is not to start
+  the subscriber. `TestInvalidator_Subscribe_RemoteInvalidation` looked like proof it worked because
+  it pointed both nodes at one miniredis; what it established was that node2 could empty node1's
+  cache.
+
+  And no configuration produces the state it was for. The issue left this open — "`multilevel.go`
+  exists, so this is not hypothetical, but I have not traced whether any configuration puts a local
+  tier in front of the Redis tier" — and the answer is no: `NewFromConfig` is strictly either/or, and
+  `MultiLevelCache.initializeLevels` builds only L1 (memory, optionally predictive) and L2 (on-disk).
+  There is no Redis tier for a local tier to sit ahead of.
+
+  **Cross-node invalidation already happens, and not by pub/sub.** `FileSystem.invalidate` calls
+  `cache.Delete` on every mutation; against this cache that is one `DEL` on the one shared copy, so
+  the next `Get` on every other node misses. One copy of the bytes is the coherence mechanism —
+  which is now what the package doc says, per the issue's instruction to explain why a shared
+  keyspace does not need this.
+
+  Should a local tier ever go in front of Redis, the invalidation needed then is not this one: it
+  would have to reach the local tiers, which a `DEL` cannot, and carry the ETag it was computed from
+  so it cannot be applied out of order relative to the write that caused it — R4 in
+  `docs/design/conditional-writes-vs-raft.md`. Fifty lines that delete from the wrong cache are not
+  a head start on that.
+
+  `DeleteContext` was added by [#179] for the subscriber's context and loses its only caller here, so
+  it goes too rather than remaining an exported second way to do the same thing with no caller —
+  which is the shape of defect [#376] closed on the same day. `Cache.Client` existed only to hand
+  `NewInvalidator` a client, and go-redis is now imported by nothing outside this package's own file.
+  Giving `types.Cache` a context is still worth doing and is still a change across four
+  implementations and every call site in `internal/fuse`; it is not a change to make by way of one
+  method a lint finding produced.
+
+  Coverage is unchanged at 88.0%, against a floor of 88 — the deleted code and the tests that covered
+  it left together. `Cache.Delete` is still covered, confirmed by mutation: neutering it fails
+  `TestDelete` and the shared conformance suite's `Delete removes the key`.
+
 - **`tests/fuse_test.go`, ten tests that asserted against the mock they built rather than against
   `internal/fuse`** ([#378]). The file survives as `tests/mockbackend_test.go` holding only the
   `MockBackend` fixture, which six call sites in `integration_test.go`, `unit_test.go`, and
@@ -2520,6 +2567,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **`ReadAheadManager.Stop` and its stop channel are deleted; the mount context is the only shutdown
+  signal** ([#376]). The production fix landed in [#179] — cancel the mount context and the prefetch
+  workers and the cleanup ticker return, which the adapter's existing `cancelMount()` on the unmount
+  path already does. What was left over was an exported lifecycle method nothing outside tests called,
+  which is the worst of the available states: a reader finds it, reasonably assumes `Unmount` calls it,
+  and is wrong.
+
+  Calling it from `Unmount` was the other option and was rejected, because it reintroduces exactly the
+  "someone must remember this on every mount path" obligation whose being missed *was* the leak — five
+  goroutines per mount, for the life of the process, each keeping its `FileSystem`, backend and cache
+  reachable.
+
+  **The issue proposed unexporting it and keeping it for tests, and a mutation refuted that premise.**
+  The stated justification was that `stopCh` expresses the one thing cancellation cannot: stopping a
+  manager whose context the caller does not own. Plausible, and false — neutering the channel's select
+  arm broke no test, so no test needed it either. A second shutdown path with no caller on *either*
+  side is not a seam worth preserving; two ways to stop the same goroutines is how they came to be
+  stopped by neither. The tests that wanted the workers out of the way now cancel a mount context of
+  their own, so the test shutdown and the real one are the same code path, which the deleted `Stop`
+  never was.
+
+  Not a behaviour change: `internal/fuse` has no importer outside this repository and the method had no
+  caller inside it. `sync.Once` and a `chan struct{}` leave the struct with it.
 
 - **substrate v0.87.0 → v0.93.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
   `go.sum` are the whole diff.

@@ -39,7 +39,6 @@ func TestReadAheadManager_DefaultConfig(t *testing.T) {
 		TTL:             5 * time.Minute,
 	}
 	ram := NewReadAheadManager(t.Context(), nil, cfg)
-	defer ram.Stop()
 
 	if !ram.config.Enabled {
 		t.Error("expected Enabled=true")
@@ -56,7 +55,6 @@ func TestReadAheadManager_FirstRead_CreatesPattern(t *testing.T) {
 	t.Parallel()
 
 	ram := newTestRAM(t, 3, 5*time.Minute)
-	defer ram.Stop()
 
 	ram.OnRead("data.bin", 0, 1024)
 
@@ -82,7 +80,6 @@ func TestReadAheadManager_SequentialIncrementsHits(t *testing.T) {
 	t.Parallel()
 
 	ram := newTestRAM(t, 3, 5*time.Minute)
-	defer ram.Stop()
 
 	// 4 sequential reads: offsets 0, 1024, 2048, 3072
 	for i := range 4 {
@@ -104,7 +101,6 @@ func TestReadAheadManager_NonSequential_ResetsPattern(t *testing.T) {
 	t.Parallel()
 
 	ram := newTestRAM(t, 3, 5*time.Minute)
-	defer ram.Stop()
 
 	// Build up some sequential hits.
 	for i := range 4 {
@@ -133,7 +129,6 @@ func TestReadAheadManager_Disabled_NoPatterns(t *testing.T) {
 		TTL:             5 * time.Minute,
 	}
 	ram := NewReadAheadManager(t.Context(), nil, cfg)
-	defer ram.Stop()
 
 	ram.OnRead("disabled.bin", 0, 1024)
 
@@ -172,7 +167,6 @@ func TestReadAheadManager_PrefetchScheduled_AfterEnoughHits(t *testing.T) {
 	)
 
 	ram := newTestRAM(t, minSeq, 5*time.Minute)
-	defer ram.Stop()
 
 	// Reads up to but not including the one that reaches the threshold.
 	for i := range hitRead - 1 {
@@ -208,7 +202,6 @@ func TestReadAheadManager_PatternTTL_Cleanup(t *testing.T) {
 	t.Parallel()
 
 	ram := newTestRAM(t, 3, 10*time.Millisecond) // very short TTL
-	defer ram.Stop()
 
 	ram.OnRead("short.bin", 0, 1024)
 
@@ -332,7 +325,6 @@ func TestReadAheadConfig_DefaultValues(t *testing.T) {
 
 	// NewReadAheadManager fills in nil config with the canonical defaults.
 	ram := NewReadAheadManager(t.Context(), nil, nil)
-	defer ram.Stop()
 
 	want := ReadAheadConfig{
 		Enabled:         true,
@@ -381,7 +373,6 @@ func TestNewFileSystemPassesTheConfiguredReadAhead(t *testing.T) {
 		MountPoint: t.TempDir(),
 		ReadAhead:  &want,
 	})
-	t.Cleanup(fs.readAhead.Stop)
 
 	if fs.readAhead == nil {
 		t.Fatal("no read-ahead manager was constructed")
@@ -407,7 +398,6 @@ func TestNewFileSystemFallsBackWhenReadAheadIsUnset(t *testing.T) {
 	t.Parallel()
 
 	fs := NewFileSystem(t.Context(), nil, nil, nil, nil, &Config{MountPoint: t.TempDir()})
-	t.Cleanup(fs.readAhead.Stop)
 
 	if fs.readAhead == nil || fs.readAhead.config == nil {
 		t.Fatal("a Config with no ReadAhead left the filesystem with no read-ahead manager")

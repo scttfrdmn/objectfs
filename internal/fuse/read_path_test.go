@@ -34,6 +34,32 @@ type readPathFixture struct {
 	fs    *FileSystem
 	srv   *testaws.TestServer
 	cache *cache.LRUCache
+
+	// cancelMount is the fixture's own mount context, and it is how a test stops the read-ahead
+	// manager the fixture built. See [readPathFixture.stopReadAhead].
+	cancelMount context.CancelFunc
+}
+
+// stopReadAhead retires the prefetch workers the fixture started, by canceling its mount context —
+// which is the mechanism the unmount path uses, and since #376 the only one there is.
+//
+// Three tests take read-ahead out of the way before reading, because a prefetch worker issues its own
+// asynchronous GETs and one landing after the count has been taken makes the assertion depend on
+// goroutine scheduling; that is how the first version of TestSequentialReadIsCachedWholesale failed
+// intermittently while the cache was working correctly. Each of them then sets `readAhead` to nil or
+// replaces it with a worker-less manager, and **that** assignment is what does the work: it is what
+// stops new prefetches from being scheduled at all.
+//
+// So be clear about what this call is worth, because a mutation says it is not much — removing all
+// three of them leaves the suite green over twelve runs. Every caller invokes it during setup, before
+// any read has established a sequential pattern, so there is nothing queued for the workers to act on
+// and nothing for cancellation to prevent. It is kept for what it does rather than what it prevents:
+// a test that replaces the manager would otherwise leave the previous one's four goroutines running on
+// the fixture until the test ended, and stopping what you replace is the honest shape even when
+// nothing currently observes the difference. It earns its keep as documentation of intent, and it
+// exercises the production shutdown path from a test, which the deleted `Stop` never did.
+func (f *readPathFixture) stopReadAhead() {
+	f.cancelMount()
 }
 
 func newReadPathFixture(t *testing.T) *readPathFixture {
@@ -62,13 +88,19 @@ func newReadPathFixture(t *testing.T) *readPathFixture {
 	})
 	t.Cleanup(func() { _ = byteCache.Close() })
 
-	fs := NewFileSystem(t.Context(), backend, byteCache, writer, nil, &Config{
+	// A mount context of the fixture's own, derived from t.Context() so it is canceled at test end
+	// either way. Having one is what lets a test retire the read-ahead workers the way an unmount does;
+	// see [readPathFixture.stopReadAhead].
+	mount, cancelMount := context.WithCancel(t.Context())
+	t.Cleanup(cancelMount)
+
+	fs := NewFileSystem(mount, backend, byteCache, writer, nil, &Config{
 		DefaultMode: 0o644,
 		DefaultUID:  1000,
 		DefaultGID:  1000,
 	})
 
-	return &readPathFixture{fs: fs, srv: srv, cache: byteCache}
+	return &readPathFixture{fs: fs, srv: srv, cache: byteCache, cancelMount: cancelMount}
 }
 
 // open returns a handle for an object that already exists in the bucket, as Open would build one.
@@ -216,7 +248,7 @@ func TestSequentialReadIsCachedWholesale(t *testing.T) {
 	// asynchronous GETs, and a GET that lands after the warm pass has been counted makes the assertion
 	// depend on goroutine timing — which is how the first version of this test failed intermittently
 	// while the cache was working correctly. Prefetch has its own tests below.
-	f.fs.readAhead.Stop()
+	f.stopReadAhead()
 	f.fs.readAhead = nil
 
 	const (
@@ -326,7 +358,7 @@ func TestConcurrentIdenticalReadsShareOneGET(t *testing.T) {
 
 	// Read-ahead off: the point is what concurrent *readers* cost, and a prefetch worker issuing its
 	// own GETs is the variable this test exists to remove.
-	f.fs.readAhead.Stop()
+	f.stopReadAhead()
 	f.fs.readAhead = nil
 
 	const (
@@ -515,7 +547,7 @@ func TestCacheHitsAreReportedToTheDetector(t *testing.T) {
 	// Serve every read from cache, deterministically: fill it before reading a byte, and take the
 	// prefetch workers out of the picture entirely so nothing else can populate or race it. What remains
 	// is exactly the question under test — does a hit reach the detector.
-	f.fs.readAhead.Stop()
+	f.stopReadAhead()
 	f.fs.readAhead = NewReadAheadManager(t.Context(), f.fs, &ReadAheadConfig{
 		Enabled:         true,
 		WindowSize:      64 * 1024,
@@ -523,7 +555,6 @@ func TestCacheHitsAreReportedToTheDetector(t *testing.T) {
 		ConcurrentReads: 0, // no workers: schedulePrefetch fills the queue and nothing drains it
 		TTL:             time.Minute,
 	})
-	t.Cleanup(f.fs.readAhead.Stop)
 
 	f.cache.Put("detect.dat", 0, f.srv.GetObject("detect.dat"))
 
