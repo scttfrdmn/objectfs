@@ -45,7 +45,7 @@ which names them rather than leaving them mixed in with the list above.
 ### 💾 S3 Integration
 
 - **AWS S3 first, others best-effort**: AWS S3 is the target and ObjectFS uses every S3 capability
-  that benefits it. MinIO, Ceph RGW and other S3-compatible endpoints work for plain filesystem use
+  that benefits it. MinIO, Ceph RGW, RustFS and other S3-compatible endpoints work for plain filesystem use
   and get a fallback or a reduced capability where they diverge — established by probing the
   endpoint, not by a config flag. "Universal compatibility" is not claimed: RGW 19.2.0 fails the
   conditional-write probe, so coordination declines to start there. A performance capability falls

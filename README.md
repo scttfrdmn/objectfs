@@ -80,7 +80,7 @@ supported** — there is no WinFsp binding, and none is claimed until one exists
 ## AWS S3 is the target, not a lowest common denominator
 
 **ObjectFS is built for AWS S3 specifically, and uses every S3 capability that benefits it.**
-S3-compatible endpoints — MinIO, Ceph RGW, Wasabi and the rest — are supported on a best-effort
+S3-compatible endpoints — MinIO, Ceph RGW, RustFS, Wasabi and the rest — are supported on a best-effort
 basis: they get a fallback or a reduced capability, not a veto over what ObjectFS does on AWS.
 
 This is a design decision with teeth, because the alternative is the default. A filesystem that

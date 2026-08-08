@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RustFS `1.0.0-beta.12` probed and added to the conditional-write compatibility matrix.** Run, not
+  read: the same `s3compat` suite that produced the AWS, MinIO and RGW rows, pointed at a local
+  container, with each of the four cells the suite does not print measured on its own key. It is the
+  first non-AWS endpoint to match AWS on **every** cell, including the two RGW gets wrong — `If-Match`
+  against an absent key is `404 NoSuchKey` rather than `412` (the distinction every CAS loop is built
+  on), and a precondition on `CompleteMultipartUpload` is evaluated, so a conditional write above the
+  multipart threshold stays conditional. It also honors a conditional `DeleteObject`, where MinIO and
+  RGW both accept the header and delete anyway, and it accepts the quoted ETag it returned, so
+  `PutObjectIf` works with the value the store gave it. The capability probe reports
+  `ConditionalWrite=true`, and `TestCompatCapabilityProbeMatchesObservedBehavior` confirms the probe
+  agrees with the endpoint. Recorded with the image digest and revision because `beta.12` is a
+  pre-release: the row says what that build did on 2026-08-08, and the mount-time probe is what
+  protects a deployment if a later beta regresses.
+
 ### Changed
 
 - **The support posture is now stated as a thesis rather than left implicit: AWS S3 is the primary

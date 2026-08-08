@@ -33,6 +33,14 @@ package s3_test
 //	  -e CEPH_PUBLIC_NETWORK=0.0.0.0/0 -e RGW_FRONTEND_PORT=8080 quay.io/ceph/demo:latest
 //	OBJECTFS_COMPAT_ENDPOINT=http://127.0.0.1:9112 ... go test -race -tags=s3compat ...
 //
+// Against a local RustFS:
+//
+//	podman run -d -p 9113:9000 -e RUSTFS_ACCESS_KEY=objectfs -e RUSTFS_SECRET_KEY=objectfs123 \
+//	  -e RUSTFS_ADDRESS=0.0.0.0:9000 docker.io/rustfs/rustfs:latest
+//	OBJECTFS_COMPAT_ENDPOINT=http://127.0.0.1:9113 \
+//	  OBJECTFS_COMPAT_ACCESS_KEY=objectfs OBJECTFS_COMPAT_SECRET_KEY=objectfs123 \
+//	  go test -race -tags=s3compat -v -count=1 ./internal/storage/s3/
+//
 // And against the real service, which is the reference every other row is compared to. The keys are
 // optional given an endpoint, so the default credential chain supplies them; the region is not, since a
 // bucket lives in one and CreateBucket signed for another is rejected:
