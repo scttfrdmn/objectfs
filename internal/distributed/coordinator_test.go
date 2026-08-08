@@ -1202,15 +1202,152 @@ func (mc *mockCache) Stats() types.CacheStats {
 	return mc.stats
 }
 
-// TestClusterManager_InvalidateCacheKey_NoGossip verifies that
-// InvalidateCacheKey is a no-op (does not panic) when gossip is not running.
+// TestClusterManager_InvalidateCacheKey_NoGossip verifies that InvalidateCacheKey reports that it could
+// not reach peers when gossip is not running, rather than returning as though it had.
+//
+// This used to assert only that it did not panic, which is the weakest thing that could be checked
+// here: it passed identically whether the invalidation was broadcast or dropped on the floor. The
+// distinction matters because the caller is a node that just replaced an object's bytes, and a peer
+// that never hears about it keeps serving the version before.
 func TestClusterManager_InvalidateCacheKey_NoGossip(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithNode(t, "inval-no-gossip")
 	mc := &mockCache{}
 	cm.SetCache(mc)
-	// gossip.conn is nil (Start not called) — should not panic
-	cm.InvalidateCacheKey("foo", `"etag-1"`)
+
+	// gossip.conn is nil: NewClusterManager builds a GossipProtocol, but only Start opens its socket. So
+	// the object exists and every send would dial out from an unbound port and reach nobody, which is the
+	// case this asserts on — not a nil gossip, which no constructed cluster has.
+	err := cm.InvalidateCacheKey("foo", `"etag-1"`)
+	if !errors.Is(err, types.ErrNotSupported) {
+		t.Errorf("InvalidateCacheKey with gossip not listening = %v, want ErrNotSupported: a nil here "+
+			"would tell a caller its peers had been told to evict a version they are still serving", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), string(MessageTypeCacheInvalidate)) {
+		t.Errorf("error %q does not name the message that was not sent: an operator reading this needs to "+
+			"know what was lost", err)
+	}
+
+	// And it must not have evicted locally. InvalidateCacheKey tells *peers*; the local cache belongs to
+	// whoever performed the write, and evicting here would hide the failure it just reported.
+	mc.mu.Lock()
+	deleted := mc.deleted
+	mc.mu.Unlock()
+	if len(deleted) != 0 {
+		t.Errorf("local cache deletions = %v, want none: InvalidateCacheKey is a message to peers", deleted)
+	}
+}
+
+// TestCoordinatorWrapper_UnimplementedMethodsRefuse pins that the two cache-coordination methods with no
+// implementation say so, rather than reporting success.
+//
+// The assertion is errors.Is against types.ErrNotSupported and not merely "err != nil", because the
+// caller of AnnounceKey is a cache write path that has to distinguish "this cluster cannot announce" —
+// fall back to the object store, permanently — from a transient send failure worth retrying.
+//
+// #284 deleted a CacheReplicator that returned nil having sent nothing, counted the bytes as replicated,
+// and survived four releases because the only test covering it asserted that its field was non-nil.
+// These are the assertions that would have caught it.
+func TestCoordinatorWrapper_UnimplementedMethodsRefuse(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "wrapper-refuse")
+	coord := cm.GetCoordinator()
+	ctx := t.Context()
+
+	t.Run("AnnounceKey", func(t *testing.T) {
+		t.Parallel()
+		err := coord.AnnounceKey(ctx, types.KeyAnnouncement{
+			Key: "some/key", NodeID: "wrapper-refuse", ETag: `"v1"`, Size: 10,
+		})
+		if !errors.Is(err, types.ErrNotSupported) {
+			t.Errorf("AnnounceKey = %v, want ErrNotSupported", err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "some/key") {
+			t.Errorf("error %q does not name the key it failed to announce", err)
+		}
+	})
+
+	t.Run("QueryKeyOwnership", func(t *testing.T) {
+		t.Parallel()
+		holders, err := coord.QueryKeyOwnership(ctx, "some/key")
+		if !errors.Is(err, types.ErrNotSupported) {
+			t.Errorf("QueryKeyOwnership = %v, want ErrNotSupported", err)
+		}
+		// An empty slice with a nil error is the documented answer for "no peer holds this", so returning
+		// it here would be indistinguishable from a working query against a cold cluster.
+		if holders != nil {
+			t.Errorf("QueryKeyOwnership returned %d holders alongside its error; a caller that reads the "+
+				"slice before the error must find nothing", len(holders))
+		}
+	})
+}
+
+// TestCoordinatorWrapper_InvalidateKey_BroadcastsTheETag verifies the one cache-coordination method that
+// is implemented actually reaches a peer, carrying the version it was given.
+//
+// It asserts by receiving the message on a second node rather than by inspecting the call, because the
+// bug this guards against is a broadcast that is assembled correctly and never sent — which is what
+// InvalidateCacheKey did on a cluster with gossip down, silently, before this change.
+func TestCoordinatorWrapper_InvalidateKey_BroadcastsTheETag(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	cm1, cm2 := startGossipPair(t, "wrapper-inval-a", "wrapper-inval-b")
+
+	// cm2's receive path records the invalidations it applies. A recording cache is what lets this
+	// distinguish "arrived" from "arrived naming the right version": the ledger in handleCacheInvalidate
+	// keys on (key, ETag), so a message carrying the wrong ETag still evicts and would pass a test that
+	// only watched for the eviction.
+	mc2 := &mockCache{}
+	cm2.SetCache(mc2)
+
+	if err := cm1.GetCoordinator().InvalidateKey(ctx, "warm/key", `"v7"`); err != nil {
+		t.Fatalf("InvalidateKey: %v", err)
+	}
+
+	waitForDeletion(t, mc2, "warm/key")
+
+	// Now prove the ETag crossed the wire and was recorded, not merely that an eviction happened: a
+	// second invalidation naming the same version must be discarded by the receiver's ledger, while one
+	// naming a different version must be applied.
+	if err := cm1.GetCoordinator().InvalidateKey(ctx, "warm/key", `"v7"`); err != nil {
+		t.Fatalf("InvalidateKey replay: %v", err)
+	}
+	if err := cm1.GetCoordinator().InvalidateKey(ctx, "warm/key", `"v8"`); err != nil {
+		t.Fatalf("InvalidateKey new version: %v", err)
+	}
+
+	// Wait for the "v8" eviction, then count. Ordering over loopback UDP from one sender is reliable
+	// enough in practice, but the count is what the assertion rests on, and it is only meaningful once
+	// the last message has landed.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mc2.mu.Lock()
+		n := len(mc2.deleted)
+		mc2.mu.Unlock()
+		if n >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Settle briefly so a wrongly-applied replay has time to show up rather than being missed by a
+	// racing count. Without this, a broken ledger could pass by arriving late.
+	time.Sleep(100 * time.Millisecond)
+
+	mc2.mu.Lock()
+	deleted := mc2.deleted
+	mc2.mu.Unlock()
+
+	if len(deleted) != 2 {
+		t.Errorf("cm2 applied %d invalidations (%v), want 2: one for \"v7\" and one for \"v8\", with the "+
+			"replay of \"v7\" discarded by the receiver's ledger", len(deleted), deleted)
+	}
+	for _, k := range deleted {
+		if k != "warm/key" {
+			t.Errorf("cm2 evicted %q, want only \"warm/key\"", k)
+		}
+	}
 }
 
 // TestGossip_CacheInvalidate_AppliesEachVersionOnce is requirement R4: an invalidation naming a
@@ -1319,72 +1456,92 @@ func TestGossip_MarkInvalidationApplied_LedgerIsBounded(t *testing.T) {
 	}
 }
 
-// TestClusterManager_CacheInvalidation_TwoNodes verifies that
-// InvalidateCacheKey on cm1 causes cm2's cache to have Delete called for the
-// same key over loopback UDP.
-func TestClusterManager_CacheInvalidation_TwoNodes(t *testing.T) {
-	t.Parallel()
+// startGossipPair starts two clusters on loopback and registers the second in the first's gossip
+// memberlist, so a broadcast from cm1 reaches cm2. Both are stopped by t.Cleanup.
+//
+// Registration is one-directional because that is what a broadcast test needs and adding the reverse
+// would start membership traffic between them, which changes what a message-count assertion is counting.
+func startGossipPair(t *testing.T, id1, id2 string) (cm1, cm2 *ClusterManager) {
+	t.Helper()
 	ctx := t.Context()
 
-	cfg1 := testConfig(t, "inval-node-a")
-	cfg2 := testConfig(t, "inval-node-b")
-
-	cm1, err := NewClusterManager(cfg1)
+	cm1, err := NewClusterManager(testConfig(t, id1))
 	if err != nil {
-		t.Fatalf("NewClusterManager cm1: %v", err)
+		t.Fatalf("NewClusterManager %s: %v", id1, err)
 	}
-	cm2, err := NewClusterManager(cfg2)
+	cm2, err = NewClusterManager(testConfig(t, id2))
 	if err != nil {
-		t.Fatalf("NewClusterManager cm2: %v", err)
+		t.Fatalf("NewClusterManager %s: %v", id2, err)
 	}
-
-	mc2 := &mockCache{}
-	cm2.SetCache(mc2)
 
 	if err := cm1.Start(ctx); err != nil {
-		t.Fatalf("cm1.Start: %v", err)
+		t.Fatalf("%s.Start: %v", id1, err)
 	}
-	defer func() { _ = cm1.Stop() }()
+	t.Cleanup(func() { _ = cm1.Stop() })
 
 	if err := cm2.Start(ctx); err != nil {
-		t.Fatalf("cm2.Start: %v", err)
+		t.Fatalf("%s.Start: %v", id2, err)
 	}
-	defer func() { _ = cm2.Stop() }()
+	t.Cleanup(func() { _ = cm2.Stop() })
 
-	addr1 := cm1.gossip.LocalAddr()
 	addr2 := cm2.gossip.LocalAddr()
-	if addr1 == "" || addr2 == "" {
+	if addr1 := cm1.gossip.LocalAddr(); addr1 == "" || addr2 == "" {
 		t.Fatalf("could not get local addresses: %q %q", addr1, addr2)
 	}
 
-	// Cross-register so cm1 knows about cm2's address.
-	cm1.UpdateNodeInfo("inval-node-b", &NodeInfo{
-		ID: "inval-node-b", Address: addr2, Status: NodeStatusAlive, Metadata: map[string]string{},
+	cm1.UpdateNodeInfo(id2, &NodeInfo{
+		ID: id2, Address: addr2, Status: NodeStatusAlive, Metadata: map[string]string{},
 	})
-	// Also register cm2's gossip memberlist entry so broadcastMessage sees it.
+	// The gossip memberlist is separate from the cluster's node map, and broadcastMessage reads this one.
 	cm1.gossip.mu.Lock()
-	cm1.gossip.memberlist["inval-node-b"] = &GossipNode{
-		Info:  &NodeInfo{ID: "inval-node-b", Address: addr2},
+	cm1.gossip.memberlist[id2] = &GossipNode{
+		Info:  &NodeInfo{ID: id2, Address: addr2},
 		State: StateAlive,
 	}
 	cm1.gossip.mu.Unlock()
 
-	cm1.InvalidateCacheKey("foo", `"etag-1"`)
+	return cm1, cm2
+}
 
-	// Wait up to 200ms for the message to arrive and be processed.
-	deadline := time.Now().Add(200 * time.Millisecond)
+// waitForDeletion blocks until mc records an eviction of key, or fails the test.
+//
+// The timeout is generous rather than tight — this waits on loopback UDP plus a receive goroutine, and
+// the failure it exists to catch is a message that is never sent, which no amount of waiting fixes. A
+// short deadline here buys nothing and flakes on a loaded CI runner.
+func waitForDeletion(t *testing.T, mc *mockCache, key string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		mc2.mu.Lock()
-		found := len(mc2.deleted) > 0 && mc2.deleted[len(mc2.deleted)-1] == "foo"
-		mc2.mu.Unlock()
+		mc.mu.Lock()
+		found := slices.Contains(mc.deleted, key)
+		mc.mu.Unlock()
 		if found {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	mc2.mu.Lock()
-	deleted := mc2.deleted
-	mc2.mu.Unlock()
-	t.Errorf("cache.Delete(%q) was not called on cm2 within 200ms; deleted keys: %v", "foo", deleted)
+	mc.mu.Lock()
+	deleted := mc.deleted
+	mc.mu.Unlock()
+	t.Fatalf("cache.Delete(%q) was not called within 2s; deleted keys: %v", key, deleted)
+}
+
+// TestClusterManager_CacheInvalidation_TwoNodes verifies that
+// InvalidateCacheKey on cm1 causes cm2's cache to have Delete called for the
+// same key over loopback UDP.
+func TestClusterManager_CacheInvalidation_TwoNodes(t *testing.T) {
+	t.Parallel()
+
+	cm1, cm2 := startGossipPair(t, "inval-node-a", "inval-node-b")
+
+	mc2 := &mockCache{}
+	cm2.SetCache(mc2)
+
+	if err := cm1.InvalidateCacheKey("foo", `"etag-1"`); err != nil {
+		t.Fatalf("InvalidateCacheKey: %v", err)
+	}
+
+	waitForDeletion(t, mc2, "foo")
 }

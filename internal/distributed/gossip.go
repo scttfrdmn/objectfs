@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // GossipProtocol implements a gossip-based cluster membership protocol
@@ -1278,6 +1280,17 @@ func (gp *GossipProtocol) sendMessage(addr string, msg *GossipMessage) error {
 	return nil
 }
 
+// broadcastMessage sends msg to every alive peer, reporting whether it was able to start sending.
+//
+// What the error does and does not mean. It is refused up front when this protocol is not listening —
+// there is no socket, so nothing can be sent and the caller's message is lost, which used to be
+// indistinguishable from a fanout to every peer. It says nothing about delivery: sends run concurrently
+// and gossip is an unreliable datagram protocol with no acknowledgement, so a nil means "handed to the
+// network for each peer", never "received". Callers needing convergence rely on retransmission, not on
+// this return value.
+//
+// A cluster with no peers is a nil error and no sends. That is not a failure — a single-node cluster
+// broadcasting has nobody to tell, and the operation it is reporting on succeeded locally.
 func (gp *GossipProtocol) broadcastMessage(msg *GossipMessage) error {
 	// Addresses rather than *NodeInfo, for the reason performGossip resolves them under the lock too:
 	// a pointer taken out of the memberlist aliases a struct the receive goroutine owns. This one
@@ -1285,6 +1298,7 @@ func (gp *GossipProtocol) broadcastMessage(msg *GossipMessage) error {
 	// and the ID filter below excludes it — but that is a property of a filter two lines away, not of
 	// the code doing the read, and it is the same reasoning that made three other sites wrong (#278).
 	gp.mu.RLock()
+	listening := gp.conn != nil
 	localID := gp.localNode.ID
 	targets := make([]string, 0, len(gp.memberlist))
 	for _, gossipNode := range gp.memberlist {
@@ -1295,8 +1309,22 @@ func (gp *GossipProtocol) broadcastMessage(msg *GossipMessage) error {
 	}
 	gp.mu.RUnlock()
 
+	// Checked against the socket rather than against gp being non-nil, because a GossipProtocol exists
+	// from NewGossipProtocol onward and only acquires a socket in Start. A cluster constructed and not
+	// started has a whole gossip object whose every send would dial out from an unbound port and go
+	// nowhere in particular — reporting success for that is how a caller comes to believe peers were
+	// told something they were not.
+	if !listening {
+		return fmt.Errorf("cannot broadcast %s: gossip is not listening, so this node has no way to "+
+			"reach its peers: %w", msg.Type, types.ErrNotSupported)
+	}
+
 	for _, addr := range targets {
 		go func(addr string) {
+			// Errors are counted rather than returned: this runs after the caller has its answer, and one
+			// unreachable peer is the normal state of a gossip cluster rather than a failure of the
+			// broadcast. sendMessage already increments NetworkErrors and MessagesOversize, which is where
+			// an operator sees it.
 			_ = gp.sendMessage(addr, msg)
 		}(addr)
 	}

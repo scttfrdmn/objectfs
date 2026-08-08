@@ -830,34 +830,47 @@ func (cm *ClusterManager) SetCache(c types.Cache) {
 // Empty is allowed and means the caller cannot name a version — an unconditional put whose ETag was
 // not read back. Such a message is applied by every receiver every time, which is safe but wasteful,
 // so prefer a conditional write's reported ETag where there is one.
-func (cm *ClusterManager) InvalidateCacheKey(key, etag string) {
-	cm.invalidateCacheKey(CacheInvalidateMessage{Key: key, ETag: etag})
+//
+// An error means the invalidation was not broadcast, so peers may still serve the version it was meant
+// to evict. It is not an acknowledgement that any of them acted on it: gossip has none to give.
+func (cm *ClusterManager) InvalidateCacheKey(key, etag string) error {
+	return cm.invalidateCacheKey(CacheInvalidateMessage{Key: key, ETag: etag})
 }
 
 // InvalidateDeletedCacheKey is InvalidateCacheKey for a key that was removed rather than replaced.
 //
 // It exists because a receiver cannot tell the two apart from the ETag: a delete has no version to
 // name, and neither does an unconditional put, so an empty ETag alone is ambiguous.
-func (cm *ClusterManager) InvalidateDeletedCacheKey(key string) {
-	cm.invalidateCacheKey(CacheInvalidateMessage{Key: key, Deleted: true})
+func (cm *ClusterManager) InvalidateDeletedCacheKey(key string) error {
+	return cm.invalidateCacheKey(CacheInvalidateMessage{Key: key, Deleted: true})
 }
 
-func (cm *ClusterManager) invalidateCacheKey(m CacheInvalidateMessage) {
+// invalidateCacheKey broadcasts m, filling in the sending node.
+//
+// It reports an error when it could not send rather than returning silently, which is what it used to
+// do when gossip was not running. That silence is the shape of defect #284 deleted: a caller invalidating
+// before Start got the same answer as one whose peers were all reached, and the difference is whether
+// other nodes are still serving bytes this key just replaced.
+//
+// A running cluster with no peers is a nil error, since there is nobody to tell and nothing went wrong.
+func (cm *ClusterManager) invalidateCacheKey(m CacheInvalidateMessage) error {
 	cm.mu.RLock()
 	gossip := cm.gossip
 	nodeID := cm.nodeID
 	cm.mu.RUnlock()
 
 	if gossip == nil {
-		return
+		return fmt.Errorf("cannot invalidate %q on peers: this cluster has no gossip protocol, so it has "+
+			"no way to reach them: %w", m.Key, types.ErrNotSupported)
 	}
 
 	m.From = nodeID
 	payload, err := json.Marshal(m)
 	if err != nil {
-		return
+		return fmt.Errorf("marshaling the invalidation for %q: %w", m.Key, err)
 	}
-	_ = gossip.broadcastMessage(&GossipMessage{
+
+	return gossip.broadcastMessage(&GossipMessage{
 		Type:      MessageTypeCacheInvalidate,
 		From:      nodeID,
 		Timestamp: time.Now(),
@@ -876,9 +889,52 @@ type coordinatorWrapper struct {
 	*Coordinator
 }
 
+// coordinatorWrapper must satisfy the whole interface, checked here rather than only at the one
+// GetCoordinator return that happens to exercise it today.
+var _ types.DistributedCoordinator = (*coordinatorWrapper)(nil)
+
 func (cw *coordinatorWrapper) ExecuteOperation(ctx context.Context, op any) (any, error) {
 	if distOp, ok := op.(*DistributedOperation); ok {
 		return cw.Coordinator.ExecuteOperation(ctx, distOp)
 	}
 	return nil, fmt.Errorf("invalid operation type: %T", op)
+}
+
+// AnnounceKey is not implemented yet and says so.
+//
+// The gossip message type it needs does not exist — [MessageTypeCacheInvalidate] is the only
+// cache-related one — so there is nothing to send and no receiver to send it to. #140 builds both.
+//
+// It returns an error rather than nil because a nil here would mean "announced" to every caller, and
+// #284 deleted a CacheReplicator that did exactly that: it added bytes to BytesReplicated when gossip
+// was not running and it had sent nothing, and it survived four releases because the only test covering
+// it asserted that its field was non-nil. A caller told [types.ErrNotSupported] falls back to reading
+// from the object store, which is correct and merely slower.
+func (cw *coordinatorWrapper) AnnounceKey(_ context.Context, ann types.KeyAnnouncement) error {
+	return fmt.Errorf("announcing %q to peers is not implemented (#140): %w", ann.Key, types.ErrNotSupported)
+}
+
+// QueryKeyOwnership is not implemented yet and says so, for the reason on [coordinatorWrapper.AnnounceKey]:
+// nothing announces, so no node has ownership information to report.
+//
+// Specifically it does not return an empty slice with a nil error. That is the documented answer for a
+// key no peer has cached, so returning it here would be indistinguishable from a working query against
+// a cold cluster — and a caller measuring peer-fetch hit rates would read a flat zero as "warming does
+// not help" rather than "warming is not built".
+func (cw *coordinatorWrapper) QueryKeyOwnership(_ context.Context, key string) ([]types.KeyAnnouncement, error) {
+	return nil, fmt.Errorf("querying which peers hold %q is not implemented (#140): %w", key,
+		types.ErrNotSupported)
+}
+
+// InvalidateKey broadcasts a cache invalidation for key at etag. This one is real: the message type,
+// the sender, and the receiver's replay-suppressing ledger all landed in #284.
+func (cw *coordinatorWrapper) InvalidateKey(_ context.Context, key, etag string) error {
+	// The embedded pointer is checked by name because the selector below reads through it; || short-circuits,
+	// so cw.cluster is only evaluated once there is a Coordinator to read it from.
+	if cw.Coordinator == nil || cw.cluster == nil {
+		return fmt.Errorf("cannot invalidate %q: this coordinator has no cluster: %w", key,
+			types.ErrNotSupported)
+	}
+
+	return cw.cluster.InvalidateCacheKey(key, etag)
 }
