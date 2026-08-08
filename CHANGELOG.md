@@ -601,6 +601,30 @@ had no message authentication, and a cluster will not start without a shared sec
   asynchronously, and `ConsistencyStrong` is the mislabeled fan-out.
 
 ### Fixed
+
+- **`internal/coord`'s lease-steal helper retried 50 times against a condition that made every
+  attempt fail** ([#390]). `TestDoCancelsTheActionWhenTheLeaseIsLost` failed on `main`, passed on
+  re-run, and looked like an ordinary flake — in a retry loop that had itself been added to fix a
+  flake in the same test. It was not. The helper reads the lease object's ETag and then conditionally
+  writes against it, racing the holder's renewal ticker; a HEAD+PUT round trip against the in-process
+  endpoint measures ~4ms mean and ~6.4ms worst, against a `RenewInterval` of 10ms. Once the round trip
+  exceeds the interval a tick lands between the read and the write on *every* attempt, so the 50
+  attempts are not 50 independent trials whose failure probability compounds downward but 50 instances
+  of one certain loss — a deterministic failure on any loaded runner, wearing a flake's clothes. A
+  retry count only helps when attempts are independent.
+
+  The steal now takes the holder's own `claimMu` for its read-then-write. That lock already exists and
+  is already held across the holder's whole read-assert-store round trip — it is what stops a holder's
+  two concurrent renewals from defeating each other — so taking it makes the steal atomic with respect
+  to renewals for the same reason. **No production code changed**: the mechanism was there and the test
+  was reaching past it. It is also the more faithful model, since a real contender takes over a lease
+  precisely when the holder is *not* mid-renewal.
+
+  Verified by mutation against a constructed reproduction, because CI's timing cannot be summoned on
+  demand: at `RenewInterval = 1ms` — the ticker inside the measured round trip, which is CI's condition
+  expressed locally — removing the `claimMu` hold fails all three steal-inside-an-action tests
+  deterministically with CI's exact message, and restoring it passes 20 consecutive runs at that same
+  1ms. The whole package passes `-count=25 -race`.
 - **The conditional-write capability probe called Ceph RGW capable, and RGW ignores preconditions on
   every multipart write** ([#285]). The probe asserts an unmatchable `If-Match` against a key expected
   to be absent; its `412` arm reported the capability present unconditionally, on the reasoning that
@@ -2332,6 +2356,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#284]: https://github.com/scttfrdmn/objectfs/issues/284
 [#385]: https://github.com/scttfrdmn/objectfs/issues/385
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
+[#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
 [#269]: https://github.com/scttfrdmn/objectfs/issues/269

@@ -108,8 +108,9 @@ func TestGuardedWriteFailsWhenTheLeaseIsStolenMidAction(t *testing.T) {
 			return fmt.Errorf("first write: %w", err)
 		}
 
-		// Now the lease moves.
-		stealLease(t, ts, first.cfg.Key)
+		// Now the lease moves. Inside a Do, so the steal is serialized against this holder's renewal
+		// ticker — see stealLeaseFrom.
+		stealLeaseFrom(t, ts, first, first.cfg.Key)
 
 		// And the same call that worked a moment ago must now fail.
 		if err := g.Put(after, []byte("must not land"), nil); err != nil {
@@ -165,7 +166,7 @@ func TestGuardedDeleteAndPutIfAlsoReassert(t *testing.T) {
 			}
 
 			err := l.Do(ctx, func(_ context.Context, g Guard) error {
-				stealLease(t, ts, l.cfg.Key)
+				stealLeaseFrom(t, ts, l, l.cfg.Key)
 
 				if err := tc.act(g); err != nil {
 					return err
@@ -653,9 +654,9 @@ func TestDoCancelsTheActionWhenTheLeaseIsLost(t *testing.T) {
 
 	err := l.Do(ctx, func(actionCtx context.Context, _ Guard) error {
 		// Steal the lease, then wait for the renewal ticker to notice. The steal races that ticker for
-		// the lease object's ETag, which is why it goes through stealLease rather than a single
-		// conditional write — see the note there.
-		stealLease(t, ts, l.cfg.Key)
+		// the lease object's ETag, which is why it goes through stealLeaseFrom rather than a single
+		// conditional write — see the note there. This is the test whose steal failed on CI.
+		stealLeaseFrom(t, ts, l, l.cfg.Key)
 
 		select {
 		case <-actionCtx.Done():
@@ -987,24 +988,69 @@ func TestRenewKeepsTheClaimWhenTheStoreIsMerelyUnreachable(t *testing.T) {
 // what the contender being simulated would do, so this is the more faithful model as well as the
 // stable one.
 //
+// The retry alone was not enough, and the reason is worth stating because "add a retry" is the
+// intuitive fix and it left a test that still failed on CI. A HEAD+PUT round trip against the
+// in-process endpoint measures ~4ms mean and ~6.4ms worst on an idle laptop. Once that round trip
+// exceeds RenewInterval, a tick lands between the HEAD and the PUT on *every* attempt — so the 50
+// attempts are not 50 independent trials with a compounding chance of success, they are 50 instances
+// of the same certain loss. On a loaded runner where the round trip crosses 10ms that is a
+// deterministic failure wearing a flake's clothes, and it is what failed on ca27fbe.
+//
+// So the steal takes the holder's own claimMu for its read-then-write, rather than trying to outrun
+// the ticker. claimMu is the lock the holder already holds across its whole read-assert-store round
+// trip — it exists so a holder's two concurrent renewals cannot defeat each other — and taking it here
+// makes the steal's HEAD and PUT atomic with respect to renewals for the same reason. No production
+// code changes: the mechanism was already there, and this test was reaching past it.
+//
+// That is also the faithful model rather than a convenience. A real contender takes over a lease
+// precisely when the holder is *not* mid-renewal, because a renewal in flight is what makes the lease
+// un-takeable; racing one is the single case where a takeover is supposed to lose. The retry stays for
+// the interleaving where the ticker won the lock first and moved the ETag before this attempt read it.
+//
+// Verified by mutation rather than by argument, and the reproduction is worth keeping because CI's
+// timing is not reproducible on demand: setting RenewInterval to 1ms puts the ticker inside the
+// measured round trip, which is CI's condition expressed locally. With the claimMu hold removed, all
+// three steal-inside-an-action tests then fail with the identical "could not steal … in 50 attempts"
+// message CI produced — deterministically, not once in twenty. With it restored and the interval left
+// at 1ms, 20 consecutive runs pass. A local run at the committed intervals proves nothing either way,
+// which is why this note records the hostile setting instead.
+//
 // It deliberately does not use Lease.Acquire: that would wait out a full observation period, and the
 // point of these tests is the case where the lease moves while the first holder still believes it has
 // it.
 func stealLease(t *testing.T, ts *testaws.TestServer, key string) {
 	t.Helper()
 
+	stealLeaseFrom(t, ts, nil, key)
+}
+
+// stealLeaseFrom is stealLease against a known holder, whose claimMu it takes so the read-then-write
+// cannot be split by that holder's renewal ticker. holder may be nil, for the callers that steal a
+// lease no live Lease value is renewing.
+func stealLeaseFrom(t *testing.T, ts *testaws.TestServer, holder *Lease, key string) {
+	t.Helper()
+
 	var lastErr error
 
-	for range 50 {
-		etag := currentLeaseETag(t, ts, key)
+	for attempt := range 50 {
+		err := func() error {
+			if holder != nil {
+				holder.claimMu.Lock()
+				defer holder.claimMu.Unlock()
+			}
 
-		_, err := ts.Backend().PutObjectIf(context.Background(), key, []byte(`{"holder":"second"}`), nil,
-			types.Precondition{ETag: etag})
+			etag := currentLeaseETag(t, ts, key)
+
+			_, err := ts.Backend().PutObjectIf(context.Background(), key, []byte(`{"holder":"second"}`), nil,
+				types.Precondition{ETag: etag})
+
+			return err
+		}()
 		if err == nil {
 			return
 		}
 		if !errors.Is(err, types.ErrPreconditionFailed) {
-			t.Fatalf("stealing the lease at %q: %v", key, err)
+			t.Fatalf("stealing the lease at %q on attempt %d: %v", key, attempt+1, err)
 		}
 
 		lastErr = err
