@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`internal/coord` — a lease over `PutObjectIf` where every guarded action re-asserts the CAS**
+  ([#283]). Mutual exclusion between nodes with the object store as the arbiter, replacing the
+  direction the consensus code was heading in.
+
+  The shape of the API is the substance of the change. There is no exported method on `Lease` that
+  writes: the only way to act under a lease is `Lease.Do`, which re-asserts before invoking the action
+  and hands it a `Guard` whose `Put`, `PutIf`, and `Delete` each re-assert again immediately before
+  the write they perform. That is not defensive layering, it is the property the design document
+  identifies as the whole difference between this and a lock that lies: *a CAS design fails closed
+  only if every guarded action itself re-asserts the CAS.* A node that has lost its network keeps
+  believing it holds the lease — Raft's partitioned leader has the same blind spot — and what makes
+  the difference is whether its next write is refused. An action guarded by "I checked my lease a
+  moment ago" is not guarded, so the type system does not let you write one.
+
+  What survives is a residual window of one round trip rather than one lease period: between a
+  successful re-assert and the write it guards, S3 cannot reject the write on the strength of the
+  lease, because a conditional write cannot span two keys. That is stated in the package doc rather
+  than elided, and `Guard.PutIf` exists for callers whose correctness needs zero — a precondition on
+  state only the current holder could have set is evaluated by the store itself.
+
+  **Takeover never compares two clocks.** Skewed clocks disagreeing about when a lease expired is
+  precisely how two holders arise, so an abandoned lease is claimed only after its ETag has been
+  observed unchanged across a full period, measured as a duration on one observer's monotonic clock.
+  This is why every lease record carries a fresh nonce, and the reason is a verified property of S3
+  rather than a precaution: the ETag is the MD5 of the body, so a renewal rewriting identical fields
+  leaves it unchanged and a live holder becomes indistinguishable from a stopped one — the exact
+  confusion the takeover rule exists to resolve. Renewals must move the ETag or the mechanism
+  silently inverts.
+
+  `Release` writes a record marked released rather than deleting the object, because there is no
+  `DeleteObjectIf`: an unconditional delete by a holder that has since lost the lease would remove the
+  *current* holder's record and hand the lease to whoever raced next. Acquisition is bounded and
+  jittered, and keys are per-resource, because AWS bills failed conditional requests at the normal
+  rate — N contenders on one key is O(N) requests, and a global lock key would turn every operation in
+  the system into contention on one object. `New` refuses to construct a lease against an endpoint
+  that does not report `ConditionalWrite`, and against one that cannot answer at all: a store that
+  accepts a conditional header and ignores it is indistinguishable from one that honors it, from every
+  angle except the outcome of a race.
+
+  **Mutation-verified, and it found two defects in the tests rather than in the code.** Removing the
+  re-assert from each `Guard` method fails a named test; so does replacing the nonce with a constant,
+  and so does deleting the observation window. Two of those only failed after the tests were fixed.
+  Stealing the lease *before* `Do` meant `Do`'s own opening `Renew` rejected the action and the method
+  under test was never reached, so deleting its re-assert changed nothing — the steal had to move
+  inside the action. And the nonce test passed with the nonce constant, because the record's
+  nanosecond timestamps varied the body on their own; pinning the clock is what makes it a test of the
+  nonce. Coverage told the same story a third time at 87.4%: `Guard.PutIf` and `Guard.Delete` were
+  covered only where they *refuse*, so either could have had its write deleted outright while every
+  test still passed, since the rest of the suite asserts that a stale holder's writes do not land.
+
+  **Chasing a one-in-sixty flake found a defect in the lease itself.** `Renew` reads the held ETag,
+  asserts it, and stores the new one, and those three steps were not atomic — so two renewals by the
+  *same* holder both read the same ETag and both asserted it. One won; the other was handed
+  `ErrPreconditionFailed` by its own holder's write, could not tell that from a takeover, and returned
+  `ErrLost` and dropped the claim. Every guarded action then failed closed on a lease the node still
+  genuinely held, reporting that another holder had taken it, which was false. This needed no
+  contention and no unusual caller: `Do`'s renewal ticker and every `Guard` method's re-assert both
+  call `Renew`, so a holder following the package's only supported pattern defeated itself. Reproduced
+  100% of the time with two goroutines, fixed by serializing the whole read-modify-write of the claim
+  across its round trip, and now covered by
+  `TestOneHoldersConcurrentRenewalsDoNotDefeatEachOther` — which asserts the lease is still *usable*
+  afterwards rather than only that the renewals returned nil.
+
+  The flake that led there was separately a defect in a test's model, and is fixed rather than
+  tolerated: every steal performed inside a `Do` action races that action's renewal ticker for the
+  lease object's ETag, so the steal's own precondition could fail through no fault of the code under
+  test. Retrying against a fresh ETag is what the contender being simulated would do, so the stable
+  version is the more faithful one. Both halves are the same lesson — a package about who wins a race
+  has to be tested by something that does not itself race.
+
 - **`Backend.PutObjectIf` — a write that happens only if an assertion about the key's current state
   holds, reporting the new ETag** ([#282]). This is the primitive the coordination work is being rebuilt
   on: `Precondition{Absent: true}` is a lease acquisition, `Precondition{ETag: current}` is a

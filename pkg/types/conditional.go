@@ -22,7 +22,7 @@ type Precondition struct {
 
 	// ETag asserts the key currently has this ETag. Sent as If-Match.
 	//
-	// An absent key is [ErrNotFound]-shaped rather than [ErrPreconditionFailed], because those want
+	// An absent key is not-found-shaped rather than [ErrPreconditionFailed], because those want
 	// different recovery: a lost race means recompute and retry, a vanished object means the state
 	// being updated no longer exists. Implementations must preserve that distinction — S3 answers
 	// 404 rather than 412 for If-Match against a missing key, which is verified behavior and not an

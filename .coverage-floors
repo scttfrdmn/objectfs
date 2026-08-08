@@ -187,6 +187,18 @@ internal/compression     87
 # `compression_enabled: true` over a feature that was off — so a test that only checked the new path
 # worked would leave the old one free to come back as a silent no-op.
 internal/config          88
+# internal/coord enters at 88, and the number is the less interesting half of what it took to get
+# there. 87.4% was reached with Guard.PutIf and Guard.Delete at 66.7% each, covered only on the path
+# where they *refuse* — so either could have had its write deleted entirely and every test would
+# still have passed, because the package's other tests assert that a stale holder's writes do not
+# land. Verified by mutation, not predicted: replacing Delete's body with `return nil` failed nothing
+# until TestGuardedWritesReachTheStoreWhileTheLeaseIsHeld existed.
+#
+# The uncovered remainder is where it should be for this package: the crypto/rand and json.Marshal
+# error arms, and the transient-network branch of Renew that deliberately does *not* drop the claim.
+# That last one is the fail-open direction and is worth reaching; it needs a backend double that
+# fails a specific call, which the endpoint does not currently offer.
+internal/coord           88
 internal/cost            98
 internal/difftest        75
 internal/distributed     67
