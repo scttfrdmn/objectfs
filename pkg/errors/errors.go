@@ -345,6 +345,19 @@ func IsServiceFailure(code ErrorCode) bool {
 		// contention the precondition exists to arbitrate, so N contenders for one lease would take
 		// writes offline for all of them. ErrorThreshold is 3.
 		ErrCodePreconditionFailed: true,
+
+		// The same reasoning, for the other rejection a conditional write can get: two well-formed
+		// requests collided and the service did the work of noticing. If anything this one matters more,
+		// because a conflict is what a *busy* contended key produces — so it arrives in bursts by design,
+		// and ten of them on one key took every write in the process offline until this line existed.
+		// Found by TestAConflictStormDoesNotDegradeWritesOrTripTheBreaker rather than by review, and only
+		// once the emulator could produce a 409 at all.
+		//
+		// Retryable and not-a-service-failure are separate questions and this code answers them
+		// differently: it *is* in retry.DefaultConfig's retryable set, because repeating the write may
+		// well succeed, while ErrCodePreconditionFailed is not. Being worth retrying is not evidence the
+		// service is unwell.
+		ErrCodeConditionalConflict: true,
 	}
 	return !notAFailure[code]
 }

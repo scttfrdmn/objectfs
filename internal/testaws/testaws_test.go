@@ -3,6 +3,7 @@ package testaws_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/scttfrdmn/objectfs/internal/testaws"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // The harness is itself test infrastructure, so it needs its own tests. If the recorder silently
@@ -716,6 +718,67 @@ func TestInjectFaultFailsExactlyItsBudget(t *testing.T) {
 	if gets := ts.GETs(key); len(gets) != 3 {
 		t.Errorf("recorded %d GETs, want 3 (two faulted, one served): %+v", len(gets), gets)
 	}
+}
+
+// TestSeedConditionalConflictOnlyAffectsConditionalWrites is the seed's own regression test, and what
+// it pins is the property that makes the seed worth having over a Fault: the conflict is consumed where
+// a real one would be, after the preconditions have been evaluated.
+//
+// If it fired earlier it would answer 409 to writes S3 answers differently — an unconditional write, or
+// a conditional one whose precondition genuinely did not hold — and a test built on it would be
+// asserting against a state the real service cannot produce. That is exactly the failure mode a Fault
+// has here, which is why this exists alongside one.
+func TestSeedConditionalConflictOnlyAffectsConditionalWrites(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ctx := context.Background()
+
+	const key = "contended"
+	ts.SeedConditionalConflict(key, 1)
+
+	// An unconditional write is untouched by the seed. It also does not spend it, which the conditional
+	// write below proves by still finding a conflict armed.
+	ts.PutObject(key, []byte("unconditional"))
+
+	// A conditional write whose precondition does not hold must still report the precondition failure:
+	// the object exists, so asserting absence loses on the merits, and a seed consumed before that
+	// evaluation would mask it.
+	_, err := ts.Backend().PutObjectIf(ctx, key, []byte("declined"), nil, types.Precondition{Absent: true})
+	if !errors.Is(err, types.ErrPreconditionFailed) {
+		t.Fatalf("a conditional write against an existing key = %v, want ErrPreconditionFailed; a "+
+			"seeded conflict consumed before the preconditions were evaluated would hide it", err)
+	}
+
+	// And the seed is still armed, so neither of the two writes above spent it. This is the half that
+	// would fail silently: a seed consumed by the wrong request leaves the test that needed it running
+	// against an unarmed server, passing for the wrong reason.
+	//
+	// The precondition has to genuinely hold for the conflict to be reachable, so this asserts the
+	// object's current ETag rather than its absence.
+	info, err := ts.Backend().HeadObject(ctx, key)
+	if err != nil {
+		t.Fatalf("HeadObject(%q): %v", key, err)
+	}
+
+	_, err = ts.Backend().PutObjectIf(ctx, key, []byte("conflicted"), nil,
+		types.Precondition{ETag: info.ETag})
+	if !errors.Is(err, types.ErrConditionalConflict) {
+		t.Fatalf("a conditional write whose precondition holds = %v, want ErrConditionalConflict from "+
+			"the seed armed at the top of this test", err)
+	}
+
+	// Budget spent: the same write now succeeds, which is what makes "conflict once, then succeed"
+	// expressible — the same reason Fault is bounded rather than probabilistic.
+	if _, err := ts.Backend().PutObjectIf(ctx, key, []byte("landed"), nil,
+		types.Precondition{ETag: info.ETag}); err != nil {
+		t.Fatalf("after the seed was spent the write = %v, want success", err)
+	}
+	if got := ts.GetObject(key); string(got) != "landed" {
+		t.Errorf("stored = %q, want %q; the write that reported success did not land", got, "landed")
+	}
+
+	ts.ClearConditionalConflicts()
 }
 
 // TestInjectFaultMatchesOnMethodKeyAndRange pins the matcher's selectivity. Over-matching is the

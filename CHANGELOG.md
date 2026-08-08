@@ -9,6 +9,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`internal/coord` — a lease over `PutObjectIf` where every guarded action re-asserts the CAS**
+  ([#283]). Mutual exclusion between nodes with the object store as the arbiter, replacing the
+  direction the consensus code was heading in.
+
+  The shape of the API is the substance of the change. There is no exported method on `Lease` that
+  writes: the only way to act under a lease is `Lease.Do`, which re-asserts before invoking the action
+  and hands it a `Guard` whose `Put`, `PutIf`, and `Delete` each re-assert again immediately before
+  the write they perform. That is not defensive layering, it is the property the design document
+  identifies as the whole difference between this and a lock that lies: *a CAS design fails closed
+  only if every guarded action itself re-asserts the CAS.* A node that has lost its network keeps
+  believing it holds the lease — Raft's partitioned leader has the same blind spot — and what makes
+  the difference is whether its next write is refused. An action guarded by "I checked my lease a
+  moment ago" is not guarded, so the type system does not let you write one.
+
+  What survives is a residual window of one round trip rather than one lease period: between a
+  successful re-assert and the write it guards, S3 cannot reject the write on the strength of the
+  lease, because a conditional write cannot span two keys. That is stated in the package doc rather
+  than elided, and `Guard.PutIf` exists for callers whose correctness needs zero — a precondition on
+  state only the current holder could have set is evaluated by the store itself.
+
+  **Takeover never compares two clocks.** Skewed clocks disagreeing about when a lease expired is
+  precisely how two holders arise, so an abandoned lease is claimed only after its ETag has been
+  observed unchanged across a full period, measured as a duration on one observer's monotonic clock.
+  This is why every lease record carries a fresh nonce, and the reason is a verified property of S3
+  rather than a precaution: the ETag is the MD5 of the body, so a renewal rewriting identical fields
+  leaves it unchanged and a live holder becomes indistinguishable from a stopped one — the exact
+  confusion the takeover rule exists to resolve. Renewals must move the ETag or the mechanism
+  silently inverts.
+
+  `Release` writes a record marked released rather than deleting the object, because there is no
+  `DeleteObjectIf`: an unconditional delete by a holder that has since lost the lease would remove the
+  *current* holder's record and hand the lease to whoever raced next. Acquisition is bounded and
+  jittered, and keys are per-resource, because AWS bills failed conditional requests at the normal
+  rate — N contenders on one key is O(N) requests, and a global lock key would turn every operation in
+  the system into contention on one object. `New` refuses to construct a lease against an endpoint
+  that does not report `ConditionalWrite`, and against one that cannot answer at all: a store that
+  accepts a conditional header and ignores it is indistinguishable from one that honors it, from every
+  angle except the outcome of a race.
+
+  **Mutation-verified, and it found two defects in the tests rather than in the code.** Removing the
+  re-assert from each `Guard` method fails a named test; so does replacing the nonce with a constant,
+  and so does deleting the observation window. Two of those only failed after the tests were fixed.
+  Stealing the lease *before* `Do` meant `Do`'s own opening `Renew` rejected the action and the method
+  under test was never reached, so deleting its re-assert changed nothing — the steal had to move
+  inside the action. And the nonce test passed with the nonce constant, because the record's
+  nanosecond timestamps varied the body on their own; pinning the clock is what makes it a test of the
+  nonce. Coverage told the same story a third time at 87.4%: `Guard.PutIf` and `Guard.Delete` were
+  covered only where they *refuse*, so either could have had its write deleted outright while every
+  test still passed, since the rest of the suite asserts that a stale holder's writes do not land.
+
+  **Chasing a one-in-sixty flake found a defect in the lease itself.** `Renew` reads the held ETag,
+  asserts it, and stores the new one, and those three steps were not atomic — so two renewals by the
+  *same* holder both read the same ETag and both asserted it. One won; the other was handed
+  `ErrPreconditionFailed` by its own holder's write, could not tell that from a takeover, and returned
+  `ErrLost` and dropped the claim. Every guarded action then failed closed on a lease the node still
+  genuinely held, reporting that another holder had taken it, which was false. This needed no
+  contention and no unusual caller: `Do`'s renewal ticker and every `Guard` method's re-assert both
+  call `Renew`, so a holder following the package's only supported pattern defeated itself. Reproduced
+  100% of the time with two goroutines, fixed by serializing the whole read-modify-write of the claim
+  across its round trip, and now covered by
+  `TestOneHoldersConcurrentRenewalsDoNotDefeatEachOther` — which asserts the lease is still *usable*
+  afterwards rather than only that the renewals returned nil.
+
+  **A fuzz target found a process-killing panic in 0.37 seconds, before it was committed.**
+  `FuzzNewConfig` asserts the one property that makes a `Config` safe to hold a lease with: `New`
+  either refuses it, or produces a lease whose renewal interval leaves genuine margin before its
+  period. `Period: 2ns` made `RenewInterval` default to `Period/4` = **0** by integer division, which
+  passed the margin check — 0 genuinely is shorter than 2ns — and then panicked: `time.NewTicker(0)`
+  is "non-positive interval for NewTicker", raised inside `Do`'s renewal goroutine where no caller can
+  recover it, which in a mount means the process and every open file descriptor with it. `Period` now
+  has a `MinPeriod` floor, the reproducer the fuzzer minimized is committed as corpus, the rejection
+  is also tabled so it is not fuzz-only, and the target is in the CI matrix. The floor is set at where
+  the arithmetic degenerates rather than at a useful deployment minimum, because encoding the latter
+  would also reject the short periods this package's own takeover tests need — a real guard traded for
+  slower tests.
+
+  The flake that led there was separately a defect in a test's model, and is fixed rather than
+  tolerated: every steal performed inside a `Do` action races that action's renewal ticker for the
+  lease object's ETag, so the steal's own precondition could fail through no fault of the code under
+  test. Retrying against a fresh ETag is what the contender being simulated would do, so the stable
+  version is the more faithful one. Both halves are the same lesson — a package about who wins a race
+  has to be tested by something that does not itself race.
+
+  **The one arm of `Renew` that must not drop the claim is now covered too.** A precondition failure is
+  evidence the lease moved and a 404 is evidence the record is gone, but a 500 is evidence of nothing
+  about the lease — so it leaves the claim alone, and a test now proves that rather than the code merely
+  asserting it. This is the fail-*open* direction, and getting it wrong would hand a resource to the
+  next contender on every transient blip, possibly while the original holder was still mid-action. It
+  goes through fault injection rather than a backend double on purpose: a double returning a canned
+  error exercises the `errors.Is` arms without proving anything about which errors S3 actually produces,
+  and the question is how a real 500 classifies after the SDK, the circuit breaker, and the error
+  translator have each had it. The test also asserts the claim is still *assertable* after the store
+  recovers, not just that `Held` reports true — a cleared or replaced local ETag would fail the next
+  precondition while still looking held.
+
 - **`Backend.PutObjectIf` — a write that happens only if an assertion about the key's current state
   holds, reporting the new ETag** ([#282]). This is the primitive the coordination work is being rebuilt
   on: `Precondition{Absent: true}` is a lease acquisition, `Precondition{ETag: current}` is a
@@ -29,6 +124,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pkg/retry`, because `PutObjectIf` deliberately does not wrap itself in a retryer (a CAS caller has to
   re-read state and recompute its bytes; that loop is only its own) and so nothing in the S3 package
   could fail if the classification were wrong.
+
+  **`ErrCodeConditionalConflict` is a non-failure too, and was not** until a test could produce a 409 at
+  all. Only the precondition-failure half of that reasoning had been applied; the conflict half read as
+  a service failure, so ten conflicts on one contended key drove `s3-writes` to unavailable and then
+  refused *every* write in the process, including writes to unrelated keys by unrelated callers. It is
+  the same argument and if anything a stronger one — a conflict is what a *busy* contended key produces,
+  so it arrives in bursts by design, whereas losing a race once is an ordinary quiet outcome. Retryable
+  and not-a-service-failure are separate questions and this code genuinely answers them differently:
+  repeating the write may well succeed, and being worth retrying is not evidence the service is unwell.
+  Found by `TestAConflictStormDoesNotDegradeWritesOrTripTheBreaker`, which only became possible with
+  substrate v0.93.0's `POST /v1/s3/conditional-conflict`; the arm had shipped untested because nothing
+  available could make the emulator return a 409. That is the second defect in this series found by a
+  test written against a newly-available capability rather than by review.
 
   **An absent key is `ErrCodeObjectNotFound`, not a precondition failure**, and preserving that
   distinction fixed a real defect found by execution rather than by reading. S3 answers 404 to an
@@ -72,6 +180,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignores-preconditions case. Mutation-verified in eight directions: dropping either header on either
   path, delegating the 404, reclassifying a precondition failure as a service failure or as retryable,
   removing the capability gate, and making the probe fail open each break a named test.
+
+- **`internal/testaws`: `SeedConditionalConflict` and `ClearConditionalConflicts`**, arming the emulator
+  to answer the next *n* conditional writes to a key with `409 ConditionalRequestConflict` by way of
+  substrate v0.93.0's `POST /v1/s3/conditional-conflict`. Until this existed nothing available could make
+  the endpoint return a 409 at all, so the arm of `PutObjectIf` that classifies one had shipped untested —
+  and the defect above is what was hiding there.
+
+  **It is deliberately not a `Fault`, and the difference is the whole reason it earns its keep.** A fault
+  would produce the same status and code and prove much less: it short-circuits in front of the emulator,
+  so it would answer 409 to a write whose precondition never held, which is a state S3 does not produce. A
+  seeded conflict is consumed *after* the preconditions pass, so a genuine 412 or 404 still reports as
+  itself and does not spend the budget, and an unconditional write is untouched — which is exactly what
+  makes "a conflict is retryable, a precondition failure is not" a claim a test can establish rather than
+  assume. `TestSeedConditionalConflictOnlyAffectsConditionalWrites` pins all three of those properties,
+  including the half that would otherwise fail silently: a seed consumed by the wrong request leaves the
+  test that needed it running against an unarmed server, passing for the wrong reason. The seed is
+  key-scoped, and the control-plane request goes to the emulator directly rather than through the
+  recording proxy, because it is not S3 traffic and should not appear in the request log a test asserts
+  against.
 
 - **278 of the `paralleltest`/`tparallel` backlog cleared: the lint total is 570 → 299** ([#179]).
   `t.Parallel()` on every test and subtest in seventeen files across `pkg/errors`, `pkg/status`,

@@ -361,6 +361,135 @@ func TestPreconditionFailureIsNotRetried(t *testing.T) {
 	}
 }
 
+// TestConditionalConflictIsDistinctFromAPreconditionFailureAndIsRetried is the other conditional-write
+// rejection, and the two must not be conflated: S3 answers 412 when the precondition did not hold and
+// 409 ConditionalRequestConflict when the write raced a delete or another conditional write.
+//
+// The difference is what the caller does next. A precondition failure is definitive — the object's
+// state is not what was asserted, and asking again cannot change that. A conflict says only that two
+// requests collided; the caller's view of the state may still be current, so the *same* write may
+// simply succeed. Collapsing the two either spins a CAS loop against an answer that will never change,
+// or abandons a lease acquisition that would have won on the second try.
+//
+// PutObjectIf does not retry either of them itself — it sits outside b.retryer on purpose, because a
+// CAS caller has to re-read state and recompute bytes before it can retry anything, which is a loop
+// only it can run. So what this asserts is that the caller is given what it needs to make that
+// decision: one request, a distinguishable sentinel, and a retry by the caller that then succeeds. The
+// retry succeeding is the substantive difference from a precondition failure, and asserting the error
+// alone would not show it.
+//
+// This became testable with substrate v0.93.0 (scttfrdmn/substrate#540), which is why the arm shipped
+// uncovered. It deliberately does not use a fault: a fault answering 409 short-circuits in front of
+// the emulator, so it would fire on a write whose precondition never held, which is a state S3 does
+// not produce. The seeded conflict is consumed only after the preconditions pass.
+func TestConditionalConflictIsDistinctFromAPreconditionFailureAndIsRetried(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	backend := ts.Backend()
+	ctx := context.Background()
+
+	// Warm the capability probe before counting: it issues a conditional PutObject of its own, and it
+	// would otherwise consume the first seeded conflict and be counted as the write under test.
+	_ = backend.Capabilities()
+
+	ts.SeedConditionalConflict("contended", 1)
+
+	before := ts.Operations("PutObject")
+
+	_, err := backend.PutObjectIf(ctx, "contended", []byte("first try"), nil,
+		types.Precondition{Absent: true})
+	if !stderr.Is(err, types.ErrConditionalConflict) {
+		t.Fatalf("err = %v, want ErrConditionalConflict", err)
+	}
+
+	// Not the other sentinel. A caller keying on ErrPreconditionFailed would re-read state that has not
+	// changed, and a CAS loop doing that against a conflict makes no progress while looking correct.
+	if stderr.Is(err, types.ErrPreconditionFailed) {
+		t.Errorf("err = %v is also ErrPreconditionFailed; the two rejections must stay distinct", err)
+	}
+
+	// Exactly one request. The retry is the caller's to run, and a hidden internal retry would spend a
+	// request the caller did not ask for and could not observe.
+	if got := ts.Operations("PutObject") - before; got != 1 {
+		t.Errorf("a conflicting conditional write issued %d PutObject requests, want 1", got)
+	}
+
+	// The seed is spent, so the caller's own retry — the same write against the same asserted state —
+	// succeeds. That is what makes the classification actionable rather than merely different.
+	etag, err := backend.PutObjectIf(ctx, "contended", []byte("won on the retry"), nil,
+		types.Precondition{Absent: true})
+	if err != nil {
+		t.Fatalf("retrying after a conflict = %v, want it to succeed; repeating the same write is "+
+			"exactly what a conflict, unlike a precondition failure, says is worth doing", err)
+	}
+	if etag == "" {
+		t.Error("no ETag returned, so a caller has nothing to chain a later precondition on")
+	}
+
+	// The bytes landed, not just the call returned nil.
+	stored, err := backend.GetObject(ctx, "contended", 0, -1)
+	if err != nil {
+		t.Fatalf("GetObject after the retried write: %v", err)
+	}
+	if !bytes.Equal(stored, []byte("won on the retry")) {
+		t.Errorf("stored = %q, want %q", stored, "won on the retry")
+	}
+}
+
+// TestAConflictStormDoesNotDegradeWritesOrTripTheBreaker is the conflict twin of
+// TestPreconditionFailureDoesNotDegradeWritesOrTripTheBreaker, and it matters more rather than less: a
+// conflict is what a *busy* contended key produces, so this is the case where many of them arrive at
+// once by design.
+//
+// A conflict is the mechanism working. It means two well-formed requests collided and the service did
+// the work of noticing — evidence S3 is healthy, not evidence it is not. Counting it against s3-writes
+// would degrade the component under exactly the contention conditional writes exist to arbitrate,
+// where ErrorThreshold is 3, so a handful of contenders on one key would take writes offline for every
+// one of them and for every unrelated writer in the process. The final unconditional write is how that
+// is detected: a degraded s3-writes refuses it at the health gate.
+//
+// It also asserts the obvious thing that would be embarrassing to get wrong — a rejected write stores
+// nothing.
+func TestAConflictStormDoesNotDegradeWritesOrTripTheBreaker(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	backend := ts.Backend()
+	ctx := context.Background()
+
+	_ = backend.Capabilities()
+
+	// Well past ErrorThreshold (3) and past the breaker's ReadyToTrip count.
+	const attempts = 10
+	ts.SeedConditionalConflict("contended", attempts)
+
+	for i := range attempts {
+		_, err := backend.PutObjectIf(ctx, "contended", []byte("never lands"), nil,
+			types.Precondition{Absent: true})
+		if !stderr.Is(err, types.ErrConditionalConflict) {
+			t.Fatalf("attempt %d: err = %v, want ErrConditionalConflict", i, err)
+		}
+	}
+
+	if ts.ObjectExists("contended") {
+		t.Error("a conditional write that reported a conflict stored the object anyway")
+	}
+
+	// The classification this rests on, asserted directly so a change to the non-failure set fails here
+	// rather than only showing up as a mysteriously degraded component under load.
+	if objerrors.IsServiceFailure(objerrors.ErrCodeConditionalConflict) {
+		t.Error("ErrCodeConditionalConflict counts as a service failure; contenders colliding on one " +
+			"key would take writes offline for all of them")
+	}
+
+	if err := backend.PutObject(ctx, "unrelated", []byte("x"), nil); err != nil {
+		t.Fatalf("an ordinary write failed after %d conflicts: %v\n"+
+			"A conflict means the service worked in order to notice a collision; counting it as a "+
+			"service failure takes writes offline under the contention it arbitrates", attempts, err)
+	}
+}
+
 // TestCapabilitiesReportsConditionalWriteAgainstAnEvaluatingEndpoint asserts the probe answers
 // correctly against an endpoint that does evaluate preconditions.
 //

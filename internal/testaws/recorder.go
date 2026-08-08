@@ -1,7 +1,9 @@
 package testaws
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -255,6 +257,77 @@ func (ts *TestServer) ClearFaults() {
 	defer ts.rec.mu.Unlock()
 
 	ts.rec.faults = nil
+}
+
+// SeedConditionalConflict arms the emulator to answer the next n *conditional* writes to key with
+// 409 ConditionalRequestConflict, the code S3 returns when a conditional write races a delete or
+// another conditional write.
+//
+// # Why this is not a Fault
+//
+// A Fault would produce the same status and code, and would prove much less. The distinction the
+// caller has to act on is that a conflict is retryable and a precondition failure is not, and that
+// only means something if the conflict is evaluated where a real one would be: substrate consumes a
+// seeded conflict *after* the preconditions pass, so a genuine 412 or 404 still reports as itself and
+// does not spend the budget, and an unconditional write is never affected. A Fault short-circuits in
+// front of the emulator, so it cannot express any of that — it would answer 409 to a write whose
+// precondition never held, which is a state S3 does not produce.
+//
+// It goes to the emulator directly rather than through the recording proxy, because the control plane
+// is not S3 traffic and should not appear in the request log a test is asserting against.
+//
+// Requires substrate v0.93.0 or newer, which is where the endpoint landed (scttfrdmn/substrate#540).
+func (ts *TestServer) SeedConditionalConflict(key string, n int) {
+	ts.t.Helper()
+
+	body, err := json.Marshal(map[string]any{
+		"bucket": ts.Bucket,
+		"key":    key,
+		// Only the PutObject arm. The copy and multipart-complete arms are separate counters, and
+		// seeding one this helper's callers do not exercise would arm a fixture that never fires.
+		"putConflicts": n,
+	})
+	if err != nil {
+		ts.t.Fatalf("testaws: encoding a conditional-conflict seed: %v", err)
+	}
+
+	ts.controlPlane(http.MethodPost, "/v1/s3/conditional-conflict", body)
+}
+
+// ClearConditionalConflicts removes every seeded conflict, including budget not yet spent.
+func (ts *TestServer) ClearConditionalConflicts() {
+	ts.t.Helper()
+
+	ts.controlPlane(http.MethodDelete, "/v1/s3/conditional-conflict", nil)
+}
+
+// controlPlane issues a request to one of the emulator's own control endpoints and fails the test
+// unless it is accepted. A silently rejected seed is the failure mode worth guarding: the test then
+// runs against an unarmed server and passes for the wrong reason.
+func (ts *TestServer) controlPlane(method, path string, body []byte) {
+	ts.t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), method, ts.Server.URL+path, reader)
+	if err != nil {
+		ts.t.Fatalf("testaws: building a %s %s request: %v", method, path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.HTTPClient().Do(req)
+	if err != nil {
+		ts.t.Fatalf("testaws: %s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	answer, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		ts.t.Fatalf("testaws: %s %s = %d: %s", method, path, resp.StatusCode, answer)
+	}
 }
 
 // serveFault writes an S3-shaped error response. The body matters: the AWS SDK parses the Code out

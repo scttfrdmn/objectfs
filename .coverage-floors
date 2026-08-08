@@ -187,6 +187,24 @@ internal/compression     87
 # `compression_enabled: true` over a feature that was off — so a test that only checked the new path
 # worked would leave the old one free to come back as a silent no-op.
 internal/config          88
+# internal/coord enters at 88, and the number is the less interesting half of what it took to get
+# there. 87.4% was reached with Guard.PutIf and Guard.Delete at 66.7% each, covered only on the path
+# where they *refuse* — so either could have had its write deleted entirely and every test would
+# still have passed, because the package's other tests assert that a stale holder's writes do not
+# land. Verified by mutation, not predicted: replacing Delete's body with `return nil` failed nothing
+# until TestGuardedWritesReachTheStoreWhileTheLeaseIsHeld existed.
+#
+# 88 → 89 with the transient-store branch of Renew, the one arm that must *not* drop the claim. It was
+# left uncovered on the theory that reaching it needed a capability the harness lacked; testaws.Fault
+# already had it, so the note recording that gap was wrong rather than the gap being real — worth
+# remembering as a reason to check the harness before believing a branch is unreachable. It goes
+# through the injector rather than a backend double on purpose: a double returning a canned error
+# exercises the errors.Is arms without proving anything about which errors S3 produces, and the whole
+# question here is how a real 500 classifies after the SDK, the breaker, and the translator have had it.
+#
+# The uncovered remainder is the crypto/rand and json.Marshal error arms, which need a failing
+# encoder rather than a failing endpoint.
+internal/coord           89
 internal/cost            98
 internal/difftest        75
 internal/distributed     67
@@ -222,7 +240,16 @@ internal/metrics         85
 # platform is a claim about a file set that platform does not compile, so CI is the authority for
 # any package with a //go:build split. internal/fuse is the other one.
 internal/network         98
-internal/testaws         61
+
+# internal/testaws 61 → 64 with SeedConditionalConflict/ClearConditionalConflicts, which drive
+# substrate's conditional-conflict control endpoint so a test can make the emulator answer 409
+# ConditionalRequestConflict. The seed's own regression test is what earns the points, and what it
+# pins is the property that makes a seed worth having over a Fault: the conflict is consumed *after*
+# the preconditions are evaluated, so an unconditional write is unaffected and a genuine 412 still
+# reports as itself. A Fault short-circuits in front of the emulator and would answer 409 to a write
+# whose precondition never held — a state S3 does not produce, and a test built on it would assert
+# against a fiction.
+internal/testaws         64
 internal/vfs             98
 
 # internal/storage/s3 goes from 71 to 73 with the two operations the node contract added to the
