@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The support posture is now stated as a thesis rather than left implicit: AWS S3 is the primary
+  backend and ObjectFS uses every S3 capability that benefits it; S3-compatible endpoints are
+  best-effort and get a fallback or a lesser capability.** This was already how the code behaved —
+  the capability probe, `ErrNotSupported` on an endpoint that fails it, and Transfer Acceleration's
+  silent fallback are all v0.12.0 and earlier — but nothing said it, so the next capability had no
+  rule to follow and the docs drifted the other way. `README.md` and `CLAUDE.md` now name the two
+  degradation rules that the existing code already distinguishes: a **performance** capability falls
+  back silently, because slower is a correct outcome, and a **correctness** capability fails closed,
+  because a precondition an endpoint silently drops tells every contender for a lease that it won.
+  Capabilities are established by probing the endpoint, never from a config flag, an endpoint-URL
+  heuristic, or a version string.
+- **`docs/index.md` no longer claims "Universal compatibility: works with AWS S3, MinIO, Ceph, and
+  all S3-compatible storage."** It was the exact claim the thesis rejects, and it was also false in a
+  way this repository had already measured: Ceph RGW 19.2.0 fails the conditional-write probe, so
+  coordination declines to start there. The page's title and overview said "S3-Compatible Object
+  Storage" where the project targets AWS S3. Replaced with what varies, which is coordination, and a
+  link to the probed matrix — plain filesystem use is unaffected on any S3-compatible endpoint.
+
 ## [0.12.0] - 2026-08-08
 
 Coordination stops pretending. ObjectFS's distributed layer had a consistency taxonomy, a Raft log,

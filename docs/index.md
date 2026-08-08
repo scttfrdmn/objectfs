@@ -1,15 +1,16 @@
 # ObjectFS
 
-**High-Performance FUSE Filesystem for S3-Compatible Object Storage**
+**High-Performance FUSE Filesystem for AWS S3**
 
-ObjectFS transforms S3-compatible object storage into a high-performance filesystem optimized for research computing, data science, and cloud-native applications.
+ObjectFS mounts an AWS S3 bucket as a filesystem, for research computing, data science, and
+cloud-native applications.
 
 ---
 
 ## Overview
 
-ObjectFS is a FUSE filesystem for Linux and macOS that presents a POSIX interface over S3-compatible
-object storage. It is **not** a POSIX-compliant filesystem — a subset of the POSIX surface is
+ObjectFS is a FUSE filesystem for Linux and macOS that presents a POSIX interface over AWS S3. It is
+**not** a POSIX-compliant filesystem — a subset of the POSIX surface is
 implemented, and several operations fail by design rather than silently doing the wrong thing. The
 [supported-operations table in the README](https://github.com/scttfrdmn/objectfs#supported-operations)
 is the authority on what works, what errors, and which tools are known not to work.
@@ -43,7 +44,13 @@ which names them rather than leaving them mixed in with the list above.
 
 ### 💾 S3 Integration
 
-- **Universal compatibility**: Works with AWS S3, MinIO, Ceph, and all S3-compatible storage
+- **AWS S3 first, others best-effort**: AWS S3 is the target and ObjectFS uses every S3 capability
+  that benefits it. MinIO, Ceph RGW and other S3-compatible endpoints work for plain filesystem use
+  and get a fallback or a reduced capability where they diverge — established by probing the
+  endpoint, not by a config flag. "Universal compatibility" is not claimed: RGW 19.2.0 fails the
+  conditional-write probe, so coordination declines to start there. A performance capability falls
+  back silently; a correctness capability fails closed. See
+  [conditional-write compatibility](design/conditional-write-compatibility.md)
 - **Multi-region support**: Optimize for your region or cross-region workflows
 - **Storage class per mount**: `storage_tier` decides the class every object is written with, and
   `cost_optimization.small_objects_on_standard` diverts an object to STANDARD when the configured tier

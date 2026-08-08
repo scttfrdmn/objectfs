@@ -6,6 +6,32 @@ FUSE filesystem presenting a POSIX interface over AWS S3, for research computing
 deployments. Not a POSIX-compliant filesystem — see the supported-operations table in `README.md`
 for what works, what fails by design, and which tools are known not to work.
 
+### Thesis: AWS S3 is the target, not a lowest common denominator
+
+**AWS S3 is the primary backend. Use every S3 capability that benefits ObjectFS. S3-compatible
+backends are best-effort and get a fallback or a lesser capability — they do not get a veto over
+what ObjectFS does on AWS.** Do not design to the intersection of every S3 implementation; that
+buys portability with capability, and the cost lands on the backend nearly every user is running.
+
+Two consequences for any capability you add:
+
+1. **Establish it by probing, not by asking.** Never a config flag, an endpoint-URL heuristic, or a
+   version string. A store that accepts a header and ignores it looks identical to one that honours
+   it from every angle except the outcome. `types.BackendCapabilities` and
+   `types.CapabilityReporter` are the existing shape; extend them rather than inventing a parallel
+   mechanism. If a caller cannot get an answer, treat the capability as absent.
+2. **Choose the degradation rule by capability kind.** A **performance** capability falls back
+   silently — slower is a correct outcome, as Transfer Acceleration does in
+   `executeWithAccelerationFallback`. A **correctness** capability fails closed: the feature refuses
+   to start with an operator-facing reason, as conditional writes do by returning `ErrNotSupported`
+   when the probe fails. Never degrade a correctness guarantee to keep a feature available on a
+   non-AWS store — a precondition silently dropped tells every contender it won, which is the exact
+   outcome the mechanism exists to prevent.
+
+`docs/design/conditional-write-compatibility.md` is the worked example: a probed matrix, per
+endpoint, where AWS is the only row verified against the real service and the only one CI keeps
+verified.
+
 - **Module**: `github.com/scttfrdmn/objectfs`
 - **Go version**: 1.26.0
 - **License**: Apache 2.0, Copyright 2025-2026 Scott Friedman

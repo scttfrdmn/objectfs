@@ -77,6 +77,43 @@ supported** — there is no WinFsp binding, and none is claimed until one exists
 
 ---
 
+## AWS S3 is the target, not a lowest common denominator
+
+**ObjectFS is built for AWS S3 specifically, and uses every S3 capability that benefits it.**
+S3-compatible endpoints — MinIO, Ceph RGW, Wasabi and the rest — are supported on a best-effort
+basis: they get a fallback or a reduced capability, not a veto over what ObjectFS does on AWS.
+
+This is a design decision with teeth, because the alternative is the default. A filesystem that
+targets the intersection of every S3 implementation gets whole-object PUTs and unconditional writes,
+which is a smaller and slower filesystem than S3 can support — and the cost is paid on the backend
+almost every user is actually running.
+
+So capabilities are established by **probing the endpoint in front of this process**, never from a
+config flag, an endpoint-URL heuristic, or a version string. A store that *accepts* a header and
+ignores it is indistinguishable from one that honours it by every means except the outcome, so
+asking is not good enough; ObjectFS attempts the operation. See `types.BackendCapabilities`.
+
+What happens when a capability is missing depends on **what kind of capability it is**, and the two
+rules are deliberately different:
+
+| | If AWS-only and the endpoint lacks it | Example |
+|---|---|---|
+| **Performance capability** | **Fall back silently.** Slower is a correct outcome | Transfer Acceleration falls back to the standard endpoint on error, and stays fallen back |
+| **Correctness capability** | **Fail closed.** The feature refuses to start, with an operator-facing reason | Conditional writes: an endpoint that fails the probe gets `ErrNotSupported`, and coordination declines rather than running unguarded |
+
+The second rule is the one that matters. A precondition an endpoint silently drops is worse than one
+it refuses, because every contender for a lease is told it won. Degrading a correctness guarantee to
+keep a feature available on a non-AWS store would be trading the guarantee for the feature, and the
+guarantee is the feature.
+
+Plain filesystem use is unaffected by any of this — reads, writes, and metadata work on any
+S3-compatible endpoint. What varies is coordination. Measured per-endpoint results, probed rather
+than documented, are in
+[Conditional-write compatibility](docs/design/conditional-write-compatibility.md); AWS S3 is the only
+row verified against the real service, and the only row that stays verified in CI.
+
+---
+
 ## Supported filesystem operations
 
 This table is the contract. It is derived from the methods that exist in `internal/fuse` and
