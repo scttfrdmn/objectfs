@@ -18,7 +18,7 @@ The code that simulated the guarantee is deleted rather than left as a fallback,
 here reports success to every contender for a lease, which is the outcome the mechanism exists to
 prevent.
 
-This tag carries two closed milestones: **Distributed Foundations & Install Simplicity** (23 issues)
+This tag carries two closed milestones: **Distributed Foundations & Install Simplicity** (24 issues)
 and **Test Harness, Coverage & Build Hygiene** (24 issues). Both were at zero open before it was
 cut.
 
