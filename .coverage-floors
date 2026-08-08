@@ -194,11 +194,17 @@ internal/config          88
 # land. Verified by mutation, not predicted: replacing Delete's body with `return nil` failed nothing
 # until TestGuardedWritesReachTheStoreWhileTheLeaseIsHeld existed.
 #
-# The uncovered remainder is where it should be for this package: the crypto/rand and json.Marshal
-# error arms, and the transient-network branch of Renew that deliberately does *not* drop the claim.
-# That last one is the fail-open direction and is worth reaching; it needs a backend double that
-# fails a specific call, which the endpoint does not currently offer.
-internal/coord           88
+# 88 → 89 with the transient-store branch of Renew, the one arm that must *not* drop the claim. It was
+# left uncovered on the theory that reaching it needed a capability the harness lacked; testaws.Fault
+# already had it, so the note recording that gap was wrong rather than the gap being real — worth
+# remembering as a reason to check the harness before believing a branch is unreachable. It goes
+# through the injector rather than a backend double on purpose: a double returning a canned error
+# exercises the errors.Is arms without proving anything about which errors S3 produces, and the whole
+# question here is how a real 500 classifies after the SDK, the breaker, and the translator have had it.
+#
+# The uncovered remainder is the crypto/rand and json.Marshal error arms, which need a failing
+# encoder rather than a failing endpoint.
+internal/coord           89
 internal/cost            98
 internal/difftest        75
 internal/distributed     67

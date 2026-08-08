@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -900,6 +901,78 @@ func TestRenewAfterTheLeaseObjectIsDeletedReportsLost(t *testing.T) {
 	}
 	if l.Held() {
 		t.Error("the holder still believes it holds a lease whose object is gone")
+	}
+}
+
+// TestRenewKeepsTheClaimWhenTheStoreIsMerelyUnreachable is the fail-*open* direction of Renew, and it
+// is the only branch of the three that must not drop the claim.
+//
+// A precondition failure is evidence the lease moved; a 404 is evidence the record is gone. A 500 is
+// evidence of nothing about the lease — it says S3 could not be reached, and the holder's claim is
+// exactly as valid as it was a moment earlier. Dropping it on that would make every transient blip
+// hand the resource to the next contender, and worse, would do so while the original holder may still
+// be mid-action: two nodes acting on one resource is the failure this package exists to prevent, and
+// arriving at it through a retryable error would be a bitter way to get there.
+//
+// It is worth stating why this needed a fault injector rather than a backend double. A double returning
+// a canned error would exercise the errors.Is arms and prove nothing about which errors S3 actually
+// produces — the classification is only meaningful against the real translation path, where a 500
+// becomes whatever internal/storage/s3 makes of it. This goes through the SDK, the retry policy, the
+// circuit breaker, and the error translator, so the arm is tested against the shape of error that will
+// really arrive.
+func TestRenewKeepsTheClaimWhenTheStoreIsMerelyUnreachable(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ctx := context.Background()
+
+	l := leaseFor(t, ts, "holder")
+	if err := l.Acquire(ctx); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Times is above the SDK's attempt budget so the renewal genuinely fails rather than succeeding on
+	// a retry: the point is what Renew does with a failure it cannot attribute to a lost lease.
+	ts.InjectFault(testaws.Fault{
+		Method:    "PUT",
+		KeySuffix: l.cfg.Key,
+		Status:    http.StatusInternalServerError,
+		Code:      "InternalError",
+		Times:     10,
+	})
+
+	err := l.Renew(ctx)
+	if err == nil {
+		t.Fatal("Renew against an unreachable store succeeded, so the fault did not reach the write")
+	}
+	if ts.FaultsFired() == 0 {
+		t.Fatal("no fault fired, so this test proved nothing about the error path")
+	}
+
+	// The error must not be ErrNotHeld. That sentinel is what callers key on to decide the lease is
+	// gone, and reporting it here is how a transient failure would turn into a released resource.
+	if errors.Is(err, ErrNotHeld) {
+		t.Errorf("Renew after a transient store failure = %v, want an error that is not ErrNotHeld", err)
+	}
+	if !l.Held() {
+		t.Fatal("a transient store failure dropped the claim; the holder still holds this lease")
+	}
+
+	// And the claim is not merely believed — it is still assertable. If the local ETag had been cleared
+	// or replaced, the next renewal's precondition would fail even with the store healthy again, which
+	// is the way this could be wrong while Held() still reported true.
+	ts.ClearFaults()
+
+	if err := l.Renew(ctx); err != nil {
+		t.Fatalf("Renew after the store recovered = %v, want the claim to still be assertable", err)
+	}
+	if err := l.Do(ctx, func(_ context.Context, g Guard) error {
+		return g.Put("after-recovery", []byte("still held"), nil)
+	}); err != nil {
+		t.Errorf("Do after the store recovered = %v, want the lease to still be usable", err)
+	}
+	if !ts.ObjectExists("after-recovery") {
+		t.Error("a guarded write after recovery did not reach the store")
 	}
 }
 

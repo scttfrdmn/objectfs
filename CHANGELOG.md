@@ -92,6 +92,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version is the more faithful one. Both halves are the same lesson — a package about who wins a race
   has to be tested by something that does not itself race.
 
+  **The one arm of `Renew` that must not drop the claim is now covered too.** A precondition failure is
+  evidence the lease moved and a 404 is evidence the record is gone, but a 500 is evidence of nothing
+  about the lease — so it leaves the claim alone, and a test now proves that rather than the code merely
+  asserting it. This is the fail-*open* direction, and getting it wrong would hand a resource to the
+  next contender on every transient blip, possibly while the original holder was still mid-action. It
+  goes through fault injection rather than a backend double on purpose: a double returning a canned
+  error exercises the `errors.Is` arms without proving anything about which errors S3 actually produces,
+  and the question is how a real 500 classifies after the SDK, the circuit breaker, and the error
+  translator have each had it. The test also asserts the claim is still *assertable* after the store
+  recovers, not just that `Held` reports true — a cleared or replaced local ETag would fail the next
+  precondition while still looking held.
+
 - **`Backend.PutObjectIf` — a write that happens only if an assertion about the key's current state
   holds, reporting the new ETag** ([#282]). This is the primitive the coordination work is being rebuilt
   on: `Precondition{Absent: true}` is a lease acquisition, `Precondition{ETag: current}` is a
