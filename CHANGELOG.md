@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-08
+
+Coordination stops pretending. ObjectFS's distributed layer had a consistency taxonomy, a Raft log,
+and a `CacheReplicator`; what it did was send the same PUT to N nodes writing the same key and call
+majority success linearizable. That is replaced by compare-and-swap on the object store itself —
+`Backend.PutObjectIf` asserts a precondition, `internal/coord`'s lease re-asserts the CAS on every
+guarded action, and an endpoint that cannot honour a precondition is refused rather than downgraded.
+The code that simulated the guarantee is deleted rather than left as a fallback, because a fallback
+here reports success to every contender for a lease, which is the outcome the mechanism exists to
+prevent.
+
+This tag carries two closed milestones: **Distributed Foundations & Install Simplicity** (23 issues)
+and **Test Harness, Coverage & Build Hygiene** (24 issues). Both were at zero open before it was
+cut.
+
+The second is what makes the first credible. Four SDKs shipped in this repository and **not one of
+them compiled**: the JavaScript SDK had 48 `tsc` errors, the Java SDK four `mvn compile` errors, and
+the C SDK a maximum-length S3 key that came back one byte short — each surviving because no CI job
+ran the compiler. Four build tags carried code nothing built. Ten tests in `tests/fuse_test.go`
+asserted against the mock they constructed rather than against the filesystem they discarded. A
+release that adds a coordination primitive on top of that has no basis for the claim, so the gates
+came first: every build tag compiles in CI, every SDK builds and tests, the lint backlog is 570 →
+299, and the four suites that could not fail are gone rather than repaired.
+
+Two findings are worth reading before deploying. Ceph RGW ≤ 19.2.0 implements conditional writes
+*partially* — it answers `412` for a key that does not exist, rejects the quoted ETag it just
+returned, and ignores preconditions on `CompleteMultipartUpload`, so a conditional write large
+enough to be multipart is silently unconditional. The mount-time capability probe now detects this
+and refuses; `docs/design/conditional-write-compatibility.md` records the full matrix, measured
+against real AWS, MinIO and RGW endpoints rather than read from documentation. Separately, gossip
+had no message authentication, and a cluster will not start without a shared secret.
+
 ### Added
 
 - **A conditional-write compatibility matrix, measured rather than read** ([#285]).
@@ -567,420 +599,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn out to be three names for two behaviours: `ConsistencySession` and `ConsistencyEventual` are
   now nearly the same function, both executing on `targetNodes[0]` and then replicating
   asynchronously, and `ConsistencyStrong` is the mislabeled fan-out.
-
-### Security
-
-- **Gossip messages are authenticated, and a cluster will not start without a shared secret**
-  ([#206]). The gossip protocol runs over UDP and verified nothing about who sent a datagram, so any
-  host that could reach the port could add itself to the cluster, announce that a node was dead, or
-  announce that it held the current copy of a cached object — which is a path to a reading process
-  being served bytes chosen by whoever sent the last announcement. Every message now carries an
-  HMAC-SHA256 over its exact bytes, checked before the payload is parsed, so an unauthenticated
-  datagram never reaches the decoding of any message type, let alone a handler.
-
-  The secret comes from `OBJECTFS_CLUSTER_SECRET` or from a file named by `SecretFile`, and never
-  from a YAML field: packaging installs the shipped configuration world-readable, so a secret there
-  would be published to every user on the node. A secret file readable by anyone but its owner is
-  refused, as is one shorter than 32 bytes, and both errors say how to generate a good one. If no
-  secret is configured at all, `NewClusterManager` returns an error naming both sources rather than
-  starting unauthenticated — running without authentication is the failure nobody notices, so it is
-  refused at construction. That fail-closed behavior broke five existing tests when it landed, which
-  is the evidence that it cannot be bypassed.
-
-  A MAC authenticates the sender but not the moment, so messages also carry a timestamp and ID
-  checked against a 30-second window with a nonce cache: a captured "node N owns key K" cannot be
-  replayed later to undo the state that replaced it. Freshness is checked *after* the MAC, because a
-  nonce cache writable by an unauthenticated sender could be flooded with random IDs to evict the
-  real entries and re-open the window. Rejections are counted separately for a bad MAC, a replay,
-  and an unknown envelope version, and each logs a different operator hint — a cluster of one with a
-  rising unauthenticated count is a wrong secret, while the same cluster with a rising wrong-version
-  count is a half-finished upgrade. What this does not do is stated in the package documentation:
-  payloads are not encrypted, and because every member holds the same key, a compromised node can
-  impersonate any other.
-
-- **The documentation platform's three `vite` advisories are closed, by an `overrides` block rather
-  than by the version bump they asked for.** Alerts 1–3 all name `vite` in
-  `docs-platform/package.json`, and every one of them has its lowest patched release on the 6.x line
-  (`<= 6.4.2` → 6.4.3, `<= 6.4.1` → 6.4.2). There is no patched 5.x, so `"vite": "^5.0.10"` was
-  permanently vulnerable no matter how far it moved inside the major.
-
-  Bumping the declared range to `^6.4.3` on its own does not close them, which is worth recording
-  because it looks like it should. `vitepress@1.6.4` — the latest *stable* release — depends on
-  `vite: ^5.4.14` as a regular dependency rather than a peer, so npm is free to satisfy it
-  separately: the install produces `vite@6.4.3` at the top level and
-  `node_modules/vitepress/node_modules/vite@5.4.21` underneath it, and the nested copy is the one
-  that builds the docs. Verified by installing exactly that and running `npm audit`, which still
-  reported `high vite <=6.4.2`. The manifest would have looked fixed while the vulnerable code was
-  still on disk and still executing.
-
-  An `overrides` block is what forces the transitive copy up too. With `vite: ^6.4.3` there,
-  `npm audit` reports zero vite findings and no nested `vite` directory exists. This keeps
-  `vitepress` on its current stable version; the alternative was `vitepress@2.0.0-alpha.19` with
-  `vite@^7`, which also clears the alerts but makes a published pre-release a dependency of the docs
-  build, and an override is the smaller commitment for the same result.
-
-  `uuid: ^11.1.1` is overridden for the same structural reason — a missing buffer-bounds check in
-  `uuid` v3/v5/v6 reachable through `dockerode` → `docker-modem`, which `src/api-server.js` uses to
-  run playground containers. `dockerode@5.0.1` drops the dependency entirely, but that is a major
-  bump of a package with live call sites; the override fixes the vulnerable code without touching
-  them. `dockerode` and `docker-modem` were both confirmed to load and `uuid.v4()` to work under the
-  forced version. `npm audit` in `docs-platform` now reports zero vulnerabilities of any severity,
-  down from three high/moderate vite findings plus two moderate `uuid`/`dockerode` findings that no
-  alert had been opened for.
-
-  A caveat this does not fix, and which is the reason none of it can be verified by CI: **the docs
-  platform does not build, on `main` or with these overrides**, and nothing in CI runs
-  `vitepress build` to notice. Filed as [#317]. The override does move the failure later — vite 6
-  loads the ESM-only `vitepress` that vite 5 refused with *"ESM file cannot be loaded by
-  `require`"*, so the build now reaches page compilation instead of dying in config resolution —
-  but "later" is not "passing", and the version claim here rests on `npm audit` and on module
-  loading, not on a successful build.
-
-[#206]: https://github.com/scttfrdmn/objectfs/issues/206
-[#317]: https://github.com/scttfrdmn/objectfs/issues/317
-
-### Removed
-
-- **The consistency taxonomy, the N-identical-PUT fan-out, the `CacheReplicator`, and the proposal
-  machinery** ([#284]). Four deletions, and what connects them is that each named a distributed
-  guarantee the code did not provide — the fan-out did not make the write linearizable, the replicator
-  did not replicate, and the proposals did not transfer leadership.
-
-  **`ConsistencyLevel` and its three constants.** `ConsistencyEventual`, `ConsistencySession` and
-  `ConsistencyStrong` all issued the same unconditional `PutObject` and differed only in how many nodes
-  issued it and whether the caller waited, so what an operator picked changed the request count and not
-  the guarantee. `ConsistencyStrong` in particular fanned the identical bytes at the identical key to
-  every target node and called majority success "linearizable"; every node in a cluster writes the same
-  key in the same bucket, S3 holds the single copy, so N-1 of those PUTs were billed requests that
-  changed nothing and a majority reporting success said only that a majority could reach S3. What
-  replaced it is per-operation rather than per-mount and is evaluated by the store rather than voted
-  on: `DistributedOperation.Precondition`, on the one write it guards.
-
-  **`CacheReplicator`, `ReplicationTask`, `ReplicationStats` and the `"replication"` key of
-  `Coordinator.GetStats`.** Its worker sent N-1 peers a PUT of an object's own bytes back to the same
-  key in the same bucket. Worse, when gossip was not running — which was every unit test — it sent
-  nothing at all and added the byte count to `BytesReplicated` anyway, so the throughput it reported
-  was of work that had not happened. The one test covering it asserted `c.replicator != nil`, which is
-  what let it survive: a test that proves a field was assigned proves nothing about the subsystem, and
-  that assignment was the only part of it that worked. Warming a peer's *local* cache is different and
-  real, and is filed as [#141].
-
-  **`ProposeChange`, `broadcastProposal`, `voteOnProposal`, `executeProposal`,
-  `cleanupExpiredProposals` and `ClusterManager.ProposeLeadershipChange`.** `broadcastProposal` slept
-  100ms and then voted for its own proposal, so a majority of one was always found and
-  `executeProposal` called `SetLeader`. A node cannot be made leader by being named: the election path
-  reaches the same setter having actually contested it with terms, votes and a randomized timeout, and
-  a second path reaching it after a self-vote does not transfer leadership, it overwrites one node's
-  opinion of who holds it. [#133] was closed as not-the-direction with this stub still in the tree;
-  [#284]'s acceptance criteria said to delete rather than fix it.
-
-  **Three of the five `EntryType` constants.** `EntryTypeConfigChange`, `EntryTypeOperation` and
-  `EntryTypeSnapshot` had no producer anywhere in the repository — there is no configuration-change
-  path, no operation is ever logged, and [#151], which would have added snapshotting, was closed when
-  the CAS direction was adopted. `applyLogEntry` was a five-arm switch with every arm empty; with those
-  three gone the remaining branches were indistinguishable, so it collapsed to a log line. It stays a
-  method because `lastApplied` must advance for `commitIndex` to mean anything. The surviving
-  constants' *strings* are unchanged, so an entry of a removed type arriving from an older peer still
-  decodes and still applies as the no-op it always was.
-
-- **`internal/cache/redis.Invalidator`, its pub/sub protocol, and `Cache.DeleteContext` and
-  `Cache.Client` with it** ([#377]). `Publish` broadcast `"<nodeID>:<key>"` on an
-  `objectfs:invalidation` channel and `Subscribe` ran a goroutine that deleted received keys while
-  skipping the node's own broadcasts — exported, documented, covered by three tests, and started by
-  nothing outside them. `NewFromConfig` builds the `Cache` on `cluster.redis.enabled`, so the shipped
-  behaviour was: nodes share a Redis cache, no node publishes, no node subscribes.
-
-  **Wiring it up was the other option and two findings refuted it, either one sufficient.**
-
-  It did not do what its name says. The subscriber's delete was `Cache.DeleteContext`, which is
-  `DEL` against **Redis** — so a received invalidation deleted the shared copy every node reads
-  from, not a local copy. That is a cluster-wide cache flush caused by one node's write, strictly
-  worse than the `DEL` that node had already performed itself, and the fix for it is not to start
-  the subscriber. `TestInvalidator_Subscribe_RemoteInvalidation` looked like proof it worked because
-  it pointed both nodes at one miniredis; what it established was that node2 could empty node1's
-  cache.
-
-  And no configuration produces the state it was for. The issue left this open — "`multilevel.go`
-  exists, so this is not hypothetical, but I have not traced whether any configuration puts a local
-  tier in front of the Redis tier" — and the answer is no: `NewFromConfig` is strictly either/or, and
-  `MultiLevelCache.initializeLevels` builds only L1 (memory, optionally predictive) and L2 (on-disk).
-  There is no Redis tier for a local tier to sit ahead of.
-
-  **Cross-node invalidation already happens, and not by pub/sub.** `FileSystem.invalidate` calls
-  `cache.Delete` on every mutation; against this cache that is one `DEL` on the one shared copy, so
-  the next `Get` on every other node misses. One copy of the bytes is the coherence mechanism —
-  which is now what the package doc says, per the issue's instruction to explain why a shared
-  keyspace does not need this.
-
-  Should a local tier ever go in front of Redis, the invalidation needed then is not this one: it
-  would have to reach the local tiers, which a `DEL` cannot, and carry the ETag it was computed from
-  so it cannot be applied out of order relative to the write that caused it — R4 in
-  `docs/design/conditional-writes-vs-raft.md`. Fifty lines that delete from the wrong cache are not
-  a head start on that.
-
-  `DeleteContext` was added by [#179] for the subscriber's context and loses its only caller here, so
-  it goes too rather than remaining an exported second way to do the same thing with no caller —
-  which is the shape of defect [#376] closed on the same day. `Cache.Client` existed only to hand
-  `NewInvalidator` a client, and go-redis is now imported by nothing outside this package's own file.
-  Giving `types.Cache` a context is still worth doing and is still a change across four
-  implementations and every call site in `internal/fuse`; it is not a change to make by way of one
-  method a lint finding produced.
-
-  Coverage is unchanged at 88.0%, against a floor of 88 — the deleted code and the tests that covered
-  it left together. `Cache.Delete` is still covered, confirmed by mutation: neutering it fails
-  `TestDelete` and the shared conformance suite's `Delete removes the key`.
-
-- **`tests/fuse_test.go`, ten tests that asserted against the mock they built rather than against
-  `internal/fuse`** ([#378]). The file survives as `tests/mockbackend_test.go` holding only the
-  `MockBackend` fixture, which six call sites in `integration_test.go`, `unit_test.go`, and
-  `predictive_cache_test.go` need. Everything below the fixture is gone.
-
-  Each of the three top-level functions constructed a `fuse.FileSystem` and then wrote
-  `_ = filesystem // Use filesystem to avoid unused variable`. Of ten subtests exactly one touched it,
-  and only to read `GetStats()` on either side of a loop that called `backend.GetObject` directly — so
-  `assert.GreaterOrEqual(t, statsAfter.Reads, statsBefore.Reads)` compared zero against zero. That
-  assertion holds for every possible implementation of `internal/fuse`, including one whose `Read` is
-  `panic("unimplemented")`. The rest asserted that an in-memory map returns what was put into it, and
-  `BenchmarkFUSEOperations` measured the throughput of that map: 1 MiB of `[]byte` copying against a
-  floor of 10 MB/s, reported as FUSE performance.
-
-  Nothing was lost by deleting them, which was checked per subtest rather than assumed. Write
-  coalescing is asserted harder by `internal/vfs/writer_test.go`, whose forty tests cover offset
-  writes, sparse writes, and a write that races its own flush; the cache subtest duplicates part of
-  `internal/cache/multilevel_test.go`'s twenty-three; metrics collection has four test files of its
-  own; and the read-ahead claim is what `internal/fuse/read_path_test.go` actually makes, fourteen
-  tests driving the real `FileHandle.Read` and the real metadata cache. Removing the file also drops
-  `internal/fuse` from `tests`' import graph entirely — it was the only importer — and the package's
-  coverage is unchanged at 68.6% against a floor of 67%, which is the measurement confirming those
-  subtests were reaching none of it.
-
-  Verified by mutation in both directions, since the point of the change is that these tests could not
-  fail. Zeroing `Reads` in `GetStats` fails `TestGetStatsReportsEveryCounter` by name; forcing
-  `FileHandle.Read`'s offset to 0 fails seven read-path tests by name, including
-  `TestReadClampBoundaries` and `TestReadAfterWriteReturnsNewBytes`. Under both mutations `go test
-  -race ./tests/` passed, exactly as it did before the deletion — the demonstration that the file's
-  existence, not its content, was the coverage.
-
-- **`pkg/profiling` and `pkg/memmon`, two memory-monitoring packages nothing imported** ([#245]).
-  2,738 lines across five files, plus `docs/memory-monitoring.md`, its `mkdocs.yml` nav entry, and
-  both `.coverage-floors` entries.
-
-  `pkg/profiling` is the security half. `startPprofServer` built a mux carrying the five standard
-  `net/http/pprof` handlers plus four of its own — `/memory/stats`, `/memory/samples`, `/memory/gc`
-  and `/memory/free` — and served it from `Addr: fmt.Sprintf(":%d", m.config.Port)`. A bare `:port`
-  binds every interface, the last two handlers mutate process state, and there is no authentication
-  anywhere in the package. Nothing in a shipped binary could reach it, because nothing imported it;
-  what made it worth deleting rather than leaving is that it was the thing `global.enable_pprof` and
-  `global.profile_port` would have wired if either setting had ever been honoured. Those two keys were
-  removed in v0.11.0 with the reason recorded as "tracked as #245"; this closes the other end, so
-  restoring the setting now requires building the server it names, with an authenticated bind that
-  is not a wildcard.
-
-  `pkg/memmon` is a near-duplicate of the same idea with the listener left off — `MemoryMonitor`,
-  `Profiler`, alerts, leak detection, per-object tracking. It is not a vulnerability; it is 1,464
-  lines of dead code whose doc page described it as a shipped feature with a Quick Start. Two
-  packages implementing one absent feature is how a reader ends up believing the feature exists.
-
-  Neither had a Go importer outside its own package, verified before and after. `go build ./...` and
-  `go vet ./...` are unchanged by the deletion, which is the whole argument: a package the compiler
-  does not need is a package the documentation should not promise.
-
-  The `.coverage-floors` note about `pkg/memmon`'s 51.0%-or-50.6% flake outlived the package, so its
-  finding was rewritten into the file's header as the general lesson rather than deleted with the
-  entry. The flake was the smaller half — the test it exposed accepted either outcome with
-  `t.Log("No alerts generated (may be normal...)")`, so deleting the branch under test left it green.
-  That is worth keeping regardless of which package it happened in.
-
-[#245]: https://github.com/scttfrdmn/objectfs/issues/245
-
-- **`docs-platform`'s application surface: an API server nothing ran, the two components that called
-  it, a Dockerfile that could not build, and a seven-service compose file** ([#336]). The directory is
-  a VitePress documentation site and is now only that.
-
-  #336 was filed as four `package.json` keys naming files that do not exist — `main` and `start` and
-  `dev` pointed at `src/server.js`, which has no history in this repository, and `lint`/`format`/`build`
-  named a `client/` directory that has none either. So `npm start`, the obvious thing to type here, had
-  never worked. The question the issue left open was whether the API server was part of the supported
-  surface. It is not.
-
-  What `src/api-server.js` actually was: 549 lines of Express serving a health endpoint, a Docker-backed
-  code-execution sandbox, a Swagger UI, a socket.io channel, and a proxy to ObjectFS. Nothing built it,
-  tested it, deployed it, or documented how to start it correctly.
-
-  **The two Vue components are the part worth stating plainly, because they were worse than broken —
-  they rendered.** `CodeRunner` drew a "Run" button on 26 code blocks across three pages and POSTed to
-  `/api/code-runner/execute`; `ApiPlayground` drew a "Send Request" button on three pages and fetched
-  `/api-playground/...`. Both endpoints existed only in the unrun server, so every one of those buttons
-  was inert on every page it ever appeared on, with no error to say why. The three phantom components
-  removed in #214 failed at build time and were therefore *found*; these two compiled, shipped, and
-  failed at the reader. A gate that runs `vitepress build` cannot see the difference, which is recorded
-  in the `docs-site` job rather than fixed by adding another job.
-
-  Six of the seven endpoints the playground offered do not exist in ObjectFS at all — `/api/v1/metrics`,
-  `/api/v1/mount`, `/api/v1/mount/{mount_point}`, `/api/v1/mounts`, `/api/v1/storage/objects`, and a
-  second health route. A running mount serves `/health` and `/metrics`, at the addresses
-  `monitoring.health_checks.addr` and `monitoring.metrics.addr` configure. The pages say so now.
-
-  The `Dockerfile` and `docker-compose.yml` go for the same reason, and each was independently
-  unusable. The Dockerfile `COPY`ed `api/`, `tutorials/`, `sdks/` and `public/`, none of which exist in
-  this directory, so it failed on the first one. The compose file bind-mounted `./nginx.conf`, `./ssl`,
-  `./prometheus.yml` and `./grafana/` — four more absent paths — across seven services, and pulled
-  `objectfs/objectfs:latest`, an image this project does not publish; releases go to
-  `ghcr.io/scttfrdmn/objectfs`. Deployment manifests that work are #146's job.
-
-  **Thirteen runtime dependencies went with it**, every one of them there for the server: `express`,
-  `cors`, `helmet`, `compression`, `morgan`, `swagger-ui-express`, `swagger-jsdoc`, `socket.io`,
-  `dockerode`, `axios`, `dotenv`, `prismjs`, `yaml`. Two of those (`prismjs`, `axios`) had no reference
-  anywhere in the tree even before this change. `nodemon`, `jest`, `eslint`, `prettier`, `typescript`,
-  `@types/express` and `@types/node` went too — the test, lint and format scripts they backed all named
-  absent directories, and no CI job ran any of them. `npm ci` installs **130 packages where it
-  installed 689** — 739 lockfile entries down to 180 — `npm audit` reports zero vulnerabilities, and the
-  `uuid` override is gone because the advisory it forced was reachable only through `dockerode` →
-  `docker-modem`.
-
-  Two open Dependabot pull requests were closed rather than merged as part of this: #348 bumping
-  `eslint` and #349 bumping `express` and `@types/express`, both in this directory. A bump against a
-  dependency that no longer exists has nothing to apply to. `.github/dependabot.yml`'s entry for this
-  directory records the new shape, because a comment describing runtime dependencies would otherwise
-  outlive them; the entry itself stays, since `vite` and `vitepress` are exactly what needs watching.
-
-  Verified end to end: `npx vitepress build .` succeeds, `internal/config`'s docs-link, symbol and
-  lockfile gates pass, and the regenerated lockfile agrees with the trimmed manifest — which is what
-  `TestNPMLockfilesAgreeWithTheirManifests` checks, and what `npm ci` would otherwise refuse at install
-  time in whichever job happened to run first.
-
-[#336]: https://github.com/scttfrdmn/objectfs/issues/336
-
-- **The CargoShip transporter upload path, and the `storage.s3.use_cargoship` key that selected it**
-  ([#362]). `PutObject` has one implementation now.
-
-  The branch was removed rather than given a fourth bypass. A `cargoships3.Archive` cannot express what
-  a `PutObjectInput` expresses, and three bypasses in front of it already said so in long comments: it
-  has no field for a `Content-Encoding` (uploading a compressed object through it stored the encoding as
-  *user metadata*, so `GetObject` saw an empty encoding, skipped decompression, and returned a raw zstd
-  frame while `HeadObject` still reported the uncompressed size), no representation for SSE-S3 or bucket
-  keys, and no per-object storage class — `optimizeStorageClass` ignores `Archive.StorageClass` for every
-  archive ObjectFS builds and substitutes the transporter's construction-time default.
-
-  **The fourth was not bypassed, and is the one this issue found.** `Content-Type` was written into
-  `Archive.Metadata` under a `"content-type"` key. That is S3 user metadata, not the header. Measured on
-  `file.txt` through the endpoint: the transporter path stored `application/octet-stream` and the direct
-  path stored `text/plain`, with `detectContentType` having computed the right value one line earlier in
-  both cases. Since the transporter was reachable only *below* `multipart.threshold`, that was every
-  object under 32 MiB on the shipped defaults — which is every object a FUSE mount writes.
-
-  **Nothing was on the other side of the ledger.** The transporter was unreachable at or above the
-  threshold, because `PutObject` returns into `putObjectMultipart` first and that function never
-  referenced a transporter (grep count: zero). So its 64 MiB *multipart* `BufferProvider` was installed
-  on a path that only ever performed single-part uploads — an upload shape a mount cannot produce. That
-  buffer lives in a `sync.Pool`, which is cleared at every GC cycle, so it was not amortized across
-  uploads but re-allocated on the first PUT after each collection: 20 PUTs with no GC between them
-  allocated 3.4 MiB total, and 20 PUTs with a forced GC after each allocated **837.2 MiB**. It also
-  inverted `GOMEMLIMIT` — tightening the limit from 768 MiB to 384 MiB took 300 difftest iterations from
-  751 MiB of total allocation over 4 GCs to **3570 MiB over 28**, because a tighter limit means more pool
-  clears. With the transporter off, both limits gave 285 MiB.
-
-  Throughput gave nothing back either. 30 PUTs per size against the in-process endpoint: 4 KiB 327µs on
-  vs 243µs off (**35% slower**), 1 MiB 2.851ms vs 2.624ms (8% slower), 8 MiB 20.531ms vs 20.786ms (a
-  wash). A local endpoint is not evidence against BBR over a real network — but the sizes where BBR could
-  matter never reached the branch.
-
-  It also stamped four metadata keys on every small object that no caller asked for, two of them
-  structurally empty: `cargoship-original-size` was always `"0"` and `cargoship-compression-type` always
-  `""` (ObjectFS never set the `Archive` fields they come from), plus `cargoship-created-by` and
-  `cargoship-upload-time` — a timestamp, so two otherwise-identical objects differed. User metadata is
-  billed, returned on every `HEAD`, and part of what makes two objects compare unequal.
-
-  **The config key is removed rather than deprecated**, and the loader decodes strictly, so a file still
-  setting `storage.s3.use_cargoship` now fails at startup naming the key. Same reasoning as the removed
-  `security.encryption` booleans and the `cost_optimization` block: an operator who set it did so
-  believing their uploads took a different path, and an error is the one way that belief gets
-  re-examined. `s3.Config.EnableCargoShipOptimization`, `ClientManager.GetTransporter`,
-  `ClientManager.IsCargoShipEnabled`, and `cargoShipCanEncrypt` are gone with it.
-  `ConvertTierToCargoShipStorageClass` stays — it has its own unit tests and CargoShip's `awsconfig`
-  types are still used for tier mapping.
-
-  Three tests in `internal/storage/s3/upload_path_test.go` now pin the boundary rather than the path:
-  the detected `Content-Type` reaches the stored object on both sides of the multipart threshold, the
-  stored user-metadata key set is exactly what ObjectFS wrote, and caller-supplied metadata survives.
-  All three were written to fail first and verified by mutation — dropping `ContentType` from the input,
-  stamping a foreign key, and dropping the caller's keys each fail the corresponding test.
-  `testaws.TestServer.ObjectContentType` was added to read the header specifically, kept separate from
-  `ObjectMetadata` so a test cannot satisfy itself with the wrong one, since confusing the two is the
-  defect.
-
-  **One test in this change nearly shipped passing for the wrong reason**, which is worth recording. The
-  first draft set `MultipartChunkSize` to 1 MiB — below the AWS uploader's 5 MiB part minimum — so every
-  CargoShip upload failed with `part size must be at least 5242880 bytes`, fell back to the direct path,
-  and the direct path set the header correctly. The test was green against the broken code. It was caught
-  by reading the `CargoShip optimization failed, falling back to standard S3` warning in the output of a
-  run that was supposed to be failing.
-
-- **`tests/posix_test.go`, `tests/integration/`, and `pkg/optimization` — three suites and a package
-  that had never compiled, run, or been imported** ([#197], [#240]).
-
-  `tests/posix_test.go` was 400 lines of POSIX conformance assertions behind the `posix` tag. It did
-  not fail; it was never built. Repairing it was tried first and abandoned on evidence: removing the
-  duplicate `MockBackend` yields `unknown field files`, fixing that yields `undefined: vfs`, adding
-  the import yields `not enough arguments in call to metrics.NewCollector`. Three API generations, one
-  after another. Its own `MockBackend` copy had meanwhile been half-edited by some later sweep — it
-  takes a `meta` argument and carries a rename-preserves-metadata comment — which is the clearest
-  evidence available that someone updated this file without ever compiling it.
-
-  What it asserted is now asserted elsewhere, and better. Its eight suite methods covered mount,
-  file create/read/stat/delete, mkdir/readdir/rmdir, permissions, seek, concurrent reads, and stats.
-  `internal/fuse` has 13 test files over Lookup, Readdir, Mkdir, Create, Unlink, Rmdir, Rename,
-  Chmod, Setattr, Fsync, Statfs, attributes, the read path, cache invalidation and errno mapping —
-  against a real in-process S3 endpoint rather than a map. `internal/difftest` runs write, read,
-  truncate, flush, reopen and stat sequences against ObjectFS *and* the local OS filesystem and
-  asserts they agree. `internal/fuse/kernel_options_live_test.go` covers what genuinely needs a
-  kernel, behind `fuse_mount`, and is compiled in CI. The deleted file's `assert.NoError` on
-  `manager.Mount` also meant it would have failed rather than skipped on any runner without
-  `/dev/fuse`, so it could not have been added to CI as written.
-
-  `tests/integration/` was a LocalStack suite. `CLAUDE.md`, `CONTRIBUTING.md` and `DEVELOPMENT.md`
-  all rule LocalStack out, and nothing in the repository set the `AWS_ENDPOINT_URL` it required — so
-  it never ran even in the era when it compiled. Its companion `mocks.go` existed to assert that
-  `pkg/optimization`'s interfaces are satisfied by mocks written for that assertion, and those two
-  files were `pkg/optimization`'s **only importers in the entire tree**, so the package went with
-  them. A 284-line interface set whose sole consumer was a test of its own self-consistency.
-
-  Two pieces of wiring went too, both broken independently of the deletions. The
-  `integration-ready-check` pre-commit hook ran `go test -tags=integration ./tests/...` whenever
-  `AWS_ENDPOINT_URL` was set, inferring LocalStack from an environment variable that means nothing of
-  the kind. And `make test-integration` ran `go test -tags=integration ./test/integration/...` — a
-  directory that has never existed, so the target failed with `lstat ./test/integration/: no such
-  file or directory` for as long as git records it. The `integration` tag itself survives: it marks
-  real-AWS tests inside `internal/awsrates` and `internal/storage/s3`, which `make test-aws` and the
-  commands in `CONTRIBUTING.md` run.
-
-[#197]: https://github.com/scttfrdmn/objectfs/issues/197
-
-- **`markdown-it`, `markdown-it-anchor` and `markdown-it-container` from `docs-platform`, none of
-  which the site was using** ([#299]). Dependabot proposed the `markdown-it` 15 major, which is what
-  prompted looking at it. The answer is that the dependency should not be there at all, and the
-  reason it looked load-bearing is worth writing down, because it is a trap the next person will hit
-  in the same order:
-
-  `.vitepress/config.js` had a `markdown.config` hook registering `markdown-it-container` for 'tip',
-  'warning' and 'danger'. That reads as a genuine use of a genuine dependency. It is three kinds of
-  redundant. VitePress ships those exact three containers built in. No page in this tree uses `:::`
-  syntax at all — the 142 `custom-block` elements in the rendered output all come from VitePress's
-  own handling. And the `md` object handed to that hook is VitePress's *bundled* markdown-it
-  instance, not the top-level one: `vitepress` 1.6.4 does not list `markdown-it` in its
-  `dependencies` and carries its own copy inside `dist/node/`. So the hook that appeared to justify
-  the top-level `markdown-it` was never extending it.
-
-  Measured rather than reasoned: removing all three from `node_modules` and rebuilding produces a
-  site that builds, with all six pages byte-identical to the baseline once asset content hashes are
-  normalized. Confirmed the other way too — leaving the hook in place with the package gone fails
-  the build with `Cannot find module 'markdown-it-container'`, so the hook and the dependency are a
-  matched pair and neither should be removed alone.
-
-  This is also the answer to #299 on its merits. A major bump of a dependency nothing imports is a
-  lockfile change with no behaviour attached, and holding or taking it was the wrong question.
-
-[#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
 - **The conditional-write capability probe called Ceph RGW capable, and RGW ignores preconditions on
@@ -3039,6 +2657,420 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#252]: https://github.com/scttfrdmn/objectfs/pull/252
 [#253]: https://github.com/scttfrdmn/objectfs/pull/253
 
+### Removed
+
+- **The consistency taxonomy, the N-identical-PUT fan-out, the `CacheReplicator`, and the proposal
+  machinery** ([#284]). Four deletions, and what connects them is that each named a distributed
+  guarantee the code did not provide — the fan-out did not make the write linearizable, the replicator
+  did not replicate, and the proposals did not transfer leadership.
+
+  **`ConsistencyLevel` and its three constants.** `ConsistencyEventual`, `ConsistencySession` and
+  `ConsistencyStrong` all issued the same unconditional `PutObject` and differed only in how many nodes
+  issued it and whether the caller waited, so what an operator picked changed the request count and not
+  the guarantee. `ConsistencyStrong` in particular fanned the identical bytes at the identical key to
+  every target node and called majority success "linearizable"; every node in a cluster writes the same
+  key in the same bucket, S3 holds the single copy, so N-1 of those PUTs were billed requests that
+  changed nothing and a majority reporting success said only that a majority could reach S3. What
+  replaced it is per-operation rather than per-mount and is evaluated by the store rather than voted
+  on: `DistributedOperation.Precondition`, on the one write it guards.
+
+  **`CacheReplicator`, `ReplicationTask`, `ReplicationStats` and the `"replication"` key of
+  `Coordinator.GetStats`.** Its worker sent N-1 peers a PUT of an object's own bytes back to the same
+  key in the same bucket. Worse, when gossip was not running — which was every unit test — it sent
+  nothing at all and added the byte count to `BytesReplicated` anyway, so the throughput it reported
+  was of work that had not happened. The one test covering it asserted `c.replicator != nil`, which is
+  what let it survive: a test that proves a field was assigned proves nothing about the subsystem, and
+  that assignment was the only part of it that worked. Warming a peer's *local* cache is different and
+  real, and is filed as [#141].
+
+  **`ProposeChange`, `broadcastProposal`, `voteOnProposal`, `executeProposal`,
+  `cleanupExpiredProposals` and `ClusterManager.ProposeLeadershipChange`.** `broadcastProposal` slept
+  100ms and then voted for its own proposal, so a majority of one was always found and
+  `executeProposal` called `SetLeader`. A node cannot be made leader by being named: the election path
+  reaches the same setter having actually contested it with terms, votes and a randomized timeout, and
+  a second path reaching it after a self-vote does not transfer leadership, it overwrites one node's
+  opinion of who holds it. [#133] was closed as not-the-direction with this stub still in the tree;
+  [#284]'s acceptance criteria said to delete rather than fix it.
+
+  **Three of the five `EntryType` constants.** `EntryTypeConfigChange`, `EntryTypeOperation` and
+  `EntryTypeSnapshot` had no producer anywhere in the repository — there is no configuration-change
+  path, no operation is ever logged, and [#151], which would have added snapshotting, was closed when
+  the CAS direction was adopted. `applyLogEntry` was a five-arm switch with every arm empty; with those
+  three gone the remaining branches were indistinguishable, so it collapsed to a log line. It stays a
+  method because `lastApplied` must advance for `commitIndex` to mean anything. The surviving
+  constants' *strings* are unchanged, so an entry of a removed type arriving from an older peer still
+  decodes and still applies as the no-op it always was.
+
+- **`internal/cache/redis.Invalidator`, its pub/sub protocol, and `Cache.DeleteContext` and
+  `Cache.Client` with it** ([#377]). `Publish` broadcast `"<nodeID>:<key>"` on an
+  `objectfs:invalidation` channel and `Subscribe` ran a goroutine that deleted received keys while
+  skipping the node's own broadcasts — exported, documented, covered by three tests, and started by
+  nothing outside them. `NewFromConfig` builds the `Cache` on `cluster.redis.enabled`, so the shipped
+  behaviour was: nodes share a Redis cache, no node publishes, no node subscribes.
+
+  **Wiring it up was the other option and two findings refuted it, either one sufficient.**
+
+  It did not do what its name says. The subscriber's delete was `Cache.DeleteContext`, which is
+  `DEL` against **Redis** — so a received invalidation deleted the shared copy every node reads
+  from, not a local copy. That is a cluster-wide cache flush caused by one node's write, strictly
+  worse than the `DEL` that node had already performed itself, and the fix for it is not to start
+  the subscriber. `TestInvalidator_Subscribe_RemoteInvalidation` looked like proof it worked because
+  it pointed both nodes at one miniredis; what it established was that node2 could empty node1's
+  cache.
+
+  And no configuration produces the state it was for. The issue left this open — "`multilevel.go`
+  exists, so this is not hypothetical, but I have not traced whether any configuration puts a local
+  tier in front of the Redis tier" — and the answer is no: `NewFromConfig` is strictly either/or, and
+  `MultiLevelCache.initializeLevels` builds only L1 (memory, optionally predictive) and L2 (on-disk).
+  There is no Redis tier for a local tier to sit ahead of.
+
+  **Cross-node invalidation already happens, and not by pub/sub.** `FileSystem.invalidate` calls
+  `cache.Delete` on every mutation; against this cache that is one `DEL` on the one shared copy, so
+  the next `Get` on every other node misses. One copy of the bytes is the coherence mechanism —
+  which is now what the package doc says, per the issue's instruction to explain why a shared
+  keyspace does not need this.
+
+  Should a local tier ever go in front of Redis, the invalidation needed then is not this one: it
+  would have to reach the local tiers, which a `DEL` cannot, and carry the ETag it was computed from
+  so it cannot be applied out of order relative to the write that caused it — R4 in
+  `docs/design/conditional-writes-vs-raft.md`. Fifty lines that delete from the wrong cache are not
+  a head start on that.
+
+  `DeleteContext` was added by [#179] for the subscriber's context and loses its only caller here, so
+  it goes too rather than remaining an exported second way to do the same thing with no caller —
+  which is the shape of defect [#376] closed on the same day. `Cache.Client` existed only to hand
+  `NewInvalidator` a client, and go-redis is now imported by nothing outside this package's own file.
+  Giving `types.Cache` a context is still worth doing and is still a change across four
+  implementations and every call site in `internal/fuse`; it is not a change to make by way of one
+  method a lint finding produced.
+
+  Coverage is unchanged at 88.0%, against a floor of 88 — the deleted code and the tests that covered
+  it left together. `Cache.Delete` is still covered, confirmed by mutation: neutering it fails
+  `TestDelete` and the shared conformance suite's `Delete removes the key`.
+
+- **`tests/fuse_test.go`, ten tests that asserted against the mock they built rather than against
+  `internal/fuse`** ([#378]). The file survives as `tests/mockbackend_test.go` holding only the
+  `MockBackend` fixture, which six call sites in `integration_test.go`, `unit_test.go`, and
+  `predictive_cache_test.go` need. Everything below the fixture is gone.
+
+  Each of the three top-level functions constructed a `fuse.FileSystem` and then wrote
+  `_ = filesystem // Use filesystem to avoid unused variable`. Of ten subtests exactly one touched it,
+  and only to read `GetStats()` on either side of a loop that called `backend.GetObject` directly — so
+  `assert.GreaterOrEqual(t, statsAfter.Reads, statsBefore.Reads)` compared zero against zero. That
+  assertion holds for every possible implementation of `internal/fuse`, including one whose `Read` is
+  `panic("unimplemented")`. The rest asserted that an in-memory map returns what was put into it, and
+  `BenchmarkFUSEOperations` measured the throughput of that map: 1 MiB of `[]byte` copying against a
+  floor of 10 MB/s, reported as FUSE performance.
+
+  Nothing was lost by deleting them, which was checked per subtest rather than assumed. Write
+  coalescing is asserted harder by `internal/vfs/writer_test.go`, whose forty tests cover offset
+  writes, sparse writes, and a write that races its own flush; the cache subtest duplicates part of
+  `internal/cache/multilevel_test.go`'s twenty-three; metrics collection has four test files of its
+  own; and the read-ahead claim is what `internal/fuse/read_path_test.go` actually makes, fourteen
+  tests driving the real `FileHandle.Read` and the real metadata cache. Removing the file also drops
+  `internal/fuse` from `tests`' import graph entirely — it was the only importer — and the package's
+  coverage is unchanged at 68.6% against a floor of 67%, which is the measurement confirming those
+  subtests were reaching none of it.
+
+  Verified by mutation in both directions, since the point of the change is that these tests could not
+  fail. Zeroing `Reads` in `GetStats` fails `TestGetStatsReportsEveryCounter` by name; forcing
+  `FileHandle.Read`'s offset to 0 fails seven read-path tests by name, including
+  `TestReadClampBoundaries` and `TestReadAfterWriteReturnsNewBytes`. Under both mutations `go test
+  -race ./tests/` passed, exactly as it did before the deletion — the demonstration that the file's
+  existence, not its content, was the coverage.
+
+- **`pkg/profiling` and `pkg/memmon`, two memory-monitoring packages nothing imported** ([#245]).
+  2,738 lines across five files, plus `docs/memory-monitoring.md`, its `mkdocs.yml` nav entry, and
+  both `.coverage-floors` entries.
+
+  `pkg/profiling` is the security half. `startPprofServer` built a mux carrying the five standard
+  `net/http/pprof` handlers plus four of its own — `/memory/stats`, `/memory/samples`, `/memory/gc`
+  and `/memory/free` — and served it from `Addr: fmt.Sprintf(":%d", m.config.Port)`. A bare `:port`
+  binds every interface, the last two handlers mutate process state, and there is no authentication
+  anywhere in the package. Nothing in a shipped binary could reach it, because nothing imported it;
+  what made it worth deleting rather than leaving is that it was the thing `global.enable_pprof` and
+  `global.profile_port` would have wired if either setting had ever been honoured. Those two keys were
+  removed in v0.11.0 with the reason recorded as "tracked as #245"; this closes the other end, so
+  restoring the setting now requires building the server it names, with an authenticated bind that
+  is not a wildcard.
+
+  `pkg/memmon` is a near-duplicate of the same idea with the listener left off — `MemoryMonitor`,
+  `Profiler`, alerts, leak detection, per-object tracking. It is not a vulnerability; it is 1,464
+  lines of dead code whose doc page described it as a shipped feature with a Quick Start. Two
+  packages implementing one absent feature is how a reader ends up believing the feature exists.
+
+  Neither had a Go importer outside its own package, verified before and after. `go build ./...` and
+  `go vet ./...` are unchanged by the deletion, which is the whole argument: a package the compiler
+  does not need is a package the documentation should not promise.
+
+  The `.coverage-floors` note about `pkg/memmon`'s 51.0%-or-50.6% flake outlived the package, so its
+  finding was rewritten into the file's header as the general lesson rather than deleted with the
+  entry. The flake was the smaller half — the test it exposed accepted either outcome with
+  `t.Log("No alerts generated (may be normal...)")`, so deleting the branch under test left it green.
+  That is worth keeping regardless of which package it happened in.
+
+[#245]: https://github.com/scttfrdmn/objectfs/issues/245
+
+- **`docs-platform`'s application surface: an API server nothing ran, the two components that called
+  it, a Dockerfile that could not build, and a seven-service compose file** ([#336]). The directory is
+  a VitePress documentation site and is now only that.
+
+  #336 was filed as four `package.json` keys naming files that do not exist — `main` and `start` and
+  `dev` pointed at `src/server.js`, which has no history in this repository, and `lint`/`format`/`build`
+  named a `client/` directory that has none either. So `npm start`, the obvious thing to type here, had
+  never worked. The question the issue left open was whether the API server was part of the supported
+  surface. It is not.
+
+  What `src/api-server.js` actually was: 549 lines of Express serving a health endpoint, a Docker-backed
+  code-execution sandbox, a Swagger UI, a socket.io channel, and a proxy to ObjectFS. Nothing built it,
+  tested it, deployed it, or documented how to start it correctly.
+
+  **The two Vue components are the part worth stating plainly, because they were worse than broken —
+  they rendered.** `CodeRunner` drew a "Run" button on 26 code blocks across three pages and POSTed to
+  `/api/code-runner/execute`; `ApiPlayground` drew a "Send Request" button on three pages and fetched
+  `/api-playground/...`. Both endpoints existed only in the unrun server, so every one of those buttons
+  was inert on every page it ever appeared on, with no error to say why. The three phantom components
+  removed in #214 failed at build time and were therefore *found*; these two compiled, shipped, and
+  failed at the reader. A gate that runs `vitepress build` cannot see the difference, which is recorded
+  in the `docs-site` job rather than fixed by adding another job.
+
+  Six of the seven endpoints the playground offered do not exist in ObjectFS at all — `/api/v1/metrics`,
+  `/api/v1/mount`, `/api/v1/mount/{mount_point}`, `/api/v1/mounts`, `/api/v1/storage/objects`, and a
+  second health route. A running mount serves `/health` and `/metrics`, at the addresses
+  `monitoring.health_checks.addr` and `monitoring.metrics.addr` configure. The pages say so now.
+
+  The `Dockerfile` and `docker-compose.yml` go for the same reason, and each was independently
+  unusable. The Dockerfile `COPY`ed `api/`, `tutorials/`, `sdks/` and `public/`, none of which exist in
+  this directory, so it failed on the first one. The compose file bind-mounted `./nginx.conf`, `./ssl`,
+  `./prometheus.yml` and `./grafana/` — four more absent paths — across seven services, and pulled
+  `objectfs/objectfs:latest`, an image this project does not publish; releases go to
+  `ghcr.io/scttfrdmn/objectfs`. Deployment manifests that work are #146's job.
+
+  **Thirteen runtime dependencies went with it**, every one of them there for the server: `express`,
+  `cors`, `helmet`, `compression`, `morgan`, `swagger-ui-express`, `swagger-jsdoc`, `socket.io`,
+  `dockerode`, `axios`, `dotenv`, `prismjs`, `yaml`. Two of those (`prismjs`, `axios`) had no reference
+  anywhere in the tree even before this change. `nodemon`, `jest`, `eslint`, `prettier`, `typescript`,
+  `@types/express` and `@types/node` went too — the test, lint and format scripts they backed all named
+  absent directories, and no CI job ran any of them. `npm ci` installs **130 packages where it
+  installed 689** — 739 lockfile entries down to 180 — `npm audit` reports zero vulnerabilities, and the
+  `uuid` override is gone because the advisory it forced was reachable only through `dockerode` →
+  `docker-modem`.
+
+  Two open Dependabot pull requests were closed rather than merged as part of this: #348 bumping
+  `eslint` and #349 bumping `express` and `@types/express`, both in this directory. A bump against a
+  dependency that no longer exists has nothing to apply to. `.github/dependabot.yml`'s entry for this
+  directory records the new shape, because a comment describing runtime dependencies would otherwise
+  outlive them; the entry itself stays, since `vite` and `vitepress` are exactly what needs watching.
+
+  Verified end to end: `npx vitepress build .` succeeds, `internal/config`'s docs-link, symbol and
+  lockfile gates pass, and the regenerated lockfile agrees with the trimmed manifest — which is what
+  `TestNPMLockfilesAgreeWithTheirManifests` checks, and what `npm ci` would otherwise refuse at install
+  time in whichever job happened to run first.
+
+[#336]: https://github.com/scttfrdmn/objectfs/issues/336
+
+- **The CargoShip transporter upload path, and the `storage.s3.use_cargoship` key that selected it**
+  ([#362]). `PutObject` has one implementation now.
+
+  The branch was removed rather than given a fourth bypass. A `cargoships3.Archive` cannot express what
+  a `PutObjectInput` expresses, and three bypasses in front of it already said so in long comments: it
+  has no field for a `Content-Encoding` (uploading a compressed object through it stored the encoding as
+  *user metadata*, so `GetObject` saw an empty encoding, skipped decompression, and returned a raw zstd
+  frame while `HeadObject` still reported the uncompressed size), no representation for SSE-S3 or bucket
+  keys, and no per-object storage class — `optimizeStorageClass` ignores `Archive.StorageClass` for every
+  archive ObjectFS builds and substitutes the transporter's construction-time default.
+
+  **The fourth was not bypassed, and is the one this issue found.** `Content-Type` was written into
+  `Archive.Metadata` under a `"content-type"` key. That is S3 user metadata, not the header. Measured on
+  `file.txt` through the endpoint: the transporter path stored `application/octet-stream` and the direct
+  path stored `text/plain`, with `detectContentType` having computed the right value one line earlier in
+  both cases. Since the transporter was reachable only *below* `multipart.threshold`, that was every
+  object under 32 MiB on the shipped defaults — which is every object a FUSE mount writes.
+
+  **Nothing was on the other side of the ledger.** The transporter was unreachable at or above the
+  threshold, because `PutObject` returns into `putObjectMultipart` first and that function never
+  referenced a transporter (grep count: zero). So its 64 MiB *multipart* `BufferProvider` was installed
+  on a path that only ever performed single-part uploads — an upload shape a mount cannot produce. That
+  buffer lives in a `sync.Pool`, which is cleared at every GC cycle, so it was not amortized across
+  uploads but re-allocated on the first PUT after each collection: 20 PUTs with no GC between them
+  allocated 3.4 MiB total, and 20 PUTs with a forced GC after each allocated **837.2 MiB**. It also
+  inverted `GOMEMLIMIT` — tightening the limit from 768 MiB to 384 MiB took 300 difftest iterations from
+  751 MiB of total allocation over 4 GCs to **3570 MiB over 28**, because a tighter limit means more pool
+  clears. With the transporter off, both limits gave 285 MiB.
+
+  Throughput gave nothing back either. 30 PUTs per size against the in-process endpoint: 4 KiB 327µs on
+  vs 243µs off (**35% slower**), 1 MiB 2.851ms vs 2.624ms (8% slower), 8 MiB 20.531ms vs 20.786ms (a
+  wash). A local endpoint is not evidence against BBR over a real network — but the sizes where BBR could
+  matter never reached the branch.
+
+  It also stamped four metadata keys on every small object that no caller asked for, two of them
+  structurally empty: `cargoship-original-size` was always `"0"` and `cargoship-compression-type` always
+  `""` (ObjectFS never set the `Archive` fields they come from), plus `cargoship-created-by` and
+  `cargoship-upload-time` — a timestamp, so two otherwise-identical objects differed. User metadata is
+  billed, returned on every `HEAD`, and part of what makes two objects compare unequal.
+
+  **The config key is removed rather than deprecated**, and the loader decodes strictly, so a file still
+  setting `storage.s3.use_cargoship` now fails at startup naming the key. Same reasoning as the removed
+  `security.encryption` booleans and the `cost_optimization` block: an operator who set it did so
+  believing their uploads took a different path, and an error is the one way that belief gets
+  re-examined. `s3.Config.EnableCargoShipOptimization`, `ClientManager.GetTransporter`,
+  `ClientManager.IsCargoShipEnabled`, and `cargoShipCanEncrypt` are gone with it.
+  `ConvertTierToCargoShipStorageClass` stays — it has its own unit tests and CargoShip's `awsconfig`
+  types are still used for tier mapping.
+
+  Three tests in `internal/storage/s3/upload_path_test.go` now pin the boundary rather than the path:
+  the detected `Content-Type` reaches the stored object on both sides of the multipart threshold, the
+  stored user-metadata key set is exactly what ObjectFS wrote, and caller-supplied metadata survives.
+  All three were written to fail first and verified by mutation — dropping `ContentType` from the input,
+  stamping a foreign key, and dropping the caller's keys each fail the corresponding test.
+  `testaws.TestServer.ObjectContentType` was added to read the header specifically, kept separate from
+  `ObjectMetadata` so a test cannot satisfy itself with the wrong one, since confusing the two is the
+  defect.
+
+  **One test in this change nearly shipped passing for the wrong reason**, which is worth recording. The
+  first draft set `MultipartChunkSize` to 1 MiB — below the AWS uploader's 5 MiB part minimum — so every
+  CargoShip upload failed with `part size must be at least 5242880 bytes`, fell back to the direct path,
+  and the direct path set the header correctly. The test was green against the broken code. It was caught
+  by reading the `CargoShip optimization failed, falling back to standard S3` warning in the output of a
+  run that was supposed to be failing.
+
+- **`tests/posix_test.go`, `tests/integration/`, and `pkg/optimization` — three suites and a package
+  that had never compiled, run, or been imported** ([#197], [#240]).
+
+  `tests/posix_test.go` was 400 lines of POSIX conformance assertions behind the `posix` tag. It did
+  not fail; it was never built. Repairing it was tried first and abandoned on evidence: removing the
+  duplicate `MockBackend` yields `unknown field files`, fixing that yields `undefined: vfs`, adding
+  the import yields `not enough arguments in call to metrics.NewCollector`. Three API generations, one
+  after another. Its own `MockBackend` copy had meanwhile been half-edited by some later sweep — it
+  takes a `meta` argument and carries a rename-preserves-metadata comment — which is the clearest
+  evidence available that someone updated this file without ever compiling it.
+
+  What it asserted is now asserted elsewhere, and better. Its eight suite methods covered mount,
+  file create/read/stat/delete, mkdir/readdir/rmdir, permissions, seek, concurrent reads, and stats.
+  `internal/fuse` has 13 test files over Lookup, Readdir, Mkdir, Create, Unlink, Rmdir, Rename,
+  Chmod, Setattr, Fsync, Statfs, attributes, the read path, cache invalidation and errno mapping —
+  against a real in-process S3 endpoint rather than a map. `internal/difftest` runs write, read,
+  truncate, flush, reopen and stat sequences against ObjectFS *and* the local OS filesystem and
+  asserts they agree. `internal/fuse/kernel_options_live_test.go` covers what genuinely needs a
+  kernel, behind `fuse_mount`, and is compiled in CI. The deleted file's `assert.NoError` on
+  `manager.Mount` also meant it would have failed rather than skipped on any runner without
+  `/dev/fuse`, so it could not have been added to CI as written.
+
+  `tests/integration/` was a LocalStack suite. `CLAUDE.md`, `CONTRIBUTING.md` and `DEVELOPMENT.md`
+  all rule LocalStack out, and nothing in the repository set the `AWS_ENDPOINT_URL` it required — so
+  it never ran even in the era when it compiled. Its companion `mocks.go` existed to assert that
+  `pkg/optimization`'s interfaces are satisfied by mocks written for that assertion, and those two
+  files were `pkg/optimization`'s **only importers in the entire tree**, so the package went with
+  them. A 284-line interface set whose sole consumer was a test of its own self-consistency.
+
+  Two pieces of wiring went too, both broken independently of the deletions. The
+  `integration-ready-check` pre-commit hook ran `go test -tags=integration ./tests/...` whenever
+  `AWS_ENDPOINT_URL` was set, inferring LocalStack from an environment variable that means nothing of
+  the kind. And `make test-integration` ran `go test -tags=integration ./test/integration/...` — a
+  directory that has never existed, so the target failed with `lstat ./test/integration/: no such
+  file or directory` for as long as git records it. The `integration` tag itself survives: it marks
+  real-AWS tests inside `internal/awsrates` and `internal/storage/s3`, which `make test-aws` and the
+  commands in `CONTRIBUTING.md` run.
+
+[#197]: https://github.com/scttfrdmn/objectfs/issues/197
+
+- **`markdown-it`, `markdown-it-anchor` and `markdown-it-container` from `docs-platform`, none of
+  which the site was using** ([#299]). Dependabot proposed the `markdown-it` 15 major, which is what
+  prompted looking at it. The answer is that the dependency should not be there at all, and the
+  reason it looked load-bearing is worth writing down, because it is a trap the next person will hit
+  in the same order:
+
+  `.vitepress/config.js` had a `markdown.config` hook registering `markdown-it-container` for 'tip',
+  'warning' and 'danger'. That reads as a genuine use of a genuine dependency. It is three kinds of
+  redundant. VitePress ships those exact three containers built in. No page in this tree uses `:::`
+  syntax at all — the 142 `custom-block` elements in the rendered output all come from VitePress's
+  own handling. And the `md` object handed to that hook is VitePress's *bundled* markdown-it
+  instance, not the top-level one: `vitepress` 1.6.4 does not list `markdown-it` in its
+  `dependencies` and carries its own copy inside `dist/node/`. So the hook that appeared to justify
+  the top-level `markdown-it` was never extending it.
+
+  Measured rather than reasoned: removing all three from `node_modules` and rebuilding produces a
+  site that builds, with all six pages byte-identical to the baseline once asset content hashes are
+  normalized. Confirmed the other way too — leaving the hook in place with the package gone fails
+  the build with `Cannot find module 'markdown-it-container'`, so the hook and the dependency are a
+  matched pair and neither should be removed alone.
+
+  This is also the answer to #299 on its merits. A major bump of a dependency nothing imports is a
+  lockfile change with no behaviour attached, and holding or taking it was the wrong question.
+
+[#299]: https://github.com/scttfrdmn/objectfs/pull/299
+
+### Security
+
+- **Gossip messages are authenticated, and a cluster will not start without a shared secret**
+  ([#206]). The gossip protocol runs over UDP and verified nothing about who sent a datagram, so any
+  host that could reach the port could add itself to the cluster, announce that a node was dead, or
+  announce that it held the current copy of a cached object — which is a path to a reading process
+  being served bytes chosen by whoever sent the last announcement. Every message now carries an
+  HMAC-SHA256 over its exact bytes, checked before the payload is parsed, so an unauthenticated
+  datagram never reaches the decoding of any message type, let alone a handler.
+
+  The secret comes from `OBJECTFS_CLUSTER_SECRET` or from a file named by `SecretFile`, and never
+  from a YAML field: packaging installs the shipped configuration world-readable, so a secret there
+  would be published to every user on the node. A secret file readable by anyone but its owner is
+  refused, as is one shorter than 32 bytes, and both errors say how to generate a good one. If no
+  secret is configured at all, `NewClusterManager` returns an error naming both sources rather than
+  starting unauthenticated — running without authentication is the failure nobody notices, so it is
+  refused at construction. That fail-closed behavior broke five existing tests when it landed, which
+  is the evidence that it cannot be bypassed.
+
+  A MAC authenticates the sender but not the moment, so messages also carry a timestamp and ID
+  checked against a 30-second window with a nonce cache: a captured "node N owns key K" cannot be
+  replayed later to undo the state that replaced it. Freshness is checked *after* the MAC, because a
+  nonce cache writable by an unauthenticated sender could be flooded with random IDs to evict the
+  real entries and re-open the window. Rejections are counted separately for a bad MAC, a replay,
+  and an unknown envelope version, and each logs a different operator hint — a cluster of one with a
+  rising unauthenticated count is a wrong secret, while the same cluster with a rising wrong-version
+  count is a half-finished upgrade. What this does not do is stated in the package documentation:
+  payloads are not encrypted, and because every member holds the same key, a compromised node can
+  impersonate any other.
+
+- **The documentation platform's three `vite` advisories are closed, by an `overrides` block rather
+  than by the version bump they asked for.** Alerts 1–3 all name `vite` in
+  `docs-platform/package.json`, and every one of them has its lowest patched release on the 6.x line
+  (`<= 6.4.2` → 6.4.3, `<= 6.4.1` → 6.4.2). There is no patched 5.x, so `"vite": "^5.0.10"` was
+  permanently vulnerable no matter how far it moved inside the major.
+
+  Bumping the declared range to `^6.4.3` on its own does not close them, which is worth recording
+  because it looks like it should. `vitepress@1.6.4` — the latest *stable* release — depends on
+  `vite: ^5.4.14` as a regular dependency rather than a peer, so npm is free to satisfy it
+  separately: the install produces `vite@6.4.3` at the top level and
+  `node_modules/vitepress/node_modules/vite@5.4.21` underneath it, and the nested copy is the one
+  that builds the docs. Verified by installing exactly that and running `npm audit`, which still
+  reported `high vite <=6.4.2`. The manifest would have looked fixed while the vulnerable code was
+  still on disk and still executing.
+
+  An `overrides` block is what forces the transitive copy up too. With `vite: ^6.4.3` there,
+  `npm audit` reports zero vite findings and no nested `vite` directory exists. This keeps
+  `vitepress` on its current stable version; the alternative was `vitepress@2.0.0-alpha.19` with
+  `vite@^7`, which also clears the alerts but makes a published pre-release a dependency of the docs
+  build, and an override is the smaller commitment for the same result.
+
+  `uuid: ^11.1.1` is overridden for the same structural reason — a missing buffer-bounds check in
+  `uuid` v3/v5/v6 reachable through `dockerode` → `docker-modem`, which `src/api-server.js` uses to
+  run playground containers. `dockerode@5.0.1` drops the dependency entirely, but that is a major
+  bump of a package with live call sites; the override fixes the vulnerable code without touching
+  them. `dockerode` and `docker-modem` were both confirmed to load and `uuid.v4()` to work under the
+  forced version. `npm audit` in `docs-platform` now reports zero vulnerabilities of any severity,
+  down from three high/moderate vite findings plus two moderate `uuid`/`dockerode` findings that no
+  alert had been opened for.
+
+  A caveat this does not fix, and which is the reason none of it can be verified by CI: **the docs
+  platform does not build, on `main` or with these overrides**, and nothing in CI runs
+  `vitepress build` to notice. Filed as [#317]. The override does move the failure later — vite 6
+  loads the ESM-only `vitepress` that vite 5 refused with *"ESM file cannot be loaded by
+  `require`"*, so the build now reaches page compilation instead of dying in config resolution —
+  but "later" is not "passing", and the version claim here rests on `npm audit` and on module
+  loading, not on a successful build.
+
+[#206]: https://github.com/scttfrdmn/objectfs/issues/206
+[#317]: https://github.com/scttfrdmn/objectfs/issues/317
+
 ## [0.11.0] - 2026-08-03
 
 POSIX completeness and write-path safety: the operations a user reaches for first — `rm`, `rmdir`,
@@ -4489,7 +4521,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/scttfrdmn/objectfs/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/objectfs/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/scttfrdmn/objectfs/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/scttfrdmn/objectfs/compare/v0.10.1...v0.10.2
