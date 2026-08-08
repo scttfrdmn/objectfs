@@ -31,7 +31,29 @@ type GossipProtocol struct {
 	// port lets any host on the network join the cluster and announce ownership of cached
 	// objects. See auth.go.
 	auth *messageAuthenticator
+
+	// appliedInvalidations is the set of (key, ETag) cache invalidations already applied, guarded by mu
+	// and bounded by maxInvalidationLedger. See [GossipProtocol.markInvalidationApplied]. Lazily
+	// created, because a cluster with no cache injected never touches it.
+	//
+	// A set rather than a map of key to latest ETag, which is what this was first written as and which
+	// was wrong in a way only a test caught: holding just the latest version suppresses a
+	// retransmission of it but *applies* a replay of the version before it, since an older ETag differs
+	// from the stored one and ETags carry no order to compare. Remembering every version applied is
+	// what makes both cases idempotent.
+	appliedInvalidations map[string]struct{}
 }
+
+// maxInvalidationLedger bounds [GossipProtocol.appliedInvalidations].
+//
+// 4096 (key, ETag) entries at roughly a key string plus a 34-byte quoted ETag is a few hundred
+// kilobytes, which is nothing beside the cache the ledger protects, and it is large enough that the
+// duplicates gossip actually produces — retransmissions of the same write, seconds apart — are still
+// remembered. The failure mode when it overflows is a redundant eviction, not a stale read.
+//
+// Note that a key written repeatedly consumes one entry per version, since each is a distinct
+// invalidation; the bound is on invalidations remembered, not on keys.
+const maxInvalidationLedger = 4096
 
 // GossipNode represents a node in the gossip protocol
 type GossipNode struct {
@@ -113,6 +135,21 @@ const (
 type CacheInvalidateMessage struct {
 	Key  string `json:"key"`
 	From string `json:"from"`
+
+	// ETag names the version the sender wrote, which is the version this invalidation is *about*.
+	//
+	// Requirement R4 of docs/design/conditional-writes-vs-raft.md §1: gossip is unordered, so without
+	// a version an invalidation can be applied after a later write's invalidation has already been
+	// applied, and the receiver has no way to tell that it has moved past this one. Empty means the
+	// sender could not name a version — an unconditional put, or a delete — and such a message is
+	// applied unconditionally, since "evict whatever you hold" is always safe.
+	//
+	// It comes from [OperationResult.ETag], which is why the coordinator propagates it.
+	ETag string `json:"etag,omitempty"`
+
+	// Deleted marks an invalidation caused by the key being removed rather than replaced. A receiver
+	// cannot infer this from an empty ETag, because an unconditional put has one too.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 // JoinMessage represents a join request
@@ -503,13 +540,90 @@ func (gp *GossipProtocol) handleIncomingMessage(ctx context.Context, data []byte
 
 	// Cache invalidation
 	case MessageTypeCacheInvalidate:
-		if gp.cluster.cache != nil {
-			var m CacheInvalidateMessage
-			if err := json.Unmarshal(msg.Data, &m); err == nil && m.Key != "" {
-				gp.cluster.cache.Delete(m.Key)
+		gp.handleCacheInvalidate(msg)
+	}
+}
+
+// handleCacheInvalidate evicts a key on behalf of a peer that wrote it, discarding an invalidation
+// naming a version this node has already applied.
+//
+// The duplicate check is the point, and it is a check against *what has been applied*, not against
+// message IDs. Gossip retransmits and fans out, so the same invalidation arrives more than once by
+// design; a re-delete of a key already evicted is harmless in itself, but it is indistinguishable
+// from an invalidation for an *older* version arriving after a newer one — and applying that would
+// throw away bytes this node has since legitimately re-cached. That is requirement R4 of
+// docs/design/conditional-writes-vs-raft.md §1.
+//
+// What this cannot do, and does not pretend to: decide that the cached bytes are *newer* than the
+// invalidation. [types.Cache] stores bytes at offsets and has no version alongside them, so this node
+// cannot compare what it holds against m.ETag — only against the last ETag it was told about. So the
+// rule is "apply each version once", which fixes the retransmission and the out-of-order replay of a
+// version already superseded. Suppressing an invalidation for a version older than what is actually
+// cached needs the cache to carry an ETag per key, which is #129's `KeyAnnouncement` plumbing and
+// #141's warming work; it is not smuggled in here as a guess.
+func (gp *GossipProtocol) handleCacheInvalidate(msg *GossipMessage) {
+	gp.cluster.mu.RLock()
+	cache := gp.cluster.cache
+	gp.cluster.mu.RUnlock()
+
+	if cache == nil {
+		return
+	}
+
+	var m CacheInvalidateMessage
+	if err := json.Unmarshal(msg.Data, &m); err != nil || m.Key == "" {
+		return
+	}
+
+	// An invalidation that names no version is applied every time. A delete has no ETag to name, and an
+	// unconditional put's sender may not have one; "evict whatever you hold" is always safe, and the
+	// alternative — treating "no version" as one version and applying it once — would drop every
+	// invalidation for a key after the first.
+	if m.ETag != "" && !gp.markInvalidationApplied(m.Key, m.ETag) {
+		return
+	}
+
+	cache.Delete(m.Key)
+}
+
+// markInvalidationApplied records that key was invalidated at etag, reporting whether this is the
+// first time. It bounds its own memory: the ledger drops the oldest entries once it exceeds
+// maxInvalidationLedger.
+//
+// Forgetting an entry means the next duplicate for it is applied — a redundant eviction, which costs a
+// re-fetch and not correctness. Growing without bound would be a leak proportional to every version of
+// every key the cluster has ever written, so this is the right direction to fail in.
+func (gp *GossipProtocol) markInvalidationApplied(key, etag string) bool {
+	// NUL rather than a printable separator: an S3 key may contain any byte except NUL, so "a\x00b" and
+	// "a" + "\x00b" cannot be confused, where a colon or a slash could be.
+	entry := key + "\x00" + etag
+
+	gp.mu.Lock()
+	defer gp.mu.Unlock()
+
+	if gp.appliedInvalidations == nil {
+		gp.appliedInvalidations = make(map[string]struct{})
+	}
+	if _, applied := gp.appliedInvalidations[entry]; applied {
+		return false
+	}
+
+	if len(gp.appliedInvalidations) >= maxInvalidationLedger {
+		// Drop an arbitrary tenth. Go's map iteration order is unspecified, which is what makes this a
+		// fair sample rather than a preference for whatever hashes low, and there is no access time to
+		// evict by: the ledger records versions, not reads.
+		target := maxInvalidationLedger - maxInvalidationLedger/10
+		for k := range gp.appliedInvalidations {
+			delete(gp.appliedInvalidations, k)
+			if len(gp.appliedInvalidations) <= target {
+				break
 			}
 		}
 	}
+
+	gp.appliedInvalidations[entry] = struct{}{}
+
+	return true
 }
 
 func (gp *GossipProtocol) handleJoinMessage(msg *GossipMessage) {

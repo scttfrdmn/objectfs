@@ -82,14 +82,27 @@ class PerformanceConfig:
 
 @dataclass
 class ClusterConfig:
-    """Distributed cluster configuration."""
+    """Distributed cluster configuration.
+
+    ``consistency_level`` is gone as of v0.12.0. It took ``"eventual"``, ``"strong"`` or
+    ``"session"``, all three of which issued the same unconditional PUT and differed only in how
+    many nodes issued it, so the setting selected a request count rather than a guarantee. The Go
+    loader rejects unknown keys, so a document written by an older SDK now fails at load naming the
+    key -- which is the intended outcome: what replaced it is a per-write precondition evaluated by
+    S3, not a per-mount level, and no key here can express that.
+
+    The three timeouts below are a separate, older problem and are left as they are: the Go
+    ``cluster`` schema has never had ``election_timeout``, ``heartbeat_interval`` or
+    ``join_timeout`` -- those live on the disjoint ``internal/distributed.ClusterConfig`` (#139) --
+    so ``to_yaml`` emits a cluster block the loader refuses on the first of them. Verified against
+    the loader rather than inferred. Fixing that is not #284's to do; it is filed as #385.
+    """
     enabled: bool = False
     node_id: str = ""
     listen_addr: str = "0.0.0.0:8080"
     advertise_addr: str = "127.0.0.1:8080"
     seed_nodes: List[str] = field(default_factory=list)
     replication_factor: int = 3
-    consistency_level: str = "eventual"
 
     # Timeouts
     election_timeout: str = "5s"
@@ -402,7 +415,6 @@ class Configuration:
         config.performance.max_concurrency = 200
         config.cluster.enabled = True
         config.cluster.replication_factor = 3
-        config.cluster.consistency_level = "strong"
         config.monitoring.enabled = True
         config.security.enabled = True
         # No `tls_enabled = True` here, deliberately. SecurityConfig.validate() requires

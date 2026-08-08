@@ -565,21 +565,11 @@ func TestConsensusEngine_TriggerElection_WhenLeader_IsNoOp(t *testing.T) {
 	}
 }
 
-// TestConsensusEngine_ProposeChange_NotLeader_ReturnsError verifies that only
-// the leader can propose changes.
-func TestConsensusEngine_ProposeChange_NotLeader_ReturnsError(t *testing.T) {
-	t.Parallel()
-	cm, _ := NewClusterManager(testConfig(t, "not-leader-prop"))
-	ce := cm.consensus
-
-	err := ce.ProposeChange(context.Background(), &ConsensusProposal{
-		Type: ProposalTypeOperation,
-		Data: []byte("noop"),
-	})
-	if err == nil {
-		t.Fatal("ProposeChange as follower should return error")
-	}
-}
+// There was a TestConsensusEngine_ProposeChange_NotLeader_ReturnsError here, asserting that a
+// follower's ProposeChange returned an error. #284 deleted ProposeChange and everything downstream of
+// it, so the test went with it rather than being ported: the guard it covered was the only part of
+// that path that did what it said, and what it guarded was a broadcast that slept 100ms and voted for
+// its own proposal.
 
 // TestConsensusEngine_StartStop verifies the lifecycle without panics.
 func TestConsensusEngine_StartStop(t *testing.T) {

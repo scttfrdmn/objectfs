@@ -18,7 +18,7 @@ type Precondition struct {
 	//
 	// This is the primitive a lease acquisition is built from: concurrent writers all asserting
 	// absence resolve to exactly one success, decided by the store rather than by any of them.
-	Absent bool
+	Absent bool `json:"absent,omitempty"`
 
 	// ETag asserts the key currently has this ETag. Sent as If-Match.
 	//
@@ -27,8 +27,14 @@ type Precondition struct {
 	// being updated no longer exists. Implementations must preserve that distinction — S3 answers
 	// 404 rather than 412 for If-Match against a missing key, which is verified behavior and not an
 	// inference from the specification.
-	ETag string
+	ETag string `json:"etag,omitempty"`
 }
+
+// The JSON tags are load-bearing rather than decorative: a Precondition crosses the wire inside
+// internal/distributed's node-operation message, where every neighboring field is snake_case. Without
+// them the payload carried `Absent` and `ETag` beside `key` and `created_at`. Tagging is free right
+// now because neither this type nor that message has shipped in a release, and would be a wire break
+// later.
 
 // IsZero reports whether p asserts nothing, which is not a valid precondition for a conditional
 // write.

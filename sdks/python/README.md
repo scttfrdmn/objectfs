@@ -234,8 +234,7 @@ performance:
 
 cluster:
   enabled: false
-  replication_factor: 3
-  consistency_level: eventual
+  replication_factor: 3     # nodes selected per operation; the first performs the write
 
 monitoring:
   metrics:

@@ -9,26 +9,25 @@ the coordination mechanisms needed for multi-node deployments.
 
 ⚠️ WARNING: experimental, and narrower than this document's structure implies. Not for production.
 
-Read [#Consistency Levels] before relying on anything here. The short version is that the consensus
-engine elects leaders and replicates nothing — applyLogEntry has three empty arms and no caller
-appends an operation entry — and that the coordinator's data path calls the backend directly without
-consulting the log, the commit index, the term, or leadership.
+Read [#Conditional Writes] before relying on anything here. The short version is that the consensus
+engine elects leaders and replicates nothing — applyLogEntry has no state machine to apply anything
+to — and that the coordinator's data path calls the backend directly without consulting the log, the
+commit index, the term, or leadership.
 
 That is not going to be built out. As of 2026-08-03 the direction is per-key S3 compare-and-swap:
 docs/design/conditional-writes-vs-raft.md (#169) was adopted, on the grounds that Raft replicates a
 log so N nodes can agree on state they each hold a copy of, and these nodes hold no such state — the
 bucket does. The Raft issues are closed (#128, #130, #133, #151) and the replacement is filed as #282
-(Backend.PutObjectIf), #283 (a lease over it), #284 (removing the fan-out and this taxonomy) and #285
-(verifying non-AWS backends).
+(Backend.PutObjectIf), #283 (a lease over it), #284 (removing the fan-out and the consistency
+taxonomy) and #285 (verifying non-AWS backends).
 
-So what is below describes code that exists and will shrink, not a design being completed. The
-consistency levels in particular are on their way out via #284; gossip-based membership and leader
-election stay.
+So what is below describes code that exists and has shrunk, not a design being completed.
+Gossip-based membership and leader election stay.
 
 Architecture
 
 	┌──────────────────────────────────────────────────┐
-	│           Coordinator (Operation Manager)         │  - Executes distributed operations                │  - Enforces consistency levels                    │  - Manages operation lifecycle                    │
+	│           Coordinator (Operation Manager)         │  - Executes distributed operations                │  - Evaluates preconditions at the store           │  - Manages operation lifecycle                    │
 	└────────┬──────────────────┬──────────────────────┘
 	         │
 	    ┌────▼─────┐      ┌─────▼──────┐
@@ -42,63 +41,63 @@ Architecture
 # Core Components
 
 1. ClusterManager: Manages cluster membership, node health, and leader election
-2. Coordinator: Executes distributed operations with configurable consistency
+2. Coordinator: Executes one operation on one node, conditionally when asked
 3. GossipProtocol: Handles node-to-node communication and state synchronization
-4. ConsensusEngine: Implements consensus for critical cluster decisions
+4. ConsensusEngine: Elects a leader; see the warning above for what it does not do
 
-# Consistency Levels
+# Conditional Writes
 
-Three levels are accepted, and this section says what each one does rather than what it is named
-after, because the names promise guarantees the code does not provide.
+An operation is executed once, by one node. When it is a put and carries a
+[DistributedOperation.Precondition], the store evaluates that precondition and refuses the write if
+it does not hold — so the exclusion is done by S3, on the one request, and not by counting nodes.
 
-Whichever level is used, a failed operation is reported both ways: [Coordinator.ExecuteOperation]
-returns a non-nil error and an [OperationResult] with Success false, and the error carries the same
-text as OperationResult.Error. Checking either is sufficient. Until v0.11.0 it was not — the
-executors reported failure only in the result and returned a nil error, so a caller checking err
-alone saw a success, which is what [ClusterManager.DistributeOperation] did when incrementing its
-own counters (#269).
-
-The reason they cannot provide them is structural, not a missing feature: every node in a cluster
-writes the same key in the same bucket. S3 is the single copy. So "replicate to the other nodes"
-means issuing the same PUT again from another node, and a majority of nodes reporting success means
-a majority could reach S3 — it says nothing about ordering, isolation, or what a subsequent read
-returns. The levels therefore differ in how many redundant identical requests are issued and whether
-the caller waits for them.
-
-Eventual (default) — one node executes; the others re-issue the same operation in the background.
-
-	op := &distributed.DistributedOperation{
-		Type:        distributed.OpTypePut,
-		Key:         "cache/data.bin",
-		Data:        data,
-		Consistency: distributed.ConsistencyEventual,
-	}
-	result, err := coordinator.ExecuteOperation(ctx, op)
-
-Session — the first target node executes, then the rest re-issue in the background. Identical to
-Eventual except for preferring targetNodes[0], and it does not provide read-your-writes: the
-guarantee that name refers to comes from reading through the write buffer, which internal/vfs does
-per descriptor and this package is not involved in.
-
-	op := &distributed.DistributedOperation{
-		Type:        distributed.OpTypeGet,
-		Key:         "session/user123",
-		Consistency: distributed.ConsistencySession,
+	// Take a key nobody holds. Two callers racing this: exactly one succeeds.
+	created, err := coordinator.ExecuteOperation(ctx, &distributed.DistributedOperation{
+		Type:         distributed.OpTypePut,
+		Key:          "cluster/owner",
+		Data:         []byte(nodeID),
+		Precondition: types.Precondition{Absent: true},
+	})
+	if errors.Is(err, types.ErrPreconditionFailed) {
+		// Somebody else holds it. Re-read and decide; do not retry blindly.
 	}
 
-Strong — every target node executes concurrently and the call succeeds once a majority reports
-success. This is N identical PUTs of the same bytes to one key, so it is a reachability signal and
-not linearizability, which this document claimed until v0.11.0. What it buys over Eventual is that
-the caller learns of a failure synchronously; what it costs is N times the requests. A genuinely
-linearizable single-key write is available from S3 itself, via a conditional write — see
-docs/design/conditional-writes-vs-raft.md (#169).
+	// Replace it only if it still holds what we read. created.ETag is the version to assert next.
+	_, err = coordinator.ExecuteOperation(ctx, &distributed.DistributedOperation{
+		Type:         distributed.OpTypePut,
+		Key:          "cluster/owner",
+		Data:         []byte(successor),
+		Precondition: types.Precondition{ETag: created.ETag},
+	})
 
-	op := &distributed.DistributedOperation{
-		Type:        distributed.OpTypePut,
-		Key:         "config/settings.yaml",
-		Data:        configData,
-		Consistency: distributed.ConsistencyStrong,
-	}
+A refused write reports [ConditionalLost] in [OperationResult.Conditional] and wraps
+[types.ErrPreconditionFailed] in the error, and nothing was written. It is not retried internally and
+must not be: the answer is definitive, and the recovery is to re-read, recompute and CAS again, which
+only the caller can do because only it knows what the new bytes should be. A precondition on anything
+but a put is refused with [types.ErrInvalidPrecondition] rather than dropped.
+
+An endpoint that does not evaluate preconditions reports [ConditionalUnsupported] and writes nothing.
+A caller that needs mutual exclusion must stop there — falling back to an unconditional write turns
+the one guarantee this package offers into a last-writer-wins overwrite. #285 tracks which non-AWS
+backends evaluate them.
+
+Whether the operation was conditional or not, a failure is reported both ways:
+[Coordinator.ExecuteOperation] returns a non-nil error and an [OperationResult] with Success false,
+and the error carries the same text as OperationResult.Error. Checking either is sufficient. Until
+v0.11.0 it was not — the executors reported failure only in the result and returned a nil error, so a
+caller checking err alone saw a success, which is what [ClusterManager.DistributeOperation] did when
+incrementing its own counters (#269).
+
+There was a "Consistency Levels" section here, documenting `ConsistencyEventual`, `ConsistencySession`
+and `ConsistencyStrong` with an example each. #284 deleted the type and this section with it. All three
+issued the same unconditional PutObject and differed only in how many nodes issued it and whether the
+caller waited, so what an operator picked changed the request count and not the guarantee — Strong in
+particular was N identical PUTs of the same bytes to one key, which this document called
+"linearizable" until v0.11.0 and which is a reachability signal. The reason no level could provide
+what it named is structural rather than a missing feature: every node writes the same key in the same
+bucket, and S3 holds the single copy, so "replicate to the other nodes" means issuing the same PUT
+again from somewhere else. What replaced the taxonomy is per-operation instead of per-mount, and is
+evaluated by the store rather than voted on.
 
 # Gossip Authentication
 
@@ -143,7 +142,6 @@ Basic cluster configuration:
 			"192.168.1.12:8080",
 		},
 		ReplicationFactor: 3,
-		ConsistencyLevel:  "eventual",
 
 		// Required. The same file, with the same contents, on every node.
 		SecretFile: "/etc/objectfs/cluster.secret",
@@ -179,15 +177,16 @@ Basic cluster configuration:
 
 Execute operations across the cluster:
 
-	// Write operation
+	// Write operation. No Precondition, so this is an unconditional put: last writer wins,
+	// which is what an uncoordinated write to S3 has always been. Set Precondition when the
+	// write is only correct if something about the key still holds -- see [#Conditional Writes].
 	writeOp := &distributed.DistributedOperation{
-		ID:          "write-123",
-		Type:        distributed.OpTypePut,
-		Key:         "objects/file.dat",
-		Data:        fileData,
-		Consistency: distributed.ConsistencyStrong,
-		Timeout:     30 * time.Second,
-		Retries:     3,
+		ID:      "write-123",
+		Type:    distributed.OpTypePut,
+		Key:     "objects/file.dat",
+		Data:    fileData,
+		Timeout: 30 * time.Second,
+		Retries: 3,
 	}
 	result, err := coordinator.ExecuteOperation(ctx, writeOp)
 	if err != nil {
@@ -196,9 +195,8 @@ Execute operations across the cluster:
 
 	// Read operation
 	readOp := &distributed.DistributedOperation{
-		Type:        distributed.OpTypeGet,
-		Key:         "objects/file.dat",
-		Consistency: distributed.ConsistencyEventual,
+		Type: distributed.OpTypeGet,
+		Key:  "objects/file.dat",
 	}
 	result, err = coordinator.ExecuteOperation(ctx, readOp)
 	if result.Success {
@@ -238,17 +236,15 @@ Latency Based (StrategyLatencyBased):
 
 # Cache Replication
 
-The CacheReplicator handles asynchronous cache synchronization:
+There is none, and this section documented one. #284 deleted the CacheReplicator, so
+[Coordinator.GetStats] no longer has a "replication" key and the type assertion shown here would
+panic; ReplicationStats and its BytesReplicated counter are gone with it.
 
-	// Replication happens automatically for write operations
-	// with replication factor > 1
-
-	// Monitor replication status
-	stats := coordinator.GetStats()
-	replicationStats := stats["replication"].(distributed.ReplicationStats)
-	log.Printf("Replicated: %d bytes, Active: %d tasks",
-		replicationStats.BytesReplicated,
-		replicationStats.ActiveTasks)
+What that subsystem did was send N-1 peers a put of an object's own bytes back to the same key in the
+same bucket, which is a billed request that changes nothing. Worse, when gossip was not running it
+sent nothing at all and added the byte count to BytesReplicated anyway, so the throughput it reported
+was of work that had not happened. Warming a peer's *local* cache is a different thing and is real
+work; it is filed as #141.
 
 # Cluster Health Monitoring
 
@@ -387,8 +383,7 @@ ClusterConfig controls all distributed system behavior:
 		ListenAddr        string            // Bind address
 		AdvertiseAddr     string            // Advertised address
 		SeedNodes         []string          // Bootstrap nodes
-		ReplicationFactor int               // Data replication count
-		ConsistencyLevel  string            // Default consistency
+		ReplicationFactor int               // How many nodes selectTargetNodes returns; the first executes
 		GossipInterval    time.Duration     // Gossip frequency
 		FailureTimeout    time.Duration     // Failure detection timeout
 		ElectionTimeout   time.Duration     // Leader election timeout
@@ -398,28 +393,35 @@ ClusterConfig controls all distributed system behavior:
 
 # Best Practices
 
-1. Consistency Trade-offs
-Choose the appropriate consistency level for each operation. Don't use strong
-consistency for operations that don't require it.
+1. Attach a Precondition to a Write That Is Only Correct If Something Still Holds
+Read-modify-write, claiming a key, and advancing a version all need one; a plain overwrite does not.
+The cost is nothing -- it is the same single request -- and what it buys is that a concurrent writer
+is refused rather than silently overwriting. Never retry a refused precondition without re-reading:
+the answer is definitive, so retrying the same bytes either fails again or clobbers whoever won.
+
+This item replaced "Consistency Trade-offs", which advised not using strong consistency where it was
+not needed. The three levels differed in request count and not in guarantee, so the advice was sound
+in shape and about a knob that selected nothing.
 
 2. Replication Factor
-Set replication factor based on:
-- Data criticality (higher for important data)
-- Cluster size (typically 3 for small clusters)
-- Read/write ratio (higher for read-heavy workloads)
+This is a selection width, not a number of copies. [Coordinator.selectTargetNodes] returns this many
+nodes and [Coordinator.executeOnce] uses the first; the rest are the preference order a strategy that
+genuinely needed peers would consume. Raising it does not make more copies of the bytes -- S3 holds
+the one copy -- so set it for routing preference, not durability.
 
 3. Network Partitions
-Plan for network partitions:
-- Use quorum-based operations
-- Implement proper timeout handling
-- Design for eventual consistency where possible
+A partition does not divide the data, because the data is not here. A node cut off from its peers
+loses membership and leader election; its reads and writes still go to S3, and a precondition is
+still evaluated by S3, so mutual exclusion survives a partition that consensus would not. What to
+plan for is timeouts and a stale membership view, not a split copy of the bytes.
 
 4. Monitoring
 Monitor cluster health metrics:
-- Node availability
-- Replication lag
-- Operation latency
-- Load imbalance
+  - Node availability
+  - Operation latency
+  - Load imbalance
+  - Refused conditional writes -- a rising [ConditionalLost] rate is contention, and a single
+    [ConditionalUnsupported] means the endpoint does not exclude anybody and nothing was written
 
 5. Testing
 Test failure scenarios:
@@ -459,10 +461,12 @@ Example: Complete Cluster Setup
 
 	import (
 		"context"
+		"errors"
 		"log"
 		"time"
 
 		"github.com/scttfrdmn/objectfs/internal/distributed"
+		"github.com/scttfrdmn/objectfs/pkg/types"
 	)
 
 	func main() {
@@ -472,7 +476,6 @@ Example: Complete Cluster Setup
 			AdvertiseAddr:     "192.168.1.10:8080",
 			SeedNodes:         []string{"192.168.1.11:8080"},
 			ReplicationFactor: 3,
-			ConsistencyLevel:  "eventual",
 			GossipInterval:    time.Second,
 			HeartbeatInterval: time.Second,
 			SecretFile:        "/etc/objectfs/cluster.secret",
@@ -501,22 +504,26 @@ Example: Complete Cluster Setup
 		}
 		defer coordinator.Stop()
 
-		// Execute distributed operation
+		// Execute a distributed operation. Conditional on the key being absent, so if another
+		// node in this cluster runs the same code, exactly one of them creates it and the rest
+		// get types.ErrPreconditionFailed. Drop Precondition for a plain last-writer-wins put.
 		op := &distributed.DistributedOperation{
-			Type:        distributed.OpTypePut,
-			Key:         "test-key",
-			Data:        []byte("test-value"),
-			Consistency: distributed.ConsistencyStrong,
+			Type:         distributed.OpTypePut,
+			Key:          "test-key",
+			Data:         []byte("test-value"),
+			Precondition: types.Precondition{Absent: true},
 		}
 
 		result, err := coordinator.ExecuteOperation(ctx, op)
-		if err != nil {
+		switch {
+		case errors.Is(err, types.ErrPreconditionFailed):
+			log.Printf("another node created test-key first")
+		case err != nil:
 			log.Fatal(err)
-		}
-
-		if result.Success {
-			log.Printf("Operation succeeded on %d nodes",
-				len(result.NodeResults))
+		default:
+			// The ETag of what was just stored, which is the version a follow-on
+			// compare-and-swap asserts.
+			log.Printf("created test-key, etag %s", result.ETag)
 		}
 
 # See Also

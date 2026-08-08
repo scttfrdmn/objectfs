@@ -565,6 +565,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The consistency taxonomy, the N-identical-PUT fan-out, the `CacheReplicator`, and the proposal
+  machinery** ([#284]). Four deletions, and what connects them is that each named a distributed
+  guarantee the code did not provide — the fan-out did not make the write linearizable, the replicator
+  did not replicate, and the proposals did not transfer leadership.
+
+  **`ConsistencyLevel` and its three constants.** `ConsistencyEventual`, `ConsistencySession` and
+  `ConsistencyStrong` all issued the same unconditional `PutObject` and differed only in how many nodes
+  issued it and whether the caller waited, so what an operator picked changed the request count and not
+  the guarantee. `ConsistencyStrong` in particular fanned the identical bytes at the identical key to
+  every target node and called majority success "linearizable"; every node in a cluster writes the same
+  key in the same bucket, S3 holds the single copy, so N-1 of those PUTs were billed requests that
+  changed nothing and a majority reporting success said only that a majority could reach S3. What
+  replaced it is per-operation rather than per-mount and is evaluated by the store rather than voted
+  on: `DistributedOperation.Precondition`, on the one write it guards.
+
+  **`CacheReplicator`, `ReplicationTask`, `ReplicationStats` and the `"replication"` key of
+  `Coordinator.GetStats`.** Its worker sent N-1 peers a PUT of an object's own bytes back to the same
+  key in the same bucket. Worse, when gossip was not running — which was every unit test — it sent
+  nothing at all and added the byte count to `BytesReplicated` anyway, so the throughput it reported
+  was of work that had not happened. The one test covering it asserted `c.replicator != nil`, which is
+  what let it survive: a test that proves a field was assigned proves nothing about the subsystem, and
+  that assignment was the only part of it that worked. Warming a peer's *local* cache is different and
+  real, and is filed as [#141].
+
+  **`ProposeChange`, `broadcastProposal`, `voteOnProposal`, `executeProposal`,
+  `cleanupExpiredProposals` and `ClusterManager.ProposeLeadershipChange`.** `broadcastProposal` slept
+  100ms and then voted for its own proposal, so a majority of one was always found and
+  `executeProposal` called `SetLeader`. A node cannot be made leader by being named: the election path
+  reaches the same setter having actually contested it with terms, votes and a randomized timeout, and
+  a second path reaching it after a self-vote does not transfer leadership, it overwrites one node's
+  opinion of who holds it. [#133] was closed as not-the-direction with this stub still in the tree;
+  [#284]'s acceptance criteria said to delete rather than fix it.
+
+  **Three of the five `EntryType` constants.** `EntryTypeConfigChange`, `EntryTypeOperation` and
+  `EntryTypeSnapshot` had no producer anywhere in the repository — there is no configuration-change
+  path, no operation is ever logged, and [#151], which would have added snapshotting, was closed when
+  the CAS direction was adopted. `applyLogEntry` was a five-arm switch with every arm empty; with those
+  three gone the remaining branches were indistinguishable, so it collapsed to a log line. It stays a
+  method because `lastApplied` must advance for `commitIndex` to mean anything. The surviving
+  constants' *strings* are unchanged, so an entry of a removed type arriving from an older peer still
+  decodes and still applies as the no-op it always was.
+
 - **`internal/cache/redis.Invalidator`, its pub/sub protocol, and `Cache.DeleteContext` and
   `Cache.Client` with it** ([#377]). `Publish` broadcast `"<nodeID>:<key>"` on an
   `objectfs:invalidation` channel and `Subscribe` ran a goroutine that deleted received keys while
@@ -2545,12 +2587,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#133]: https://github.com/scttfrdmn/objectfs/issues/133
+[#139]: https://github.com/scttfrdmn/objectfs/issues/139
+[#141]: https://github.com/scttfrdmn/objectfs/issues/141
 [#150]: https://github.com/scttfrdmn/objectfs/issues/150
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#282]: https://github.com/scttfrdmn/objectfs/issues/282
 [#283]: https://github.com/scttfrdmn/objectfs/issues/283
 [#284]: https://github.com/scttfrdmn/objectfs/issues/284
+[#385]: https://github.com/scttfrdmn/objectfs/issues/385
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
@@ -2567,6 +2612,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **BREAKING: `ClusterManager.InvalidateCacheKey` takes the ETag of the write that caused the
+  invalidation, and a peer applies each version once** ([#284]). The gossip payload was `{Key, From}`
+  and carried no version, so a receiver could not tell an invalidation for a version it had already
+  moved past from one for the version it holds — and gossip both retransmits and delivers out of
+  order, so that is the normal case rather than an edge one. Replaying a superseded invalidation
+  evicts bytes the peer has since legitimately re-cached. This is requirement R4 of
+  `docs/design/conditional-writes-vs-raft.md` §1.
+
+  `InvalidateCacheKey(key)` becomes `InvalidateCacheKey(key, etag)`, taking `OperationResult.ETag` from
+  the write that prompted it; `InvalidateDeletedCacheKey(key)` is the delete case, which exists as its
+  own method because an empty ETag alone is ambiguous — an unconditional put has one too. An empty ETag
+  is still accepted and is applied by every receiver every time, because "evict whatever you hold" is
+  always safe and suppressing it would leave a deleted key cached.
+
+  **What this deliberately does not claim.** The receiver's ledger records which `(key, ETag)`
+  invalidations it has applied, so a retransmission and a replay of a superseded version are both
+  discarded. It cannot decide that the bytes it holds are *newer* than an incoming invalidation:
+  `types.Cache` stores bytes at offsets with no version alongside them, so there is nothing to compare
+  against. That needs a per-key ETag in the cache, which is [#129]'s `KeyAnnouncement` plumbing and
+  [#141]'s warming work, and it is not guessed at here.
+
+  A first attempt held one ETag per key rather than a set, and a test caught it: that suppresses a
+  retransmission of the latest version but *applies* a replay of the version before it, since an older
+  ETag simply differs from the stored one and ETags carry no order to compare. The ledger is bounded at
+  4096 entries and drops the oldest, because the alternative is a leak proportional to every version of
+  every key the cluster has written; overflowing costs a redundant eviction, not a stale read. All
+  three properties are mutation-verified — removing the check, reverting to latest-per-key, and
+  removing the bound each fail a named assertion.
+
+- **BREAKING: `cluster.consistency_level` is removed from the configuration file** ([#284]). Because
+  `Configuration.LoadFromFile` decodes strictly, a config that still sets it now fails at startup
+  naming the key and the line. That is the intended outcome rather than a regression: the alternative
+  is accepting a setting that selects nothing. **Delete the key**; there is no replacement to set in
+  its place, because what replaced it is per-operation
+  (`distributed.DistributedOperation.Precondition`) rather than per-mount. `cluster.cache_replication`
+  is gone the same way, and was read by no code in the repository at all.
+
+  The key selected nothing even before it was removed — see the `Removed` section above for why all
+  three levels issued the same request. So a deployment that deletes the line gets the behaviour it
+  already had, whichever value it had set.
+
+  `sdks/python`'s `ClusterConfig` drops the field with it, and `examples/config.yaml` no longer emits
+  it. Separately and pre-existing: the Python SDK's `to_yaml` emits `cluster.election_timeout`,
+  `heartbeat_interval` and `join_timeout`, which the Go `cluster` schema has never had — they live on
+  the disjoint `internal/distributed.ClusterConfig` ([#139]) — so the strict loader refuses that block
+  on the first of them. Verified against the loader rather than inferred, and filed as [#385] rather
+  than folded in here.
+
+- **A conditional write reports the ETag of what it stored, and a refused one says why** ([#284]).
+  `OperationResult.ETag` carries the new version, so a caller can chain a compare-and-swap from it
+  without a re-read, and `OperationResult.Conditional` names the outcome (`lost`, `conflict`,
+  `unsupported`, `invalid`) alongside an error wrapping `types.ErrPreconditionFailed`. A refused write
+  is never retried internally: the answer is definitive, and the recovery is to re-read, recompute and
+  CAS again, which only the caller can do. A precondition attached to anything but a put is refused
+  with `types.ErrInvalidPrecondition` rather than silently dropped — a caller that means "delete only
+  if unchanged" and gets an unconditional delete has no way to find out.
+
+  **The tests are the point of this issue and are verified by mutation.** `TestMultiNodeCluster` now
+  gives each node its own in-process substrate endpoint and asserts the cluster issued exactly **one**
+  PUT of the key; the assertion it replaced was `result.Success` on a `ConsistencyStrong` write, which
+  could not tell one PUT from two. Two coordinators racing an `If-Match` on one key must produce
+  exactly one success and one `ErrPreconditionFailed` with the stored bytes being the winner's, and a
+  CAS chain must accept the ETag each write reported while refusing every earlier one. Forcing the
+  write path unconditional kills all of them; suppressing the returned ETag kills two. The success half
+  of these runs against a real backend rather than the package's `mockBackend`, whose `PutObjectIf`
+  returns `ErrNotSupported` deliberately — a stub cannot both refuse to fake a CAS and serve as the
+  success case for one.
 
 - **`ReadAheadManager.Stop` and its stop channel are deleted; the mount context is the only shutdown
   signal** ([#376]). The production fix landed in [#179] — cancel the mount context and the prefetch

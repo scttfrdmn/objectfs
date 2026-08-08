@@ -329,8 +329,15 @@ cluster:
   listen_addr: 0.0.0.0:8080
   advertise_addr: 127.0.0.1:8080
   seed_nodes: []
+  # How many nodes an operation selects, in preference order. Only the first performs the write —
+  # there is one copy of the bytes and S3 holds it — so this is a selection width, not a number of
+  # copies made.
+  #
+  # `consistency_level` was here, taking eventual/strong/session, and v0.12.0 removed it: all three
+  # issued the same unconditional PUT and differed only in how many nodes issued it, so it selected a
+  # request count rather than a guarantee. A file that still sets it now fails at load naming the key.
+  # What replaced it is per-write rather than per-mount and has no key here.
   replication_factor: 3
-  consistency_level: eventual         # eventual, strong
   redis:
     enabled: false
     address: localhost:6379

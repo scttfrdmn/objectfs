@@ -2,10 +2,7 @@ package distributed
 
 import (
 	"context"
-	cryptorand "crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -14,15 +11,19 @@ import (
 
 // ConsensusEngine elects a leader using Raft's election mechanics — terms, votes, and a randomized
 // election timeout — over gossip. It is not a consensus engine in the sense the name implies: the log
-// below holds one bootstrap noop plus one entry per election win, applyLogEntry has three empty arms,
-// and nothing appends an operation entry. Leader election works and is tested (#279); replication
-// does not exist.
+// below holds one bootstrap noop plus one entry per election win, applyLogEntry has no state machine
+// to apply anything to, and nothing appends an operation entry. Leader election works and is tested
+// (#279); replication does not exist.
 //
 // It is not going to. #169 concluded that Raft has nothing to replicate here — nodes hold no
 // authoritative state, the bucket does — and the CAS direction was adopted on 2026-08-03, closing
 // #128 (the log interface), #130 (persistent state), #133 (proposal broadcast) and #151 (compaction).
-// The log, commitIndex, lastApplied, nextIndex and matchIndex fields serve the election only; #284 is
-// where the unused machinery comes out.
+// The log, commitIndex, lastApplied, nextIndex and matchIndex fields serve the election only. #284
+// took out the proposal machinery that sat beside them: a ConsensusProposal, four statuses, three
+// types, a proposals map, a 30-second expiry sweep, and a `broadcastProposal` that slept 100ms and
+// then voted for its own proposal so that `voteOnProposal` would find a majority of one and execute
+// it. Nothing in the repository proposed anything but a leadership change, and that path reached
+// `SetLeader` — which the election already does, having actually contested it.
 type ConsensusEngine struct {
 	mu          sync.RWMutex
 	cluster     *ClusterManager
@@ -41,9 +42,6 @@ type ConsensusEngine struct {
 	// Election state
 	electionTimer *time.Timer
 	voteCount     int
-
-	// Proposal state
-	proposals map[string]*ConsensusProposal
 
 	stats  *ConsensusStats
 	stopCh chan struct{}
@@ -82,46 +80,21 @@ type LogEntry struct {
 	RequestID string    `json:"request_id"`
 }
 
-// EntryType represents the type of log entry
+// EntryType represents the type of log entry.
+//
+// Two of them, and both are appended by code in this file: a noop at index 0 to anchor the log, and
+// one entry per election win. #284 removed EntryTypeConfigChange, EntryTypeOperation and
+// EntryTypeSnapshot, which named things nothing produced — there is no configuration-change path, no
+// operation is ever logged (coordinator.go goes to the backend directly), and #151, which would have
+// added snapshotting, was closed when the CAS direction was adopted.
+//
+// The strings are unchanged, so an entry of a removed type arriving from an older peer still decodes
+// and still applies as the no-op it always was; see [ConsensusEngine.applyLogEntry].
 type EntryType string
 
 const (
 	EntryTypeNoop           EntryType = "noop"
 	EntryTypeLeaderElection EntryType = "leader_election"
-	EntryTypeConfigChange   EntryType = "config_change"
-	EntryTypeOperation      EntryType = "operation"
-	EntryTypeSnapshot       EntryType = "snapshot"
-)
-
-// ConsensusProposal represents a proposal for distributed consensus
-type ConsensusProposal struct {
-	ID        string          `json:"id"`
-	Type      ProposalType    `json:"type"`
-	Data      []byte          `json:"data"`
-	Proposer  string          `json:"proposer"`
-	Timestamp time.Time       `json:"timestamp"`
-	Status    ProposalStatus  `json:"status"`
-	Votes     map[string]bool `json:"votes"`
-	Result    []byte          `json:"result,omitempty"`
-}
-
-// ProposalType represents the type of consensus proposal
-type ProposalType string
-
-const (
-	ProposalTypeLeadershipChange ProposalType = "leadership_change"
-	ProposalTypeConfigChange     ProposalType = "config_change"
-	ProposalTypeOperation        ProposalType = "operation"
-)
-
-// ProposalStatus represents the status of a consensus proposal
-type ProposalStatus string
-
-const (
-	ProposalStatusPending  ProposalStatus = "pending"
-	ProposalStatusAccepted ProposalStatus = "accepted"
-	ProposalStatusRejected ProposalStatus = "rejected"
-	ProposalStatusExpired  ProposalStatus = "expired"
 )
 
 // RequestVoteMessage represents a vote request
@@ -163,22 +136,20 @@ type AppendEntriesResponse struct {
 
 // ConsensusStats tracks consensus protocol statistics
 type ConsensusStats struct {
-	mu                sync.RWMutex
-	CurrentState      string        `json:"current_state"`
-	CurrentTerm       uint64        `json:"current_term"`
-	CurrentLeader     string        `json:"current_leader"`
-	LogLength         int           `json:"log_length"`
-	CommitIndex       uint64        `json:"commit_index"`
-	LastApplied       uint64        `json:"last_applied"`
-	ElectionsStarted  int64         `json:"elections_started"`
-	ElectionsWon      int64         `json:"elections_won"`
-	VotesCast         int64         `json:"votes_cast"`
-	ProposalsReceived int64         `json:"proposals_received"`
-	ProposalsAccepted int64         `json:"proposals_accepted"`
-	LogEntriesAdded   int64         `json:"log_entries_added"`
-	HeartbeatsSent    int64         `json:"heartbeats_sent"`
-	LastElection      time.Time     `json:"last_election"`
-	Uptime            time.Duration `json:"uptime"`
+	mu               sync.RWMutex
+	CurrentState     string        `json:"current_state"`
+	CurrentTerm      uint64        `json:"current_term"`
+	CurrentLeader    string        `json:"current_leader"`
+	LogLength        int           `json:"log_length"`
+	CommitIndex      uint64        `json:"commit_index"`
+	LastApplied      uint64        `json:"last_applied"`
+	ElectionsStarted int64         `json:"elections_started"`
+	ElectionsWon     int64         `json:"elections_won"`
+	VotesCast        int64         `json:"votes_cast"`
+	LogEntriesAdded  int64         `json:"log_entries_added"`
+	HeartbeatsSent   int64         `json:"heartbeats_sent"`
+	LastElection     time.Time     `json:"last_election"`
+	Uptime           time.Duration `json:"uptime"`
 }
 
 // NewConsensusEngine creates a new consensus engine
@@ -192,7 +163,6 @@ func NewConsensusEngine(cluster *ClusterManager, config *ClusterConfig) (*Consen
 		log:         make([]*LogEntry, 0),
 		nextIndex:   make(map[string]uint64),
 		matchIndex:  make(map[string]uint64),
-		proposals:   make(map[string]*ConsensusProposal),
 		stats: &ConsensusStats{
 			CurrentState: StateFollower.String(),
 		},
@@ -226,7 +196,6 @@ func (ce *ConsensusEngine) Start(ctx context.Context) error {
 	// Start background goroutines
 	go ce.electionLoop(ctx)
 	go ce.heartbeatLoop(ctx)
-	go ce.proposalCleanup(ctx)
 	go ce.updateStats(ctx)
 
 	return nil
@@ -269,39 +238,6 @@ func (ce *ConsensusEngine) TriggerElection(ctx context.Context) error {
 	slog.Info("triggering leader election")
 	ce.startElection()
 
-	return nil
-}
-
-// ProposeChange proposes a change to the cluster
-func (ce *ConsensusEngine) ProposeChange(ctx context.Context, proposal *ConsensusProposal) error {
-	ce.mu.Lock()
-	defer ce.mu.Unlock()
-
-	if ce.state != StateLeader {
-		return fmt.Errorf("only leader can propose changes")
-	}
-
-	// Generate proposal ID if not provided
-	if proposal.ID == "" {
-		proposalBytes := make([]byte, 8)
-		_, _ = cryptorand.Read(proposalBytes)
-		proposal.ID = "prop-" + hex.EncodeToString(proposalBytes)
-	}
-
-	proposal.Status = ProposalStatusPending
-	proposal.Votes = make(map[string]bool)
-	proposal.Timestamp = time.Now()
-
-	ce.proposals[proposal.ID] = proposal
-
-	// Broadcast proposal to all nodes
-	ce.broadcastProposal(proposal)
-
-	ce.stats.mu.Lock()
-	ce.stats.ProposalsReceived++
-	ce.stats.mu.Unlock()
-
-	slog.Info("proposed change", "proposal_id", proposal.ID, "type", proposal.Type)
 	return nil
 }
 
@@ -350,22 +286,6 @@ func (ce *ConsensusEngine) heartbeatLoop(ctx context.Context) {
 			if isLeader {
 				ce.sendHeartbeats()
 			}
-		}
-	}
-}
-
-func (ce *ConsensusEngine) proposalCleanup(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ce.stopCh:
-			return
-		case <-ticker.C:
-			ce.cleanupExpiredProposals()
 		}
 	}
 }
@@ -837,109 +757,20 @@ func (ce *ConsensusEngine) updateCommitIndex() {
 	}
 }
 
+// applyLogEntry advances lastApplied past entry. There is no state machine for it to advance, and that
+// is the honest state of this engine rather than a gap: both entry types [EntryType] declares are
+// records of something that already happened — the log anchor and an election this node won, whose
+// effect ClusterManager.SetLeader had before the entry was appended.
+//
+// So this logs and returns. It used to be a five-arm switch with every arm empty, three of whose arms
+// named entry types nothing produced; #284 removed those types and the arms with them, and what
+// remained was a switch whose branches were indistinguishable. #169 decided coordination moves to S3
+// conditional writes rather than to Raft log replication, so this is not a to-do list.
+//
+// It stays a method, and is still called, because lastApplied must advance for commitIndex to mean
+// anything and because a per-entry line is what makes an election traceable in a log.
 func (ce *ConsensusEngine) applyLogEntry(entry *LogEntry) {
 	slog.Info("applying log entry", "index", entry.Index, "type", entry.Type)
-
-	switch entry.Type {
-	case EntryTypeLeaderElection:
-		// Leader election entry applied
-	case EntryTypeConfigChange:
-		// Apply configuration change
-	case EntryTypeOperation:
-		// Apply operation
-
-	// Every arm of this switch is empty, which is the honest state of it: this engine replicates and
-	// commits log entries and then applies none of them. Nothing appends an EntryTypeOperation, and
-	// executeLocally in coordinator.go goes to the backend directly without consulting the log or
-	// leadership, so there is no state machine for an apply to advance. The arms are kept because the
-	// log entries they name are real and do get committed.
-	//
-	// EntryTypeNoop is appended once, at index 0, by newConsensusEngine — a Raft no-op to anchor the
-	// log — and applying it is correctly a no-op. EntryTypeSnapshot is declared in this file and
-	// appended nowhere: there is no snapshotting in this engine, so an entry of that type cannot exist
-	// to be applied — #151, which would have added it, was closed for exactly that reason. On the
-	// direction here: #169 decided coordination moves to S3 conditional writes rather than this Raft
-	// implementation, with #284 the live follow-up. So these arms are not a to-do list.
-	case EntryTypeNoop, EntryTypeSnapshot:
-	}
-}
-
-// Proposal handling
-
-func (ce *ConsensusEngine) broadcastProposal(proposal *ConsensusProposal) {
-	// In a real implementation, this would broadcast to all nodes
-	slog.Info("broadcasting proposal to cluster", "proposal_id", proposal.ID)
-
-	// For simulation, automatically accept our own proposals after a delay
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		ce.voteOnProposal(proposal.ID, true)
-	}()
-}
-
-func (ce *ConsensusEngine) voteOnProposal(proposalID string, accept bool) {
-	ce.mu.Lock()
-	defer ce.mu.Unlock()
-
-	proposal, exists := ce.proposals[proposalID]
-	if !exists {
-		return
-	}
-
-	nodeID := ce.cluster.GetNodeID()
-	proposal.Votes[nodeID] = accept
-
-	// Count votes
-	acceptVotes := 0
-	totalVotes := len(proposal.Votes)
-
-	for _, vote := range proposal.Votes {
-		if vote {
-			acceptVotes++
-		}
-	}
-
-	nodes := ce.cluster.GetNodes()
-	aliveNodes := 0
-	for _, node := range nodes {
-		if node.Status == NodeStatusAlive {
-			aliveNodes++
-		}
-	}
-
-	majority := aliveNodes/2 + 1
-
-	// Check if proposal should be accepted or rejected
-	if acceptVotes >= majority {
-		proposal.Status = ProposalStatusAccepted
-		ce.executeProposal(proposal)
-
-		ce.stats.mu.Lock()
-		ce.stats.ProposalsAccepted++
-		ce.stats.mu.Unlock()
-
-		slog.Info("proposal accepted", "proposal_id", proposalID, "accept_votes", acceptVotes, "total_votes", totalVotes)
-	} else if totalVotes-acceptVotes > aliveNodes-majority {
-		proposal.Status = ProposalStatusRejected
-		slog.Info("proposal rejected", "proposal_id", proposalID, "accept_votes", acceptVotes, "total_votes", totalVotes)
-	}
-}
-
-func (ce *ConsensusEngine) executeProposal(proposal *ConsensusProposal) {
-	switch proposal.Type {
-	case ProposalTypeLeadershipChange:
-		newLeader := string(proposal.Data)
-		slog.Info("executing leadership change", "new_leader", newLeader)
-		ce.cluster.SetLeader(newLeader)
-
-	case ProposalTypeConfigChange:
-		slog.Info("executing configuration change")
-		// Apply configuration change
-
-	case ProposalTypeOperation:
-		slog.Info("executing operation proposal")
-		// Execute operation
-	}
 }
 
 // Utility methods
@@ -1008,20 +839,6 @@ func (ce *ConsensusEngine) getLastLogTerm() uint64 {
 	return ce.log[len(ce.log)-1].Term
 }
 
-func (ce *ConsensusEngine) cleanupExpiredProposals() {
-	ce.mu.Lock()
-	defer ce.mu.Unlock()
-
-	now := time.Now()
-	for proposalID, proposal := range ce.proposals {
-		if proposal.Status == ProposalStatusPending && now.Sub(proposal.Timestamp) > 30*time.Second {
-			proposal.Status = ProposalStatusExpired
-			delete(ce.proposals, proposalID)
-			slog.Info("proposal expired", "proposal_id", proposalID)
-		}
-	}
-}
-
 func (ce *ConsensusEngine) updateStats(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -1057,21 +874,19 @@ func (ce *ConsensusEngine) GetStats() *ConsensusStats {
 
 	ce.stats.mu.RLock()
 	stats := &ConsensusStats{
-		CurrentState:      state,
-		CurrentTerm:       term,
-		CurrentLeader:     ce.stats.CurrentLeader,
-		LogLength:         logLength,
-		CommitIndex:       commitIndex,
-		LastApplied:       lastApplied,
-		ElectionsStarted:  ce.stats.ElectionsStarted,
-		ElectionsWon:      ce.stats.ElectionsWon,
-		VotesCast:         ce.stats.VotesCast,
-		ProposalsReceived: ce.stats.ProposalsReceived,
-		ProposalsAccepted: ce.stats.ProposalsAccepted,
-		LogEntriesAdded:   ce.stats.LogEntriesAdded,
-		HeartbeatsSent:    ce.stats.HeartbeatsSent,
-		LastElection:      ce.stats.LastElection,
-		Uptime:            ce.stats.Uptime,
+		CurrentState:     state,
+		CurrentTerm:      term,
+		CurrentLeader:    ce.stats.CurrentLeader,
+		LogLength:        logLength,
+		CommitIndex:      commitIndex,
+		LastApplied:      lastApplied,
+		ElectionsStarted: ce.stats.ElectionsStarted,
+		ElectionsWon:     ce.stats.ElectionsWon,
+		VotesCast:        ce.stats.VotesCast,
+		LogEntriesAdded:  ce.stats.LogEntriesAdded,
+		HeartbeatsSent:   ce.stats.HeartbeatsSent,
+		LastElection:     ce.stats.LastElection,
+		Uptime:           ce.stats.Uptime,
 	}
 	ce.stats.mu.RUnlock()
 

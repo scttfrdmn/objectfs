@@ -3,6 +3,7 @@ package distributed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -20,7 +21,6 @@ type Coordinator struct {
 	cluster      *ClusterManager
 	config       *ClusterConfig
 	operations   map[string]*ActiveOperation
-	replicator   *CacheReplicator
 	loadBalancer *LoadBalancer
 	stopCh       chan struct{}
 	backend      types.Backend
@@ -43,20 +43,38 @@ type NodeOperationRespMessage struct {
 	Result    *NodeResult `json:"result"`
 }
 
-// DistributedOperation represents an operation to be executed across the cluster
+// DistributedOperation represents an operation to be executed across the cluster.
+//
+// There was a Consistency field here, of type ConsistencyLevel, and #284 removed it along with the
+// type and its three constants. What replaced it is [DistributedOperation.Precondition], and the
+// reason it is a replacement rather than a removal plus an unrelated addition is that the two answer
+// the same question — "may this write overwrite what is there?" — and only one of them could answer
+// it. See the package documentation for the whole argument; the short form is that all three levels
+// issued the same unconditional PutObject and differed only in how many nodes issued it.
 type DistributedOperation struct {
-	ID          string            `json:"id"`
-	Type        OperationType     `json:"type"`
-	Key         string            `json:"key"`
-	Data        []byte            `json:"data,omitempty"`
-	Offset      int64             `json:"offset,omitempty"`
-	Size        int64             `json:"size,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	Consistency ConsistencyLevel  `json:"consistency"`
-	Timeout     time.Duration     `json:"timeout"`
-	Retries     int               `json:"retries"`
-	TargetNodes []string          `json:"target_nodes,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
+	ID       string            `json:"id"`
+	Type     OperationType     `json:"type"`
+	Key      string            `json:"key"`
+	Data     []byte            `json:"data,omitempty"`
+	Offset   int64             `json:"offset,omitempty"`
+	Size     int64             `json:"size,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// Precondition, when set, makes an OpTypePut a compare-and-swap: the backend evaluates it and
+	// refuses the write if it does not hold, reporting [types.ErrPreconditionFailed].
+	//
+	// This is the only guarantee this package offers about a write, and it is a real one, decided by
+	// S3 rather than by a count of nodes that agreed. Its zero value means an unconditional write —
+	// last-writer-wins — which is the honest description of what every consistency level here did.
+	//
+	// It is only consulted for OpTypePut. A precondition on a GET, a DELETE, or a LIST is a caller
+	// error rather than something to ignore silently, so [Coordinator.ExecuteOperation] rejects it.
+	Precondition types.Precondition `json:"precondition,omitzero"`
+
+	Timeout     time.Duration `json:"timeout"`
+	Retries     int           `json:"retries"`
+	TargetNodes []string      `json:"target_nodes,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
 }
 
 // OperationType represents the type of distributed operation
@@ -70,20 +88,26 @@ const (
 	OpTypeBatch  OperationType = "batch"
 )
 
-// ConsistencyLevel represents the consistency requirement for an operation
-type ConsistencyLevel string
-
-const (
-	ConsistencyEventual ConsistencyLevel = "eventual"
-	ConsistencyStrong   ConsistencyLevel = "strong"
-	ConsistencySession  ConsistencyLevel = "session"
-)
-
 // OperationResult represents the result of a distributed operation
 type OperationResult struct {
-	Success     bool                   `json:"success"`
-	Data        []byte                 `json:"data,omitempty"`
-	Error       string                 `json:"error,omitempty"`
+	Success bool   `json:"success"`
+	Data    []byte `json:"data,omitempty"`
+	Error   string `json:"error,omitempty"`
+
+	// Conditional classifies a conditional-write failure and is empty for every other outcome. The
+	// error [Coordinator.ExecuteOperation] returns wraps the matching sentinel, so a caller can use
+	// either errors.Is on the error or this field on the result. See [ConditionalOutcome].
+	Conditional ConditionalOutcome `json:"conditional,omitempty"`
+
+	// ETag is the stored object's ETag after a successful OpTypePut, and is empty otherwise.
+	//
+	// It is here so that a caller performing a compare-and-swap loop can continue from it without a
+	// HeadObject between iterations, and — the load-bearing use — so that a cache invalidation can
+	// name the version it was computed from. See [ClusterManager.InvalidateCacheKey]: an invalidation
+	// without an ETag can be applied out of order relative to the write that caused it, which is
+	// requirement R4 of docs/design/conditional-writes-vs-raft.md §1.
+	ETag string `json:"etag,omitempty"`
+
 	NodeResults map[string]*NodeResult `json:"node_results"`
 	Latency     time.Duration          `json:"latency"`
 	RetriesUsed int                    `json:"retries_used"`
@@ -92,11 +116,91 @@ type OperationResult struct {
 
 // NodeResult represents the result from a specific node
 type NodeResult struct {
-	NodeID  string        `json:"node_id"`
-	Success bool          `json:"success"`
-	Data    []byte        `json:"data,omitempty"`
+	NodeID  string `json:"node_id"`
+	Success bool   `json:"success"`
+	Data    []byte `json:"data,omitempty"`
+
+	// ETag is the stored object's ETag after a successful conditional put on this node. See
+	// [OperationResult.ETag], which it is copied to.
+	ETag string `json:"etag,omitempty"`
+
+	// Conditional classifies a conditional-write failure, and is empty for every other outcome. See
+	// [ConditionalOutcome] for why this travels as a string rather than as the error itself.
+	Conditional ConditionalOutcome `json:"conditional,omitempty"`
+
 	Error   string        `json:"error,omitempty"`
 	Latency time.Duration `json:"latency"`
+}
+
+// ConditionalOutcome names why a conditional write did not land, so that a caller can select a
+// recovery without parsing an error string.
+//
+// It exists because a NodeResult crosses the wire. An operation executed on a peer is marshaled to
+// JSON, sent over gossip, and unmarshaled by the requesting node, so a Go error on the far side does
+// not survive the trip — only exported fields do. Carrying the sentinel as an unexported field would
+// make the classification silently correct for a local execution and silently absent for a remote
+// one, which is a seam defect of exactly the kind this package's audit was full of.
+//
+// A bool would not do either. Per docs/design/conditional-writes-vs-raft.md §2 the taxonomy is
+// three-way and the three select *different* recovery: a lost race means re-read and CAS again, a
+// conflict means retry the same write as-is, and an absent object means the state being updated is
+// gone and re-doing the CAS will never succeed.
+type ConditionalOutcome string
+
+const (
+	// ConditionalLost means the precondition was evaluated and did not hold: another writer won.
+	// Recovery is to re-read, recompute from what is now stored, and retry the compare-and-swap. This
+	// is the expected outcome of a contended write, not an error to log as one.
+	ConditionalLost ConditionalOutcome = "lost"
+
+	// ConditionalConflict means the write raced a delete. The caller's view is not necessarily stale,
+	// so retrying the same write may simply succeed.
+	ConditionalConflict ConditionalOutcome = "conflict"
+
+	// ConditionalUnsupported means the endpoint does not evaluate preconditions and nothing was
+	// written. A caller needing mutual exclusion must refuse to proceed rather than fall back to an
+	// unconditional write — see [types.ErrNotSupported].
+	ConditionalUnsupported ConditionalOutcome = "unsupported"
+
+	// ConditionalInvalid means the precondition itself was unusable — it asserted nothing, or it
+	// asserted both absence and a specific ETag. A caller error, distinct from one that was evaluated.
+	ConditionalInvalid ConditionalOutcome = "invalid"
+)
+
+// sentinel returns the [types] error o corresponds to, or nil for the empty outcome. It is the inverse
+// of [classifyConditional] and exists so that errors.Is works identically on a local and a remote
+// execution — see [Coordinator.ExecuteOperation].
+func (o ConditionalOutcome) sentinel() error {
+	switch o {
+	case ConditionalLost:
+		return types.ErrPreconditionFailed
+	case ConditionalConflict:
+		return types.ErrConditionalConflict
+	case ConditionalUnsupported:
+		return types.ErrNotSupported
+	case ConditionalInvalid:
+		return types.ErrInvalidPrecondition
+	default:
+		return nil
+	}
+}
+
+// classifyConditional maps a [Backend.PutObjectIf] error onto a [ConditionalOutcome], returning the
+// empty outcome for an error that is not about the precondition — a timeout, a network failure, an
+// AccessDenied. Those are ordinary failures and a caller must not read them as a lost race.
+func classifyConditional(err error) ConditionalOutcome {
+	switch {
+	case errors.Is(err, types.ErrPreconditionFailed):
+		return ConditionalLost
+	case errors.Is(err, types.ErrConditionalConflict):
+		return ConditionalConflict
+	case errors.Is(err, types.ErrNotSupported):
+		return ConditionalUnsupported
+	case errors.Is(err, types.ErrInvalidPrecondition):
+		return ConditionalInvalid
+	default:
+		return ""
+	}
 }
 
 // ActiveOperation tracks an ongoing distributed operation
@@ -108,34 +212,21 @@ type ActiveOperation struct {
 	_         sync.RWMutex
 }
 
-// CacheReplicator handles cache replication across nodes
-type CacheReplicator struct {
-	mu           sync.RWMutex
-	cluster      *ClusterManager
-	config       *ClusterConfig
-	replications map[string]*ReplicationTask
-	stats        *ReplicationStats
-}
-
-// ReplicationTask represents a cache replication task
-type ReplicationTask struct {
-	Key         string    `json:"key"`
-	Data        []byte    `json:"data"`
-	TargetNodes []string  `json:"target_nodes"`
-	CreatedAt   time.Time `json:"created_at"`
-	Attempts    int       `json:"attempts"`
-}
-
-// ReplicationStats tracks replication statistics
-type ReplicationStats struct {
-	mu                 sync.RWMutex
-	TasksCreated       int64         `json:"tasks_created"`
-	TasksCompleted     int64         `json:"tasks_completed"`
-	TasksFailed        int64         `json:"tasks_failed"`
-	BytesReplicated    int64         `json:"bytes_replicated"`
-	AvgReplicationTime time.Duration `json:"avg_replication_time"`
-	ActiveTasks        int           `json:"active_tasks"`
-}
+// There was a CacheReplicator here, with a ReplicationTask, a ReplicationStats of six counters, a
+// once-per-second worker, and a `simulateReplication` that returned true. #284 deleted all of it, and
+// the deciding fact is that nobody could say what it was for.
+//
+// What it did: after a write succeeded on one node, it registered the same key and bytes as a task,
+// and a worker then sent every other target node an operation asking it to PUT those bytes to that
+// key. Each peer can already reach S3, and the bytes were already there, so the work was to have N-1
+// peers overwrite an object with its own contents. When gossip was not running — which is every unit
+// test — `simulateReplication` returned true without sending anything and the statistics counted the
+// bytes as replicated, so the counters reported throughput for work that had not happened.
+//
+// It could not have been cache warming either, which is the one purpose that would have justified it:
+// warming means putting bytes into a peer's *cache*, and this sent a backend PUT. Cache warming is
+// #141 and #142, it is a v0.13.0 item, and it needs a message type of its own rather than a consistency
+// level's side effect. Reviving a path that re-uploads an object to itself is not a head start on it.
 
 // LoadBalancer manages load distribution across cluster nodes
 type LoadBalancer struct {
@@ -177,14 +268,6 @@ func NewCoordinator(cluster *ClusterManager, config *ClusterConfig, backend type
 		backend:    backend,
 	}
 
-	// Initialize cache replicator
-	c.replicator = &CacheReplicator{
-		cluster:      cluster,
-		config:       config,
-		replications: make(map[string]*ReplicationTask),
-		stats:        &ReplicationStats{},
-	}
-
 	// Initialize load balancer
 	c.loadBalancer = &LoadBalancer{
 		cluster:  cluster,
@@ -203,7 +286,6 @@ func (c *Coordinator) Start(ctx context.Context) error {
 
 	// Start background tasks
 	go c.cleanupOperations(ctx)
-	go c.replicationWorker(ctx)
 	go c.updateLoadBalancerStats(ctx)
 
 	return nil
@@ -236,10 +318,19 @@ func (c *Coordinator) ExecuteOperation(ctx context.Context, op *DistributedOpera
 	if op.Retries == 0 {
 		op.Retries = c.config.RetryAttempts
 	}
-	if op.Consistency == "" {
-		op.Consistency = ConsistencyLevel(c.config.ConsistencyLevel)
-	}
 	op.CreatedAt = start
+
+	// A precondition is only meaningful on a put, and a caller that attached one to a read or a delete
+	// has a mistaken belief about what will be enforced. Rejecting is the fail-closed answer: silently
+	// ignoring it would mean a caller that meant "delete only if unchanged" gets an unconditional
+	// delete and no indication, which is the shape of every defect this package's audit found.
+	if op.Type != OpTypePut && !op.Precondition.IsZero() {
+		return &OperationResult{
+			Success: false,
+			Error:   fmt.Sprintf("a precondition is only supported on %s, not %s", OpTypePut, op.Type),
+			Latency: time.Since(start),
+		}, fmt.Errorf("distributed: precondition on %s operation: %w", op.Type, types.ErrInvalidPrecondition)
+	}
 
 	// Track active operation
 	activeOp := &ActiveOperation{
@@ -269,38 +360,33 @@ func (c *Coordinator) ExecuteOperation(ctx context.Context, op *DistributedOpera
 		}, err
 	}
 
-	// Execute operation based on type and consistency level
-	var result *OperationResult
-
-	switch op.Consistency {
-	case ConsistencyStrong:
-		result, err = c.executeStrongConsistency(ctx, activeOp, targetNodes)
-	case ConsistencySession:
-		result, err = c.executeSessionConsistency(ctx, activeOp, targetNodes)
-	case ConsistencyEventual:
-		result, err = c.executeEventualConsistency(ctx, activeOp, targetNodes)
-	default:
-		return &OperationResult{
-			Success: false,
-			Error:   fmt.Sprintf("unsupported consistency level: %s", op.Consistency),
-			Latency: time.Since(start),
-		}, fmt.Errorf("unsupported consistency level: %s", op.Consistency)
-	}
+	result := c.executeOnce(ctx, activeOp, targetNodes)
 
 	result.CompletedAt = time.Now()
 	result.Latency = time.Since(start)
 
-	// A result that failed is returned with an error, always. The three executors above each
-	// reported failure only in result.Success and returned a nil error, so a caller that checked
-	// err — the ordinary thing to do in Go, and what ClusterManager.DistributeOperation did —
+	// A result that failed is returned with an error, always. The three consistency executors this
+	// replaced each reported failure only in result.Success and returned a nil error, so a caller that
+	// checked err — the ordinary thing to do in Go, and what ClusterManager.DistributeOperation did —
 	// recorded an operation that failed on every node as a success (#269).
 	//
-	// Reconciling here rather than in each executor is deliberate: this is the single point every
-	// consistency level passes through, so a fourth level added later cannot reintroduce the
-	// disagreement, and none of them has to remember to return two representations of the same
-	// fact. The error text is result.Error so the two cannot drift either.
-	if err == nil && !result.Success {
+	// Reconciling here rather than inside the executor is deliberate: this is the single point every
+	// operation passes through, so a second execution strategy added later cannot reintroduce the
+	// disagreement. The error text is result.Error so the two cannot drift either.
+	if !result.Success {
 		err = fmt.Errorf("operation %s on %q failed: %s", op.Type, op.Key, result.Error)
+
+		// And it wraps the conditional-write sentinel when there was one, so a caller racing for a
+		// claim can ask errors.Is(err, types.ErrPreconditionFailed) rather than inspect the result.
+		//
+		// Reconstructing it from result.Conditional rather than threading the original error through:
+		// the original does not exist on the remote path. A NodeResult arrives from a peer as JSON with
+		// its error already flattened to a string, so the classification the far side made is the only
+		// thing that survived, and building the sentinel from it here is what makes errors.Is behave
+		// the same whether the operation ran locally or on a peer.
+		if sentinel := result.Conditional.sentinel(); sentinel != nil {
+			err = fmt.Errorf("%w: %w", sentinel, err)
+		}
 	}
 
 	// Update load balancer stats
@@ -368,118 +454,53 @@ func (c *Coordinator) selectTargetNodes(op *DistributedOperation) ([]string, err
 	}
 }
 
-// executeStrongConsistency executes an operation with strong consistency
-func (c *Coordinator) executeStrongConsistency(ctx context.Context, activeOp *ActiveOperation, targetNodes []string) (*OperationResult, error) {
+// executeOnce runs the operation on one node — the first of targetNodes — and reports what that node
+// did. It is the whole of this package's execution strategy.
+//
+// It replaced three functions, `executeStrongConsistency`, `executeSessionConsistency` and
+// `executeEventualConsistency`, and the case for one function is not that the three were similar. It
+// is that all three issued the *same unconditional PutObject* and differed only in how many nodes
+// issued it and whether the caller waited:
+//
+//   - Strong fanned the operation to all N target nodes with a WaitGroup and declared success at
+//     `successCount >= len(targetNodes)/2+1`. Every node wrote the same key in the same bucket with
+//     the same bytes, so those were N redundant identical PUTs and the majority count answered "could
+//     most nodes reach S3" — a reachability signal, billed N times.
+//   - Session and Eventual were the same function. Diffing their bodies with comments stripped, the
+//     only differences were a `len(targetNodes) > 0` guard before `targetNodes[0]` and an extra
+//     `op.Type == OpTypePut` condition on the background replication.
+//
+// One node is enough because there is one copy of the bytes. S3 holds it, every node can already
+// reach it, and a second node writing it again adds a request and no guarantee. What a caller who
+// wanted "strong" actually needs is that its write not silently clobber a concurrent one, and that is
+// [DistributedOperation.Precondition] — one conditional request to one key, evaluated by the store.
+//
+// targetNodes past the first are unused, and deliberately still selected: [Coordinator.selectTargetNodes]
+// returns them in preference order, and the load-balancer statistics below count the whole set as
+// routed work. A follow-on execution strategy that genuinely needs peers — cache warming, #141 — will
+// want the list rather than have to reconstruct it.
+func (c *Coordinator) executeOnce(ctx context.Context, activeOp *ActiveOperation, targetNodes []string) *OperationResult {
 	op := activeOp.Operation
 
-	// For strong consistency, we need consensus from majority of nodes
-	requiredNodes := len(targetNodes)/2 + 1
-
-	// Execute operation on all target nodes synchronously
-	results := make(map[string]*NodeResult)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, nodeID := range targetNodes {
-		wg.Add(1)
-		go func(nodeID string) {
-			defer wg.Done()
-
-			nodeResult := c.executeOnNode(ctx, nodeID, op)
-
-			mu.Lock()
-			results[nodeID] = nodeResult
-			mu.Unlock()
-		}(nodeID)
-	}
-
-	wg.Wait()
-
-	// Count successful results
-	successCount := 0
-	var firstSuccess *NodeResult
-	var firstError string
-
-	for _, result := range results {
-		if result.Success {
-			successCount++
-			if firstSuccess == nil {
-				firstSuccess = result
-			}
-		} else if firstError == "" {
-			firstError = result.Error
+	if len(targetNodes) == 0 {
+		return &OperationResult{
+			Success:     false,
+			Error:       "no target nodes selected",
+			NodeResults: map[string]*NodeResult{},
 		}
 	}
 
-	// Determine overall success based on majority
-	success := successCount >= requiredNodes
+	node := targetNodes[0]
+	result := c.executeOnNode(ctx, node, op)
 
-	result := &OperationResult{
-		Success:     success,
-		NodeResults: results,
-	}
-
-	if success && firstSuccess != nil {
-		result.Data = firstSuccess.Data
-	} else {
-		result.Error = fmt.Sprintf("insufficient successful responses (%d/%d required), first error: %s",
-			successCount, requiredNodes, firstError)
-	}
-
-	return result, nil
-}
-
-// executeSessionConsistency executes an operation with session consistency
-func (c *Coordinator) executeSessionConsistency(ctx context.Context, activeOp *ActiveOperation, targetNodes []string) (*OperationResult, error) {
-	op := activeOp.Operation
-
-	// For session consistency, try to use the same node for related operations
-	// Fall back to any available node if the preferred node is unavailable
-
-	var primaryNode string
-	if len(targetNodes) > 0 {
-		primaryNode = targetNodes[0]
-	}
-
-	// Execute on primary node first
-	result := c.executeOnNode(ctx, primaryNode, op)
-
-	operationResult := &OperationResult{
+	return &OperationResult{
 		Success:     result.Success,
 		Data:        result.Data,
+		ETag:        result.ETag,
+		Conditional: result.Conditional,
 		Error:       result.Error,
-		NodeResults: map[string]*NodeResult{primaryNode: result},
+		NodeResults: map[string]*NodeResult{node: result},
 	}
-
-	// If write operation succeeded, asynchronously replicate to other nodes
-	if op.Type == OpTypePut && result.Success && len(targetNodes) > 1 {
-		go c.replicateAsync(ctx, op, targetNodes[1:])
-	}
-
-	return operationResult, nil
-}
-
-// executeEventualConsistency executes an operation with eventual consistency
-func (c *Coordinator) executeEventualConsistency(ctx context.Context, activeOp *ActiveOperation, targetNodes []string) (*OperationResult, error) {
-	op := activeOp.Operation
-
-	// For eventual consistency, execute on any available node and replicate asynchronously
-	primaryNode := targetNodes[0]
-	result := c.executeOnNode(ctx, primaryNode, op)
-
-	operationResult := &OperationResult{
-		Success:     result.Success,
-		Data:        result.Data,
-		Error:       result.Error,
-		NodeResults: map[string]*NodeResult{primaryNode: result},
-	}
-
-	// Asynchronously replicate to other nodes
-	if result.Success && len(targetNodes) > 1 {
-		go c.replicateAsync(ctx, op, targetNodes[1:])
-	}
-
-	return operationResult, nil
 }
 
 // executeOnNode executes an operation on a specific node. If nodeID is the
@@ -597,10 +618,30 @@ func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *
 			result.Data = data
 		}
 	case OpTypePut:
-		if err := c.backend.PutObject(ctx, op.Key, op.Data, nil); err != nil {
+		// One request, conditional when the caller asserted something about the key's current state.
+		//
+		// A precondition that does not hold comes back as types.ErrPreconditionFailed and nothing was
+		// written; that is reported as a failed result like any other, and the caller distinguishes it
+		// with errors.Is on the error ExecuteOperation returns. It is not retried here and must not be:
+		// the answer is definitive, and the recovery is to re-read, recompute, and CAS again — which
+		// only the caller can do, since only it knows what the new bytes should be.
+		if op.Precondition.IsZero() {
+			if err := c.backend.PutObject(ctx, op.Key, op.Data, op.Metadata); err != nil {
+				result.Error = err.Error()
+			} else {
+				result.Success = true
+			}
+
+			break
+		}
+
+		etag, err := c.backend.PutObjectIf(ctx, op.Key, op.Data, op.Metadata, op.Precondition)
+		if err != nil {
 			result.Error = err.Error()
+			result.Conditional = classifyConditional(err)
 		} else {
 			result.Success = true
+			result.ETag = etag
 		}
 	case OpTypeDelete:
 		if err := c.backend.DeleteObject(ctx, op.Key); err != nil {
@@ -687,27 +728,6 @@ func (c *Coordinator) handleNetworkOperationResp(msg *GossipMessage) {
 	}
 }
 
-// replicateAsync asynchronously replicates data to target nodes
-func (c *Coordinator) replicateAsync(ctx context.Context, op *DistributedOperation, targetNodes []string) {
-	if c.replicator == nil {
-		return
-	}
-
-	task := &ReplicationTask{
-		Key:         op.Key,
-		Data:        op.Data,
-		TargetNodes: targetNodes,
-		CreatedAt:   time.Now(),
-		Attempts:    0,
-	}
-
-	c.replicator.mu.Lock()
-	c.replicator.replications[op.Key] = task
-	c.replicator.stats.TasksCreated++
-	c.replicator.stats.ActiveTasks++
-	c.replicator.mu.Unlock()
-}
-
 // Background worker methods
 
 func (c *Coordinator) cleanupOperations(ctx context.Context) {
@@ -737,103 +757,6 @@ func (c *Coordinator) performOperationCleanup() {
 			delete(c.operations, opID)
 		}
 	}
-}
-
-func (c *Coordinator) replicationWorker(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.stopCh:
-			return
-		case <-ticker.C:
-			c.processReplicationTasks(ctx)
-		}
-	}
-}
-
-func (c *Coordinator) processReplicationTasks(ctx context.Context) {
-	c.replicator.mu.Lock()
-	tasks := make([]*ReplicationTask, 0, len(c.replicator.replications))
-	for _, task := range c.replicator.replications {
-		tasks = append(tasks, task)
-	}
-	c.replicator.mu.Unlock()
-
-	for _, task := range tasks {
-		c.processReplicationTask(ctx, task)
-	}
-}
-
-func (c *Coordinator) processReplicationTask(ctx context.Context, task *ReplicationTask) {
-	start := time.Now()
-	task.Attempts++
-
-	successCount := 0
-	for _, nodeID := range task.TargetNodes {
-		// Simulate replication to node
-		if c.simulateReplication(nodeID, task.Key, task.Data) {
-			successCount++
-		}
-	}
-
-	c.replicator.mu.Lock()
-	if successCount > 0 {
-		c.replicator.stats.TasksCompleted++
-		c.replicator.stats.BytesReplicated += int64(len(task.Data))
-		delete(c.replicator.replications, task.Key)
-	} else if task.Attempts >= 3 {
-		c.replicator.stats.TasksFailed++
-		delete(c.replicator.replications, task.Key)
-	}
-	c.replicator.stats.ActiveTasks = len(c.replicator.replications)
-
-	// Update average replication time
-	replicationTime := time.Since(start)
-	if c.replicator.stats.AvgReplicationTime == 0 {
-		c.replicator.stats.AvgReplicationTime = replicationTime
-	} else {
-		alpha := 0.1
-		c.replicator.stats.AvgReplicationTime = time.Duration(
-			alpha*float64(replicationTime) + (1-alpha)*float64(c.replicator.stats.AvgReplicationTime),
-		)
-	}
-	c.replicator.mu.Unlock()
-}
-
-func (c *Coordinator) simulateReplication(nodeID, key string, data []byte) bool {
-	nodes := c.cluster.GetNodes()
-	node, exists := nodes[nodeID]
-	if !exists || node.Status != NodeStatusAlive {
-		return false
-	}
-
-	// If gossip is not running fall back to a logical ACK.
-	if c.cluster.gossip == nil || c.cluster.gossip.conn == nil {
-		return true
-	}
-
-	// Fire-and-forget: send a PUT operation to the target node; the response
-	// (if any) arrives on handleNetworkOperationResp and is silently discarded
-	// because no pending channel is registered for this requestID.
-	op := &DistributedOperation{
-		Type: OpTypePut,
-		Key:  key,
-		Data: data,
-	}
-	msg := &NodeOperationMessage{
-		RequestID: fmt.Sprintf("repl-%s-%d", key, time.Now().UnixNano()),
-		From:      c.cluster.GetNodeID(),
-		Operation: op,
-	}
-	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperation, msg); err != nil {
-		slog.Warn("failed to replicate key", "key", key, "node_id", nodeID, "error", err)
-		return false
-	}
-	return true
 }
 
 func (c *Coordinator) updateLoadBalancerStats(ctx context.Context) {
@@ -986,17 +909,6 @@ func (c *Coordinator) GetStats() map[string]any {
 	activeOps := len(c.operations)
 	c.mu.RUnlock()
 
-	c.replicator.stats.mu.RLock()
-	replicationStats := ReplicationStats{
-		TasksCreated:       c.replicator.stats.TasksCreated,
-		TasksCompleted:     c.replicator.stats.TasksCompleted,
-		TasksFailed:        c.replicator.stats.TasksFailed,
-		BytesReplicated:    c.replicator.stats.BytesReplicated,
-		AvgReplicationTime: c.replicator.stats.AvgReplicationTime,
-		ActiveTasks:        c.replicator.stats.ActiveTasks,
-	}
-	c.replicator.stats.mu.RUnlock()
-
 	c.loadBalancer.stats.mu.RLock()
 	loadBalancerStats := LoadBalancerStats{
 		RequestsRouted:  c.loadBalancer.stats.RequestsRouted,
@@ -1007,9 +919,13 @@ func (c *Coordinator) GetStats() map[string]any {
 	maps.Copy(loadBalancerStats.NodeLoad, c.loadBalancer.stats.NodeLoad)
 	c.loadBalancer.stats.mu.RUnlock()
 
+	// No "replication" key. It reported six counters from the CacheReplicator that #284 deleted, and
+	// what they counted was peers re-uploading an object to itself — with the count incremented even
+	// when nothing was sent, because simulateReplication returned true whenever gossip was not running.
+	// A stats map that omits a subsystem is honest; one that reports throughput for work that did not
+	// happen is the reason the audit distrusted this package's numbers.
 	return map[string]any{
 		"active_operations": activeOps,
-		"replication":       &replicationStats,
 		"load_balancer":     &loadBalancerStats,
 	}
 }

@@ -11,7 +11,9 @@ package types
 // — indistinguishable from a genuinely lost race — into a caller error at the call site.
 
 import (
+	"encoding/json"
 	stderr "errors"
+	"strings"
 	"testing"
 )
 
@@ -127,5 +129,61 @@ func TestConditionalSentinelsAreDistinct(t *testing.T) {
 					"opposite retry policies", aName, bName)
 			}
 		}
+	}
+}
+
+// TestPreconditionJSON pins the wire form, because a Precondition travels inside
+// internal/distributed's node-operation message and both halves of that round trip are remote.
+//
+// Two properties, and a defect in each direction if either slips. The field names must be snake_case
+// like every field beside them in that message — they were `Absent` and `ETag` until tags were added,
+// which is a cosmetic wart now and a wire break to fix after a release. And a zero Precondition must
+// serialize to nothing at all, so an unconditional operation does not travel carrying a precondition
+// field asserting nothing: a receiver that read `"precondition": {}` as "conditional" would refuse
+// every plain write.
+func TestPreconditionJSON(t *testing.T) {
+	t.Parallel()
+
+	type envelope struct {
+		Key          string       `json:"key"`
+		Precondition Precondition `json:"precondition,omitzero"`
+	}
+
+	zero, err := json.Marshal(envelope{Key: "k"})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	if strings.Contains(string(zero), "precondition") {
+		t.Errorf("a zero Precondition serialized to %s; it must be omitted entirely, or an "+
+			"unconditional operation travels carrying a precondition that asserts nothing", zero)
+	}
+
+	for _, tc := range []struct {
+		name string
+		p    Precondition
+		want string
+	}{
+		{"absent", Precondition{Absent: true}, `{"key":"k","precondition":{"absent":true}}`},
+		{"etag", Precondition{ETag: `"abc"`}, `{"key":"k","precondition":{"etag":"\"abc\""}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := json.Marshal(envelope{Key: "k", Precondition: tc.p})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("marshal = %s, want %s", got, tc.want)
+			}
+
+			var back envelope
+			if err := json.Unmarshal(got, &back); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if back.Precondition != tc.p {
+				t.Errorf("round trip gave %+v, want %+v", back.Precondition, tc.p)
+			}
+		})
 	}
 }
