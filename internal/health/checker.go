@@ -22,6 +22,10 @@ type Checker struct {
 	stopCh     chan struct{}
 	started    bool
 	lastUpdate time.Time
+
+	// boundAddr is what the listener reports, which is not necessarily Config.HTTPAddr: a caller
+	// asking for port 0 gets whatever the kernel assigned, and [Checker.Addr] is how it finds out.
+	boundAddr string
 }
 
 // Config represents health checker configuration
@@ -561,7 +565,29 @@ func (c *Checker) listenHealth(ctx context.Context) (net.Listener, error) {
 		return nil, fmt.Errorf("binding the health endpoint on %s: %w", c.config.HTTPAddr, err)
 	}
 
+	// Recorded under the lock Start already holds when it calls this — see Addr.
+	c.boundAddr = ln.Addr().String()
+
 	return ln, nil
+}
+
+// Addr returns the address the health endpoint is bound to, or "" if nothing has bound one.
+//
+// It exists for the same reason [metrics.Collector.Addr] does, and it is the piece that was missing
+// on this side: a test asserting *where* this listener is had to reserve an ephemeral port, close it,
+// and hand the address to Start — which returns the port to the kernel's pool in between, so anything
+// else asking for an ephemeral port can be given it first. That window failed a CI run on the metrics
+// side. Configuring port 0 and reading back closes it, and needs somewhere to read back from.
+//
+// The address, not a port, and the host half is what matters: /health reports component names, error
+// strings and check timings with no authentication, so a wildcard bind publishes that to anything
+// that can route here (#211). A wildcard reads back as 0.0.0.0 or [::] rather than the configured
+// host, which a scrape of loopback cannot distinguish.
+func (c *Checker) Addr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.boundAddr
 }
 
 // serveHealth serves the health endpoint on ln, returning when Stop closes stopCh.

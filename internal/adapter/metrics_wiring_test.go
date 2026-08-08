@@ -28,14 +28,21 @@ import (
 //
 // The address is a non-default one, and that is deliberate. A fixture equal to the default passes
 // whether the mapping happened or not, since the field would hold that value anyway.
+//
+// Port 0, not testhttp.FreeAddr. FreeAddr closes its listener before returning the address, so the
+// port goes back to the ephemeral pool and anything else asking for one can be handed it before
+// startMetrics binds — which is what happened in CI, where this test failed with
+// "bind: address already in use" on a port the miniredis in cache_selection_test.go got in the
+// interval. Nothing in the test was wrong; the address was stale by the time it was used. Port 0
+// closes the window instead of narrowing it, because the kernel picks at the moment of the bind.
 func TestStartMetricsBindsTheEndpoint(t *testing.T) {
 	t.Parallel()
 
-	addr := testhttp.FreeAddr(t)
+	const configured = "127.0.0.1:0"
 
 	cfg := config.NewDefault()
 	cfg.Monitoring.Metrics.Enabled = true
-	cfg.Monitoring.Metrics.Addr = addr
+	cfg.Monitoring.Metrics.Addr = configured
 
 	a := &Adapter{config: cfg}
 
@@ -47,11 +54,14 @@ func TestStartMetricsBindsTheEndpoint(t *testing.T) {
 	// The address the listener reports, which is the value the consumer received — not a recomputation
 	// of the mapping. #211's whole point is that "something is listening" and "the listener is where
 	// the configuration said" are different assertions, and only the second one fails for a wildcard
-	// bind: a wildcard answers on loopback too.
-	if got := a.metrics.Addr(); got != addr {
-		t.Errorf("the collector bound %s; monitoring.metrics.addr was %s. A wildcard bind reports "+
-			"0.0.0.0 or [::] here and publishes an unauthenticated endpoint on every interface", got, addr)
+	// bind: a wildcard answers on loopback too. The host is the half that carries that, and the half
+	// port 0 leaves comparable.
+	addr := a.metrics.Addr()
+	if addr == "" {
+		t.Fatal("the collector reports no bound address after a successful startMetrics, so nothing " +
+			"bound a listener — the field is non-nil either way, which is how this shipped once already")
 	}
+	testhttp.SameHost(t, addr, configured, "the adapter's metrics endpoint")
 
 	body := testhttp.Get(t, addr, "/metrics", "the adapter bound no metrics listener")
 
@@ -75,6 +85,12 @@ func TestStartMetricsBindsTheEndpoint(t *testing.T) {
 // This is also the only way to turn the endpoint off now. `metrics_port: 0` used to look like a way,
 // and it was the worst of both: zero read as "unset" to the collector's defaulting, came back as 8080,
 // and got bound (#212). An address has no value that quietly means something else.
+//
+// FreeAddr is right here and wrong in the test above, for the same reason in both cases: it hands
+// back an address whose port has already been released. This test never binds it — the assertion is
+// that nothing does — so a competing ephemeral bind cannot make it wrong, since failing it requires
+// answering HTTP 200 on /metrics. And an address is needed before Start, which is what port 0
+// cannot give.
 func TestStartMetricsHonorsDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -110,7 +126,9 @@ func TestStartMetricsRejectsAnUnusableLabel(t *testing.T) {
 
 	cfg := config.NewDefault()
 	cfg.Monitoring.Metrics.Enabled = true
-	cfg.Monitoring.Metrics.Addr = testhttp.FreeAddr(t)
+	// Port 0 rather than an address from testhttp.FreeAddr: the registration this test is about fails
+	// in NewCollector, before anything binds, so the only requirement on this value is that it parses.
+	cfg.Monitoring.Metrics.Addr = "127.0.0.1:0"
 	// "operation" is a variable label on operations_total, errors_total and both histograms.
 	cfg.Monitoring.Metrics.CustomLabels = map[string]string{"operation": "read"}
 
