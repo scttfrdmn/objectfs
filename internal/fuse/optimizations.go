@@ -8,15 +8,16 @@ import (
 	"time"
 )
 
-// ReadAheadManager implements intelligent read-ahead strategies
+// ReadAheadManager implements intelligent read-ahead strategies.
+//
+// There is no Stop, and no stop channel. The mount context is the one shutdown signal — see
+// [NewReadAheadManager] for why, and #376 for why the second one is gone.
 type ReadAheadManager struct {
 	mu            sync.RWMutex
 	activeReads   map[string]*ReadPattern
 	fs            *FileSystem
 	config        *ReadAheadConfig
 	prefetchQueue chan *PrefetchRequest
-	stopCh        chan struct{}
-	stopOnce      sync.Once
 }
 
 // ReadAheadConfig configures read-ahead behavior.
@@ -87,14 +88,24 @@ func DefaultReadAheadConfig() ReadAheadConfig {
 // build its own context from context.Background(), which is the one context nothing can carry anything
 // into and nothing can cancel.
 //
-// And it is a second stop signal, which is the one that matters in production. [ReadAheadManager.Stop]
-// exists, is safe to call twice, and **is called by nothing outside tests** — not by
-// [MountManager.Unmount], not by Adapter.Stop, not by anything on the unmount path. Measured: five
-// goroutines per filesystem, `ConcurrentReads` prefetch workers plus the cleanup ticker, surviving
-// every unmount for the life of the process. A long-running host that mounts and unmounts — which is
-// what the mount watcher's remount does — accumulates them, each still holding its FileSystem, its
-// backend and its cache reachable. Canceling ctx now stops them, so the adapter's existing
-// cancelMount() on the unmount path is the fix without a new call anyone has to remember to make.
+// And it is the shutdown signal — the only one there is. Cancel it and the prefetch workers and the
+// cleanup ticker return; there is nothing else to call, which is the point.
+//
+// That is the resolution of #376, and it is a deletion rather than a wiring-up. There was a `Stop`,
+// exported, `sync.Once`-guarded, closing a channel both workers selected on — and called by nothing
+// outside tests: not [MountManager.Unmount], not Adapter.Stop, not anything on the unmount path.
+// Measured: five goroutines per filesystem, `ConcurrentReads` prefetch workers plus the cleanup ticker,
+// surviving every unmount for the life of the process, each holding its FileSystem and through it the
+// backend and the cache. A long-running host that remounts, which is what the mount watcher does,
+// accumulated them.
+//
+// The mount context fixed that. What was left was an exported lifecycle method production never called,
+// and calling it from Unmount was rejected because it reintroduces the "someone must remember this on
+// every mount path" obligation whose being missed was the leak. The remaining case for keeping it was
+// that a test might need to stop a manager whose context it does not own — but neutering the channel's
+// select arm broke no test, so no test needed it either. A second shutdown path with no caller on either
+// side is not a seam worth preserving: two ways to stop the same goroutines is how they came to be
+// stopped by neither.
 func NewReadAheadManager(ctx context.Context, fs *FileSystem, config *ReadAheadConfig) *ReadAheadManager {
 	if config == nil {
 		defaults := DefaultReadAheadConfig()
@@ -106,7 +117,6 @@ func NewReadAheadManager(ctx context.Context, fs *FileSystem, config *ReadAheadC
 		fs:            fs,
 		config:        config,
 		prefetchQueue: make(chan *PrefetchRequest, 100),
-		stopCh:        make(chan struct{}),
 	}
 
 	// Start prefetch workers
@@ -216,17 +226,14 @@ func (ram *ReadAheadManager) schedulePrefetch(path string, offset, size int64) {
 	}
 }
 
-// prefetchWorker handles prefetch requests until Stop closes stopCh or the mount's context ends.
+// prefetchWorker handles prefetch requests until the mount's context ends.
 //
-// Both, not either: Stop is what the tests call, and canceling the mount context is what actually
-// happens on the unmount path, since nothing in the tree calls Stop. See [NewReadAheadManager].
+// One shutdown signal, not two. See [NewReadAheadManager].
 func (ram *ReadAheadManager) prefetchWorker(mount context.Context) {
 	for {
 		select {
 		case req := <-ram.prefetchQueue:
 			ram.performPrefetch(mount, req)
-		case <-ram.stopCh:
-			return
 		case <-mount.Done():
 			return
 		}
@@ -323,7 +330,7 @@ func (ram *ReadAheadManager) performPrefetch(mount context.Context, req *Prefetc
 	}
 }
 
-// cleanupWorker removes expired patterns until Stop closes stopCh or the mount's context ends.
+// cleanupWorker removes expired patterns until the mount's context ends.
 func (ram *ReadAheadManager) cleanupWorker(mount context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -332,8 +339,6 @@ func (ram *ReadAheadManager) cleanupWorker(mount context.Context) {
 		select {
 		case <-ticker.C:
 			ram.cleanup()
-		case <-ram.stopCh:
-			return
 		case <-mount.Done():
 			return
 		}
@@ -351,11 +356,4 @@ func (ram *ReadAheadManager) cleanup() {
 			delete(ram.activeReads, path)
 		}
 	}
-}
-
-// Stop stops the read-ahead manager. Safe to call multiple times (#104).
-func (ram *ReadAheadManager) Stop() {
-	ram.stopOnce.Do(func() {
-		close(ram.stopCh)
-	})
 }
