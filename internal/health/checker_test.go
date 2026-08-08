@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/scttfrdmn/objectfs/internal/testhttp"
 )
 
 // This file covers the HTTP health endpoint and the Checker accessors around it.
@@ -313,24 +315,19 @@ func TestStartFailsWhenTheHealthAddressCannotBeBound(t *testing.T) {
 func TestStartServesTheEndpointWhereConfigured(t *testing.T) {
 	t.Parallel()
 
-	// A reserved-then-released address, because the address has to be known before Start binds it.
-	var lc net.ListenConfig
-
-	probe, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("cannot listen on loopback in this environment: %v", err)
-	}
-	addr := probe.Addr().String()
-	if err := probe.Close(); err != nil {
-		t.Fatalf("releasing the reserved address: %v", err)
-	}
+	// Port 0, read back through Addr. This used to reserve an ephemeral port, close it, and hand the
+	// address to Start — which returns the port to the kernel's pool in between, so anything else
+	// asking for an ephemeral port could be given it first and Start would fail to bind. That is not
+	// hypothetical: the same pattern in internal/testhttp.FreeAddr failed a CI run on the metrics
+	// side. The kernel picks at the moment of the bind, so there is no interval to lose.
+	const configured = "127.0.0.1:0"
 
 	checker, err := NewChecker(&Config{
 		Enabled:       true,
 		CheckInterval: time.Hour,
 		Timeout:       5 * time.Second,
 		HTTPEnabled:   true,
-		HTTPAddr:      addr,
+		HTTPAddr:      configured,
 		HTTPPath:      "/health",
 	})
 	if err != nil {
@@ -341,6 +338,15 @@ func TestStartServesTheEndpointWhereConfigured(t *testing.T) {
 		t.Fatalf("Start() error = %v", err)
 	}
 	t.Cleanup(func() { _ = checker.Stop() })
+
+	addr := checker.Addr()
+	if addr == "" {
+		t.Fatal("Start returned nil with http_enabled true, but Addr reports nothing bound")
+	}
+
+	// The host half is the assertion. A wildcard bind reports 0.0.0.0 or [::] here and never the
+	// configured loopback address, where a scrape of 127.0.0.1 passes against either.
+	testhttp.SameHost(t, addr, configured, "the health endpoint")
 
 	if code, _ := get(t, "http://"+addr+"/health"); code != http.StatusOK &&
 		code != http.StatusServiceUnavailable {

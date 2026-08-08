@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scrape. `FreeAddr` survives for the one caller that needs an address in advance and never binds it
   — the test asserting a disabled endpoint listens nowhere, which a competing bind cannot make pass.
 
+  `internal/health` had the same reserve-then-release pattern in the #211 regression test, not yet
+  triggered, and no way to fix it: nothing reported where the health listener bound. So
+  `health.Checker.Addr()` now exists, matching `metrics.Collector.Addr()` — which also means an
+  operator running the health endpoint on port 0 can find out where it went.
+
 ## [0.12.0] - 2026-08-08
 
 Coordination stops pretending. ObjectFS's distributed layer had a consistency taxonomy, a Raft log,
