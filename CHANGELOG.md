@@ -43,6 +43,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Storage" where the project targets AWS S3. Replaced with what varies, which is coordination, and a
   link to the probed matrix — plain filesystem use is unaffected on any S3-compatible endpoint.
 
+### Fixed
+
+- **A flaky test that failed a CI run, in a helper written to make tests reliable.**
+  `testhttp.FreeAddr` binds `127.0.0.1:0`, records the address and closes the listener — which
+  returns the port to the ephemeral pool, so the kernel is free to hand it to something else before
+  the caller binds it. In CI it did: `TestStartMetricsBindsTheEndpoint` failed with
+  `bind: address already in use` on a port the `miniredis` in `internal/adapter`'s own
+  `cache_selection_test.go` had been given in the interval. Nothing in the test was wrong; the
+  address was stale by the time it was used.
+
+  Every caller that binds now configures port 0 and reads back where the kernel put it, closing the
+  window rather than narrowing it. That means the bound port is not known in advance, so the
+  where-it-bound assertion is now `testhttp.SameHost` — which is the assertion [#211] always turned
+  on: `fmt.Sprintf(":%d", Port)` produced a *wildcard host*, publishing an unauthenticated
+  `/metrics` on every routable interface, and a wildcard bind reads back as `0.0.0.0` or `[::]`
+  rather than the loopback address configured. Verified by mutation: reintroducing the host-stripped
+  bind fails both wiring tests naming the wildcard, and deleting the `Serve` goroutine fails the
+  scrape. `FreeAddr` survives for the one caller that needs an address in advance and never binds it
+  — the test asserting a disabled endpoint listens nowhere, which a competing bind cannot make pass.
+
+  `internal/health` had the same reserve-then-release pattern in the #211 regression test, not yet
+  triggered, and no way to fix it: nothing reported where the health listener bound. So
+  `health.Checker.Addr()` now exists, matching `metrics.Collector.Addr()` — which also means an
+  operator running the health endpoint on port 0 can find out where it went.
+
 ## [0.12.0] - 2026-08-08
 
 Coordination stops pretending. ObjectFS's distributed layer had a consistency taxonomy, a Raft log,
