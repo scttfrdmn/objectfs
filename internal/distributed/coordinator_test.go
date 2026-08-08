@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
@@ -135,9 +136,12 @@ func TestNewCoordinator(t *testing.T) {
 	if c.loadBalancer == nil {
 		t.Fatal("loadBalancer is nil")
 	}
-	if c.replicator == nil {
-		t.Fatal("replicator is nil")
-	}
+
+	// There was a `c.replicator == nil` check here. #284 deleted the CacheReplicator, and this
+	// assertion is what let it survive: it proved a field had been assigned, which was the only thing
+	// about that subsystem that worked. Its worker sent peers a PUT of an object's own bytes back to
+	// itself, and when gossip was not running — which is every test in this file — it sent nothing and
+	// counted the bytes as replicated anyway.
 }
 
 // TestCoordinator_ExecuteOperation_NoAliveNodes verifies that ExecuteOperation
@@ -150,9 +154,8 @@ func TestCoordinator_ExecuteOperation_NoAliveNodes(t *testing.T) {
 	}
 
 	_, err = cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "k",
 	})
 	if err == nil {
 		t.Fatal("expected error with no alive nodes, got nil")
@@ -168,10 +171,9 @@ func TestCoordinator_ExecuteOperation_GeneratesID(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithNode(t, "gen-id-node")
 	op := &DistributedOperation{
-		ID:          "", // empty — should be generated
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyEventual,
+		ID:   "", // empty — should be generated
+		Type: OpTypeGet,
+		Key:  "k",
 	}
 
 	_, _ = cm.coordinator.ExecuteOperation(context.Background(), op)
@@ -184,22 +186,48 @@ func TestCoordinator_ExecuteOperation_GeneratesID(t *testing.T) {
 	}
 }
 
-// TestCoordinator_ExecuteOperation_AppliesDefaultConsistency verifies that an
-// operation with no consistency level gets the config default.
-func TestCoordinator_ExecuteOperation_AppliesDefaultConsistency(t *testing.T) {
+// TestCoordinator_ExecuteOperation_RejectsPreconditionOnNonPut verifies that a precondition attached
+// to anything but a put is refused rather than ignored.
+//
+// Ignoring it is the dangerous outcome and the one worth a test: a caller that means "delete only if
+// unchanged" and gets an unconditional delete has no way to find out. So this asserts the fail-closed
+// direction — an error, wrapping types.ErrInvalidPrecondition, and the backend untouched.
+//
+// It replaced TestCoordinator_ExecuteOperation_AppliesDefaultConsistency, which asserted that an
+// operation with no consistency level was assigned config.ConsistencyLevel. That is the defaulting
+// #284 deleted: the level it filled in selected how many nodes issued the same unconditional PUT, and
+// the test could not tell whether the value it read back had any effect.
+func TestCoordinator_ExecuteOperation_RejectsPreconditionOnNonPut(t *testing.T) {
 	t.Parallel()
-	cm := makeClusterWithNode(t, "def-cons-node")
-	op := &DistributedOperation{
-		Type: OpTypeGet,
-		Key:  "k",
-		// Consistency intentionally empty
-	}
 
-	_, _ = cm.coordinator.ExecuteOperation(context.Background(), op)
+	for _, opType := range []OperationType{OpTypeGet, OpTypeDelete, OpTypeList} {
+		t.Run(string(opType), func(t *testing.T) {
+			t.Parallel()
 
-	want := ConsistencyLevel(cm.coordinator.config.ConsistencyLevel)
-	if op.Consistency != want {
-		t.Errorf("Consistency = %q, want %q (config default)", op.Consistency, want)
+			cm := makeClusterWithBackend(t, "precond-"+string(opType))
+
+			result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
+				Type:         opType,
+				Key:          "k",
+				Precondition: types.Precondition{ETag: `"abc"`},
+			})
+			if err == nil {
+				t.Fatalf("ExecuteOperation returned nil error for a precondition on %s: it must be "+
+					"refused, never silently dropped", opType)
+			}
+			if !errors.Is(err, types.ErrInvalidPrecondition) {
+				t.Errorf("error %v does not wrap types.ErrInvalidPrecondition", err)
+			}
+			if result == nil {
+				t.Fatal("result is nil; the caller needs the reason as well as the error")
+			}
+			if result.Success {
+				t.Error("result.Success = true for a rejected operation")
+			}
+			if !strings.Contains(result.Error, string(opType)) {
+				t.Errorf("result.Error = %q should name the operation type", result.Error)
+			}
+		})
 	}
 }
 
@@ -209,9 +237,8 @@ func TestCoordinator_ExecuteOperation_AppliesDefaultTimeout(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithNode(t, "def-timeout-node")
 	op := &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "k",
 		// Timeout intentionally zero
 	}
 
@@ -228,9 +255,8 @@ func TestCoordinator_ExecuteOperation_AppliesDefaultRetries(t *testing.T) {
 	t.Parallel()
 	cm := makeClusterWithNode(t, "def-retry-node")
 	op := &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "k",
 		// Retries intentionally zero
 	}
 
@@ -241,16 +267,20 @@ func TestCoordinator_ExecuteOperation_AppliesDefaultRetries(t *testing.T) {
 	}
 }
 
-// TestCoordinator_ExecuteOperation_EventualConsistency_Get verifies a
-// successful GET with eventual consistency returns a result with data.
-func TestCoordinator_ExecuteOperation_EventualConsistency_Get(t *testing.T) {
+// TestCoordinator_ExecuteOperation_Get verifies a successful GET returns a result with data, a
+// latency, and the node that served it.
+//
+// This is one test where there were four. Three of them — _EventualConsistency_Get,
+// _SessionConsistency and _StrongConsistency — issued the same GET at the same three levels and
+// asserted result.Success, which is what the levels being three names for one behavior looks like
+// from the test side: none of them could have failed while the others passed.
+func TestCoordinator_ExecuteOperation_Get(t *testing.T) {
 	t.Parallel()
-	cm := makeClusterWithBackend(t, "ev-get-node")
+	cm := makeClusterWithBackend(t, "get-node")
 
 	result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "mykey",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "mykey",
 	})
 	if err != nil {
 		t.Fatalf("ExecuteOperation: %v", err)
@@ -267,19 +297,20 @@ func TestCoordinator_ExecuteOperation_EventualConsistency_Get(t *testing.T) {
 	if result.CompletedAt.IsZero() {
 		t.Error("result.CompletedAt should not be zero")
 	}
+	if len(result.NodeResults) != 1 {
+		t.Errorf("len(NodeResults) = %d, want 1: one node performs the operation", len(result.NodeResults))
+	}
 }
 
-// TestCoordinator_ExecuteOperation_EventualConsistency_Put verifies a
-// successful PUT with eventual consistency.
-func TestCoordinator_ExecuteOperation_EventualConsistency_Put(t *testing.T) {
+// TestCoordinator_ExecuteOperation_Put verifies a successful unconditional PUT.
+func TestCoordinator_ExecuteOperation_Put(t *testing.T) {
 	t.Parallel()
-	cm := makeClusterWithBackend(t, "ev-put-node")
+	cm := makeClusterWithBackend(t, "put-node")
 
 	result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypePut,
-		Key:         "mykey",
-		Data:        []byte("hello"),
-		Consistency: ConsistencyEventual,
+		Type: OpTypePut,
+		Key:  "mykey",
+		Data: []byte("hello"),
 	})
 	if err != nil {
 		t.Fatalf("ExecuteOperation: %v", err)
@@ -287,46 +318,200 @@ func TestCoordinator_ExecuteOperation_EventualConsistency_Put(t *testing.T) {
 	if !result.Success {
 		t.Errorf("result.Success = false, error: %s", result.Error)
 	}
-}
-
-// TestCoordinator_ExecuteOperation_SessionConsistency verifies session
-// consistency returns a result from the primary node.
-func TestCoordinator_ExecuteOperation_SessionConsistency(t *testing.T) {
-	t.Parallel()
-	cm := makeClusterWithBackend(t, "sess-node")
-
-	result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencySession,
-	})
-	if err != nil {
-		t.Fatalf("ExecuteOperation: %v", err)
-	}
-	if !result.Success {
-		t.Errorf("result.Success = false, error: %s", result.Error)
-	}
-	if len(result.NodeResults) == 0 {
-		t.Error("NodeResults should contain at least one entry")
+	if result.Conditional != "" {
+		t.Errorf("result.Conditional = %q, want empty for an unconditional write", result.Conditional)
 	}
 }
 
-// TestCoordinator_ExecuteOperation_StrongConsistency verifies that strong
-// consistency succeeds with a single alive node (majority = 1).
-func TestCoordinator_ExecuteOperation_StrongConsistency(t *testing.T) {
-	t.Parallel()
-	cm := makeClusterWithBackend(t, "strong-node")
+// makeClusterWithRealBackend is makeClusterWithBackend against a real S3 backend on an in-process
+// substrate endpoint, which is what a conditional write needs: mockBackend answers PutObjectIf with
+// types.ErrNotSupported on purpose, so a CAS cannot be exercised against it. The returned server is
+// the same one the cluster writes to, so a test can read the stored bytes back and count requests.
+func makeClusterWithRealBackend(t *testing.T, nodeID string) (*ClusterManager, *testaws.TestServer) {
+	t.Helper()
+	cm := makeClusterWithNode(t, nodeID)
+	srv := testaws.Start(t)
+	cm.SetBackend(srv.Backend())
+	return cm, srv
+}
 
-	result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyStrong,
+// TestCoordinator_ExecuteOperation_ConcurrentUpdate_OneWriterWins is the test #284 exists for: two
+// coordinators read the same object and both try to replace it, each asserting the ETag it read.
+//
+// Exactly one must succeed. The loser must get types.ErrPreconditionFailed and must not have written,
+// so the stored bytes are one writer's and not a splice or the loser's. Under the taxonomy this
+// replaced there was no test that could state this: `consistency_level: strong` issued the same
+// unconditional PutObject the other two levels did, N times, and the last writer won silently.
+func TestCoordinator_ExecuteOperation_ConcurrentUpdate_OneWriterWins(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	const key = "cas/contended"
+	cmA, srv := makeClusterWithRealBackend(t, "cas-a")
+	srv.PutObject(key, []byte("v0"))
+
+	// A second coordinator over the *same* endpoint, so both writes race one key in one bucket. A
+	// second substrate server would give each its own object and the race could not happen.
+	cmB := makeClusterWithNode(t, "cas-b")
+	cmB.SetBackend(srv.Backend())
+
+	info, err := srv.Backend().HeadObject(ctx, key)
+	if err != nil {
+		t.Fatalf("HeadObject: %v", err)
+	}
+	if info.ETag == "" {
+		t.Fatal("HeadObject returned an empty ETag: there is nothing for a CAS to assert on")
+	}
+
+	type outcome struct {
+		body string
+		res  *OperationResult
+		err  error
+	}
+	results := make(chan outcome, 2)
+
+	var start sync.WaitGroup
+	start.Add(1)
+	for _, w := range []struct {
+		cm   *ClusterManager
+		body string
+	}{{cmA, "written-by-a"}, {cmB, "written-by-b"}} {
+		go func() {
+			start.Wait()
+			res, err := w.cm.coordinator.ExecuteOperation(ctx, &DistributedOperation{
+				Type:         OpTypePut,
+				Key:          key,
+				Data:         []byte(w.body),
+				Precondition: types.Precondition{ETag: info.ETag},
+			})
+			results <- outcome{w.body, res, err}
+		}()
+	}
+	start.Done()
+
+	var winners, losers []outcome
+	for range 2 {
+		o := <-results
+		switch {
+		case o.err == nil && o.res.Success:
+			winners = append(winners, o)
+		case errors.Is(o.err, types.ErrPreconditionFailed):
+			losers = append(losers, o)
+		default:
+			t.Errorf("writer %q neither won nor lost on the precondition: err=%v result=%+v",
+				o.body, o.err, o.res)
+		}
+	}
+
+	if len(winners) != 1 {
+		t.Fatalf("%d writers succeeded, want exactly 1: both asserted the same ETag, so the second "+
+			"must be refused — two successes is a lost update", len(winners))
+	}
+	if len(losers) != 1 {
+		t.Fatalf("%d writers were refused, want exactly 1", len(losers))
+	}
+
+	won := winners[0]
+	if won.res.ETag == "" {
+		t.Error("the winning result carries no ETag: a CAS loop cannot continue without the new version")
+	}
+	if won.res.ETag == info.ETag {
+		t.Errorf("the winning ETag %q equals the pre-write ETag: the write did not change the version",
+			won.res.ETag)
+	}
+	if got := string(srv.GetObject(key)); got != won.body {
+		t.Errorf("stored bytes are %q, want %q from the writer that succeeded", got, won.body)
+	}
+
+	lost := losers[0]
+	if lost.res != nil && lost.res.Conditional != ConditionalLost {
+		t.Errorf("refused writer reports Conditional = %q, want %q",
+			lost.res.Conditional, ConditionalLost)
+	}
+}
+
+// TestCoordinator_ExecuteOperation_ETagOrdering verifies that each conditional write reports the ETag
+// of what it just stored, and that chaining a CAS from that ETag succeeds while replaying a stale one
+// fails. That is the whole contract a caller needs to build a read-modify-write loop, and it is what
+// the coordinator could not express before #284: PutObject returned no ETag at all.
+func TestCoordinator_ExecuteOperation_ETagOrdering(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	const key = "cas/chain"
+	cm, srv := makeClusterWithRealBackend(t, "etag-chain")
+
+	// Create it with an if-absent write, which is how a caller takes a key nobody holds.
+	created, err := cm.coordinator.ExecuteOperation(ctx, &DistributedOperation{
+		Type:         OpTypePut,
+		Key:          key,
+		Data:         []byte("gen-1"),
+		Precondition: types.Precondition{Absent: true},
 	})
 	if err != nil {
-		t.Fatalf("ExecuteOperation: %v", err)
+		t.Fatalf("if-absent create: %v", err)
 	}
-	if !result.Success {
-		t.Errorf("result.Success = false, error: %s", result.Error)
+	if created.ETag == "" {
+		t.Fatal("create returned no ETag")
+	}
+
+	// A second if-absent write must fail: the key is no longer absent.
+	if _, err := cm.coordinator.ExecuteOperation(ctx, &DistributedOperation{
+		Type:         OpTypePut,
+		Key:          key,
+		Data:         []byte("gen-1-again"),
+		Precondition: types.Precondition{Absent: true},
+	}); !errors.Is(err, types.ErrPreconditionFailed) {
+		t.Errorf("second if-absent write: err = %v, want types.ErrPreconditionFailed", err)
+	}
+
+	// Chain forward from the reported ETag. Each generation asserts the previous one and must be
+	// accepted, and must report a *different* ETag than the one it asserted.
+	etags := []string{created.ETag}
+	for gen := 2; gen <= 4; gen++ {
+		body := fmt.Sprintf("gen-%d", gen)
+		prev := etags[len(etags)-1]
+
+		res, err := cm.coordinator.ExecuteOperation(ctx, &DistributedOperation{
+			Type:         OpTypePut,
+			Key:          key,
+			Data:         []byte(body),
+			Precondition: types.Precondition{ETag: prev},
+		})
+		if err != nil {
+			t.Fatalf("CAS from the ETag the previous write reported (%s): %v", prev, err)
+		}
+		if res.ETag == "" {
+			t.Fatalf("%s stored but reported no ETag, so the chain cannot continue", body)
+		}
+		if res.ETag == prev {
+			t.Errorf("%s reports the ETag it asserted (%s); a changed object has a new version",
+				body, prev)
+		}
+		etags = append(etags, res.ETag)
+	}
+
+	if got := string(srv.GetObject(key)); got != "gen-4" {
+		t.Errorf("stored bytes are %q, want %q: the accepted chain is what the object should hold", got, "gen-4")
+	}
+
+	// Every ETag in the chain but the last is now stale, and asserting any of them must be refused —
+	// including the one two writes back, not merely the immediately previous one.
+	for i, stale := range etags[:len(etags)-1] {
+		if _, err := cm.coordinator.ExecuteOperation(ctx, &DistributedOperation{
+			Type:         OpTypePut,
+			Key:          key,
+			Data:         []byte("from-a-stale-read"),
+			Precondition: types.Precondition{ETag: stale},
+		}); !errors.Is(err, types.ErrPreconditionFailed) {
+			t.Errorf("write asserting generation %d's stale ETag %s: err = %v, want "+
+				"types.ErrPreconditionFailed", i+1, stale, err)
+		}
+	}
+
+	if got := string(srv.GetObject(key)); got != "gen-4" {
+		t.Errorf("stored bytes are %q after the refused writes, want %q: a refused CAS must not write",
+			got, "gen-4")
 	}
 }
 
@@ -346,7 +531,6 @@ func TestCoordinator_ExecuteOperation_ExplicitTargetNodes(t *testing.T) {
 	result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
 		Type:        OpTypeGet,
 		Key:         "k",
-		Consistency: ConsistencyEventual,
 		TargetNodes: []string{"target-1"},
 	})
 	if err != nil {
@@ -368,9 +552,8 @@ func TestCoordinator_ExecuteOperation_ListUsesLeader(t *testing.T) {
 	cm.SetLeader("list-node")
 
 	result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeList,
-		Key:         "prefix/",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeList,
+		Key:  "prefix/",
 	})
 	if err != nil {
 		t.Fatalf("ExecuteOperation: %v", err)
@@ -392,10 +575,18 @@ func TestCoordinator_GetStats_Structure(t *testing.T) {
 	if stats == nil {
 		t.Fatal("GetStats() returned nil")
 	}
-	for _, key := range []string{"active_operations", "replication", "load_balancer"} {
+	for _, key := range []string{"active_operations", "load_balancer"} {
 		if _, ok := stats[key]; !ok {
 			t.Errorf("stats missing key %q", key)
 		}
+	}
+
+	// And it must not report a "replication" key. #284 deleted the CacheReplicator whose six counters
+	// that key carried; asserting its absence is what stops the map from growing the key back with a
+	// zero value, which would read as "no replication happened" rather than "no such subsystem".
+	if _, ok := stats["replication"]; ok {
+		t.Error(`stats has a "replication" key: the CacheReplicator it reported was deleted in #284, ` +
+			`and it counted peers re-uploading an object to itself — incremented even when nothing was sent`)
 	}
 }
 
@@ -450,7 +641,6 @@ func TestCoordinator_ExecuteOperation_TwoNodes_RealUDP(t *testing.T) {
 	result, err := cm1.coordinator.ExecuteOperation(ctx, &DistributedOperation{
 		Type:        OpTypeGet,
 		Key:         "remote-key",
-		Consistency: ConsistencyEventual,
 		Timeout:     5 * time.Second,
 		TargetNodes: []string{"coord-node-b"},
 	})
@@ -1020,7 +1210,113 @@ func TestClusterManager_InvalidateCacheKey_NoGossip(t *testing.T) {
 	mc := &mockCache{}
 	cm.SetCache(mc)
 	// gossip.conn is nil (Start not called) — should not panic
-	cm.InvalidateCacheKey("foo")
+	cm.InvalidateCacheKey("foo", `"etag-1"`)
+}
+
+// TestGossip_CacheInvalidate_AppliesEachVersionOnce is requirement R4: an invalidation naming a
+// version already applied is discarded, and one naming a new version is applied.
+//
+// The receive path is exercised directly rather than over UDP, because what is under test is the
+// ledger and not the transport — TestClusterManager_CacheInvalidation_TwoNodes covers the wire. Going
+// over gossip here would make the assertion depend on retransmission timing, which is exactly the
+// nondeterminism the ledger exists to absorb.
+func TestGossip_CacheInvalidate_AppliesEachVersionOnce(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "inval-ledger")
+	mc := &mockCache{}
+	cm.SetCache(mc)
+
+	send := func(m CacheInvalidateMessage) {
+		t.Helper()
+		payload, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		cm.gossip.handleCacheInvalidate(&GossipMessage{
+			Type: MessageTypeCacheInvalidate,
+			From: "peer",
+			Data: payload,
+		})
+	}
+	deletes := func() []string {
+		mc.mu.Lock()
+		defer mc.mu.Unlock()
+
+		return slices.Clone(mc.deleted)
+	}
+
+	// The first invalidation for a version is applied; a retransmission of it is not. Gossip
+	// retransmits by design, so this arrives more than once whether or not anything is wrong.
+	send(CacheInvalidateMessage{Key: "k", ETag: `"v1"`})
+	send(CacheInvalidateMessage{Key: "k", ETag: `"v1"`})
+	if got := deletes(); !slices.Equal(got, []string{"k"}) {
+		t.Fatalf("deleted = %v, want one delete: a retransmitted invalidation for a version already "+
+			"applied must be discarded", got)
+	}
+
+	// A different version of the same key is a different write and is applied.
+	send(CacheInvalidateMessage{Key: "k", ETag: `"v2"`})
+	if got := deletes(); !slices.Equal(got, []string{"k", "k"}) {
+		t.Fatalf("deleted = %v, want two deletes: %q is a later write than %q", got, `"v2"`, `"v1"`)
+	}
+
+	// Replaying the superseded version must not evict again. This is the case the ETag exists for: the
+	// bytes this node holds may have been re-cached after v2, and applying v1's invalidation now would
+	// throw them away.
+	send(CacheInvalidateMessage{Key: "k", ETag: `"v1"`})
+	if got := deletes(); len(got) != 2 {
+		t.Errorf("deleted = %v, want the replay of %q discarded: it names a version already superseded",
+			got, `"v1"`)
+	}
+
+	// A different key with the same ETag string is a different entry. ETags are per-object, so a
+	// ledger keyed on the ETag alone would suppress a real invalidation here.
+	send(CacheInvalidateMessage{Key: "other", ETag: `"v1"`})
+	if got := deletes(); !slices.Contains(got, "other") {
+		t.Errorf("deleted = %v, want an eviction of \"other\": the ledger is keyed per key", got)
+	}
+
+	// An invalidation naming no version is applied every time. A delete has no ETag to name, and
+	// remembering "no version" as a version would drop every invalidation for a key after the first.
+	before := len(deletes())
+	send(CacheInvalidateMessage{Key: "k", Deleted: true})
+	send(CacheInvalidateMessage{Key: "k", Deleted: true})
+	if got := deletes(); len(got) != before+2 {
+		t.Errorf("deleted = %v, want both unversioned invalidations applied: evicting what you hold is "+
+			"always safe, and suppressing them would leave a deleted key cached", got)
+	}
+}
+
+// TestGossip_MarkInvalidationApplied_LedgerIsBounded verifies the ledger drops entries rather than
+// growing with every key the cluster has ever written, and that dropping costs at most a redundant
+// eviction.
+func TestGossip_MarkInvalidationApplied_LedgerIsBounded(t *testing.T) {
+	t.Parallel()
+
+	cm := makeClusterWithNode(t, "inval-bound")
+
+	for i := range maxInvalidationLedger * 2 {
+		cm.gossip.markInvalidationApplied(fmt.Sprintf("key-%d", i), `"v1"`)
+	}
+
+	cm.gossip.mu.RLock()
+	size := len(cm.gossip.appliedInvalidations)
+	cm.gossip.mu.RUnlock()
+
+	if size > maxInvalidationLedger {
+		t.Errorf("ledger holds %d entries after %d distinct keys, want at most %d: unbounded growth is "+
+			"a leak proportional to every key the cluster has written",
+			size, maxInvalidationLedger*2, maxInvalidationLedger)
+	}
+
+	// And the most recent key is still remembered, so eviction drops old entries rather than refusing
+	// new ones — a ledger that stopped recording once full would apply every duplicate from then on.
+	recent := fmt.Sprintf("key-%d", maxInvalidationLedger*2-1)
+	if first := cm.gossip.markInvalidationApplied(recent, `"v1"`); first {
+		t.Errorf("the ledger forgot %s, the key it recorded last: eviction must drop the oldest "+
+			"entries, not decline to record new ones", recent)
+	}
 }
 
 // TestClusterManager_CacheInvalidation_TwoNodes verifies that
@@ -1073,7 +1369,7 @@ func TestClusterManager_CacheInvalidation_TwoNodes(t *testing.T) {
 	}
 	cm1.gossip.mu.Unlock()
 
-	cm1.InvalidateCacheKey("foo")
+	cm1.InvalidateCacheKey("foo", `"etag-1"`)
 
 	// Wait up to 200ms for the message to arrive and be processed.
 	deadline := time.Now().Add(200 * time.Millisecond)

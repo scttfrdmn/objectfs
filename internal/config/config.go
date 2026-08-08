@@ -672,7 +672,17 @@ type S3CostOptimization struct {
 	SmallObjectsOnStandard bool `yaml:"small_objects_on_standard"`
 }
 
-// ClusterConfig represents distributed cluster settings
+// ClusterConfig represents distributed cluster settings.
+//
+// There was a `consistency_level` key here, taking "eventual", "strong" or "session", and #284
+// removed it. Because [Configuration.LoadFromFile] decodes strictly, a file that still sets it now
+// fails at startup naming the key and line — which is the intended outcome rather than a regression:
+// the alternative is accepting a setting that selects nothing.
+//
+// It selected nothing even before it was removed. All three levels issued the same unconditional
+// PutObject and differed only in how many nodes issued it, so what an operator picked changed the
+// request count and not the guarantee. What replaced it is per-operation rather than per-mount:
+// distributed.DistributedOperation.Precondition, evaluated by S3 on the one write it guards.
 type ClusterConfig struct {
 	Enabled           bool        `yaml:"enabled"`
 	NodeID            string      `yaml:"node_id"`
@@ -680,7 +690,6 @@ type ClusterConfig struct {
 	AdvertiseAddr     string      `yaml:"advertise_addr"`
 	SeedNodes         []string    `yaml:"seed_nodes"`
 	ReplicationFactor int         `yaml:"replication_factor"`
-	ConsistencyLevel  string      `yaml:"consistency_level"`
 	Redis             RedisConfig `yaml:"redis"`
 }
 
@@ -870,7 +879,6 @@ func NewDefault() *Configuration {
 			AdvertiseAddr:     "127.0.0.1:8080",
 			SeedNodes:         []string{},
 			ReplicationFactor: 3,
-			ConsistencyLevel:  "eventual",
 			Redis: RedisConfig{
 				Enabled:    false,
 				Address:    "localhost:6379",

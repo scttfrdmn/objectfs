@@ -74,9 +74,7 @@ func TestClusterManager_BasicOperations(t *testing.T) {
 		HeartbeatInterval: 500 * time.Millisecond,
 		GossipInterval:    100 * time.Millisecond,
 		GossipFanout:      2,
-		CacheReplication:  true,
 		ReplicationFactor: 1,
-		ConsistencyLevel:  "eventual",
 		MaxConcurrentOps:  10,
 		OperationTimeout:  5 * time.Second,
 		RetryAttempts:     2,
@@ -106,12 +104,21 @@ func TestClusterManager_BasicOperations(t *testing.T) {
 		t.Error("Node should not be leader initially in single-node cluster")
 	}
 
-	// Wait a bit for election timeout
-	time.Sleep(3 * time.Second)
-
-	// Now should be leader
-	if !cm.IsLeader() {
-		t.Error("Node should become leader after election timeout")
+	// Poll until this node wins, rather than sleeping for one election timeout and asserting.
+	//
+	// A `time.Sleep(3 * time.Second)` was here, against ElectionTimeout: 2s. The randomized timeout is
+	// base plus up to 100% jitter — see distributed.electionTimeout, and Raft §5.2 for why the jitter
+	// has to be that wide — so the first election fires somewhere in [2s, 4s) and a 3s sleep is a coin
+	// flip. Observed failing 1 run in 4. Waiting for the upper bound instead of the middle is what makes
+	// this deterministic; a deadline generous enough to cover the whole range costs nothing when the
+	// election is quick, because the loop returns as soon as it wins.
+	deadline := time.Now().Add(4*config.ElectionTimeout + time.Second)
+	for !cm.IsLeader() {
+		if time.Now().After(deadline) {
+			t.Fatalf("node did not become leader within %v: an uncontested single-node election has no "+
+				"other candidate to lose to", 4*config.ElectionTimeout+time.Second)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	// Verify node is in the member list
@@ -145,7 +152,6 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 		ListenAddr:       "127.0.0.1:18081",
 		AdvertiseAddr:    "127.0.0.1:18081",
 		ElectionTimeout:  time.Second,
-		ConsistencyLevel: "eventual",
 		OperationTimeout: 5 * time.Second,
 		RetryAttempts:    2,
 	}
@@ -159,7 +165,7 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 
 	// The operation below is a GET, so the key has to exist. Seeded through the raw SDK rather than
 	// through the coordinator: a test that both writes and reads through the layer under test cannot
-	// tell a symmetric encoding bug from correct behaviour.
+	// tell a symmetric encoding bug from correct behavior.
 	const (
 		key  = "test-key"
 		body = "distributed-operation-payload"
@@ -178,10 +184,9 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 
 	// Create a distributed operation
 	op := &distributed.DistributedOperation{
-		Type:        distributed.OpTypeGet,
-		Key:         key,
-		Consistency: distributed.ConsistencyEventual,
-		Timeout:     3 * time.Second,
+		Type:    distributed.OpTypeGet,
+		Key:     key,
+		Timeout: 3 * time.Second,
 	}
 
 	// Execute operation
@@ -225,10 +230,9 @@ func TestClusterManager_DistributedOperation(t *testing.T) {
 	// reconciliation in ExecuteOperation is removed — the assertion the counters could not make while
 	// every operation in this file failed for the same reason (#269).
 	failed, err := cm.DistributeOperation(ctx, &distributed.DistributedOperation{
-		Type:        distributed.OpTypeGet,
-		Key:         "a-key-that-was-never-written",
-		Consistency: distributed.ConsistencyEventual,
-		Timeout:     3 * time.Second,
+		Type:    distributed.OpTypeGet,
+		Key:     "a-key-that-was-never-written",
+		Timeout: 3 * time.Second,
 	})
 	if err == nil {
 		t.Error("DistributeOperation returned a nil error for a GET of a key that does not exist")
@@ -287,15 +291,17 @@ func TestConsensusEngine_LeaderElection(t *testing.T) {
 		t.Error("Node should become leader after election")
 	}
 
-	// Test leadership change proposal
-	err = cm.ProposeLeadershipChange(ctx, "new-leader-id")
-	if err != nil {
-		t.Errorf("Failed to propose leadership change: %v", err)
+	// And it names itself, which is the part IsLeader does not check: a node that wins an election has
+	// to record *which* node holds leadership, not merely that it does.
+	//
+	// This was a ProposeLeadershipChange(ctx, "new-leader-id") followed by a t.Logf of the result, and
+	// it asserted nothing — its own comment said the leader "won't actually change". #284 deleted that
+	// method along with the proposal machinery: a node cannot be made leader by being named, and the
+	// path reached the same SetLeader the election below already reached, after voting for itself.
+	if leader := cm.GetLeader(); leader != config.NodeID {
+		t.Errorf("GetLeader() = %q, want %q: the winner of an uncontested election is this node",
+			leader, config.NodeID)
 	}
-
-	// Verify leader changed (in this simple case it won't actually change since we don't have other nodes)
-	currentLeader := cm.GetLeader()
-	t.Logf("Current leader after proposal: %s", currentLeader)
 }
 
 func TestGossipProtocol_BasicFunctionality(t *testing.T) {
@@ -360,7 +366,6 @@ func TestLoadBalancer_NodeSelection(t *testing.T) {
 		NodeID:           "lb-test-1",
 		SecretFile:       writeClusterSecret(t),
 		MaxConcurrentOps: 5,
-		ConsistencyLevel: "eventual",
 
 		// One replica, so the selected set is the primary alone. At 2 the second replica is one of the
 		// unreachable peers below, and strong consistency would require it.
@@ -402,7 +407,7 @@ func TestLoadBalancer_NodeSelection(t *testing.T) {
 	coordinator := cm.GetCoordinator()
 
 	// A GET needs its key to exist. Seeded through the raw SDK rather than through the coordinator, so
-	// that a symmetric encoding bug cannot pass as correct behaviour.
+	// that a symmetric encoding bug cannot pass as correct behavior.
 	const (
 		getKey  = "test-get-key"
 		getBody = "load-balanced-read-payload"
@@ -410,10 +415,9 @@ func TestLoadBalancer_NodeSelection(t *testing.T) {
 	srv.PutObject(getKey, []byte(getBody))
 
 	getOp := &distributed.DistributedOperation{
-		Type:        distributed.OpTypeGet,
-		Key:         getKey,
-		Consistency: distributed.ConsistencyEventual,
-		Timeout:     5 * time.Second,
+		Type:    distributed.OpTypeGet,
+		Key:     getKey,
+		Timeout: 5 * time.Second,
 	}
 
 	raw, err := coordinator.ExecuteOperation(ctx, getOp)
@@ -446,11 +450,10 @@ func TestLoadBalancer_NodeSelection(t *testing.T) {
 	}
 
 	putOp := &distributed.DistributedOperation{
-		Type:        distributed.OpTypePut,
-		Key:         "test-put-key",
-		Data:        []byte("test data"),
-		Consistency: distributed.ConsistencyStrong,
-		Timeout:     5 * time.Second,
+		Type:    distributed.OpTypePut,
+		Key:     "test-put-key",
+		Data:    []byte("test data"),
+		Timeout: 5 * time.Second,
 
 		// Pinned, because the GET above has just raised the local node's load and StrategyLeastLoad will
 		// therefore route this elsewhere — to one of the four peers that do not exist. That is the
@@ -495,6 +498,12 @@ func TestMultiNodeCluster(t *testing.T) {
 	nodeCount := 3
 	clusters := make([]*distributed.ClusterManager, nodeCount)
 
+	// One endpoint per node, kept rather than discarded, so the write below can be located. Three
+	// separate substrate servers is what makes "which node performed it" answerable at all: with one
+	// shared endpoint every node's PUT lands in the same bucket and a fan-out is indistinguishable from
+	// a single write.
+	servers := make([]*testaws.TestServer, nodeCount)
+
 	// One secret for the whole cluster, not one per node. Gossip authentication (#206) uses a
 	// shared cluster secret, so three different secrets would produce three clusters of one —
 	// which is the failure this test exists to distinguish from a working cluster.
@@ -520,7 +529,6 @@ func TestMultiNodeCluster(t *testing.T) {
 			HeartbeatInterval: 200 * time.Millisecond,
 			GossipInterval:    100 * time.Millisecond,
 			GossipFanout:      2,
-			ConsistencyLevel:  "strong",
 			ReplicationFactor: 2,
 
 			// MaxGossipPacket is deliberately left at its default. It used to be set to 65507 here, to
@@ -537,9 +545,10 @@ func TestMultiNodeCluster(t *testing.T) {
 			t.Fatalf("Failed to create cluster manager %d: %v", i, err)
 		}
 
-		// Every node, not only the one that turns out to be leader: ConsistencyStrong fans the write out
-		// to peers, so a node without a backend fails the operation for the whole cluster (#269).
-		withBackend(t, cm)
+		// Every node, not only the one that turns out to be leader. The operation is routed by
+		// selectTargetNodes rather than to the leader, so any of the three may be the one that executes
+		// it, and a node without a backend fails the operation (#269).
+		servers[i] = withBackend(t, cm)
 
 		clusters[i] = cm
 
@@ -586,12 +595,16 @@ func TestMultiNodeCluster(t *testing.T) {
 	}
 
 	// Test distributed operation on leader
+	const (
+		multiKey  = "multi-node-test-key"
+		multiBody = "distributed test data"
+	)
+
 	op := &distributed.DistributedOperation{
-		Type:        distributed.OpTypePut,
-		Key:         "multi-node-test-key",
-		Data:        []byte("distributed test data"),
-		Consistency: distributed.ConsistencyStrong,
-		Timeout:     5 * time.Second,
+		Type:    distributed.OpTypePut,
+		Key:     multiKey,
+		Data:    []byte(multiBody),
+		Timeout: 5 * time.Second,
 	}
 
 	result, err := leader.DistributeOperation(ctx, op)
@@ -600,7 +613,34 @@ func TestMultiNodeCluster(t *testing.T) {
 	}
 
 	if result == nil || !result.Success {
-		t.Errorf("Expected successful operation, got: %v", result)
+		t.Fatalf("Expected successful operation, got: %v", result)
+	}
+
+	// One PUT, on one node, across a three-node cluster with ReplicationFactor 2.
+	//
+	// This is the assertion #284 is for, and it is why each node has its own endpoint. The operation
+	// used to run at ConsistencyStrong, which fanned the identical bytes at the identical key to every
+	// selected node and declared success on a majority — so a cluster of three at replication factor 2
+	// issued two PUTs of the same object and billed both. Counting writes per endpoint is what tells
+	// those apart; result.Success cannot, and neither could the old test, which asserted only that.
+	//
+	// Summed rather than checked node-by-node because which node executes is the load balancer's
+	// choice, and pinning it here would assert the routing rather than the request count.
+	writes := 0
+	for i, srv := range servers {
+		n := len(srv.Writes(multiKey))
+		writes += n
+
+		if n > 0 && string(srv.GetObject(multiKey)) != multiBody {
+			t.Errorf("node %d stored %q for %s, want %q",
+				i, srv.GetObject(multiKey), multiKey, multiBody)
+		}
+	}
+
+	if writes != 1 {
+		t.Errorf("the cluster issued %d PUTs of %s, want 1: there is one copy of the bytes and S3 "+
+			"holds it, so a second node writing the same key again is a billed request and no guarantee",
+			writes, multiKey)
 	}
 
 	// Verify stats across cluster
@@ -622,7 +662,6 @@ func TestConcurrentOperations(t *testing.T) {
 		AdvertiseAddr:    "127.0.0.1:18090",
 		ElectionTimeout:  time.Second,
 		MaxConcurrentOps: 20,
-		ConsistencyLevel: "eventual",
 		OperationTimeout: 2 * time.Second,
 	}
 
@@ -657,10 +696,9 @@ func TestConcurrentOperations(t *testing.T) {
 			defer wg.Done()
 
 			op := &distributed.DistributedOperation{
-				Type:        distributed.OpTypeGet,
-				Key:         fmt.Sprintf("concurrent-key-%d", opID),
-				Consistency: distributed.ConsistencyEventual,
-				Timeout:     time.Second,
+				Type:    distributed.OpTypeGet,
+				Key:     fmt.Sprintf("concurrent-key-%d", opID),
+				Timeout: time.Second,
 			}
 
 			result, err := cm.DistributeOperation(ctx, op)
@@ -723,7 +761,6 @@ func BenchmarkDistributedOperations(b *testing.B) {
 		SecretFile:       writeClusterSecret(b),
 		ElectionTimeout:  500 * time.Millisecond,
 		MaxConcurrentOps: 100,
-		ConsistencyLevel: "eventual",
 		OperationTimeout: time.Second,
 	}
 
@@ -748,10 +785,9 @@ func BenchmarkDistributedOperations(b *testing.B) {
 		opID := 0
 		for pb.Next() {
 			op := &distributed.DistributedOperation{
-				Type:        distributed.OpTypeGet,
-				Key:         fmt.Sprintf("bench-key-%d", opID%1000),
-				Consistency: distributed.ConsistencyEventual,
-				Timeout:     500 * time.Millisecond,
+				Type:    distributed.OpTypeGet,
+				Key:     fmt.Sprintf("bench-key-%d", opID%1000),
+				Timeout: 500 * time.Millisecond,
 			}
 
 			result, err := cm.DistributeOperation(ctx, op)

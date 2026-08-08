@@ -64,10 +64,18 @@ type ClusterConfig struct {
 	// [NewGossipProtocol].
 	SecretFile string `yaml:"secret_file"`
 
-	// Cache coordination
-	CacheReplication  bool   `yaml:"cache_replication"`
-	ReplicationFactor int    `yaml:"replication_factor"`
-	ConsistencyLevel  string `yaml:"consistency_level"` // "eventual", "strong", "session"
+	// ReplicationFactor is how many nodes [Coordinator.selectTargetNodes] returns for an operation.
+	//
+	// Only the first is used — see [Coordinator.executeOnce] — because there is one copy of the bytes
+	// and S3 holds it. The rest are the preference order a follow-on strategy that genuinely needs
+	// peers would consume, so this is a selection width rather than a count of copies made.
+	ReplicationFactor int `yaml:"replication_factor"`
+
+	// #284 removed two keys from this block. `consistency_level` took "eventual", "strong" or
+	// "session", and all three issued the same unconditional PutObject — see
+	// [DistributedOperation.Precondition] for what replaced it. `cache_replication` was a bool read by
+	// no code in the repository, and the subsystem whose name it carried put an object's own bytes back
+	// to itself on N-1 peers; both it and the CacheReplicator are gone. Actual cache warming is #141.
 
 	// Performance settings
 	MaxConcurrentOps int           `yaml:"max_concurrent_ops"`
@@ -212,9 +220,6 @@ func applyConfigDefaults(config *ClusterConfig) {
 	if config.ReplicationFactor == 0 {
 		config.ReplicationFactor = 3
 	}
-	if config.ConsistencyLevel == "" {
-		config.ConsistencyLevel = "eventual"
-	}
 	if config.MaxConcurrentOps == 0 {
 		config.MaxConcurrentOps = 100
 	}
@@ -232,17 +237,16 @@ func applyConfigDefaults(config *ClusterConfig) {
 // NewClusterManager creates a new cluster manager
 func NewClusterManager(config *ClusterConfig) (*ClusterManager, error) {
 	if config == nil {
-		// CacheReplication only, and then applyConfigDefaults below fills the rest.
+		// Empty, and then applyConfigDefaults below fills every field.
 		//
 		// This used to restate all sixteen fields, every one of which applyConfigDefaults sets to the
-		// same value two lines later — so the literal was dead except for this one field, and the
-		// duplication was live: MaxGossipPacket appeared here as 1024 and had to be changed in two
-		// places, which is how a stale copy of a default survives a fix to the default (#277).
-		//
-		// CacheReplication is the exception because it is a bool whose default is true, and a bool's
-		// zero value is indistinguishable from "not set" — so applyConfigDefaults cannot express it and
-		// a caller passing nil is the only case where the intent is known.
-		config = &ClusterConfig{CacheReplication: true}
+		// same value two lines later — so the literal was dead, and the duplication was live:
+		// MaxGossipPacket appeared here as 1024 and had to be changed in two places, which is how a
+		// stale copy of a default survives a fix to the default (#277). One field, CacheReplication,
+		// then had to stay because it was a bool defaulting to true and a bool's zero value cannot be
+		// told from "not set"; #284 deleted that field with the replicator it named, so there is nothing
+		// left here that applyConfigDefaults cannot express.
+		config = &ClusterConfig{}
 	}
 
 	// Apply defaults for zero-valued fields
@@ -464,21 +468,15 @@ func (cm *ClusterManager) DistributeOperation(ctx context.Context, op *Distribut
 	return result, err
 }
 
-// ProposeLeadershipChange proposes a leadership change
-func (cm *ClusterManager) ProposeLeadershipChange(ctx context.Context, newLeader string) error {
-	if cm.consensus == nil {
-		return fmt.Errorf("consensus engine not initialized")
-	}
-
-	proposal := &ConsensusProposal{
-		Type:      ProposalTypeLeadershipChange,
-		Data:      []byte(newLeader),
-		Proposer:  cm.nodeID,
-		Timestamp: time.Now(),
-	}
-
-	return cm.consensus.ProposeChange(ctx, proposal)
-}
+// There was a ProposeLeadershipChange here, and #284 deleted it with the proposal machinery it was
+// the only caller of. It built a ConsensusProposal naming a node and handed it to
+// ConsensusEngine.ProposeChange, which broadcast it — meaning it slept 100ms and then voted for its
+// own proposal, so a majority of one was found and executeProposal called ClusterManager.SetLeader.
+//
+// A node cannot be made leader by being named. [ConsensusEngine] contests leadership with terms,
+// votes and a randomized election timeout, and that path reaches SetLeader having actually won; a
+// second path that reaches the same setter after a self-vote does not transfer leadership, it just
+// overwrites one node's opinion of who holds it. Nothing outside a test called this.
 
 // Internal methods
 
@@ -820,9 +818,31 @@ func (cm *ClusterManager) SetCache(c types.Cache) {
 	cm.mu.Unlock()
 }
 
-// InvalidateCacheKey broadcasts a cache-invalidate message to all alive peers,
-// causing each peer to evict the given key from its local cache.
-func (cm *ClusterManager) InvalidateCacheKey(key string) {
+// InvalidateCacheKey broadcasts a cache-invalidate message to all alive peers, causing each peer to
+// evict key from its local cache.
+//
+// etag names the version the caller just wrote, and should be [OperationResult.ETag] from the write
+// that prompted this. Passing it is what lets a receiver discard an invalidation it has already
+// applied: gossip is unordered and retransmits, so an unversioned invalidation can be replayed after a
+// later one and evict bytes the peer has since legitimately re-cached (requirement R4 of
+// docs/design/conditional-writes-vs-raft.md §1).
+//
+// Empty is allowed and means the caller cannot name a version — an unconditional put whose ETag was
+// not read back. Such a message is applied by every receiver every time, which is safe but wasteful,
+// so prefer a conditional write's reported ETag where there is one.
+func (cm *ClusterManager) InvalidateCacheKey(key, etag string) {
+	cm.invalidateCacheKey(CacheInvalidateMessage{Key: key, ETag: etag})
+}
+
+// InvalidateDeletedCacheKey is InvalidateCacheKey for a key that was removed rather than replaced.
+//
+// It exists because a receiver cannot tell the two apart from the ETag: a delete has no version to
+// name, and neither does an unconditional put, so an empty ETag alone is ambiguous.
+func (cm *ClusterManager) InvalidateDeletedCacheKey(key string) {
+	cm.invalidateCacheKey(CacheInvalidateMessage{Key: key, Deleted: true})
+}
+
+func (cm *ClusterManager) invalidateCacheKey(m CacheInvalidateMessage) {
 	cm.mu.RLock()
 	gossip := cm.gossip
 	nodeID := cm.nodeID
@@ -831,7 +851,9 @@ func (cm *ClusterManager) InvalidateCacheKey(key string) {
 	if gossip == nil {
 		return
 	}
-	payload, err := json.Marshal(CacheInvalidateMessage{Key: key, From: nodeID})
+
+	m.From = nodeID
+	payload, err := json.Marshal(m)
 	if err != nil {
 		return
 	}

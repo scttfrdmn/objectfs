@@ -511,7 +511,6 @@ func createTestConfig() *config.Configuration {
 			AdvertiseAddr:     "127.0.0.1:8080",
 			SeedNodes:         []string{},
 			ReplicationFactor: 3,
-			ConsistencyLevel:  "eventual",
 		},
 	}
 }

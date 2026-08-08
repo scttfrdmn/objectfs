@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/objectfs/internal/testaws"
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
@@ -125,9 +126,6 @@ func TestNewClusterManager_ConfigDefaults(t *testing.T) {
 	}
 	if cfg.ReplicationFactor == 0 {
 		t.Error("ReplicationFactor should have a default")
-	}
-	if cfg.ConsistencyLevel == "" {
-		t.Error("ConsistencyLevel should have a default")
 	}
 	if cfg.OperationTimeout == 0 {
 		t.Error("OperationTimeout should have a default")
@@ -427,9 +425,8 @@ func TestClusterManager_DistributeOperation_NoNodes(t *testing.T) {
 	}
 
 	op := &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "test-key",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "test-key",
 	}
 	_, err = cm.DistributeOperation(context.Background(), op)
 	if err == nil {
@@ -802,9 +799,8 @@ func TestDistributeOperation_FailedOperationCountsAsFailed(t *testing.T) {
 	cm.SetBackend(&errBackend{err: errors.New("s3: AccessDenied")})
 
 	result, err := cm.DistributeOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "k",
 	})
 
 	if err == nil {
@@ -842,9 +838,8 @@ func TestDistributeOperation_SucceededOperationCountsAsSuccessful(t *testing.T) 
 	cm := makeClusterWithBackend(t, "acct-ok-node")
 
 	result, err := cm.DistributeOperation(context.Background(), &DistributedOperation{
-		Type:        OpTypeGet,
-		Key:         "k",
-		Consistency: ConsistencyEventual,
+		Type: OpTypeGet,
+		Key:  "k",
 	})
 	if err != nil {
 		t.Fatalf("DistributeOperation: %v", err)
@@ -862,36 +857,55 @@ func TestDistributeOperation_SucceededOperationCountsAsSuccessful(t *testing.T) 
 	}
 }
 
-// TestDistributeOperation_ErrorAndSuccessNeverDisagree checks the invariant itself across every
-// consistency level and both outcomes, rather than the two counters that happen to read it today.
+// TestDistributeOperation_ErrorAndSuccessNeverDisagree checks the invariant itself across every shape
+// of operation and both outcomes, rather than the two counters that happen to read it today.
 //
-// This is the assertion that would have caught the defect at any of the three executors: the fix is
-// at one choke point precisely so a fourth level cannot reintroduce the disagreement, and this is
-// what would notice if one did.
+// This is the assertion that would have caught the defect at any of the executors, and the fix is at
+// one choke point precisely so a new path cannot reintroduce the disagreement. The dimension used to
+// be the three consistency levels; #284 deleted those, and what varies now is what actually reaches a
+// different backend method — an unconditional put, a conditional one, and a read.
 func TestDistributeOperation_ErrorAndSuccessNeverDisagree(t *testing.T) {
 	t.Parallel()
 
-	levels := []ConsistencyLevel{ConsistencyEventual, ConsistencySession, ConsistencyStrong}
+	shapes := []struct {
+		name string
+		op   DistributedOperation
+	}{
+		{"get", DistributedOperation{Type: OpTypeGet, Key: "k"}},
+		{"put", DistributedOperation{Type: OpTypePut, Key: "k", Data: []byte("v")}},
+		{"put-if", DistributedOperation{
+			Type:         OpTypePut,
+			Key:          "k",
+			Data:         []byte("v"),
+			Precondition: types.Precondition{Absent: true},
+		}},
+	}
 
-	for _, level := range levels {
+	for _, shape := range shapes {
 		for _, failing := range []bool{false, true} {
-			name := fmt.Sprintf("%s/failing=%v", level, failing)
+			name := fmt.Sprintf("%s/failing=%v", shape.name, failing)
 
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 
-				cm := makeClusterWithNode(t, fmt.Sprintf("agree-%s-%v", level, failing))
+				cm := makeClusterWithNode(t, fmt.Sprintf("agree-%s-%v", shape.name, failing))
 				if failing {
 					cm.SetBackend(&errBackend{err: errors.New("s3: ServiceUnavailable")})
 				} else {
-					cm.SetBackend(&mockBackend{})
+					// A real backend for the succeeding half, not mockBackend, because one of the three
+					// shapes is a conditional write and mockBackend answers PutObjectIf with
+					// ErrNotSupported — deliberately, so that no coordination test can conclude
+					// exactly-one-writer against a stub that never excluded anybody. A stub cannot both
+					// refuse to fake a CAS and serve as the success case for one.
+					srv := testaws.Start(t)
+					if shape.op.Type == OpTypeGet {
+						srv.PutObject(shape.op.Key, []byte("v"))
+					}
+					cm.SetBackend(srv.Backend())
 				}
 
-				result, err := cm.coordinator.ExecuteOperation(context.Background(), &DistributedOperation{
-					Type:        OpTypeGet,
-					Key:         "k",
-					Consistency: level,
-				})
+				op := shape.op
+				result, err := cm.coordinator.ExecuteOperation(context.Background(), &op)
 				if result == nil {
 					t.Fatal("result is nil")
 				}
