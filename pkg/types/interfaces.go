@@ -111,13 +111,54 @@ type Backend interface {
 	HealthCheck(ctx context.Context) error
 }
 
-// DistributedCoordinator manages distributed operations across cluster nodes
+// DistributedCoordinator runs an operation on a cluster node and lets nodes tell each other what they
+// have cached.
+//
+// The two halves are separate on purpose. ExecuteOperation is about a single operation against the
+// object store, where correctness comes from the store evaluating a precondition — see
+// [Backend.PutObjectIf]. The cache-coordination methods are about which node holds which bytes, which
+// is an optimization: every one of them may fail, and a caller that treats a failure as fatal has
+// turned a slower read into no read. What they must never do is succeed without doing the work, which
+// is why implementations that cannot perform one return [ErrNotSupported] rather than nil.
 type DistributedCoordinator interface {
 	// Execute a distributed operation
 	ExecuteOperation(ctx context.Context, op any) (any, error)
 
 	// Get coordinator statistics
 	GetStats() map[string]any
+
+	// AnnounceKey tells peers this node has ann's bytes cached, so a peer can fetch from here instead of
+	// from the object store.
+	//
+	// Best-effort by nature: it is one message on an unreliable transport, and a peer that never hears
+	// it reads from S3, which is correct and merely slower. A returned error means the announcement was
+	// not sent, not that peers rejected it — there is no acknowledgement to wait for.
+	AnnounceKey(ctx context.Context, ann KeyAnnouncement) error
+
+	// QueryKeyOwnership reports the peers claiming to hold key, freshest information first where the
+	// implementation can order it.
+	//
+	// An empty slice and a nil error is the ordinary answer for a key nobody has cached, and callers
+	// must treat it as "read from the store" rather than as "the key does not exist" — this reports what
+	// is cached, and says nothing about what the bucket contains.
+	//
+	// Every returned [KeyAnnouncement] is a claim by another node, not a verified fact. A caller that
+	// fetches from a claimed holder must check what it receives against the ETag it wanted, because a
+	// holder can have evicted, replaced, or never held the bytes it announced.
+	QueryKeyOwnership(ctx context.Context, key string) ([]KeyAnnouncement, error)
+
+	// InvalidateKey tells peers to evict key, because the version named by etag replaced what they hold.
+	//
+	// etag is the version the caller wrote — the ETag reported by the write itself, not one from a
+	// later HeadObject, which could name a third node's subsequent write. It is what lets a receiver
+	// apply an invalidation exactly once: gossip retransmits and reorders, so a bare key leaves a
+	// receiver unable to distinguish an invalidation it has already acted on from one it has not.
+	//
+	// An empty etag is legal and means the caller cannot name a version — a delete, or an unconditional
+	// write whose ETag was not read back. Every receiver then applies the invalidation every time, which
+	// costs a redundant eviction and can never serve stale bytes. Prefer a real ETag where there is one;
+	// never invent one to fill the field.
+	InvalidateKey(ctx context.Context, key, etag string) error
 }
 
 // Cache defines the caching interface for byte ranges of objects.

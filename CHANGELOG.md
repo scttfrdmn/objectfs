@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`types.DistributedCoordinator` can say where bytes are cached, and `types.KeyAnnouncement` is what
+  it says it with** ([#129]). Three methods — `AnnounceKey`, `QueryKeyOwnership`, and
+  `InvalidateKey(ctx, key, etag)` — beside the two the interface already had. This is the surface the
+  whole v0.13.0 cache-warming chain ([#140], [#141], [#142], [#143]) was blocked on, none of which
+  could begin while a coordinator had no way to express "this node holds these bytes at this version".
+
+  **The two unimplemented methods return `types.ErrNotSupported`, not `nil`.** The issue as filed said
+  stubs returning nil were acceptable; that was revised, because the failure it invites is one this
+  release just deleted. [#284]'s `CacheReplicator` added bytes to a `BytesReplicated` counter when
+  gossip was not running and it had sent nothing, and it survived four releases because the only test
+  covering it asserted that its field was non-nil. `QueryKeyOwnership` in particular must not return an
+  empty slice with a nil error, which is the *correct* answer for a key no peer has cached: returning it
+  from a method that cannot query is indistinguishable from a working query against a cold cluster, so
+  an operator watching peer-fetch hit rates would read a flat zero as "warming does not help" rather
+  than "warming is not built".
+
+  `InvalidateKey` is real, since [#284] built the message, the sender, and the receiver's
+  replay-suppressing ledger. Its ETag parameter is the reason the signature is not
+  `InvalidateKey(ctx, key)` as filed: gossip retransmits and reorders, so a bare key leaves a receiver
+  unable to tell an invalidation it has already applied from one it has not (requirement R4 of
+  `docs/design/conditional-writes-vs-raft.md` §1). Empty stays legal and means the caller cannot name a
+  version — a delete, or an unconditional put — and is then applied every time, which costs a redundant
+  eviction and can never serve stale bytes.
+
+  `KeyAnnouncement` carries the full object size alongside the announced range, because a peer weighing
+  a fetch needs both: the range says what it can get from that node, the size says what fraction of the
+  object that is. Its ETag is required rather than optional, which is the one place it differs from an
+  invalidation — an unversioned invalidation is still safe, since "evict whatever you hold" cannot serve
+  wrong bytes, but an unversioned *announcement* invites a peer to fetch bytes it cannot place relative
+  to the object in the bucket and hand them to a reading process as file content. Its JSON tags are
+  pinned by a test for the reason `types.Precondition`'s were added in [#284]: that type shipped
+  untagged and put `Absent` beside `created_at`, which was free to fix only because it had not been
+  released.
+
+  The `Offset`/`Length` pair is deliberately *not* `omitempty`, unlike `Precondition`'s fields. Offset 0
+  with Length 0 means "the whole object from the start" and is the commonest announcement there is, so
+  omitting the pair would make it indistinguishable on the wire from a malformed message carrying no
+  range at all.
+
+  Mutation-verified in both directions: returning nil from either stub, dropping the ETag from the
+  broadcast, having the wrapper's `InvalidateKey` silently succeed, adding `omitempty` to the range
+  fields, and renaming a wire field each fail a named assertion. Dropping the ETag is the interesting
+  one — the invalidation still *arrives*, and three of them then apply where two should, which is
+  exactly the R4 defect rather than a delivery failure.
+
 - **`internal/coord` — a lease over `PutObjectIf` where every guarded action re-asserts the CAS**
   ([#283]). Mutual exclusion between nodes with the object store as the arbiter, replacing the
   direction the consensus code was heading in.
@@ -2587,8 +2632,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#131]: https://github.com/scttfrdmn/objectfs/issues/131
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#133]: https://github.com/scttfrdmn/objectfs/issues/133
+[#129]: https://github.com/scttfrdmn/objectfs/issues/129
 [#139]: https://github.com/scttfrdmn/objectfs/issues/139
+[#140]: https://github.com/scttfrdmn/objectfs/issues/140
 [#141]: https://github.com/scttfrdmn/objectfs/issues/141
+[#142]: https://github.com/scttfrdmn/objectfs/issues/142
+[#143]: https://github.com/scttfrdmn/objectfs/issues/143
 [#150]: https://github.com/scttfrdmn/objectfs/issues/150
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
@@ -2612,6 +2661,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [scttfrdmn/substrate#540]: https://github.com/scttfrdmn/substrate/issues/540
 
 ### Changed
+
+- **BREAKING: broadcasting an invalidation reports whether it was sent** ([#129]).
+  `ClusterManager.InvalidateCacheKey` and `InvalidateDeletedCacheKey` return `error` where they
+  returned nothing, and `GossipProtocol.broadcastMessage` refuses with `types.ErrNotSupported` when
+  gossip is not listening instead of returning nil having sent nothing.
+
+  This was found by a test written for [#129] and is a real defect, not a tidying. `NewClusterManager`
+  builds a `GossipProtocol`; only `Start` opens its socket. Every send dials its own UDP socket, so
+  broadcasting from a constructed-but-unstarted cluster dialed out from an unbound port, reached nobody,
+  and reported success — and `broadcastMessage` returned nil unconditionally in any case, fanning out
+  into goroutines that discarded every send error. A node that had just replaced an object's bytes could
+  not distinguish "every peer was told to evict the version before" from "nothing was sent", and the
+  difference is whether peers keep serving stale content.
+
+  What the error means is bounded on purpose. A nil means the message was handed to the network for each
+  peer, never that any peer received it: gossip is unreliable datagrams with no acknowledgement, so
+  convergence rests on retransmission rather than on this return value. A running cluster with no peers
+  is a nil error and no sends, because there is nobody to tell and nothing went wrong. Per-peer send
+  failures stay counted in `NetworkErrors` and `MessagesOversize` rather than returned, since one
+  unreachable peer is the normal state of a gossip cluster.
+
+  The test this replaced asserted only that invalidating with gossip down did not panic, which passed
+  identically whether the message was broadcast or dropped on the floor — the weakest property that
+  could have been checked at that call site.
 
 - **BREAKING: `ClusterManager.InvalidateCacheKey` takes the ETag of the write that caused the
   invalidation, and a peer applies each version once** ([#284]). The gossip payload was `{Key, From}`

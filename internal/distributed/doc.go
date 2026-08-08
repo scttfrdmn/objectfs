@@ -246,6 +246,43 @@ sent nothing at all and added the byte count to BytesReplicated anyway, so the t
 was of work that had not happened. Warming a peer's *local* cache is a different thing and is real
 work; it is filed as #141.
 
+# Cache Coordination
+
+What nodes do share is *where bytes are cached*, not the bytes themselves. Three methods on
+[github.com/scttfrdmn/objectfs/pkg/types.DistributedCoordinator] cover it, and only one of them is
+implemented:
+
+	coord := cluster.GetCoordinator()
+
+	// Implemented. Tells peers to evict a key, naming the version that replaced what they hold.
+	if err := coord.InvalidateKey(ctx, key, res.ETag); err != nil {
+		// Peers may still be serving the version this write replaced. Not fatal to the write, which
+		// already succeeded at the store — but worth logging, because it is a staleness window.
+		slog.Warn("could not invalidate peers", "key", key, "error", err)
+	}
+
+	// Not implemented: both return types.ErrNotSupported until #140.
+	_ = coord.AnnounceKey(ctx, ann)
+	_, _ = coord.QueryKeyOwnership(ctx, key)
+
+The two unimplemented ones return an error rather than a nil or an empty slice, and that is deliberate
+rather than lazy. An empty slice with a nil error is the *correct* answer for a key no peer has cached,
+so returning it from a method that cannot query would be indistinguishable from a working query against
+a cold cluster — a caller measuring peer-fetch hit rates would read a flat zero as "warming does not
+help" instead of "warming is not built". This is the same shape as the CacheReplicator above, whose only
+test asserted that its field was non-nil.
+
+The ETag on an invalidation is load-bearing, not informational. Gossip retransmits and reorders, so a
+receiver handed a bare key cannot distinguish an invalidation it has already acted on from a new one;
+[GossipProtocol.markInvalidationApplied] keeps a bounded set of applied (key, ETag) pairs to make each
+exactly-once. An empty ETag stays legal and means the sender could not name a version — a delete, or an
+unconditional put — and is applied every time, which costs a redundant eviction and can never serve
+stale bytes.
+
+What this cannot yet do is suppress an invalidation *older* than what a peer holds. [types.Cache] stores
+bytes at offsets with no version beside them, so a receiver has nothing to compare an incoming ETag
+against; that needs a per-key version in the cache, which is #141's work.
+
 # Cluster Health Monitoring
 
 Check cluster health and node status:
