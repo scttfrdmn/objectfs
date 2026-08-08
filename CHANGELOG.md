@@ -125,6 +125,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-read state and recompute its bytes; that loop is only its own) and so nothing in the S3 package
   could fail if the classification were wrong.
 
+  **`ErrCodeConditionalConflict` is a non-failure too, and was not** until a test could produce a 409 at
+  all. Only the precondition-failure half of that reasoning had been applied; the conflict half read as
+  a service failure, so ten conflicts on one contended key drove `s3-writes` to unavailable and then
+  refused *every* write in the process, including writes to unrelated keys by unrelated callers. It is
+  the same argument and if anything a stronger one — a conflict is what a *busy* contended key produces,
+  so it arrives in bursts by design, whereas losing a race once is an ordinary quiet outcome. Retryable
+  and not-a-service-failure are separate questions and this code genuinely answers them differently:
+  repeating the write may well succeed, and being worth retrying is not evidence the service is unwell.
+  Found by `TestAConflictStormDoesNotDegradeWritesOrTripTheBreaker`, which only became possible with
+  substrate v0.93.0's `POST /v1/s3/conditional-conflict`; the arm had shipped untested because nothing
+  available could make the emulator return a 409. That is the second defect in this series found by a
+  test written against a newly-available capability rather than by review.
+
   **An absent key is `ErrCodeObjectNotFound`, not a precondition failure**, and preserving that
   distinction fixed a real defect found by execution rather than by reading. S3 answers 404 to an
   `If-Match` against a missing key, but the AWS SDK does not model `NoSuchKey` among `PutObject`'s typed
@@ -167,6 +180,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignores-preconditions case. Mutation-verified in eight directions: dropping either header on either
   path, delegating the 404, reclassifying a precondition failure as a service failure or as retryable,
   removing the capability gate, and making the probe fail open each break a named test.
+
+- **`internal/testaws`: `SeedConditionalConflict` and `ClearConditionalConflicts`**, arming the emulator
+  to answer the next *n* conditional writes to a key with `409 ConditionalRequestConflict` by way of
+  substrate v0.93.0's `POST /v1/s3/conditional-conflict`. Until this existed nothing available could make
+  the endpoint return a 409 at all, so the arm of `PutObjectIf` that classifies one had shipped untested —
+  and the defect above is what was hiding there.
+
+  **It is deliberately not a `Fault`, and the difference is the whole reason it earns its keep.** A fault
+  would produce the same status and code and prove much less: it short-circuits in front of the emulator,
+  so it would answer 409 to a write whose precondition never held, which is a state S3 does not produce. A
+  seeded conflict is consumed *after* the preconditions pass, so a genuine 412 or 404 still reports as
+  itself and does not spend the budget, and an unconditional write is untouched — which is exactly what
+  makes "a conflict is retryable, a precondition failure is not" a claim a test can establish rather than
+  assume. `TestSeedConditionalConflictOnlyAffectsConditionalWrites` pins all three of those properties,
+  including the half that would otherwise fail silently: a seed consumed by the wrong request leaves the
+  test that needed it running against an unarmed server, passing for the wrong reason. The seed is
+  key-scoped, and the control-plane request goes to the emulator directly rather than through the
+  recording proxy, because it is not S3 traffic and should not appear in the request log a test asserts
+  against.
 
 - **278 of the `paralleltest`/`tparallel` backlog cleared: the lint total is 570 → 299** ([#179]).
   `t.Parallel()` on every test and subtest in seventeen files across `pkg/errors`, `pkg/status`,

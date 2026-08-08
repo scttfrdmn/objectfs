@@ -240,7 +240,16 @@ internal/metrics         85
 # platform is a claim about a file set that platform does not compile, so CI is the authority for
 # any package with a //go:build split. internal/fuse is the other one.
 internal/network         98
-internal/testaws         61
+
+# internal/testaws 61 → 64 with SeedConditionalConflict/ClearConditionalConflicts, which drive
+# substrate's conditional-conflict control endpoint so a test can make the emulator answer 409
+# ConditionalRequestConflict. The seed's own regression test is what earns the points, and what it
+# pins is the property that makes a seed worth having over a Fault: the conflict is consumed *after*
+# the preconditions are evaluated, so an unconditional write is unaffected and a genuine 412 still
+# reports as itself. A Fault short-circuits in front of the emulator and would answer 409 to a write
+# whose precondition never held — a state S3 does not produce, and a test built on it would assert
+# against a fiction.
+internal/testaws         64
 internal/vfs             98
 
 # internal/storage/s3 goes from 71 to 73 with the two operations the node contract added to the
