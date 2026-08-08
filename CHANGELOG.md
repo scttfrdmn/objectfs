@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conditional-write compatibility matrix, measured rather than read** ([#285]).
+  `docs/design/conditional-write-compatibility.md` records, per endpoint, the probe verdict, both
+  conditional forms, the exact HTTP status and S3 error code returned, and the date and endpoint
+  version tested — AWS S3 `us-west-2`, MinIO `RELEASE.2025-09-07T16-13-09Z`, and Ceph RGW
+  `19.2.0 squid`, all probed 2026-08-08. The version is part of the claim: MinIO's conditional-write
+  enforcement is an extension of the S3 API rather than a contract, and could change.
+
+  Behind it, `internal/storage/s3/conditional_compat_test.go` under a new `s3compat` build tag — an
+  endpoint-parameterized suite pointed at any S3-compatible store by three environment variables. Its
+  central assertion is not "RGW behaves as recorded" but **"the capability probe agrees with what this
+  endpoint actually does"**, which stays meaningful as endpoints change: it fails when the probe claims
+  more than the endpoint delivers and only logs when it claims less, since the first costs correctness
+  and the second only performance. Deliberately not `internal/testaws` — an emulator agreeing with our
+  expectations proves the emulator agrees.
+
+  Verified to catch the defect rather than assumed to: with the `412` fix reverted, the suite fails
+  against a real RGW with `enforces-absence=true distinguishes-absent-from-stale=false
+  enforces-multipart-precondition=false`.
+
+  `docs/design/conditional-writes-vs-raft.md` §4's table is superseded in place rather than deleted —
+  its reasoning is unchanged and load-bearing, only its cells were stale. Two of its four rows were
+  wrong, in opposite directions, which is the argument for probing rather than for reading more
+  carefully: MinIO was recorded as needing verification and enforces everything AWS enforces, while
+  Ceph RGW was recorded as having no conditional-write support and in fact has partial support, which
+  is strictly more dangerous than none.
+
+  **Wasabi is recorded as unverified, with the reason**, rather than filled in from its documentation.
+  No endpoint was available and Wasabi has no local form to stand up. The capability probe treats it
+  like any other unknown endpoint, so an unprobed store is not an unguarded one; filling the row in
+  needs credentials and the suite, not new code.
+
 - **`types.DistributedCoordinator` can say where bytes are cached, and `types.KeyAnnouncement` is what
   it says it with** ([#129]). Three methods — `AnnounceKey`, `QueryKeyOwnership`, and
   `InvalidateKey(ctx, key, etag)` — beside the two the interface already had. This is the surface the
@@ -952,6 +983,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#299]: https://github.com/scttfrdmn/objectfs/pull/299
 
 ### Fixed
+- **The conditional-write capability probe called Ceph RGW capable, and RGW ignores preconditions on
+  every multipart write** ([#285]). The probe asserts an unmatchable `If-Match` against a key expected
+  to be absent; its `412` arm reported the capability present unconditionally, on the reasoning that
+  *something* had evaluated the assertion. Ceph RGW 19.2.0 answers `412` there where AWS S3 and MinIO
+  answer `404 NoSuchKey` — so RGW passed the probe, and RGW then turns out not to evaluate
+  preconditions on `CompleteMultipartUpload` at all. A conditional write above `MultipartThreshold`
+  was therefore silently unconditional on RGW: the same call, the same success, and the mutual
+  exclusion gone for exactly the writes where a race matters most. That is the precise failure the
+  probe exists to prevent.
+
+  **Behavior change for operators.** An endpoint that previously reported conditional writes supported
+  on the strength of a `412` may now report them unsupported, and `PutObjectIf` then returns
+  `types.ErrNotSupported` rather than writing. This is the fail-closed direction and the correct one —
+  falling back to an unconditional PUT is what would report success to every contender for a lease —
+  but a deployment pointed at Ceph RGW that was using coordination features will now refuse to start
+  them, with `ConditionalWriteDetail` naming what the endpoint did.
+
+  The fix is a disambiguation rather than a blanket rejection of `412`, because rejecting every `412`
+  has its own failure mode: an earlier run against an ignoring endpoint leaves an empty object at the
+  probe key, and every later probe then gets a `412` that is entirely correct — the same answer AWS
+  would give. That would make the capability permanently absent for the bucket, clearable only by a
+  manual delete, and silently, since false is the fail-closed direction. So the probe now asks one
+  `HEAD` whether an object exists at the probe key: present means the `412` was a correctly evaluated
+  assertion and the capability holds; absent means the endpoint conflates "no such object" with "the
+  precondition did not hold", which is the distinction every CAS loop here is built on. A `HEAD` that
+  cannot be completed leaves the capability false, on the main probe's own reasoning that an answer not
+  established is not an answer.
+
+  Two further RGW findings are recorded but not worked around, because neither can be from the client
+  side. RGW rejects the **quoted** ETag its own `PutObject` returned while accepting the bare hex
+  digest — verified at the wire with a request dumper, not inferred — and `PutObjectIf` passes
+  `Precondition.ETag` through verbatim by design, since reformatting a token the store issued is how a
+  token stops matching. And MinIO and RGW both accept `If-Match` on `DeleteObject` and delete the
+  object anyway, where AWS answers `412` and leaves it in place — all three probed, including the AWS
+  row. Nothing in ObjectFS issues a conditional delete, so that one is a matrix note rather than a
+  defect, kept because a future lease that *released* by conditional delete would be unsafe on both
+  with nothing reporting it.
 - **A test backend counted its own calls without synchronization** ([#179]). `paralleltest` 25 → 0,
   closing out the lint burn-down.
 

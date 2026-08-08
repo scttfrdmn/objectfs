@@ -214,6 +214,15 @@ guaranteed and — more usefully — what is not.
   today.
 - **`df` output is fiction.** A fixed synthetic capacity, because S3 has no size to report. Do not
   use it for capacity planning or in a script that checks for free space.
+- **On a non-AWS S3-compatible endpoint, conditional writes may not be available at all.** They are
+  the primitive behind every coordination feature, and they are an AWS behavior rather than something
+  an S3-compatible store necessarily implements: Ceph RGW 19.2.0 implements them *partially* — it
+  ignores the precondition on multipart completion, so a large conditional write silently becomes
+  unconditional. ObjectFS establishes this by probing the configured endpoint at mount time, not from
+  a version string or a config flag, and an endpoint that fails the probe gets `ErrNotSupported`
+  rather than an unconditional write — a coordination feature refuses to start rather than running
+  unguarded. Measured per-endpoint results are in
+  [Conditional-write compatibility](docs/design/conditional-write-compatibility.md).
 - **Compression, if enabled, breaks the "just objects in S3" property.** A compressed object is an
   opaque frame to `aws s3 cp`, boto3, and every other S3 client. Compression is **off by default**
   for this reason.
