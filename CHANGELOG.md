@@ -438,6 +438,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`tests/fuse_test.go`, ten tests that asserted against the mock they built rather than against
+  `internal/fuse`** ([#378]). The file survives as `tests/mockbackend_test.go` holding only the
+  `MockBackend` fixture, which six call sites in `integration_test.go`, `unit_test.go`, and
+  `predictive_cache_test.go` need. Everything below the fixture is gone.
+
+  Each of the three top-level functions constructed a `fuse.FileSystem` and then wrote
+  `_ = filesystem // Use filesystem to avoid unused variable`. Of ten subtests exactly one touched it,
+  and only to read `GetStats()` on either side of a loop that called `backend.GetObject` directly — so
+  `assert.GreaterOrEqual(t, statsAfter.Reads, statsBefore.Reads)` compared zero against zero. That
+  assertion holds for every possible implementation of `internal/fuse`, including one whose `Read` is
+  `panic("unimplemented")`. The rest asserted that an in-memory map returns what was put into it, and
+  `BenchmarkFUSEOperations` measured the throughput of that map: 1 MiB of `[]byte` copying against a
+  floor of 10 MB/s, reported as FUSE performance.
+
+  Nothing was lost by deleting them, which was checked per subtest rather than assumed. Write
+  coalescing is asserted harder by `internal/vfs/writer_test.go`, whose forty tests cover offset
+  writes, sparse writes, and a write that races its own flush; the cache subtest duplicates part of
+  `internal/cache/multilevel_test.go`'s twenty-three; metrics collection has four test files of its
+  own; and the read-ahead claim is what `internal/fuse/read_path_test.go` actually makes, fourteen
+  tests driving the real `FileHandle.Read` and the real metadata cache. Removing the file also drops
+  `internal/fuse` from `tests`' import graph entirely — it was the only importer — and the package's
+  coverage is unchanged at 68.6% against a floor of 67%, which is the measurement confirming those
+  subtests were reaching none of it.
+
+  Verified by mutation in both directions, since the point of the change is that these tests could not
+  fail. Zeroing `Reads` in `GetStats` fails `TestGetStatsReportsEveryCounter` by name; forcing
+  `FileHandle.Read`'s offset to 0 fails seven read-path tests by name, including
+  `TestReadClampBoundaries` and `TestReadAfterWriteReturnsNewBytes`. Under both mutations `go test
+  -race ./tests/` passed, exactly as it did before the deletion — the demonstration that the file's
+  existence, not its content, was the coverage.
+
 - **`pkg/profiling` and `pkg/memmon`, two memory-monitoring packages nothing imported** ([#245]).
   2,738 lines across five files, plus `docs/memory-monitoring.md`, its `mkdocs.yml` nav entry, and
   both `.coverage-floors` entries.
@@ -671,13 +702,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entirely under `-race` because no test reads `GetStats`, which left the increment with no observable
   effect other than the race itself. Both counters are now `atomic.Int64`.
 
-  Making the `tests` package parallel also required moving `fuse_test.go`'s
-  `defer writeBuffer.Close()` to `t.Cleanup`. A parent test's deferred functions run when the parent
-  function returns, which for a test with parallel subtests is *before* those subtests resume —
-  verified by execution, not inferred: a parallel subtest observes a variable set by the parent's
-  `defer`, while `t.Cleanup` runs after. `vfs.Writer.Close` is only `FlushAll` today, so the `defer`
-  form happened not to break anything, but it left the subtests writing through a closed writer by
-  contract.
+  Making the `tests` package parallel also required moving a `defer writeBuffer.Close()` to
+  `t.Cleanup` — in `fuse_test.go`, whose tests [#378] later deleted, but the finding outlives its
+  example. A parent test's deferred functions run when the parent function returns, which for a test
+  with parallel subtests is *before* those subtests resume — verified by execution, not inferred: a
+  parallel subtest observes a variable set by the parent's `defer`, while `t.Cleanup` runs after.
+  `vfs.Writer.Close` is only `FlushAll` today, so the `defer` form happened not to break anything, but
+  it left the subtests writing through a closed writer by contract.
 
   Mutation-checked at the shape the write path exists to prevent: dropping the destination offset in
   `ExtentList.Splice` — the H7 bug in its original form — fails `TestWriteBufferUnit` on the appended
@@ -2347,6 +2378,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#283]: https://github.com/scttfrdmn/objectfs/issues/283
 [#284]: https://github.com/scttfrdmn/objectfs/issues/284
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
+[#378]: https://github.com/scttfrdmn/objectfs/issues/378
 [#267]: https://github.com/scttfrdmn/objectfs/issues/267
 [#269]: https://github.com/scttfrdmn/objectfs/issues/269
 [#272]: https://github.com/scttfrdmn/objectfs/issues/272
