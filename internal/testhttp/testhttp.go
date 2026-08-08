@@ -44,11 +44,19 @@ const (
 // these servers default to are the popular ones: 8080 for ObjectFS's metrics endpoint, 9090 for the
 // Prometheus a developer may well have running. Asking the kernel is the only way to be sure.
 //
-// There is a window between the close here and the bind by the caller, which nothing can eliminate
-// without handing over the listener itself. Prefer configuring "127.0.0.1:0" and reading back where
-// the server bound — [metrics.Collector.Addr] reports it — and use this only where the address has
-// to be known before the server starts, which is every test that supplies it through a config file
-// or a Configuration.
+// **Only for an address nothing will bind.** The port is returned to the ephemeral pool by the
+// Close below, so between here and a bind by the caller the kernel is free to hand it to anything
+// else asking for an ephemeral port — including another test in the same binary, which is not a
+// hypothetical: this window failed TestStartMetricsBindsTheEndpoint in CI with "bind: address
+// already in use" on a port internal/adapter's own miniredis had been given in the interval. The
+// window cannot be closed without handing over the listener itself.
+//
+// So the caller that survives this is the one asserting nothing is listening, which needs an
+// address in advance and never binds it — a competing ephemeral bind cannot fail that assertion,
+// because the thing it would have to do to fail it is answer HTTP 200 on /metrics. A caller that
+// does bind should configure port 0 and read back where the kernel put it:
+// [metrics.Collector.Addr] reports it, and [SameHost] is how the where-it-bound assertion survives
+// not knowing the port up front.
 func FreeAddr(t *testing.T) string {
 	t.Helper()
 
@@ -65,6 +73,38 @@ func FreeAddr(t *testing.T) string {
 	}
 
 	return addr
+}
+
+// SameHost fails the test unless a server bound the host its configuration named.
+//
+// This is the assertion #211 turns on, in the form that works when the port is 0. A server handed
+// "127.0.0.1:0" binds a port only the kernel knows, so `bound == configured` cannot be the check —
+// but the port half was never what the issue was about. `fmt.Sprintf(":%d", Port)` was the defect,
+// and what it produced was a *wildcard host*: an unauthenticated /metrics and /debug/operations
+// published on every interface the machine can route. A wildcard bind reads back here as 0.0.0.0 or
+// [::], never as the loopback address that was asked for, so comparing hosts catches it — while a
+// scrape of 127.0.0.1 does not, since a wildcard answers on loopback too.
+//
+// whatBound names the thing whose address this is, so the failure says which listener is exposed
+// rather than only that some host comparison did not hold.
+func SameHost(t *testing.T, bound, configured, whatBound string) {
+	t.Helper()
+
+	boundHost, _, err := net.SplitHostPort(bound)
+	if err != nil {
+		t.Fatalf("%s reported %q, which is not a host:port: %v", whatBound, bound, err)
+	}
+
+	configuredHost, _, err := net.SplitHostPort(configured)
+	if err != nil {
+		t.Fatalf("the configured address for %s is %q, which is not a host:port: %v", whatBound, configured, err)
+	}
+
+	if boundHost != configuredHost {
+		t.Errorf("%s bound host %s; the configuration said %s (%q vs %q). A wildcard bind reports "+
+			"0.0.0.0 or [::] here and publishes an unauthenticated endpoint on every interface",
+			whatBound, boundHost, configuredHost, bound, configured)
+	}
 }
 
 // Get fetches a path from a server at addr, retrying until it answers, and fails the test if nothing

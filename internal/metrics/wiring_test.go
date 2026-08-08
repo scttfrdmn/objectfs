@@ -31,8 +31,10 @@ func exactAdapterConfig(addr string) *Config {
 //
 // Port 0 rather than a fixed number, and rather than testhttp.FreeAddr: the kernel picks a port that
 // is free at the moment of the bind, where FreeAddr picks one that was free a moment earlier and
-// leaves a window. Collector.Addr reports what was chosen, so a scrape still knows where to go. Use
-// FreeAddr only where the address must be known before the server starts.
+// leaves a window — a window that has since failed a CI run, so it is a race and not a caveat.
+// Collector.Addr reports what was chosen, so a scrape still knows where to go, and testhttp.SameHost
+// is how the where-it-bound assertion survives not knowing the port. Use FreeAddr only where the
+// address must be known before the server starts *and* nothing is going to bind it.
 const anyLoopbackAddr = "127.0.0.1:0"
 
 // TestStartSurvivesTheConfigTheAdapterBuilds is the regression test for two panics on the live path.
@@ -352,8 +354,9 @@ func TestScrapeServesTheDocumentedPath(t *testing.T) {
 func TestStartBindsWhereConfiguredAndNowhereElse(t *testing.T) {
 	t.Parallel()
 
-	addr := testhttp.FreeAddr(t) // fixed port: the assertion is about the host half
-	c, err := NewCollector(exactAdapterConfig(addr))
+	// Port 0: the assertion is about the host half, and the port half is what testhttp.FreeAddr can
+	// only hand over stale. See anyLoopbackAddr, and the CI failure recorded on FreeAddr itself.
+	c, err := NewCollector(exactAdapterConfig(anyLoopbackAddr))
 	if err != nil {
 		t.Fatalf("NewCollector: %v", err)
 	}
@@ -363,10 +366,11 @@ func TestStartBindsWhereConfiguredAndNowhereElse(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Stop(context.Background()) })
 
-	if got := c.Addr(); got != addr {
-		t.Errorf("bound %s, configured %s — a wildcard bind reports 0.0.0.0 or [::] here, and it "+
-			"publishes an unauthenticated endpoint on every interface", got, addr)
+	addr := c.Addr()
+	if addr == "" {
+		t.Fatal("Start returned nil and Addr reports nothing bound")
 	}
+	testhttp.SameHost(t, addr, anyLoopbackAddr, "the metrics endpoint")
 
 	// Confirm it over a socket too, from an address that is this host but is not loopback.
 	_, port, err := net.SplitHostPort(addr)
