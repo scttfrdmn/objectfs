@@ -248,6 +248,24 @@ not-found error, matching on `smithy.APIError`'s code rather than on message tex
 
 ## 4. Non-AWS compatibility
 
+> **Superseded 2026-08-08 by
+> [Conditional-Write Compatibility](conditional-write-compatibility.md).** The table below was written
+> from documentation and vendor source. Two of its four rows were wrong once
+> [#285](https://github.com/scttfrdmn/objectfs/issues/285) probed real endpoints — and wrong in
+> opposite directions, which is the argument for the probe rather than for better reading:
+>
+> - **MinIO** enforces both forms exactly as AWS does, verified by attempt, including under eight-way
+>   concurrency and on `CompleteMultipartUpload`. The caution below was warranted but the answer is
+>   now measured rather than pending.
+> - **Ceph RGW** does *not* lack conditional writes. It implements them **partially**, which is
+>   strictly more dangerous: it accepts `If-None-Match: *` on `PutObject`, ignores it on
+>   `CompleteMultipartUpload`, answers `412` for a key that does not exist, and rejects the quoted
+>   ETag its own `PutObject` returned. It therefore **passed the probe as originally written** and had
+>   to be caught by disambiguating the 412 — see the linked page.
+>
+> The reasoning in this section is unchanged and load-bearing; only its per-backend cells are stale.
+> Read the linked page for what endpoints actually do.
+
 | Backend | Conditional write on PUT | Evidence | Degradation |
 |---|---|---|---|
 | **AWS S3** | **Yes** — `If-None-Match: *` and `If-Match` on `PutObject`, `CompleteMultipartUpload`, `CopyObject`; conditional deletes too | [AWS docs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html) | none |

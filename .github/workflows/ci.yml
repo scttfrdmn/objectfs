@@ -80,7 +80,12 @@ jobs:
         # fuse_mount carries the tests that need a real kernel mount — whether the kernel
         # re-reads under direct I/O, whether it keeps pages across open(2). ubuntu-latest has no
         # /dev/fuse, so they cannot run here; they are compiled here.
-        tag: [aws_s3, benchmark, distributed, e2e, integration, fuse_mount]
+        # s3compat carries the conditional-write compatibility suite: it needs a MinIO, Ceph RGW or
+        # Wasabi endpoint in OBJECTFS_COMPAT_ENDPOINT and skips without one. Its findings are what
+        # docs/design/conditional-write-compatibility.md records, and two of that matrix's rows were
+        # wrong while they were documentation reads rather than probe results — so the suite is the
+        # artifact, and compiling it is what keeps it runnable.
+        tag: [aws_s3, benchmark, distributed, e2e, integration, fuse_mount, s3compat]
     steps:
       - uses: actions/checkout@v7
 

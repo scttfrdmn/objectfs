@@ -258,3 +258,126 @@ func TestProbeAcceptsA404AsEvidenceThePreconditionWasEvaluated(t *testing.T) {
 		})
 	}
 }
+
+// TestProbeRejectsAnEndpointThatAnswers412ForAnAbsentKey is the arm #285 added, and the finding that
+// made it necessary.
+//
+// Ceph RGW 19.2.0 answers 412 PreconditionFailed for an If-Match against a key that does not exist,
+// where AWS S3 and MinIO both answer 404. The old probe took any 412 as proof the header was evaluated
+// and reported the capability present — so RGW passed, and then turned out to ignore preconditions on
+// CompleteMultipartUpload outright: a conditional write above MultipartThreshold silently became
+// unconditional, which is the exact failure the probe exists to prevent.
+//
+// A 412 alone cannot say which endpoint sent it, so the probe asks whether an object exists at the
+// probe key. Absent plus 412 means the endpoint conflates "no such object" with "the precondition did
+// not hold", and that conflation is what every CAS loop here is built on distinguishing.
+func TestProbeRejectsAnEndpointThatAnswers412ForAnAbsentKey(t *testing.T) {
+	t.Parallel()
+
+	var sawHead atomic.Bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			sawHead.Store(true)
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = fmt.Fprint(w, `<?xml version="1.0"?><Error><Code>PreconditionFailed</Code>`+
+			`<Message>At least one of the pre-conditions you specified did not hold</Message></Error>`)
+	}))
+	t.Cleanup(srv.Close)
+
+	caps := backendAgainst(t, srv.URL).probeConditionalWrite(t.Context())
+
+	if caps.ConditionalWrite {
+		t.Fatal("the probe reported conditional writes supported against an endpoint that answers 412 for " +
+			"a key that does not exist. A caller cannot then tell a lost race from a deleted object, and " +
+			"the endpoint observed doing this also ignores preconditions on CompleteMultipartUpload")
+	}
+	if caps.ConditionalWriteDetail == "" {
+		t.Error("ConditionalWriteDetail is empty; an operator has nothing to act on")
+	}
+
+	// The HEAD is how the ambiguity was resolved. Without it the probe would be guessing from a status
+	// code that two different endpoints send for two different reasons.
+	if !sawHead.Load() {
+		t.Error("the probe sent no HEAD, so it decided from the 412 alone — which cannot distinguish a " +
+			"leftover object at the probe key from an endpoint that misreports absence")
+	}
+}
+
+// TestProbeAcceptsA412WhenAnObjectIsActuallyThere is the other half, and the reason the new arm is a
+// HEAD rather than a flat rejection of every 412.
+//
+// An endpoint that ignored the header on some earlier run left an empty object at the probe key. Every
+// later probe then gets a 412 that is entirely correct — the assertion was evaluated against a real
+// object and did not hold, which is what AWS itself would answer. Rejecting it would make the
+// capability permanently absent for that bucket, with nothing to clear it but a manual delete, and the
+// failure would be silent because false is the fail-closed direction.
+func TestProbeAcceptsA412WhenAnObjectIsActuallyThere(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = fmt.Fprint(w, `<?xml version="1.0"?><Error><Code>PreconditionFailed</Code>`+
+			`<Message>did not hold</Message></Error>`)
+	}))
+	t.Cleanup(srv.Close)
+
+	caps := backendAgainst(t, srv.URL).probeConditionalWrite(t.Context())
+
+	if !caps.ConditionalWrite {
+		t.Fatalf("the probe rejected a 412 raised against an object that does exist at the probe key, "+
+			"which is S3's own answer: %s\nA leftover object would make the capability permanently absent "+
+			"for the bucket", caps.ConditionalWriteDetail)
+	}
+	if caps.ConditionalWriteDetail != "" {
+		t.Errorf("ConditionalWriteDetail = %q, want empty when the capability is present",
+			caps.ConditionalWriteDetail)
+	}
+}
+
+// TestProbeFailsClosedWhenTheDisambiguatingHeadFails covers the third answer the HEAD can give.
+//
+// If the HEAD fails for its own reasons the question was never answered, and an answer not established
+// is not an answer — the same reasoning as the main probe's default arm. This is the case a reader
+// would expect to have been folded into one of the two above, so it is worth an assertion of its own:
+// treating an unreadable HEAD as "no object" would report an endpoint incapable on a transient error,
+// and treating it as "object present" would report RGW capable whenever its HEAD was throttled.
+func TestProbeFailsClosedWhenTheDisambiguatingHeadFails(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusServiceUnavailable)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = fmt.Fprint(w, `<?xml version="1.0"?><Error><Code>PreconditionFailed</Code>`+
+			`<Message>did not hold</Message></Error>`)
+	}))
+	t.Cleanup(srv.Close)
+
+	caps := backendAgainst(t, srv.URL).probeConditionalWrite(t.Context())
+
+	if caps.ConditionalWrite {
+		t.Fatal("the probe reported conditional writes supported when it could not establish whether the " +
+			"412 came from a real object or from an endpoint misreporting absence")
+	}
+	if caps.ConditionalWriteDetail == "" {
+		t.Error("ConditionalWriteDetail is empty; an operator has nothing to act on")
+	}
+}

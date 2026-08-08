@@ -132,15 +132,88 @@ func (b *Backend) probeConditionalWrite(ctx context.Context) types.BackendCapabi
 		return types.BackendCapabilities{ConditionalWrite: true}
 
 	case isPreconditionFailedCode(err):
-		// The header was evaluated against an object that does exist at the probe key — a leftover
-		// from a previous probe against a broken endpoint. The capability is established either way:
-		// something evaluated the assertion and declined the write.
-		return types.BackendCapabilities{ConditionalWrite: true}
+		// 412 for an If-Match against a key expected to be absent. Something evaluated the assertion and
+		// declined the write, so the *header* is certainly not being dropped — but this arm used to report
+		// the capability present, and #285 established by probe that it must not.
+		//
+		// Ceph RGW 19.2.0 answers 412 here where AWS and MinIO answer 404, and it is not a leftover object:
+		// the probe key was absent and stayed absent. RGW is conflating "no such object" with "the
+		// precondition did not hold", which is precisely the distinction every CAS loop in this codebase
+		// is built on — a lost race means re-read and retry, a vanished object means the state being
+		// updated no longer exists. And an endpoint reaching this arm turns out not to evaluate
+		// preconditions on CompleteMultipartUpload at all: RGW accepted an If-None-Match: * over an
+		// existing key and landed the contender's bytes over the holder's. So the one arm that could not
+		// distinguish a strict endpoint from a partial one was reporting the strongest possible answer.
+		//
+		// Which endpoint this is cannot be settled from here — a 412 is all the wire carries — so it
+		// resolves the ambiguity by asking the question again in a form that has only one right answer.
+		// See probeAbsentKeyDistinction.
+		return b.probeAbsentKeyDistinction(ctx, client)
 
 	default:
 		return types.BackendCapabilities{
 			ConditionalWriteDetail: fmt.Sprintf("the conditional-write probe could not establish an answer, "+
 				"so preconditions are treated as unsupported: %v", err),
+		}
+	}
+}
+
+// probeAbsentKeyDistinction resolves the one answer the main probe cannot classify: a 412 for an
+// If-Match against the probe key.
+//
+// Two very different endpoints produce it, and the difference decides whether a lease is safe:
+//
+//   - An object exists at the probe key — a leftover from an earlier run against an endpoint that
+//     ignored the header and created one. Then 412 is exactly right, the same answer AWS gives, and the
+//     endpoint is evaluating preconditions.
+//   - The key is absent and the endpoint answered 412 anyway. Then it does not distinguish "no such
+//     object" from "the precondition did not hold" — verified on Ceph RGW 19.2.0 — and that distinction
+//     is what every CAS loop here is built on. A caller cannot tell a lost race from a deleted object,
+//     so it retries forever against a key nobody is going to recreate.
+//
+// One HEAD settles it, and it settles it by observation rather than by inference from the error: the
+// question "is there an object at this key" has one right answer and no room for an endpoint to have
+// its own reading of it.
+//
+// The second case is reported as incapable, which is the fail-closed direction and — on the endpoint
+// that produced it — the substantively correct one for more reasons than the 404/412 conflation alone.
+// RGW additionally rejects an If-Match carrying the quoted ETag its own PutObject just returned, so
+// compare-and-swap cannot be performed at all, and it ignores preconditions on
+// CompleteMultipartUpload entirely, so a conditional write above MultipartThreshold silently becomes
+// unconditional. See docs/design/conditional-write-compatibility.md for the probe results.
+func (b *Backend) probeAbsentKeyDistinction(ctx context.Context, client *s3.Client) types.BackendCapabilities {
+	_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(capabilityProbeKey),
+	})
+
+	switch {
+	case err == nil:
+		// There is an object at the probe key, so the 412 was a correctly evaluated assertion against it.
+		return types.BackendCapabilities{ConditionalWrite: true}
+
+	case isNotFoundCode(err):
+		b.logger.Error("this endpoint answered PreconditionFailed for a conditional write against a key "+
+			"that does not exist, where S3 answers NotFound; treating conditional writes as unsupported",
+			"endpoint", b.config.Endpoint,
+			"bucket", b.bucket,
+			"probe_key", capabilityProbeKey)
+
+		return types.BackendCapabilities{
+			ConditionalWriteDetail: "the endpoint answered PreconditionFailed for an If-Match against a key " +
+				"that does not exist, where S3 and MinIO answer NotFound. It does not distinguish a lost " +
+				"race from a deleted object, so a compare-and-swap loop cannot tell whether to retry; " +
+				"endpoints observed doing this also ignore preconditions on CompleteMultipartUpload",
+		}
+
+	default:
+		// The HEAD itself failed, so the question was never answered. Same reasoning as the main probe's
+		// default arm: an answer not established is not an answer.
+		return types.BackendCapabilities{
+			ConditionalWriteDetail: fmt.Sprintf("the endpoint answered PreconditionFailed for a conditional "+
+				"write against %q, and whether an object exists there could not be established, so it is "+
+				"unknown whether the precondition was evaluated or absence was misreported: %v",
+				capabilityProbeKey, err),
 		}
 	}
 }
