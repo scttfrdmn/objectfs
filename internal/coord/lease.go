@@ -111,12 +111,35 @@ func (c *Config) withDefaults() {
 	}
 }
 
+// MinPeriod is the shortest lease period this package will accept.
+//
+// It exists because a period can be too small to divide into a renewal margin at all. RenewInterval
+// defaults to Period/4 by integer division, so Period=2ns produced RenewInterval=0 — which passed the
+// margin check below, since 0 is genuinely shorter than 2ns, and then panicked the process:
+// time.NewTicker(0) is "non-positive interval for NewTicker", raised in Do's renewal goroutine where
+// no caller can recover it. Found by FuzzNewConfig in under a second.
+//
+// The value is deliberately about the arithmetic rather than about policy. A useful lower bound for a
+// real deployment is orders of magnitude higher — a period has to cover an S3 round trip and three
+// renewals — but that is a judgment for the caller, and encoding it here would also reject the short
+// periods this package's own takeover tests depend on, which would trade a real guard for slower
+// tests. Ten milliseconds is far above where Period/4 degenerates and far below any period a
+// deployment would choose.
+const MinPeriod = 10 * time.Millisecond
+
 func (c Config) validate() error {
 	switch {
 	case c.Key == "":
 		return errors.New("coord: Config.Key is required; a lease is held on a specific object")
 	case c.Holder == "":
 		return errors.New("coord: Config.Holder is required, so an operator can tell who holds what")
+	case c.Period < MinPeriod:
+		return fmt.Errorf("coord: Period %s is below the %s minimum; a lease period has to be long "+
+			"enough for a holder to complete a round trip and renew inside it", c.Period, MinPeriod)
+	case c.RenewInterval <= 0:
+		// Unreachable through withDefaults now that Period has a floor, and checked anyway: this is the
+		// value Do hands to time.NewTicker, which panics on it in a goroutine nothing can recover from.
+		return fmt.Errorf("coord: RenewInterval %s must be positive", c.RenewInterval)
 	case c.RenewInterval >= c.Period:
 		// A renewal interval at or beyond the period means the lease is takeable before its holder
 		// would ever renew, which produces two holders under no contention at all.

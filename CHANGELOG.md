@@ -72,6 +72,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestOneHoldersConcurrentRenewalsDoNotDefeatEachOther` — which asserts the lease is still *usable*
   afterwards rather than only that the renewals returned nil.
 
+  **A fuzz target found a process-killing panic in 0.37 seconds, before it was committed.**
+  `FuzzNewConfig` asserts the one property that makes a `Config` safe to hold a lease with: `New`
+  either refuses it, or produces a lease whose renewal interval leaves genuine margin before its
+  period. `Period: 2ns` made `RenewInterval` default to `Period/4` = **0** by integer division, which
+  passed the margin check — 0 genuinely is shorter than 2ns — and then panicked: `time.NewTicker(0)`
+  is "non-positive interval for NewTicker", raised inside `Do`'s renewal goroutine where no caller can
+  recover it, which in a mount means the process and every open file descriptor with it. `Period` now
+  has a `MinPeriod` floor, the reproducer the fuzzer minimized is committed as corpus, the rejection
+  is also tabled so it is not fuzz-only, and the target is in the CI matrix. The floor is set at where
+  the arithmetic degenerates rather than at a useful deployment minimum, because encoding the latter
+  would also reject the short periods this package's own takeover tests need — a real guard traded for
+  slower tests.
+
   The flake that led there was separately a defect in a test's model, and is fixed rather than
   tolerated: every steal performed inside a `Do` action races that action's renewal ticker for the
   lease object's ETag, so the steal's own precondition could fail through no fault of the code under

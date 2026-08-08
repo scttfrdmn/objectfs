@@ -741,6 +741,16 @@ func TestNewRejectsUnusableConfigs(t *testing.T) {
 			Config{Key: "k", Holder: "h", Period: time.Second, RenewInterval: 2 * time.Second},
 			"must be shorter than Period",
 		},
+		{
+			// A period too small to divide into a renewal margin. RenewInterval defaults to Period/4 by
+			// integer division, so this produced 0 — which passes the margin check above, since 0 really
+			// is shorter than 2ns, and then panicked the process: time.NewTicker(0) is "non-positive
+			// interval for NewTicker", raised inside Do's renewal goroutine where no caller can recover
+			// it. Found by FuzzNewConfig, and tabled here so the rejection is not only fuzz-covered.
+			"period too small to divide into a renewal margin",
+			Config{Key: "k", Holder: "h", Period: 2 * time.Nanosecond},
+			"below the 10ms minimum",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

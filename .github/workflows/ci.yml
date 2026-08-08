@@ -202,9 +202,12 @@ jobs:
   # fuzz-smoke — 60 seconds per target, from the committed corpus outward.
   #
   # The corpora are committed and the ordinary `go test` run replays them, so this job is not
-  # about regression: it is about finding the *next* defect. Three of the eight targets found a
-  # real shipped defect within seconds of first being run, so a minute each is not a token
-  # gesture.
+  # about regression: it is about finding the *next* defect. Four of the ten targets found a
+  # real defect within seconds of first being run, so a minute each is not a token gesture. The
+  # most recent, FuzzNewConfig, took 0.37 s to find a config that panicked the process — Period=2ns
+  # made RenewInterval default to Period/4 = 0 by integer division, and time.NewTicker(0) panics
+  # inside a goroutine no caller can recover from. It found that before it was ever committed,
+  # which is the argument for adding a target with each package rather than after a defect.
   #
   # Each target is named explicitly rather than discovered, because `-run Fuzz -fuzz .` cannot
   # fuzz more than one target per invocation, and a loop that silently fuzzes only the first
@@ -256,6 +259,7 @@ jobs:
           - {pkg: ./internal/storage/s3, target: FuzzSliceRange}
           - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
           - {pkg: ./internal/awsname, target: FuzzValidateRegion}
+          - {pkg: ./internal/coord, target: FuzzNewConfig}
     steps:
       - uses: actions/checkout@v7
 
