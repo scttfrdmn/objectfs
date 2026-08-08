@@ -2394,6 +2394,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ReadAheadManager.Stop` and its stop channel are deleted; the mount context is the only shutdown
+  signal** ([#376]). The production fix landed in [#179] — cancel the mount context and the prefetch
+  workers and the cleanup ticker return, which the adapter's existing `cancelMount()` on the unmount
+  path already does. What was left over was an exported lifecycle method nothing outside tests called,
+  which is the worst of the available states: a reader finds it, reasonably assumes `Unmount` calls it,
+  and is wrong.
+
+  Calling it from `Unmount` was the other option and was rejected, because it reintroduces exactly the
+  "someone must remember this on every mount path" obligation whose being missed *was* the leak — five
+  goroutines per mount, for the life of the process, each keeping its `FileSystem`, backend and cache
+  reachable.
+
+  **The issue proposed unexporting it and keeping it for tests, and a mutation refuted that premise.**
+  The stated justification was that `stopCh` expresses the one thing cancellation cannot: stopping a
+  manager whose context the caller does not own. Plausible, and false — neutering the channel's select
+  arm broke no test, so no test needed it either. A second shutdown path with no caller on *either*
+  side is not a seam worth preserving; two ways to stop the same goroutines is how they came to be
+  stopped by neither. The tests that wanted the workers out of the way now cancel a mount context of
+  their own, so the test shutdown and the real one are the same code path, which the deleted `Stop`
+  never was.
+
+  Not a behaviour change: `internal/fuse` has no importer outside this repository and the method had no
+  caller inside it. `sync.Once` and a `chan struct{}` leave the struct with it.
+
 - **substrate v0.87.0 → v0.93.0.** Test-only dependency, so nothing user-facing changes; `go.mod` and
   `go.sum` are the whole diff.
 
