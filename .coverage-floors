@@ -341,7 +341,20 @@ internal/adapter         40
 # driven by a fetch registered and never finished. The second one is bounded with an explicit timeout
 # because removing the arm makes the prefetch *block* on the read it was trimmed against rather than
 # fetch too much — a parked prefetch worker, which no byte-count assertion can see.
-internal/fuse            67
+#
+# 67 → 72 with #167's extended attributes: xattr.go's five operations, the base64 name encoding, the
+# budget check and the removal tombstone are all reached by unit tests, a differential oracle against the
+# local OS filesystem, and a per-platform errno hook. Two of those tests exist because a mutation showed
+# the code they cover was unowned — deleting the clamp in xattrSize left the whole package green.
+#
+# This entry is the first one in this file set from CI's own log rather than a local run, which is the
+# lesson the three paragraphs above kept re-learning. It matters more here than the load-dependence they
+# describe: CI is ubuntu-latest and compiles unmount_path_linux.go (52 lines) where a darwin run compiles
+# unmount_path_darwin.go (44), so the two platforms do not even have the same denominator. Darwin
+# measured 72.2% and linux 72.5% for the same tree. There is no Docker on the development machine, so the
+# linux figure is not obtainable except from a PR — which means the ratchet is a second commit, after the
+# feature is green, and not part of the commit that earned the points.
+internal/fuse            72
 
 # internal/cache went 74 → 76 with the re-keying work — the byte-range keying, splitting, coalescing,
 # and coverage checks are now covered by 27 tests and a fuzz target where before they were two copies
