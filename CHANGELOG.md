@@ -69,6 +69,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   day someone adds the gauge and the page starts telling operators to compute by hand a number the
   endpoint publishes.
 
+  Committing the pages also surfaced **two defects in `TestDocumentedCLIInvocationsAreRunnable`**,
+  both of which reported a correct command as broken — the failure direction that teaches a reader to
+  distrust a gate, after which the next real defect gets waved through with it. Neither was visible
+  until the commit: every markdown gate enumerates pages with `git ls-files`, so an untracked page is
+  invisible to all of them, and a pre-commit local run cannot see the file it is about to add.
+
+  First, **the invocation parser did not stop at a pipe.** `|` was listed as shell noise and skipped,
+  after which the parser kept reading the *next* program's arguments as though objectfs had been given
+  them: `objectfs cluster status | grep -A5 Membership` was reported as passing an unrecognized `--A5`.
+  It now stops at `|`, `||`, `&&` and `;`, and a bad flag before the pipe is still caught — verified by
+  mutation, since a fix that stopped checking would have looked identical from a passing test.
+
+  Second, **the flag list was checked against `main.go` alone**, which left an entire subcommand's
+  flags unverified. `cluster.go` declares `--json`, `--endpoint` and its own `--config`, so
+  `objectfs cluster status --json` — a flag the binary parses, and one `cluster.go` has a comment about
+  documenting — was reported as unrecognized. `TestCLIFlagsMatchTheBinary` now scans every non-test
+  file in `cmd/objectfs` and fails if it finds no declarations at all, and `--json`/`--endpoint` joined
+  `cliFlags`. Narrowing the glob back to `main.go` resurfaces the false positive, which is how the fix
+  was verified rather than assumed.
+
 - **Validation for the `cluster:` config block, a cluster section in `objectfs mount --dry-run`, and
   `docs/admin-guide/distributed.md`** ([#152]). Nothing validated this block before: `Validate` checked
   storage, cache, network, monitoring and mount, and returned before reaching clustering. Four states

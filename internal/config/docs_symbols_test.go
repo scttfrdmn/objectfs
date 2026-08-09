@@ -90,6 +90,12 @@ var cliFlags = map[string]bool{
 	"max-concurrency": true,
 	"foreground":      true,
 	"mount-point":     true,
+
+	// cluster.go's FlagSet. A subcommand's flags are as real as mount's, and leaving them out reported
+	// `objectfs cluster status --json` as broken — see TestCLIFlagsMatchTheBinary, which now scans every
+	// non-test file in cmd/objectfs rather than main.go alone.
+	"json":     true,
+	"endpoint": true,
 }
 
 // cliFlagsTakingAValue are the non-boolean flags, whose following argument is a value and not a
@@ -100,6 +106,7 @@ var cliFlagsTakingAValue = map[string]bool{
 	"cache-size":      true,
 	"max-concurrency": true,
 	"mount-point":     true,
+	"endpoint":        true,
 }
 
 // subcommands is every first word cmd/objectfs/main.go dispatches on.
@@ -353,9 +360,17 @@ func checkShellBlock(t *testing.T, rel string, block fencedBlock) {
 //
 // cliFlags has to be written out because main's flag variables are unexported, and a duplicated
 // list with no check is precisely the mechanism that gave this repository five different version
-// numbers. So the list is compared against the flag declarations in main.go: a flag added there and
-// not here would go unchecked in documentation, and one removed there but left here would let this
-// gate bless a command that no longer runs.
+// numbers. So the list is compared against the flag declarations in the command's own source: a flag
+// added there and not here would go unchecked in documentation, and one removed there but left here
+// would let this gate bless a command that no longer runs.
+//
+// **Every non-test file in cmd/objectfs, not main.go alone.** Reading one file was the original shape
+// and it left a whole subcommand's flags unverified: cluster.go declares --json, --endpoint and its own
+// --config, and none of the three was in cliFlags, so `objectfs cluster status --json` — which the
+// binary parses and which cluster.go:151 has a comment about documenting — was reported as an
+// unrecognized flag. That is the failure direction this test's own comment warns about, arriving
+// through the file list rather than through the list of names: a correct command named as broken
+// teaches a reader to distrust the gate, and the next real defect gets waved through with it.
 //
 // Two flags are in cliFlags and cannot be declared: --version and --help are dispatch cases in run's
 // switch, not flags, since they have to work before any FlagSet is chosen. They are exempted by name
@@ -363,21 +378,36 @@ func checkShellBlock(t *testing.T, rel string, block fencedBlock) {
 func TestCLIFlagsMatchTheBinary(t *testing.T) {
 	t.Parallel()
 
-	//nolint:gosec // a path built from the module root this test located itself
-	mainGo, err := os.ReadFile(filepath.Join(repoRoot(t), "cmd", "objectfs", "main.go"))
+	sources, err := filepath.Glob(filepath.Join(repoRoot(t), "cmd", "objectfs", "*.go"))
 	if err != nil {
-		t.Fatalf("reading cmd/objectfs/main.go, which declares the flags: %v", err)
+		t.Fatalf("globbing cmd/objectfs: %v", err)
 	}
 
 	declared := make(map[string]bool)
-	for _, m := range flagDeclaration.FindAllStringSubmatch(string(mainGo), -1) {
-		declared[m[1]] = true
+	scanned := 0
+
+	for _, src := range sources {
+		if strings.HasSuffix(src, "_test.go") {
+			continue
+		}
+
+		body, readErr := os.ReadFile(src) //nolint:gosec // a path from a glob under the module root
+		if readErr != nil {
+			t.Fatalf("reading %s, which may declare flags: %v", src, readErr)
+		}
+
+		scanned++
+
+		for _, m := range flagDeclaration.FindAllStringSubmatch(string(body), -1) {
+			declared[m[1]] = true
+		}
 	}
 
-	if len(declared) == 0 {
-		t.Fatal("found no flag declarations in cmd/objectfs/main.go. If flag parsing moved to " +
-			"another file or another package, point this test at it — without this comparison " +
-			"cliFlags below is an unverified copy, which is the defect this test exists to prevent")
+	if scanned == 0 || len(declared) == 0 {
+		t.Fatalf("scanned %d non-test file(s) in cmd/objectfs and found %d flag declarations. If flag "+
+			"parsing moved to another package, point this test at it — without this comparison cliFlags "+
+			"below is an unverified copy, which is the defect this test exists to prevent", scanned,
+			len(declared))
 	}
 
 	// Spellings that name a subcommand rather than a flag. run() matches these on args[0] before any
@@ -686,6 +716,17 @@ func parseInvocation(line int, text, rest string) cliInvocation {
 	fields := strings.Fields(rest)
 	for i := 0; i < len(fields); i++ {
 		field := fields[i]
+
+		// A pipe, a semicolon or a `&&` ends this command. Everything after it belongs to a different
+		// program, and treating it as ours is not a harmless over-read: `objectfs cluster status | grep
+		// -A5 Membership` was reported as passing an unrecognized `--A5` to objectfs, naming a real
+		// command as broken. Listing `|` in shellNoise skipped the pipe itself and then went on reading
+		// grep's arguments as though objectfs had been given them, so the fix is to stop rather than to
+		// skip.
+		if field == "|" || field == "||" || field == "&&" || field == ";" ||
+			strings.HasPrefix(field, "|") {
+			break
+		}
 
 		switch {
 		case strings.HasPrefix(field, "-"):
