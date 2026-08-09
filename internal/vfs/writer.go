@@ -446,8 +446,33 @@ func (w *Writer) Flush(key string) error {
 
 // FlushContext is [Writer.Flush] with an explicit context.
 func (w *Writer) FlushContext(ctx context.Context, key string) error {
+	_, err := w.FlushReportingETag(ctx, key)
+
+	return err
+}
+
+// FlushReportingETag is [Writer.FlushContext] returning the version the object now holds.
+//
+// # Why the ETag has to come out of here
+//
+// It is read from the node *after* the flush and *before* the node is dropped, which is the only window
+// it exists in. [Node.MarkFlushed] records the ETag that [types.Backend.HeadObject] confirmed, and the
+// delete below is the last reference to the node — so a caller that wanted the version and asked
+// afterwards would have to issue its own HeadObject, and that answer could name a *third* node's
+// subsequent write. [types.DistributedCoordinator.InvalidateKey] is explicit that the etag must be the
+// one the write itself reported for exactly that reason: a receiver's replay ledger is keyed on it, so a
+// version that names someone else's write suppresses an invalidation that has not been applied.
+//
+// An empty ETag with a nil error is a legitimate answer and the caller must not treat it as a failure.
+// Three paths produce it: nothing was buffered for the key, so no write happened; the flush took the
+// attribute-only arm on a file that does not exist in storage yet, which stores nothing; or a write
+// landed during the upload and the node is still dirty, in which case the version in hand describes
+// content that has already been superseded. In every one of those, "I cannot name a version" is the
+// truth, and [types.DistributedCoordinator.InvalidateKey] accepts it as such — it costs a receiver a
+// redundant eviction and can never serve stale bytes.
+func (w *Writer) FlushReportingETag(ctx context.Context, key string) (string, error) {
 	if key == "" {
-		return fmt.Errorf("%w: empty key", ErrInvalid)
+		return "", fmt.Errorf("%w: empty key", ErrInvalid)
 	}
 
 	w.mu.Lock()
@@ -457,21 +482,40 @@ func (w *Writer) FlushContext(ctx context.Context, key string) error {
 	if !ok {
 		// Nothing buffered for this key. Not an error: fsync on a file with no pending writes is a
 		// no-op, and so is a second close.
-		return nil
+		return "", nil
 	}
 
 	if err := w.flusher.Flush(ctx, n); err != nil {
-		return err
+		return "", err
 	}
 
 	// Drop the node only once it is clean. A node still dirty after a flush that reported success
 	// would mean the flusher is broken; dropping it anyway would convert that into data loss.
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !n.Dirty() {
-		delete(w.nodes, key)
+
+	// Read only when the node is clean, which is a defensive guard rather than a tested path — and worth
+	// saying which, because a mutation removing it leaves this package's tests green.
+	//
+	// A dirty node here means a write landed in the window between [Flusher.Flush] returning nil and this
+	// lock. Nothing deterministic reaches it: Flush's own retry loop converges — a write during an upload
+	// makes MarkFlushed refuse, and the next attempt includes it — so every path that returns nil has just
+	// marked the node clean. The one exception is the attribute-only flush of an object that does not exist
+	// in storage yet, which reports success without marking anything, and there the ETag is empty anyway.
+	//
+	// It is kept because what it guards is not a slower answer. The ETag a dirty node holds is the version
+	// the *last* flush produced, and the pending write means that version is about to be replaced; naming
+	// it in an invalidation writes a ledger entry under a version peers should be told about again, and a
+	// receiver's ledger suppresses the second one. One comparison against a write that just uploaded an
+	// object is not a cost worth trading for that.
+	if n.Dirty() {
+		return "", nil
 	}
-	return nil
+
+	etag := n.Attr().ETag
+	delete(w.nodes, key)
+
+	return etag, nil
 }
 
 // FlushAll makes every buffered key durable. It implements [types.WriteBuffer].

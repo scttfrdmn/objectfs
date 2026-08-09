@@ -228,8 +228,10 @@ func (n *DirectoryNode) renameOne(ctx context.Context, srcPath, dstPath string) 
 	//
 	// The destination's buffered state is dropped rather than flushed. It belongs to the file this rename
 	// just overwrote, and flushing it would write those bytes over the file that replaced them.
+	// Peers as well as this node, with no ETag: CopyObject reports no version, and a delete has none to
+	// report. Empty is what [types.DistributedCoordinator.InvalidateKey] documents for both.
 	n.fs.buffer.DiscardPrefix(dstPath)
-	n.fs.invalidate(dstPath)
+	n.fs.invalidateBoth(ctx, dstPath, "")
 
 	if err := n.fs.backend.DeleteObject(ctx, srcPath); err != nil {
 		// The copy succeeded, so the data is safe at the destination and the rename has substantially
@@ -245,7 +247,7 @@ func (n *DirectoryNode) renameOne(ctx context.Context, srcPath, dstPath string) 
 	}
 
 	n.fs.buffer.DiscardPrefix(srcPath)
-	n.fs.invalidate(srcPath)
+	n.fs.invalidateBoth(ctx, srcPath, "")
 
 	n.fs.stats.mu.Lock()
 	n.fs.stats.Renames++
@@ -301,7 +303,7 @@ func (n *DirectoryNode) renameTree(ctx context.Context, srcPath, dstPath string,
 		}
 
 		n.fs.buffer.DiscardPrefix(newKey)
-		n.fs.invalidate(newKey)
+		n.fs.invalidateBoth(ctx, newKey, "")
 
 		if err := n.fs.backend.DeleteObject(ctx, key); err != nil {
 			n.fs.countError()
@@ -313,7 +315,7 @@ func (n *DirectoryNode) renameTree(ctx context.Context, srcPath, dstPath string,
 		}
 
 		n.fs.buffer.DiscardPrefix(key)
-		n.fs.invalidate(key)
+		n.fs.invalidateBoth(ctx, key, "")
 
 		moved++
 	}
@@ -327,10 +329,10 @@ func (n *DirectoryNode) renameTree(ctx context.Context, srcPath, dstPath string,
 	// Nothing is written here for either case; the check exists to record why. See [DirectoryNode.Mkdir]
 	// for what the marker is for.
 
-	n.fs.invalidate(srcPath)
-	n.fs.invalidate(srcPrefix)
-	n.fs.invalidate(dstPath)
-	n.fs.invalidate(dstPrefix)
+	n.fs.invalidateBoth(ctx, srcPath, "")
+	n.fs.invalidateBoth(ctx, srcPrefix, "")
+	n.fs.invalidateBoth(ctx, dstPath, "")
+	n.fs.invalidateBoth(ctx, dstPrefix, "")
 
 	n.fs.stats.mu.Lock()
 	n.fs.stats.Renames++
