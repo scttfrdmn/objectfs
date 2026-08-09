@@ -263,6 +263,11 @@ not-found error, matching on `smithy.APIError`'s code rather than on message tex
 >   ETag its own `PutObject` returned. It therefore **passed the probe as originally written** and had
 >   to be caught by disambiguating the 412 — see the linked page.
 >
+> - **Wasabi** is no longer unverified. Probed 2026-08-08: it accepts every conditional header and
+>   evaluates none of them, so the "treat as Ceph until probed" cell below happened to land on the
+>   right side of safe for the wrong reason. Ceph is the *partial* case; Wasabi is the uniform one, and
+>   the probe catches it on the first request that looks. Coordination declines to start on both.
+>
 > The reasoning in this section is unchanged and load-bearing; only its per-backend cells are stale.
 > Read the linked page for what endpoints actually do.
 

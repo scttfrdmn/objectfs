@@ -6,8 +6,9 @@ package s3
 // builds a lease on it. The endpoint to worry about is the one that accepts an If-Match, ignores it,
 // and answers 200 — because from every angle except the outcome of a race it is indistinguishable from
 // one that honors preconditions. A configuration flag or an endpoint-URL heuristic would call it
-// capable. `docs/design/conditional-writes-vs-raft.md` §4 names Ceph RGW as documenting conditional
-// headers for GET/HEAD only, with Wasabi unverified and treated the same until probed.
+// capable. `docs/design/conditional-write-compatibility.md` records an endpoint that does exactly this:
+// Wasabi, probed 2026-08-08, accepts If-Match with an ETag that cannot possibly match and performs the
+// write. These tests are the reason that is detected rather than deployed on.
 //
 // These are in-package tests because they need endpoints that misbehave in specific ways, which
 // internal/testaws cannot provide — and testaws imports this package, so an external test could not
