@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A write on one node now evicts what its peers have cached** ([#141]). [#140] gave the cluster the
+  vocabulary; this is the read and write paths using it. A read that misses and fetches from S3 announces
+  the range it cached, so a peer that wants those bytes can weigh asking against reading S3 itself. A
+  flush, an unlink, an rmdir, a mkdir, a create and both halves of a rename invalidate on every peer as
+  well as locally. Until this, a two-node deployment kept serving a file's previous contents for up to
+  five minutes after another node overwrote it — every part of the invalidation machinery existed and
+  nothing called it.
+
+  The invalidation carries **the ETag the write itself reported**, which is why `Flush` now asks the write
+  path for it rather than discarding it: a receiver's replay ledger is keyed on (key, version), so a
+  version fetched from a later `HeadObject` could name a *third* node's subsequent write and suppress an
+  invalidation that was never applied. A delete has no version to name and sends an empty one, which is
+  legal and means "evict whatever you hold". Local and remote eviction go through a single call, so a
+  future mutation path cannot add the local half and forget the remote one — the half that is invisible on
+  a single-node mount.
+
+  Both directions are fire-and-forget and never fail a syscall, but they are **not** logged alike. A lost
+  announcement costs a peer an S3 read, which is slower and nothing more, so it is Debug. A lost
+  invalidation means peers serve bytes this node replaced until their cache TTL expires, and nothing else
+  in the system reports it, so it is Warn: a mount whose invalidations are all failing is serving stale
+  reads cluster-wide.
+
+  An announcement is only sent when this node already knows the object's version, from the stat the kernel
+  issues before any read. With no version known, nothing is announced rather than a version being invented
+  — a peer that fetches bytes it cannot place against an object version hands them to a reading process as
+  file content. On a single-node mount the coordinator is nil and none of this runs: measured at 4.8 µs and
+  2 allocations for a 128 KiB cached read either way, since a cache hit never reaches the announce call.
+
 - **Peers now learn which keys are cached elsewhere in the cluster** ([#140]). `AnnounceKey` and
   `QueryKeyOwnership` were stubs returning `ErrNotSupported`; both are real. A node broadcasts a
   `cache_announce` gossip message naming the key, its ETag, its size and the byte range it holds;

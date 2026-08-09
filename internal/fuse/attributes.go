@@ -321,15 +321,16 @@ func (f *FileNode) Setattr(
 	// value POSIX already permits a filesystem to keep only approximately.
 
 	if changed {
-		if err := f.fs.buffer.FlushContext(ctx, f.key()); err != nil {
+		etag, err := f.fs.flushReportingETag(ctx, f.key())
+		if err != nil {
 			slog.Error("setattr: flush failed", "path", f.key(), "error", err)
 
 			return toErrno(err)
 		}
 
 		// The object's size, mtime, and mode all just changed. Anything cached for the path describes
-		// what it was before.
-		f.fs.invalidate(f.key())
+		// what it was before — here and on every peer, which is what the etag names the version for.
+		f.fs.invalidateBoth(ctx, f.key(), etag)
 
 		if h, ok := fh.(*FileHandle); ok {
 			h.file.markClean()
@@ -363,14 +364,15 @@ func (f *FileNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sy
 		return 0
 	}
 
-	if err := f.fs.buffer.FlushContext(ctx, f.key()); err != nil {
+	etag, err := f.fs.flushReportingETag(ctx, f.key())
+	if err != nil {
 		f.fs.countError()
 		slog.Error("fsync failed", "path", f.key(), "error", err)
 
 		return toErrno(err)
 	}
 
-	f.fs.invalidate(f.key())
+	f.fs.invalidateBoth(ctx, f.key(), etag)
 
 	if h, ok := fh.(*FileHandle); ok {
 		h.file.markClean()

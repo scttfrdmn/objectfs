@@ -34,18 +34,60 @@ import (
 // anything is to record the calls. Everything is guarded by a mutex because those calls happen on
 // whichever goroutine the kernel dispatched the write on.
 //
-// The recorded slices have no reader yet, and deliberately no accessor either. Copy-returning
-// announcements()/invalidations() helpers were written here and removed: the linter reports them
-// unused, which is correct — the calls that fill them are #141's — and a //nolint to keep a helper
-// alive for a caller that does not exist is how a test fixture starts drifting from what the code
-// does. They come back with the test that reads them.
+// The accessors below came back with #141, which is the test that reads them. They were written here
+// during #139, removed because the linter correctly reported them unused, and a //nolint to keep a helper
+// alive for a caller that does not exist is how a test fixture starts drifting from what the code does.
 type recordingCoordinator struct {
-	mu           sync.Mutex
-	announced    []types.KeyAnnouncement
-	invalidated  []string
+	mu          sync.Mutex
+	announced   []types.KeyAnnouncement
+	invalidated []invalidation
+
+	// announceErr and invalidateErr make the calls fail. Both call sites are fire-and-forget with the
+	// error logged and nothing surfaced, so a test asserting the syscall still succeeds needs a way to
+	// make them fail — otherwise "the error is not surfaced" is asserted against a path where no error
+	// ever occurs.
+	announceErr   error
+	invalidateErr error
+
 	queried      []string
 	queryResults []types.KeyAnnouncement
 	queryErr     error
+}
+
+// invalidation is one InvalidateKey call, key and etag together.
+//
+// Both, because the etag is the half that is easy to get wrong invisibly: a receiver's replay ledger is
+// keyed on it, so an invalidation carrying the wrong version suppresses one that was never applied. A
+// recorder that kept only the key would agree with an implementation that passed "" everywhere.
+type invalidation struct {
+	key  string
+	etag string
+}
+
+// announcements returns what was announced.
+func (r *recordingCoordinator) announcements() []types.KeyAnnouncement {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]types.KeyAnnouncement(nil), r.announced...)
+}
+
+// invalidations returns what was invalidated, in call order.
+func (r *recordingCoordinator) invalidations() []invalidation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]invalidation(nil), r.invalidated...)
+}
+
+// invalidatedKeys returns just the keys, for the assertions that do not care about versions.
+func (r *recordingCoordinator) invalidatedKeys() []string {
+	keys := make([]string, 0, len(r.invalidated))
+	for _, inv := range r.invalidations() {
+		keys = append(keys, inv.key)
+	}
+
+	return keys
 }
 
 func (r *recordingCoordinator) ExecuteOperation(ctx context.Context, op any) (any, error) {
@@ -58,9 +100,12 @@ func (r *recordingCoordinator) AnnounceKey(ctx context.Context, ann types.KeyAnn
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Recorded even when it fails. The production AnnounceKey validates before sending — it refuses an
+	// announcement with no ETag — so a test asserting what was *attempted* needs the call regardless of
+	// its outcome.
 	r.announced = append(r.announced, ann)
 
-	return nil
+	return r.announceErr
 }
 
 func (r *recordingCoordinator) QueryKeyOwnership(ctx context.Context, key string) ([]types.KeyAnnouncement, error) {
@@ -76,9 +121,9 @@ func (r *recordingCoordinator) InvalidateKey(ctx context.Context, key, etag stri
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.invalidated = append(r.invalidated, key)
+	r.invalidated = append(r.invalidated, invalidation{key: key, etag: etag})
 
-	return nil
+	return r.invalidateErr
 }
 
 var _ types.DistributedCoordinator = (*recordingCoordinator)(nil)

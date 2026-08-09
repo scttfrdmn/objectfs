@@ -663,8 +663,10 @@ func (n *DirectoryNode) Mkdir(ctx context.Context, name string, mode uint32, out
 		return nil, toErrno(err)
 	}
 
-	// A cached negative or stale entry for this path would outlive the directory's creation.
-	n.fs.invalidate(childPath)
+	// A cached negative or stale entry for this path would outlive the directory's creation. Empty ETag:
+	// PutObject is unconditional and reports no version, and [types.DistributedCoordinator.InvalidateKey]
+	// takes that as "evict whatever you hold" rather than being told an invented one.
+	n.fs.invalidateBoth(ctx, childPath, "")
 
 	return n.newDirEntry(ctx, name, childPath, out), 0
 }
@@ -701,8 +703,9 @@ func (n *DirectoryNode) Create(ctx context.Context, name string, flags uint32, m
 	childPath := n.joinPath(name)
 
 	// Whatever is cached for this path describes an object this create supersedes, including a cached
-	// negative entry from the lookup that preceded it.
-	n.fs.invalidate(childPath)
+	// negative entry from the lookup that preceded it. On peers too: a node that had stat'ed or read the
+	// file this create replaces would otherwise serve it until its cache expired.
+	n.fs.invalidateBoth(ctx, childPath, "")
 
 	uid, gid := n.fs.callerOwner(ctx)
 	attr := vfs.Attr{
@@ -823,7 +826,9 @@ func (n *DirectoryNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return toErrno(err)
 	}
 
-	n.fs.invalidate(childPath)
+	// A delete has no version to name, which is the case [types.DistributedCoordinator.InvalidateKey]
+	// documents an empty ETag for: every receiver applies it every time, which cannot serve stale bytes.
+	n.fs.invalidateBoth(ctx, childPath, "")
 
 	n.fs.stats.mu.Lock()
 	n.fs.stats.Deletes++
@@ -885,7 +890,9 @@ func (n *DirectoryNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return toErrno(err)
 	}
 
-	n.fs.invalidate(childPath)
+	// A delete has no version to name, which is the case [types.DistributedCoordinator.InvalidateKey]
+	// documents an empty ETag for: every receiver applies it every time, which cannot serve stale bytes.
+	n.fs.invalidateBoth(ctx, childPath, "")
 
 	n.fs.stats.mu.Lock()
 	n.fs.stats.Deletes++
@@ -1191,6 +1198,11 @@ func (fs *FileSystem) fetchUncached(ctx context.Context, path string, off, lengt
 	// to change.
 	fs.cache.Put(path, off, data)
 
+	// Tell peers, so a node that wants these bytes can weigh asking this one against reading S3. After the
+	// Put, not before: an announcement for bytes not yet cached invites a fetch this node would have to
+	// serve from S3 itself, which is slower for the peer than reading S3 directly.
+	fs.announceCached(ctx, path, off, data)
+
 	return data, nil
 }
 
@@ -1349,17 +1361,22 @@ func (fh *FileHandle) Write(ctx context.Context, data []byte, off int64) (writte
 // kernel interrupts the syscall that triggered it instead of running to completion against a caller
 // that has gone away.
 func (fh *FileHandle) Flush(ctx context.Context) syscall.Errno {
-	if err := fh.fs.buffer.FlushContext(ctx, fh.file.path); err != nil {
+	// The ETag rather than FlushContext, so the invalidation below can name the version this write
+	// produced. It is only available from inside the flush — see [vfs.Writer.FlushReportingETag] — and an
+	// empty string here is a legitimate "no version to name", not a failure.
+	etag, err := fh.fs.flushReportingETag(ctx, fh.file.path)
+	if err != nil {
 		fh.fs.countError()
 		slog.Error("flush failed", "path", fh.file.path, "error", err)
 
 		return toErrno(err)
 	}
 
-	// Drop what the cache holds for this path now that the object has changed underneath it. Ordered
-	// after the flush, not before: invalidating first would leave a window in which a concurrent read
-	// re-populates the cache from the old object and the flush then makes that entry stale again.
-	fh.fs.invalidate(fh.file.path)
+	// Drop what the cache holds for this path now that the object has changed underneath it, here and on
+	// every peer. Ordered after the flush, not before: invalidating first would leave a window in which a
+	// concurrent read re-populates the cache from the old object and the flush then makes that entry
+	// stale again.
+	fh.fs.invalidateBoth(ctx, fh.file.path, etag)
 
 	fh.file.markClean()
 
