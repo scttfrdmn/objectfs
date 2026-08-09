@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-09
+
+Two things that existed and did nothing now do something.
+
+`cluster.enabled: true` started a gossip ring and stopped there: the adapter never constructed a
+`ClusterManager`, `FileSystem` had no coordinator, and `AnnounceKey`/`QueryKeyOwnership` returned
+`ErrNotSupported` from stubs. A cluster's nodes could see each other and could not use each other. Now a
+write invalidates what peers have cached at the ETag it wrote, a cache miss learns from peers which keys
+are hot and reads *further* because of it, and a joining node is told what to warm before it serves its
+first request. The bytes still come from S3 — peer data fetch is not in this release, and [#399] is why:
+a sealed gossip datagram tops out at 5802 bytes of payload, so the datagram carries the *metadata* and
+S3 carries the object. That is the honest version of the feature rather than a 128 KiB read that fails as
+a 30-second timeout on a different host.
+
+The observability half is the same shape. `internal/awsrates` held request prices verified against the
+live AWS Pricing API and **every path from a rate to a user was severed** — a cost package with no
+importer, a `RecordCost` with no caller, a report behind a config key no mount could set. Latency
+percentiles were declared and never assigned, computed from a histogram that was `ms % 100` rather than
+a bucketing, so 50 ms and 250 ms shared a bucket. A Transfer Acceleration fallback was permanent for the
+life of the mount, invisibly. Compression ran zstd over BAM, tar.zst and JPEG and then discarded the
+result. Each of those was a feature the documentation described, and none of them could be observed or
+switched back, which is the difference this tag is about.
+
+Milestone **v0.13.0 — Cache Warming & Operational Excellence** closed at zero open, 20 issues.
+
+Cost accounting is worth one caution: the request counts come from a middleware in the AWS SDK's
+Deserialize step, not from the wrapper layer, because those two disagree — a 5 GB `PutObject` is one
+wrapper call and 641 requests to S3. The figures are what S3 was asked for by *this mount*, per attempt,
+excluding 5xx. They are not a substitute for Cost Explorer, and the metric's help text says so.
+
 ### Added
 
 - **Data that arrived compressed is no longer compressed again** ([#184]). With compression enabled, a
@@ -5176,7 +5206,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/scttfrdmn/objectfs/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/scttfrdmn/objectfs/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/objectfs/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/scttfrdmn/objectfs/compare/v0.10.2...v0.10.3
