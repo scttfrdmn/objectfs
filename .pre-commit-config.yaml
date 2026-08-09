@@ -115,6 +115,38 @@ repos:
     files: (go\.mod|go\.sum)$
     pass_filenames: false
 
+  # Shell script linting.
+  #
+  # Added by #137, which asks for it specifically — but the reason it belongs here rather than only in
+  # CI is #207. scripts/postinstall.sh and scripts/preremove.sh are now package maintainer scripts,
+  # which means they run as root, non-interactively, in the middle of a dpkg or rpm transaction, on a
+  # machine whose state nobody chose. There is no place a shell defect is less observable: the output
+  # goes into apt's progress stream, an unquoted variable is a path the operator did not intend, and
+  # the first sign of trouble is a package stuck half-configured.
+  #
+  # Repository-wide rather than scoped to the two scripts. The whole tree passes as of this commit:
+  # scripts/pjdfstest.sh had an unused loop counter (SC2034) and a trap-invoked function reported as
+  # never called (SC2329), and scripts/cleanup-aws-test.sh sourced a generated, gitignored file
+  # (SC1091). All three are fixed or annotated at the site with the reason — a hook that cannot pass
+  # on a clean checkout gets bypassed with --no-verify, and once that is habit it stops catching what
+  # it was added for. That is the same reasoning the golangci-lint hook above records for
+  # --new-from-merge-base.
+  #
+  # No --severity: the default reports style findings too, and the whole tree is clean at that level,
+  # so raising the floor would only hide the next one.
+  #
+  # shellcheck-py, not koalaman/shellcheck-precommit. The upstream hook runs shellcheck in a
+  # container, so it needs a running Docker daemon — verified by trying it: `pre-commit run
+  # shellcheck --all-files` died with "Cannot connect to the Docker daemon" before linting a single
+  # file. A pre-commit hook that requires Docker Desktop to be up is a hook that fails for reasons
+  # having nothing to do with the commit, which is the fastest route to --no-verify. shellcheck-py
+  # ships the same upstream binary as a Python wheel, so pre-commit's own environment handles it and
+  # the version below is the shellcheck version with a packaging suffix.
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: v0.11.0.1
+  hooks:
+  - id: shellcheck
+
   # Documentation checks
 - repo: https://github.com/igorshubovych/markdownlint-cli
   rev: v0.37.0

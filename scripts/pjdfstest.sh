@@ -52,6 +52,10 @@ fi
 MOUNT_DIR=$(mktemp -d)
 MOUNT_PID=0
 
+# cleanup is invoked by the `trap` below rather than by a call, which is why shellcheck reports SC2329
+# ("this function is never invoked") against it. Suppressed rather than restructured: the trap is the
+# invocation, and it has to be registered after MOUNT_DIR exists.
+# shellcheck disable=SC2329
 cleanup() {
     if [[ $MOUNT_PID -ne 0 ]]; then
         # Try platform-specific unmount first, then fall back to generic umount.
@@ -71,7 +75,11 @@ echo "Mounting s3://${BUCKET} at ${MOUNT_DIR} ..."
 MOUNT_PID=$!
 
 # Wait for the mount to become ready (up to 10s).
-for i in $(seq 1 20); do
+#
+# `for _ in` rather than `for i in $(seq 1 20)`: the counter was never read, and shellcheck reported
+# it as SC2034. `seq` is also not POSIX and is absent on a minimal image, which a fixed-count brace
+# expansion is not.
+for _ in {1..20}; do
     if mountpoint -q "$MOUNT_DIR" 2>/dev/null || mount | grep -q "$MOUNT_DIR"; then
         break
     fi

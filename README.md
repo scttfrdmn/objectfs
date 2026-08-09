@@ -286,6 +286,51 @@ make build          # produces ./objectfs
 go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 ```
 
+### HPC sites: environment modules
+
+Lmod and TCL Modules modulefiles are in [`configs/modules/`](configs/modules/). Install the one
+matching the module system in use, into a `share/modulefiles` tree under the same prefix as the
+binary, named for the version:
+
+```bash
+# Ask the binary rather than typing a number, so the two cannot disagree
+V=$(objectfs version | awk '{print $3}')
+
+# Lmod
+install -D configs/modules/objectfs.lua "/usr/share/modulefiles/objectfs/$V.lua"
+
+# TCL Modules — no .tcl extension: the filename IS the version
+install -D configs/modules/objectfs.tcl "/usr/share/modulefiles/objectfs/$V"
+```
+
+The version is not written inside either file — each reads it from its own filename, which is why the
+install path carries it and why the command above takes it from the binary instead of a literal. The
+`version` constant in `cmd/objectfs/main.go` stays the only place it is recorded. Both files may live
+in the same directory: Lmod reads the `.lua` and `modulecmd.tcl` reads the extensionless one, and
+neither reports the other's file.
+
+```bash
+module use /usr/share/modulefiles
+module load objectfs
+objectfs version
+module help objectfs     # usage, and what does not work
+```
+
+The modulefile puts the binary's directory on `PATH` only when that directory is not already on it,
+and exports `OBJECTFS_VERSION` so a job script can record which build it ran against. If no
+`objectfs` binary is found it **refuses to load**, listing the directories it searched, rather than
+adding a `PATH` entry that leads nowhere — a module that loads successfully and leaves `objectfs`
+as "command not found" inside a batch job is the failure this avoids.
+
+For a build outside the module tree's own prefix — a center keeping modulefiles in `/sw/modulefiles`
+and builds in `/sw/objectfs/<version>` — set `OBJECTFS_MODULE_PREFIX` to the prefix holding
+`bin/objectfs`.
+
+ObjectFS runs in the foreground and does not fork, so under a batch scheduler mount in a prologue or
+background the mount in the job script, and unmount in the epilogue: the unmount is what flushes
+buffered writes to S3, and a job killed with the mount still running loses whatever has not been
+flushed.
+
 ## Usage
 
 ```bash
