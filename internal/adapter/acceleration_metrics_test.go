@@ -142,19 +142,26 @@ func TestAMountWithAccelerationConfiguredSaysSo(t *testing.T) {
 func TestEachTickRereadsTheBackend(t *testing.T) {
 	t.Parallel()
 
-	a := newAdapterForSubstrate(t, func(cfg *config.Configuration) {
+	// startTolerantly rather than a hand-rolled Start, because which cleanup is correct depends on how far
+	// Start got and only it knows: this test first called closePartialStart unconditionally, which never
+	// unmounts. On a host that *can* mount — CI's Linux runner can, the developer laptop this was written on
+	// could not — that left a live FUSE mount over t.TempDir(), and the failure surfaced as the framework's
+	// own `TempDir RemoveAll cleanup: readdirent: input/output error` rather than as anything about
+	// acceleration.
+	a := startTolerantly(t, newAdapterForSubstrate(t, func(cfg *config.Configuration) {
 		cfg.Storage.S3.UseAcceleration = true
 		cfg.Storage.S3.AccelerationRetry = 25 * time.Millisecond
-	})
-
-	if err := a.Start(context.Background()); err != nil &&
-		!strings.Contains(err.Error(), "failed to mount filesystem") {
-		t.Fatalf("Start failed before reaching the mount: %v", err)
-	}
-	t.Cleanup(func() { closePartialStart(t, a) })
+	}))
 
 	if a.backend == nil {
 		t.Fatal("Start left no backend on the adapter, so there is nothing for a publisher to read")
+	}
+
+	// The collector Start built, which the swap below displaces. Stopped by hand because Stop stops
+	// whatever a.metrics holds at teardown, which by then is the fast one — so without this the mount's own
+	// metrics listener outlives the test.
+	if started := a.metrics; started != nil {
+		t.Cleanup(func() { _ = started.Stop(context.Background()) })
 	}
 
 	collector, err := metrics.NewCollector(&metrics.Config{
