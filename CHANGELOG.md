@@ -72,6 +72,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot have tuned to what already works. Both notes point at `README.md`'s supported-operations
   table for reading the output: ObjectFS is not POSIX-compliant, so a clean run is not the goal, and
   the useful question is whether the failing set grew.
+- **`docs/index.md` pointed at a `deployments/` directory that does not exist**, and never has —
+  there is no `deployments/` and no `deploy/` in the tree. The real artifact is a single templated
+  unit, `configs/systemd/objectfs@.service`, and the line now names it along with the part that is
+  not guessable from the filename: `systemctl start objectfs@research-data` reads
+  `/etc/objectfs/research-data.yaml`, which must set `mount.uri`, because one unit file serves every
+  instance and the instance name is the only thing systemd passes it. Same class of defect as the
+  `GetPredictiveCache` symbol in [#223] — a path in prose with nothing checking it. `README.md`
+  already linked the correct file, so this was the only stale copy.
+- **Four duplicate link reference definitions removed from this file** — `#179` and `#373` defined
+  twice, `#240` and `#245` likewise. Reference definitions are document-scoped, so the later copies
+  resolved nothing the first had not already resolved; markdownlint flagged all four as MD053 on every
+  run. The **first** occurrence is kept in each case, which is the one in release-section order, and
+  `MD052` stays clean because every use still finds a definition. They survived this long because
+  `CHANGELOG.md` is excluded from the markdownlint pre-commit hook — so the findings were real and
+  blocked nothing, which is the condition under which lint output stops being read. One stray double
+  blank line (MD012) in the v0.12.0 section went with them, for the same reason: it was in the way of
+  reading the output that matters.
 
 ### Fixed
 
@@ -1203,7 +1220,6 @@ had no message authentication, and a cluster will not start without a shared sec
   reading `crypto/rand` on the consensus hot path or on every S3 error would defend against no
   adversary. Per `.golangci.yml`, `#nosec` and not `//nolint:gosec` — only the former also satisfies
   the standalone run that feeds GitHub code scanning.
-
 
 - **Eleven unchecked type assertions, one of them on an HTTP request path** ([#179]). `errcheck` 11 → 0.
   Every finding was a single-value assertion rather than a discarded error, so each one panics where it
@@ -2549,6 +2565,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#384]: https://github.com/scttfrdmn/objectfs/issues/384
 [#367]: https://github.com/scttfrdmn/objectfs/issues/367
 [#352]: https://github.com/scttfrdmn/objectfs/issues/352
+[#223]: https://github.com/scttfrdmn/objectfs/issues/223
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378
@@ -2757,8 +2774,6 @@ had no message authentication, and a cluster will not start without a shared sec
   mutation that deletes an assertion loop passes by construction, so the useful check was that the loop
   runs at all, and it makes two comparisons over three alerts rather than being vacuous.
 
-[#179]: https://github.com/scttfrdmn/objectfs/issues/179
-[#373]: https://github.com/scttfrdmn/objectfs/issues/373
 [#376]: https://github.com/scttfrdmn/objectfs/issues/376
 [#377]: https://github.com/scttfrdmn/objectfs/issues/377
 
@@ -4151,8 +4166,6 @@ v0.10.3 established after two tags shipped without the work they were named for.
 [#211]: https://github.com/scttfrdmn/objectfs/issues/211
 [#212]: https://github.com/scttfrdmn/objectfs/issues/212
 [#230]: https://github.com/scttfrdmn/objectfs/issues/230
-[#240]: https://github.com/scttfrdmn/objectfs/issues/240
-[#245]: https://github.com/scttfrdmn/objectfs/issues/245
 [#247]: https://github.com/scttfrdmn/objectfs/issues/247
 
 ## [0.10.3] - 2026-08-02
