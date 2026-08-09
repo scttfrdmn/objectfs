@@ -85,35 +85,84 @@ standard S3 endpoints:
 
 **Detected Errors:**
 
-- `InvalidRequest` - Acceleration not enabled on bucket
-- `AccelerateNotSupported` - Bucket doesn't support acceleration
-- Acceleration endpoint connection failures
-- S3-accelerate endpoint errors
+S3 has no acceleration-specific error code — it reports every one of these as `InvalidRequest` and
+distinguishes them only by the message — so the classifier is a conjunction of the two. An
+`InvalidRequest` for an unrelated reason, such as `Invalid Range header` or an oversized single-part
+copy, is *not* an acceleration error and must not withdraw the endpoint.
+
+- `InvalidRequest` whose message names transfer acceleration or transfer accelerate: not configured
+  on the bucket, disabled, unsupported on the bucket, or a bucket name that is not DNS-compliant
+- Any error whose text names the `s3-accelerate` endpoint, such as a DNS failure resolving it. These
+  carry no API error at all, so the code half of the conjunction cannot see them
+- The AWS SDK's refusal to combine acceleration with a custom endpoint (see below)
 
 **Fallback Behavior:**
 
 1. Attempt operation with accelerated endpoint
 2. Detect acceleration error
-3. Log fallback event
+3. Log fallback event and increment `objectfs_s3_acceleration{statistic="fallbacks"}`
 4. Retry operation with standard endpoint
-5. Temporarily disable acceleration to avoid repeated failures
+5. Withdraw the accelerate endpoint until the retry period elapses
 
 **Re-enabling:**
 
-There is none. The fallback is one-way for the life of the mount: once an acceleration error is
-seen, every later request uses the standard endpoint until ObjectFS restarts. This section used to
-promise an "automatic re-enable after successful standard operations" and a manual
-`backend.GetClientManager().EnableAcceleration()`; nothing calls the re-enable path, and `Backend`
-has no `GetClientManager` accessor to reach it with.
+One request is allowed to try the accelerate endpoint again after `storage.s3.acceleration_retry`
+(default 5 minutes). If it succeeds, acceleration resumes for everything; if it fails, the endpoint
+is withdrawn for another period. Exactly one probe is in flight at a time, so a permanently broken
+endpoint costs one failed request per period rather than one per read.
 
-That is a deliberate trade rather than an oversight worth working around. The error that triggers
-fallback — a bucket without the Transfer Acceleration configuration — does not resolve on its own,
-so retrying it would mean paying a failed round-trip per request forever. Restart after fixing the
-bucket configuration.
+The mechanism is `internal/circuit`'s breaker, not a bespoke timer: withdrawn is its open state,
+probing is half-open with `MaxRequests: 1`. Reusing it is why the single-probe bound holds under
+concurrent load, which a mutex around two fields cannot express.
+
+Through v0.12.x there was no way back. The fallback was one-way for the life of the mount, so a
+thirty-second DNS failure reaching the accelerate endpoint cost a long-lived mount its acceleration
+until restart, and nothing reported that it had happened (#204). The trade that justified it — that a
+bucket without the acceleration configuration does not fix itself, so retrying forever costs a failed
+round-trip per request — is real, and the retry period is the answer to it: the cost of a permanent
+failure is bounded by the period rather than by the request rate.
+
+**Acceleration and a custom endpoint are mutually exclusive.**
+
+The AWS SDK refuses the pair outright — `A custom endpoint cannot be combined with S3 Accelerate` —
+before any request leaves the process. So `use_acceleration: true` together with `endpoint:` set for
+MinIO, Ceph, RustFS or Wasabi means every request attempts the accelerate client, is refused locally,
+and is served by the standard endpoint instead. Reads and writes work; the acceleration does nothing.
+
+That is a silent degradation on purpose, because acceleration is a performance capability and slower
+is a correct outcome (see the thesis in `CLAUDE.md`). It is also why the classifier has to match this
+particular error: unmatched, the refusal is not recognized as an acceleration problem and every GET
+and PUT fails permanently. Note that the SDK's refusal is not a `smithy.APIError` and the backend
+wraps it in an `*errors.ObjectFSError`, whose `Error()` deliberately omits its cause — so the
+classifier walks the whole `Unwrap` chain rather than matching the top-level string.
 
 ### Metrics Tracking
 
-Monitor acceleration performance with built-in metrics:
+A mount publishes acceleration state to its Prometheus endpoint as one gauge family,
+`objectfs_s3_acceleration`, with a `statistic` label:
+
+```text
+objectfs_s3_acceleration{statistic="configured"} 1
+objectfs_s3_acceleration{statistic="active"} 0
+objectfs_s3_acceleration{statistic="requests"} 412
+objectfs_s3_acceleration{statistic="bytes"} 1687552
+objectfs_s3_acceleration{statistic="fallbacks"} 1
+objectfs_s3_acceleration{statistic="avg_latency_seconds"} 0.0184
+objectfs_s3_acceleration{statistic="retry_period_seconds"} 300
+```
+
+`configured` against `active` is the pair to alert on, and the scrape above is the state worth
+alerting on: this mount was asked to accelerate and is not. Neither series alone can say that, which
+is why both are exported. `configured 0` is present rather than absent for the same reason — an absent
+family means "this build does not report acceleration", which is a different fact from "this mount was
+not asked to accelerate".
+
+The values are a snapshot the adapter re-reads from the backend on each collector tick, so they are
+gauges even where the underlying number is a running total. `fallbacks` is *set* to the backend's
+count, not incremented, and a fallback followed by a recovery shows as `active` returning to 1 with
+`fallbacks` staying where it is.
+
+In-process, the same numbers are available from the backend:
 
 ```go
 metrics := backend.GetMetrics()
@@ -241,22 +290,44 @@ if m.Requests > 0 {
 
 Acceleration events are logged automatically:
 
-```
-INFO  S3 Transfer Acceleration enabled    component=s3-backend bucket=my-bucket
+```text
+INFO  S3 Transfer Acceleration enabled    bucket=my-bucket endpoint=""
 WARN  S3 Transfer Acceleration error detected, falling back to standard endpoint
-      operation=GetObject error=InvalidRequest
-INFO  Re-enabling S3 Transfer Acceleration    component=s3-client
+      operation=GetObject retry_after=5m0s error="..."
+WARN  Disabling S3 Transfer Acceleration    reason="..."
+INFO  Retrying S3 Transfer Acceleration after backoff    breaker=s3-acceleration
+INFO  Re-enabling S3 Transfer Acceleration
+INFO  S3 Transfer Acceleration restored    breaker=s3-acceleration
 ```
+
+The last three are the recovery, and they are the sequence to look for when deciding whether a
+fallback was transient. "Retrying ... after backoff" without a following "restored" means the probe
+failed and the endpoint was withdrawn for another period.
 
 ### Metrics Integration
 
-Export metrics to monitoring systems:
+Nothing to write. A mount with `monitoring.metrics.enabled: true` exports
+`objectfs_s3_acceleration` on its own endpoint — see "Metrics Tracking" above for the series — and
+re-reads the backend on every collector tick. This section used to show two hand-rolled Prometheus
+collectors, which is what an operator had to do when the state was reachable only from inside the
+`s3` package.
 
-```go
-// Prometheus example
-accelerationGauge.Set(float64(metrics.AcceleratedRequests))
-fallbackCounter.Add(float64(metrics.FallbackEvents))
+An alert on the state that matters:
+
+```yaml
+- alert: ObjectFSAccelerationFallenBack
+  expr: |
+    objectfs_s3_acceleration{statistic="configured"} == 1
+      unless on(instance)
+    objectfs_s3_acceleration{statistic="active"} == 1
+  for: 15m
+  annotations:
+    summary: "{{ $labels.instance }} was configured to accelerate and is not"
 ```
+
+`for: 15m` rather than a shorter window because a single fallback is expected to resolve on its own
+after `storage.s3.acceleration_retry` — the default is 5 minutes, so alert on longer than a couple of
+retry periods, not on the first one.
 
 ## Troubleshooting
 
@@ -377,6 +448,10 @@ type Config struct {
     // Enable S3 Transfer Acceleration
     UseAccelerate bool `yaml:"use_accelerate"`
 
+    // How long a fallback lasts before one request may try the accelerate endpoint
+    // again. Zero takes the 5-minute default.
+    AccelerationRetry time.Duration `yaml:"acceleration_retry"`
+
     // Other S3 settings
     Region         string        `yaml:"region"`
     PoolSize       int           `yaml:"pool_size"`
@@ -384,13 +459,17 @@ type Config struct {
 }
 ```
 
+The operator-facing keys are `storage.s3.use_acceleration` and `storage.s3.acceleration_retry`; the
+struct above is what the adapter maps them onto.
+
 ### Client Manager Methods
 
 ```go
 // Check acceleration status
 IsAccelerationActive() bool
 
-// Manually control acceleration
+// Withdraw and restore the endpoint. Both are the gate's to call, not a caller's:
+// the gate decides when, and the retry has to be bounded to one in-flight probe.
 EnableAcceleration()
 DisableAcceleration(reason string)
 
@@ -401,7 +480,24 @@ GetStandardClient() *s3.Client
 
 ### Metrics Methods
 
+`AccelerationStats` is what an exporter should read. It answers "is acceleration in effect" —
+`BackendMetrics.AccelerationEnabled` answers only "was it configured", which is why a mount that had
+fallen back reported acceleration enabled for the life of the process.
+
 ```go
+type AccelerationStats struct {
+    Configured  bool          // what the operator asked for
+    Active      bool          // whether requests are taking the accelerate endpoint now
+    GateState   circuit.State // closed, open (withdrawn), or half-open (probing)
+    Requests    int64
+    Bytes       int64
+    Fallbacks   int64
+    AvgLatency  time.Duration
+    RetryPeriod time.Duration
+}
+
+stats := backend.AccelerationStats()
+
 type BackendMetrics struct {
     AccelerationEnabled  bool
     AcceleratedRequests  int64

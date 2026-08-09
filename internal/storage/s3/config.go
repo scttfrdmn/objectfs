@@ -54,6 +54,25 @@ type Config struct {
 	UseAccelerate bool `yaml:"use_accelerate"`
 	UseDualStack  bool `yaml:"use_dual_stack"`
 
+	// AccelerationRetry is how long the fallback stays in effect before one request is allowed to
+	// try the accelerate endpoint again. Zero means the default below.
+	//
+	// The fallback used to be permanent — one acceleration error and every later request in the
+	// mount's life used the standard endpoint (#204). The argument for that was sound as far as it
+	// went: the usual trigger is a bucket without the Transfer Acceleration configuration, which
+	// does not resolve on its own, so retrying it per request would pay a failed round trip forever.
+	// What it missed is that the trigger set is not only that one. A DNS or TLS failure reaching
+	// <bucket>.s3-accelerate.amazonaws.com matches too, and so does a transient InvalidRequest; those
+	// do resolve, and a mount that lost acceleration to a thirty-second network fault kept paying for
+	// it for weeks.
+	//
+	// A period rather than a per-request retry is what makes both cases affordable. At the default,
+	// the unrecoverable case costs one failed request every five minutes — a rounding error against
+	// the request rate of any mount doing enough traffic to want acceleration — and the recoverable
+	// case comes back on its own within one period. See newAccelerationGate for the state machine;
+	// it is [circuit.CircuitBreaker], not a second bespoke one.
+	AccelerationRetry time.Duration `yaml:"acceleration_retry"`
+
 	// Multipart upload configuration
 	MultipartThreshold   int64 `yaml:"multipart_threshold"`   // Size threshold for multipart uploads (bytes)
 	MultipartChunkSize   int64 `yaml:"multipart_chunk_size"`  // Chunk size for multipart uploads (bytes)
@@ -468,6 +487,10 @@ func NewDefaultConfig() *Config {
 			FailureThreshold: 0,
 			Timeout:          30 * time.Second,
 		},
+		// Not UseAccelerate — that stays false — but the period that governs it once an operator turns
+		// it on. Named here rather than left to newAccelerationGate's fallback so that a backend built
+		// from this config reports the period it will actually use.
+		AccelerationRetry:       defaultAccelerationRetry,
 		MultipartThreshold:      32 * 1024 * 1024, // 32MB - trigger multipart for larger files
 		MultipartChunkSize:      16 * 1024 * 1024, // 16MB - optimal chunk size for performance
 		MultipartConcurrency:    8,                // Match pool size for concurrent uploads

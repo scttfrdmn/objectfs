@@ -576,6 +576,14 @@ type S3Config struct {
 	UseAcceleration bool   `yaml:"use_acceleration"`
 	ForcePathStyle  bool   `yaml:"force_path_style"`
 
+	// AccelerationRetry is how long a Transfer Acceleration fallback lasts before one request is
+	// allowed to try the accelerate endpoint again. Zero means the backend's default of 5 minutes.
+	//
+	// Ignored unless use_acceleration is true. It exists because the fallback used to be permanent for
+	// the life of the mount (#204): a thirty-second DNS failure reaching the accelerate endpoint cost a
+	// mount its acceleration until it was restarted, and nothing reported that it had happened.
+	AccelerationRetry time.Duration `yaml:"acceleration_retry"`
+
 	// StorageTier is the S3 storage class objects are written with: STANDARD, STANDARD_IA,
 	// ONEZONE_IA, GLACIER_IR, GLACIER, DEEP_ARCHIVE, INTELLIGENT_TIERING or REDUCED_REDUNDANCY.
 	// Empty means STANDARD, which is also what S3 applies to a PUT that names no class.
@@ -1626,6 +1634,13 @@ func (c *Configuration) validateDurations() error {
 		{"monitoring.health_checks.timeout", c.Monitoring.HealthChecks.Timeout},
 		{"cache.ttl", c.Cache.TTL},
 		{"cluster.redis.ttl", c.Cluster.Redis.TTL},
+
+		// Checked whether or not use_acceleration is set, on the same reasoning as
+		// performance.read_ahead.ttl below: `acceleration_retry: 300` is a mistake in a file where
+		// acceleration is off too, and it becomes a live 300-nanosecond retry period the day someone
+		// turns the flag on. A period that short would put one request per 300ns against the accelerate
+		// endpoint — the per-request retry the backoff exists to avoid.
+		{"storage.s3.acceleration_retry", c.Storage.S3.AccelerationRetry},
 
 		// Checked here and not in validateReadAheadConfig, even though that function checks the other
 		// four read-ahead keys, because that one returns early on a disabled block and this trap does

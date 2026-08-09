@@ -29,6 +29,7 @@ type Collector struct {
 	activeConnections prometheus.Gauge
 	errorCounter      *prometheus.CounterVec
 	predictiveGauge   *prometheus.GaugeVec
+	accelerationGauge *prometheus.GaugeVec
 
 	// periodic are the callbacks updateLoop invokes on every tick, registered by OnPeriodicUpdate.
 	periodic []func()
@@ -361,6 +362,23 @@ func (c *Collector) UpdatePredictiveCache(stats map[string]float64) {
 	}
 }
 
+// UpdateS3Acceleration publishes the S3 Transfer Acceleration state, one series per named statistic.
+//
+// A map for the same reason UpdatePredictiveCache takes one: internal/metrics must not import
+// internal/storage/s3. The adapter imports both and is where they meet.
+//
+// The names are the contract, captured in sdks/testdata/metrics-scrape.txt and asserted by
+// TestSDKFixtureMatchesTheLiveScrape, so both SDK suites fail on a rename.
+func (c *Collector) UpdateS3Acceleration(stats map[string]float64) {
+	if !c.config.Enabled {
+		return
+	}
+
+	for name, value := range stats {
+		c.accelerationGauge.With(prometheus.Labels{"statistic": name}).Set(value)
+	}
+}
+
 // OnPeriodicUpdate registers a callback for updateLoop to invoke on every tick.
 //
 // This is how a gauge whose value lives elsewhere gets refreshed. Counters and histograms are pushed at
@@ -551,6 +569,27 @@ func (c *Collector) initMetrics() error {
 		[]string{"statistic"},
 	)
 
+	// S3 Transfer Acceleration metrics.
+	//
+	// Same shape as the predictive family above and for the same reasons: one gauge labeled by
+	// "statistic", so the set can grow without a metric-name change that both SDKs and every dashboard
+	// would have to follow.
+	//
+	// The family exists because the acceleration state was reachable by nothing outside the s3 package
+	// (#204). A mount could fall back to the standard endpoint on its first request and serve everything
+	// after that at standard throughput, and no scrape, log line, or health check said so — so the
+	// series that matters most here is `active`, which is 0 exactly when the fallback is in effect.
+	c.accelerationGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "s3_acceleration",
+			Help:        "S3 Transfer Acceleration state and counters, by statistic name",
+			ConstLabels: labels,
+		},
+		[]string{"statistic"},
+	)
+
 	return nil
 }
 
@@ -564,6 +603,7 @@ func (c *Collector) registerMetrics() error {
 		c.activeConnections,
 		c.errorCounter,
 		c.predictiveGauge,
+		c.accelerationGauge,
 	}
 
 	for _, metric := range metrics {

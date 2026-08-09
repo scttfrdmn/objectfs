@@ -111,6 +111,20 @@ func liveScrape(t *testing.T) string {
 		"evictions_intelligent": 24,
 	})
 
+	// The Transfer Acceleration family, published by a mount from the S3 backend's own state (#204).
+	// `configured` 1 with `active` 0 is the state that used to be unreportable and is the reason this
+	// family exists: acceleration was asked for and is not happening. Capturing it in that state rather
+	// than a healthy one means an SDK extractor that reads the two as one value fails here.
+	c.UpdateS3Acceleration(map[string]float64{
+		"configured":           1,
+		"active":               0,
+		"requests":             412,
+		"bytes":                412 * 4096,
+		"fallbacks":            1,
+		"avg_latency_seconds":  0.0184,
+		"retry_period_seconds": 300,
+	})
+
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

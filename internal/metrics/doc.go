@@ -94,6 +94,19 @@ Histograms:
 Gauges:
   - objectfs_cache_size_bytes{level}: Current cache size per level
   - objectfs_active_connections: Current active S3 connections
+  - objectfs_predictive_cache{statistic}: Read-ahead statistics, by statistic name
+  - objectfs_s3_acceleration{statistic}: Transfer Acceleration state and counters, by statistic name
+
+The last two are one family each with a statistic label rather than a metric per statistic, because
+both sets grow: a new label value is something a dashboard and both SDKs pick up for free, where a
+new name is a change every consumer has to follow. Their values are a snapshot the adapter re-reads
+on each update tick, so they are gauges even where the underlying number is a running total —
+objectfs_s3_acceleration{statistic="fallbacks"} is set to the backend's count, not incremented.
+
+objectfs_s3_acceleration carries statistic="configured" and statistic="active" separately, and the
+difference between them is the point (#204): configured 1 with active 0 is a mount that was asked to
+accelerate and is not, which before this family existed was reported nowhere. Alert on the pair, not
+on either alone.
 
 Every series additionally carries the operator's monitoring.metrics.custom_labels as constant
 labels — service="objectfs" by default. Consumers must parse the label block: a name identifies a

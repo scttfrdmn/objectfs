@@ -158,6 +158,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}
 
 	a.exportPredictiveStats()
+	a.exportAccelerationStats()
 
 	// 4. Initialize the write path.
 	//
@@ -620,6 +621,68 @@ func (a *Adapter) exportPredictiveStats() {
 	a.metrics.OnPeriodicUpdate(publish)
 }
 
+// exportAccelerationStats publishes the S3 Transfer Acceleration state to the metrics surface on every
+// collector tick.
+//
+// This is the "surface the state" half of #204, and the state it surfaces is one an operator could not
+// previously obtain by any means. Acceleration fell back on the first acceleration error and stayed
+// fallen back for the life of the mount; s3.Backend tracked that accurately, in
+// BackendMetrics.AccelerationEnabled — a field whose only writer was NewBackend, passing the config flag
+// — behind s3.Backend.GetMetrics, which had no caller outside its own package. So a mount serving every
+// byte over the standard endpoint reported acceleration enabled, and the throughput loss showed up
+// nowhere but in a throughput graph nobody had reason to compare against.
+//
+// Registered unconditionally, including when acceleration is not configured, and that is deliberate.
+// `configured 0` is a different fact from an absent metric family — the first says the mount was asked
+// not to accelerate, the second says this build does not report it — and the question an operator asks
+// when investigating slow reads is exactly which of those they are looking at.
+//
+// A periodic callback rather than a push at the moment of the fallback, for two reasons. The gate's
+// transitions happen inside the s3 package under a breaker lock, so a push would mean handing that lock
+// a metrics dependency; and `active` is a gauge whose value is the state of another subsystem, which is
+// the shape OnPeriodicUpdate exists for. Reading it on a tick also advances the gate's open→half-open
+// transition, which is harmless: it recovers a few seconds earlier than the next request would.
+func (a *Adapter) exportAccelerationStats() {
+	if a.metrics == nil || a.backend == nil {
+		return
+	}
+
+	publish := func() {
+		stats := a.backend.AccelerationStats()
+
+		// Keys become the `statistic` label, so they are the contract two SDKs read through
+		// sdks/testdata/metrics-scrape.txt.
+		//
+		// `configured` and `active` are both here because they answer different questions and the
+		// difference between them *is* the fallback: configured 1 with active 0 means this mount was
+		// asked to accelerate and is not. Neither one alone can say that.
+		a.metrics.UpdateS3Acceleration(map[string]float64{
+			"configured":           boolGauge(stats.Configured),
+			"active":               boolGauge(stats.Active),
+			"requests":             float64(stats.Requests),
+			"bytes":                float64(stats.Bytes),
+			"fallbacks":            float64(stats.Fallbacks),
+			"avg_latency_seconds":  stats.AvgLatency.Seconds(),
+			"retry_period_seconds": stats.RetryPeriod.Seconds(),
+		})
+	}
+
+	publish()
+	a.metrics.OnPeriodicUpdate(publish)
+}
+
+// boolGauge renders a boolean as the 1/0 Prometheus convention for state.
+//
+// Named rather than inlined as a conditional expression per field, because the two callers above are the
+// two halves of one distinction and writing them the same way is what keeps them comparable.
+func boolGauge(b bool) float64 {
+	if b {
+		return 1
+	}
+
+	return 0
+}
+
 // buildS3Config translates the loaded configuration into the backend's configuration.
 //
 // This function is audit finding D12, and the finding was not that it was wrong — it was that it was
@@ -670,6 +733,10 @@ func (a *Adapter) buildS3Config() *s3.Config {
 		},
 
 		UseAccelerate: s3cfg.UseAcceleration,
+
+		// Zero passes through to newAccelerationGate's default rather than being substituted here, so
+		// there is one place that decides the period.
+		AccelerationRetry: s3cfg.AccelerationRetry,
 
 		MultipartThreshold: a.sizeOrDefault("storage.s3.multipart.threshold",
 			s3cfg.Multipart.Threshold, defaults.MultipartThreshold),

@@ -67,6 +67,40 @@ func ReadyToTripForTest(cfg CircuitBreakerConfig) func(circuit.Counts) bool {
 	return readyToTrip(cfg)
 }
 
+// RouteAccelerationThroughTheTestEndpoint makes the accelerated client an ordinary client against the
+// same endpoint, so the acceleration path can be driven end-to-end against a test server.
+//
+// It exists because UseAccelerate and a custom BaseEndpoint are mutually exclusive in the AWS SDK: the
+// endpoint ruleset refuses to build the request at all ("A custom endpoint cannot be combined with S3
+// Accelerate"), so against any emulator an accelerated request never reaches the network. That is a real
+// defect and it has its own test — TestAccelerationOnACustomEndpointFallsBackRatherThanFailing — but it
+// also means the *recovery* half of #204 has no end-to-end path: the probe can never succeed, because no
+// probe is ever sent.
+//
+// So this substitutes the one thing that cannot work for the one thing that can, and changes nothing
+// else. The accelerated client becomes the standard client, which is a real HTTP client against the test
+// endpoint; the gate, the classifier, the fallback, the metrics and the client-manager state are all the
+// production article. What the resulting test cannot show is that the accelerate *hostname* is used —
+// nothing without a real AWS bucket can — and TestAcceleratedClientKeepsTheConfiguredEndpoint covers the
+// client construction separately.
+//
+// Config.UseAccelerate is set as well, because EnableAcceleration checks it: without that the gate's
+// half-open transition would decline to re-enable and the recovery would be untestable for a reason that
+// has nothing to do with the recovery.
+func RouteAccelerationThroughTheTestEndpoint(b *Backend) {
+	b.config.UseAccelerate = true
+
+	cm := b.clientManager
+	cm.config.UseAccelerate = true
+
+	cm.accelMu.Lock()
+	defer cm.accelMu.Unlock()
+
+	cm.acceleratedClient = cm.standardClient
+	cm.client = cm.standardClient
+	cm.accelerationActive = true
+}
+
 // CapabilityProbeKeyForTest is the key the conditional-write probe asserts against.
 //
 // A test asserting the probe left nothing behind has to name the key, and hardcoding the literal in the

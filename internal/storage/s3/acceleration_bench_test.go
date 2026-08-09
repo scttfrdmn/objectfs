@@ -132,8 +132,6 @@ func BenchmarkFallback(b *testing.B) {
 
 // BenchmarkAccelerationOverhead benchmarks the overhead of acceleration detection
 func BenchmarkAccelerationOverhead(b *testing.B) {
-	backend := &Backend{}
-
 	// One error per path through the classifier: the InvalidRequest-plus-message conjunction that
 	// matches, an InvalidRequest that fails the message half (the most expensive path — it pays for
 	// the unwrap, the code comparison, and the ToLower), a different code that short-circuits after
@@ -151,7 +149,7 @@ func BenchmarkAccelerationOverhead(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		for _, err := range testErrors {
-			_ = backend.isAccelerationError(err)
+			_ = isAccelerationError(err)
 		}
 	}
 }

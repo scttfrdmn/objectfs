@@ -7,6 +7,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // apiErr builds the shape the AWS SDK actually hands back for an S3 error response: a
@@ -25,8 +27,6 @@ func apiErr(code, message string) error {
 
 func TestBackend_isAccelerationError(t *testing.T) {
 	t.Parallel()
-
-	b := &Backend{}
 
 	tests := []struct {
 		name     string
@@ -85,6 +85,26 @@ func TestBackend_isAccelerationError(t *testing.T) {
 			expected: true,
 			why:      "no API error to inspect, but the accelerate endpoint is unmistakably what failed",
 		},
+		{
+			name: "the SDK refusing accelerate together with a custom endpoint",
+			err: errors.New("operation error S3: GetObject, resolve auth scheme: resolve endpoint: " +
+				"endpoint rule error, A custom endpoint cannot be combined with S3 Accelerate"),
+			expected: true,
+			why: "never reaches the network, so it carries no API error; unmatched, it failed every GET " +
+				"and PUT on every S3-compatible deployment that set both",
+		},
+		{
+			name: "the same refusal behind an ObjectFSError, which is how the backend sees it",
+			err: objerrors.NewError(objerrors.ErrCodeStorageRead, "GetObject operation failed").
+				WithComponent("s3-backend").
+				WithOperation("GetObject").
+				WithCause(errors.New("operation error S3: GetObject, resolve auth scheme: resolve " +
+					"endpoint: endpoint rule error, A custom endpoint cannot be combined with S3 Accelerate")),
+			expected: true,
+			why: "ObjectFSError.Error() renders its own code and message and not its cause, so a matcher " +
+				"over err.Error() alone sees no acceleration text at all — and this is the shape " +
+				"translateError hands the classifier for every request",
+		},
 
 		// Audit finding L27. Each of these was classified as an acceleration error by the substring
 		// matcher this replaced, and each false positive disables acceleration for the remaining life
@@ -141,7 +161,7 @@ func TestBackend_isAccelerationError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := b.isAccelerationError(tt.err)
+			result := isAccelerationError(tt.err)
 			if result != tt.expected {
 				t.Errorf("isAccelerationError(%v) = %v, want %v\nwhy: %s", tt.err, result, tt.expected, tt.why)
 			}
@@ -156,11 +176,10 @@ func TestBackend_isAccelerationError(t *testing.T) {
 func TestBackend_isAccelerationError_WrappedInvalidRequestStillMatches(t *testing.T) {
 	t.Parallel()
 
-	b := &Backend{}
 	inner := apiErr("InvalidRequest", "S3 Transfer Acceleration is not configured on this bucket")
 
 	for depth, err := 0, inner; depth < 4; depth++ {
-		if !b.isAccelerationError(err) {
+		if !isAccelerationError(err) {
 			t.Errorf("wrapped %d deep: isAccelerationError = false, want true (%v)", depth, err)
 		}
 		err = fmt.Errorf("layer %d: %w", depth, err)
