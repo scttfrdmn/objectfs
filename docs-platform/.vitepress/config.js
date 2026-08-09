@@ -60,7 +60,9 @@ export default defineConfig({
           text: 'API Reference',
           items: [
             { text: 'Overview', link: '/api/' },
-            { text: 'REST API', link: '/api/rest' },
+            // No 'REST API' entry: there is no /api/rest page and never was, and as of #367 there is
+            // no pkg/api either. A running mount serves /metrics and /health; both are under
+            // 'Health & Metrics' below.
             { text: 'CLI Reference', link: '/api/cli' },
             { text: 'Configuration', link: '/api/configuration' },
           ]

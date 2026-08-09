@@ -92,7 +92,6 @@ them**. Verified by import graph, not by reading the code:
 |---|---|---|
 | Cost tracking and per-operation billing | `internal/cost` | no importer outside itself |
 | TAR.ZST archive access without extraction | `internal/archive` | no importer outside itself |
-| REST API | `pkg/api` | no importer outside itself |
 | Detailed per-file performance metrics | `internal/metrics` detailed collector | constructor has no non-test caller |
 | ML tier prediction driving cache promotion | `internal/analytics` | imported by `internal/cache`, but the `Predictor` field is never set on the mount path, so the size heuristic always runs |
 | Multi-node coordination | `internal/distributed` | imported only by tests |
@@ -100,6 +99,14 @@ them**. Verified by import graph, not by reading the code:
 
 They are listed here rather than deleted from the docs because the code exists and may be wired up;
 what they are not is a feature of the shipping product. Each is tracked as its own issue.
+
+One row left this table by the other route. A REST API — `pkg/api`, 12 declared routes, no importer —
+was **deleted** rather than kept waiting ([#367](https://github.com/scttfrdmn/objectfs/issues/367)).
+A declared-but-unserved HTTP surface is worse than an absent one: it produces documentation that
+cannot be checked against behavior, and it did — the six fabricated endpoints
+[#336](https://github.com/scttfrdmn/objectfs/issues/336) had to correct in the docs playground looked
+plausible precisely *because* a package in the tree declared their shapes. A running mount serves two
+endpoints, `/metrics` and `/health`, and those are documented above.
 
 ---
 
