@@ -30,9 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write fails with `no target nodes selected` — naming neither the key nor the value), a
   **non-host:port** address, a **non-numeric port**, and **port 0 on `advertise_addr`**. Port 0 is
   allowed on `listen_addr`, because the asymmetry is real and measured: `ListenUDP` on `127.0.0.1:0`
-  binds and the kernel assigns a port, while `DialUDP` to `127.0.0.1:0` fails with `can't assign
-  requested address`. That is why this does not reuse `validateListenAddr` — its port-0 advice is
-  correct for a monitoring endpoint and wrong here.
+  binds and the kernel assigns a port, which is what `internal/distributed`'s own tests configure and
+  what `ClusterManager.GossipAddr` exists to report back. An advertised port 0 is an address no peer can
+  deliver to, and the platforms differ only in where that surfaces — darwin refuses the dial with
+  `can't assign requested address`, while **Linux dials and sends successfully and the datagram goes
+  nowhere**, reported at neither end. Linux is the worse case and the one CI runs, which is why the
+  refusal is not conditioned on a dial probe: the first version of the test required the dial to fail
+  and passed locally on darwin while failing in CI, which is the whole argument for measuring on the
+  target platform rather than the development one. This is also why the check does not reuse
+  `validateListenAddr` — its port-0 advice is correct for a monitoring endpoint and wrong here.
 
   Two settings are **warnings on `--dry-run`, not errors**, because each is right in one deployment and
   wrong in another: an empty `seed_nodes` is how the first node of a new cluster is configured, and a

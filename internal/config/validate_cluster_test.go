@@ -159,8 +159,25 @@ func TestValidateRejectsANegativeReplicationFactor(t *testing.T) {
 // A single rule for both addresses is wrong in one direction or the other, which is why this does not
 // reuse validateListenAddr. net.ListenUDP on 127.0.0.1:0 binds and the kernel assigns a port — this
 // repository's own distributed tests configure exactly that, and ClusterManager.GossipAddr exists to
-// report the assigned port back. net.DialUDP to a port 0 fails with "can't assign requested address",
-// so an advertised port 0 is an address no peer can reach.
+// report the assigned port back. An advertised port 0, meanwhile, is an address no peer can deliver to.
+//
+// # Why the dialing half is not asserted here
+//
+// It was, and it failed on Linux. The first version of this test required net.DialUDP to
+// "127.0.0.1:0" to *fail*, on the strength of a measurement made on darwin, where it returns "can't
+// assign requested address". Measured on Linux, the same dial **succeeds**, reports
+// `remote=127.0.0.1:0`, and a subsequent Write returns n=12 and a nil error. The datagram goes nowhere.
+//
+// So the platform difference is only in where the failure appears, and Linux is the worse of the two:
+// darwin refuses at the dial, while Linux accepts the address, accepts the send, and drops the
+// datagram with nothing reported at either end. That strengthens the refusal rather than weakening it —
+// an advertised port 0 on Linux is precisely the silent-partition shape this validation exists for, and
+// there is no observable event anywhere to diagnose it from.
+//
+// A test cannot assert "the send silently goes nowhere" without a receiver to prove the absence
+// against, and a negative over a UDP socket is a timeout rather than a fact. So the dialing half is
+// argued in the comment and in the refusal's own message, and what remains asserted here is the half
+// that *is* observable: the listening side binds, so port 0 has to stay legal there.
 //
 // validateListenAddr's port-0 message is also wrong here on its own terms: it tells the operator to use
 // the `enabled` flag beside the field, which the cluster block does not have per address.
@@ -194,34 +211,18 @@ func TestClusterAddrsAllowPortZeroOnlyWhereItBinds(t *testing.T) {
 			"every single-host test that wants a free port", err, bound)
 	}
 
-	// The dialing side. Refused, because the dial itself fails.
-	dialErr := func() error {
-		da, resolveErr := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-		if resolveErr != nil {
-			return resolveErr
-		}
-
-		c, connErr := net.DialUDP("udp", nil, da)
-		if connErr != nil {
-			return connErr
-		}
-
-		_ = c.Close()
-
-		return nil
-	}()
-
-	if dialErr == nil {
-		t.Error("dialing 127.0.0.1:0 succeeded. The refusal of an advertised port 0 rests on this dial " +
-			"failing; if it now works, that rule should be reconsidered rather than kept on faith")
-	}
-
+	// The advertising side. Refused on every platform, for a reason that differs by platform only in
+	// where it surfaces — see the doc comment. Deliberately not conditioned on a dial probe: the first
+	// version of this test required the dial to fail, which is true on darwin and false on Linux, so the
+	// probe made the assertion a claim about the runner rather than about the rule.
 	err = validateClusterConfig(clusterEnabled(func(c *ClusterConfig) {
 		c.AdvertiseAddr = "127.0.0.1:0"
 	}))
 	if err == nil {
-		t.Fatalf("cluster.advertise_addr = 127.0.0.1:0 was accepted, but dialing it fails: %v. A node "+
-			"advertising it is unreachable while appearing configured", dialErr)
+		t.Fatal("cluster.advertise_addr = 127.0.0.1:0 was accepted. No peer can deliver to it: darwin " +
+			"refuses the dial outright, and Linux accepts both the dial and the send and drops the " +
+			"datagram — so the node is unreachable while appearing configured, with nothing reported at " +
+			"either end")
 	}
 
 	if !strings.Contains(err.Error(), "cluster.listen_addr") {

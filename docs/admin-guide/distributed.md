@@ -94,7 +94,7 @@ is absent.
 | --- | --- | --- | --- | --- |
 | `enabled` | bool | `false` | `OBJECTFS_CLUSTER_ENABLED` | Starts the gossip mesh. Also selects the Redis cache when `redis.enabled` is set |
 | `node_id` | string | `""` | `OBJECTFS_CLUSTER_NODE_ID` | Empty generates `node-<8 hex bytes>` at startup — **new on every restart**. Set it for anything you intend to identify in a report |
-| `listen_addr` | host:port | `0.0.0.0:8080` | `OBJECTFS_CLUSTER_LISTEN_ADDR` | Where the gossip UDP socket binds. A wildcard belongs here. Port `0` is allowed and lets the kernel choose |
+| `listen_addr` | host:port | `0.0.0.0:8080` | `OBJECTFS_CLUSTER_LISTEN_ADDR` | Where the gossip UDP socket binds. A wildcard belongs here. Port `0` is allowed and lets the kernel choose — read the assigned port back before advertising it |
 | `advertise_addr` | host:port | `127.0.0.1:8080` | `OBJECTFS_CLUSTER_ADVERTISE_ADDR` | Where peers are told to reach this node. Must not be a wildcard and must not be port `0`; both are refused at startup |
 | `seed_nodes` | list of host:port | `[]` | `OBJECTFS_CLUSTER_SEEDS` | Any existing member. A node that seeds from itself is a no-op, so one well-known seed can be listed on every node. The environment form is comma-separated |
 | `secret_file` | path | `""` | — (see below) | Path to the shared gossip secret. **The path, never the secret.** Must be mode 0600 or startup refuses it |

@@ -1512,11 +1512,13 @@ func validateGossipAddr(field, addr string, allowPortZero bool) error {
 	}
 
 	if n == 0 {
-		return fmt.Errorf("%s has port 0, which no peer can dial. Port 0 on a listener means \"let the "+
-			"kernel choose\" and is fine on cluster.listen_addr, but this address is what peers are "+
-			"told to send to, and dialing it fails with \"can't assign requested address\" — so this "+
-			"node would be unreachable while appearing configured. If the kernel is choosing the port, "+
-			"read the bound one back and advertise that", field)
+		return fmt.Errorf("%s has port 0, which no peer can deliver to. Port 0 on a listener means "+
+			"\"let the kernel choose\" and is fine on cluster.listen_addr, but this address is what "+
+			"peers are told to send to. Depending on the platform, a peer either fails the dial with "+
+			"\"can't assign requested address\" or — on Linux — dials and sends successfully while the "+
+			"datagram goes nowhere, reported at neither end. Either way this node is unreachable while "+
+			"appearing configured. If the kernel is choosing the port, read the bound one back and "+
+			"advertise that", field)
 	}
 
 	if n < 1 || n > 65535 {
