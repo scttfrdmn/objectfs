@@ -1147,6 +1147,78 @@ func getEnvMappings() []envMapping {
 			return nil
 		}},
 
+		// Cluster settings. These five exist because a container orchestrator has no other way to
+		// configure them: three of the five are *per-pod* values, and a ConfigMap is shared by every pod
+		// that mounts it. Kubernetes supplies a pod's own name and IP through the downward API, which
+		// arrives as an environment variable and nothing else — so `node_id` and `advertise_addr` are
+		// reachable from a manifest only through this table. See deploy/kubernetes/statefulset.yaml,
+		// which is the caller.
+		//
+		// OBJECTFS_CLUSTER_ENABLED was documented before it existed, which is why it is first here. Both
+		// sdks/python/README.md and sdks/javascript/README.md told operators to `export
+		// OBJECTFS_CLUSTER_ENABLED=true`, and #146's issue body built a three-node compose file on it
+		// plus _NODE_ID, _ADVERTISE_ADDR and _SEEDS. None of the four were in this table: verified by
+		// calling getEnvMappings() rather than by grep, 24 entries and not one of them. So a deployment
+		// following the documentation got a silent single-node mount — every node up, none of them in a
+		// cluster, and no error anywhere, because an unread variable cannot complain.
+		//
+		// Note the asymmetry with SecretFile, which is deliberate and stays: the secret itself has
+		// OBJECTFS_CLUSTER_SECRET (distributed.ClusterSecretEnv) and no config key, because a secret in
+		// a world-readable config file is published to every user on the node. Here it is the reverse —
+		// the path is configurable and the material is not.
+		{"OBJECTFS_CLUSTER_ENABLED", func(c *Configuration, val string) error {
+			// ParseBool with the error returned, like the two monitoring toggles above and unlike the
+			// feature flags, which coerce anything that is not "true" to false. Same reasoning, and it
+			// applies more strongly here. A typo coerced to false is a node that mounts successfully,
+			// serves reads, and is invisible to every peer — cache announcements go nowhere and
+			// invalidations from other nodes are never received, so it can serve a stale object after a
+			// peer overwrote it. That is an integrity outcome, and refusing to start while naming the
+			// variable is unambiguously better than reaching it.
+			enabled, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("OBJECTFS_CLUSTER_ENABLED=%q is not a boolean: %w", val, err)
+			}
+
+			c.Cluster.Enabled = enabled
+
+			return nil
+		}},
+		{"OBJECTFS_CLUSTER_NODE_ID", func(c *Configuration, val string) error {
+			c.Cluster.NodeID = val
+			return nil
+		}},
+		{"OBJECTFS_CLUSTER_LISTEN_ADDR", func(c *Configuration, val string) error {
+			c.Cluster.ListenAddr = val
+			return nil
+		}},
+		{"OBJECTFS_CLUSTER_ADVERTISE_ADDR", func(c *Configuration, val string) error {
+			c.Cluster.AdvertiseAddr = val
+			return nil
+		}},
+		// Comma-separated, because the environment holds strings and this field is a []string. The
+		// separator is a comma rather than a space for the reason every seed list in this project uses
+		// one — a shell that splits on whitespace turns one variable into several words, and a
+		// `docker-compose.yaml` or a manifest passing seeds inline would then need quoting that is easy
+		// to get wrong and silent when wrong.
+		//
+		// Empty fields are dropped and each entry is trimmed, so a trailing comma or a value wrapped for
+		// readability across lines does not produce an empty seed. An empty seed is worth avoiding
+		// specifically: it would reach the gossip layer as an address to dial, fail, and be reported as
+		// an unreachable peer rather than as a configuration error.
+		{"OBJECTFS_CLUSTER_SEEDS", func(c *Configuration, val string) error {
+			var seeds []string
+
+			for seed := range strings.SplitSeq(val, ",") {
+				if trimmed := strings.TrimSpace(seed); trimmed != "" {
+					seeds = append(seeds, trimmed)
+				}
+			}
+
+			c.Cluster.SeedNodes = seeds
+
+			return nil
+		}},
+
 		// Read-ahead. Four variables where there were six, matching the four keys the manager reads
 		// (#176). OBJECTFS_READAHEAD_STRATEGY, _PATTERN_DETECTION and _ML_PREDICTION are gone with the
 		// settings they assigned to, and OBJECTFS_READ_AHEAD_SIZE is gone with performance.read_ahead_size

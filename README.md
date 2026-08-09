@@ -563,6 +563,40 @@ There is no pprof listener at any address. See
 - [`configs/example.yaml`](configs/example.yaml) — a short, copyable starting point. Every key in it is read on the mount path.
 - [`examples/config.yaml`](examples/config.yaml) — the complete schema: every key ObjectFS accepts, at its default value. Keys that parse and validate but are not yet read on the mount path are marked `not yet wired`, so this file is also the honest inventory of what is and is not implemented.
 
+### Containers and Kubernetes
+
+`deploy/` holds manifests that are checked on every PR rather than only written:
+
+- [`deploy/kubernetes/`](deploy/kubernetes/) — a **StatefulSet** for a clustered deployment, a
+  **DaemonSet** for one independent mount per host, plus the headless Service and ConfigMap they need.
+- [`deploy/docker/`](deploy/docker/) — a three-node Compose cluster over a local MinIO, for developing
+  distributed mode.
+
+Both need `SYS_ADMIN` and `/dev/fuse`, because mounting is privileged. Neither uses
+`privileged: true`, which would grant every capability and every device for the sake of that one.
+
+Three points where a container needs something a host install does not, all of them handled in the
+manifests and worth knowing if you write your own:
+
+- **Health and metrics must bind `0.0.0.0`.** They default to loopback, which is right for an
+  unauthenticated endpoint on a host and unusable in a pod: the kubelet probes over the pod IP, so a
+  loopback listener refuses the connection and the pod is restarted forever by a probe that could never
+  have passed. `OBJECTFS_HEALTH_ADDR` and `OBJECTFS_METRICS_ADDR` are the fix.
+- **A clustered node needs a stable identity, which is why it is a StatefulSet.** `node_id` and
+  `advertise_addr` differ per pod, and one ConfigMap is shared by every replica — so they come from the
+  downward API through `OBJECTFS_CLUSTER_NODE_ID` and `OBJECTFS_CLUSTER_ADVERTISE_ADDR`. A DaemonSet's
+  pods have generated names and no per-pod DNS, so no seed list can name them; that shape is for the
+  uncoordinated case, where each node's cache is its own and no invalidations are exchanged.
+- **Allow more than 30 seconds to stop.** A FUSE mount is unmounted by its own process on a signal, so
+  a SIGKILL at the end of the grace period leaves the kernel holding a mount whose server is gone and
+  loses any dirty range that had not reached S3. Both manifests set 120.
+
+The Compose file uses MinIO rather than LocalStack deliberately: coordination rests on conditional
+writes, which fail closed rather than degrading, and MinIO is a measured row in
+[docs/design/conditional-write-compatibility.md](docs/design/conditional-write-compatibility.md) while
+LocalStack is not. A green Compose run means the mesh forms — not that behavior is correct on AWS,
+which is what the integration suite is for.
+
 ### Cost estimation and institutional discounts
 
 Storage-cost estimates use a built-in rate table, and an institution with negotiated rates can

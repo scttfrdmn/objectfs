@@ -1,0 +1,44 @@
+# The config every node in deploy/docker/docker-compose.yaml mounts, identically.
+#
+# What is *not* here is the point of the file: no node_id, no advertise_addr, no seed list, and no
+# endpoint or credentials. Those come from the environment, because this one file is shared by three
+# containers and three of those values must differ per node. See the cluster block in
+# internal/config/config.go's getEnvMappings for the five variables and why they exist.
+#
+# Keys are checked at load, not ignored: LoadFromFile uses yaml.UnmarshalStrict, so a key that does not
+# exist fails the mount naming itself rather than being silently dropped. `objectfs mount --config
+# deploy/docker/node-config.yaml --dry-run` validates this file without mounting anything, and is what
+# internal/config/deploy_test.go runs.
+global:
+  log_level: DEBUG
+
+mount:
+  uri: s3://objectfs-dev
+  mount_point: /mnt/objectfs
+
+storage:
+  s3:
+    # Path-style addressing, which a local endpoint needs: virtual-host addressing would resolve
+    # `objectfs-dev.minio`, a name only the bucket's own DNS would answer.
+    force_path_style: true
+
+cluster:
+  # `enabled` is here as false and the environment turns it on, rather than true here. That direction
+  # is deliberate: this file is also the one a reader copies as a starting point, and a config whose
+  # default state is "clustered" fails to start for anyone who copies it without a secret — clustering
+  # refuses to run unauthenticated (#206).
+  enabled: false
+  # replication_factor is a selection width, not a copy count. There is one copy of the bytes and S3
+  # holds it; this is how many nodes an operation considers in preference order.
+  replication_factor: 3
+
+monitoring:
+  metrics:
+    enabled: true
+    # Overridden to 0.0.0.0 by OBJECTFS_METRICS_ADDR in compose. Loopback is the right default for a
+    # host install of an unauthenticated endpoint and the wrong one inside a container, where it means
+    # only that container can reach it.
+    addr: 127.0.0.1:8080
+  health_checks:
+    enabled: true
+    addr: 127.0.0.1:8081
