@@ -92,6 +92,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A remote operation whose response was too large for a gossip datagram presented as a 30-second
+  timeout instead of a size error** ([#399]). Gossip is UDP, `NodeResult.Data` is a `[]byte` that
+  `encoding/json` base64-encodes, and the envelope and MAC are on top, so at the default 8192-byte
+  `max_gossip_packet` a response carries at most **5802 bytes** of object — measured against the real
+  seal path, and an inflation of 38.9% rather than base64's 33%. The kernel's `MaxRead` is 128 KiB, so
+  essentially every read is over the limit. The responder logged the refusal at Warn and returned,
+  having sent nothing, so the requester learned only that nothing arrived and reported `operation timed
+  out waiting for remote response` after its full timeout — a size failure, on a different host, at a
+  level most deployments do not collect, which sends an operator to look at the network. The verdict
+  fits in a datagram even when the bytes do not, so the failure is now sent in place of the data,
+  naming the payload size, the limit and the setting that governs it. `ErrMessageOversize` is the
+  sentinel a caller matches on.
+
+  Raising `max_gossip_packet` is not the fix and was not applied: past the ~1500-byte path MTU a
+  datagram is IP-fragmented and one lost fragment discards all of it, so a larger limit trades a clean
+  error for intermittent loss that scales with size. Fitting object bytes through this transport is not
+  the direction — [#142] warms from S3 and puts only metadata on the wire.
+
+- **`SetBackend` raced every operation a peer had asked for.** It assigned
+  `cm.coordinator.backend` while holding the *cluster's* mutex, and `executeLocally` read the field
+  under no lock at all — from the gossip receive goroutine, which is where a peer's operation runs. Two
+  different locks and an unsynchronized read of an interface value. The backend is now set and read
+  through the coordinator's own accessors, and read once per operation rather than at each switch arm,
+  so a put and its ETag read cannot land on two different backends.
+
+  It stayed latent because every existing test injected its backend *before* `Start`, when the
+  goroutine that reads the field does not yet exist — an ordering no caller is required to observe, and
+  one that [#139] makes routinely false. Found by `-race` only once a test made an injection and a peer
+  operation overlap, which is now `TestClusterManager_SetBackend_IsSafeWhileAPeerOperationRuns`.
+
 - **The Python SDK wrote configuration files the daemon refused to start on — every one of them.**
   `Configuration.to_yaml()` emitted **sixteen** keys `internal/config` does not define, across seven
   sections, and `LoadFromFile` decodes strictly, so `save_to_file` produced a document that failed at
@@ -2565,6 +2595,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#384]: https://github.com/scttfrdmn/objectfs/issues/384
 [#367]: https://github.com/scttfrdmn/objectfs/issues/367
 [#352]: https://github.com/scttfrdmn/objectfs/issues/352
+[#399]: https://github.com/scttfrdmn/objectfs/issues/399
 [#223]: https://github.com/scttfrdmn/objectfs/issues/223
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390

@@ -803,10 +803,17 @@ func (cm *ClusterManager) RemoveNode(nodeID string) {
 func (cm *ClusterManager) SetBackend(b types.Backend) {
 	cm.mu.Lock()
 	cm.backend = b
-	if cm.coordinator != nil {
-		cm.coordinator.backend = b
-	}
+	coordinator := cm.coordinator
 	cm.mu.Unlock()
+
+	// Set through the coordinator's own accessor rather than by assigning the field here. This used to
+	// write cm.coordinator.backend under cm.mu, which is not the lock the reader holds:
+	// [Coordinator.executeLocally] reads it from the gossip receive goroutine, so an injection
+	// concurrent with a peer's operation was a data race on the interface value — caught by -race once
+	// a test made a remote operation and an injection overlap.
+	if coordinator != nil {
+		coordinator.setBackend(b)
+	}
 }
 
 // SetCache injects the cache instance for distributed invalidation.

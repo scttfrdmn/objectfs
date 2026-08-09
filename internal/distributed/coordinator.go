@@ -280,6 +280,26 @@ func NewCoordinator(cluster *ClusterManager, config *ClusterConfig, backend type
 	return c, nil
 }
 
+// setBackend replaces the backend operations execute against.
+//
+// It exists so that the field has one writer holding c.mu, because its reader is not on the caller's
+// goroutine: [Coordinator.executeLocally] runs from the gossip receive loop when a peer asks for an
+// operation. [ClusterManager.SetBackend] previously assigned this field directly while holding the
+// *cluster's* mutex, which excludes nothing here.
+func (c *Coordinator) setBackend(b types.Backend) {
+	c.mu.Lock()
+	c.backend = b
+	c.mu.Unlock()
+}
+
+// getBackend returns the current backend, which is nil until one is injected.
+func (c *Coordinator) getBackend() types.Backend {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.backend
+}
+
 // Start starts the coordinator
 func (c *Coordinator) Start(ctx context.Context) error {
 	slog.Info("starting distributed operations coordinator")
@@ -595,7 +615,12 @@ func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *
 	start := time.Now()
 	result := &NodeResult{NodeID: nodeID}
 
-	if c.backend == nil {
+	// Read once under the lock and use the local copy for the whole operation, rather than touching
+	// c.backend at each switch arm. Both callers reach here concurrently with [ClusterManager.SetBackend]
+	// — one from the caller's goroutine, one from the gossip receive loop — and re-reading the field
+	// mid-operation would also allow a put and its ETag read to land on two different backends.
+	backend := c.getBackend()
+	if backend == nil {
 		result.Error = "no backend configured"
 		result.Latency = time.Since(start)
 		return result
@@ -610,7 +635,7 @@ func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *
 
 	switch op.Type {
 	case OpTypeGet:
-		data, err := c.backend.GetObject(ctx, op.Key, op.Offset, op.Size)
+		data, err := backend.GetObject(ctx, op.Key, op.Offset, op.Size)
 		if err != nil {
 			result.Error = err.Error()
 		} else {
@@ -626,7 +651,7 @@ func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *
 		// the answer is definitive, and the recovery is to re-read, recompute, and CAS again — which
 		// only the caller can do, since only it knows what the new bytes should be.
 		if op.Precondition.IsZero() {
-			if err := c.backend.PutObject(ctx, op.Key, op.Data, op.Metadata); err != nil {
+			if err := backend.PutObject(ctx, op.Key, op.Data, op.Metadata); err != nil {
 				result.Error = err.Error()
 			} else {
 				result.Success = true
@@ -635,7 +660,7 @@ func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *
 			break
 		}
 
-		etag, err := c.backend.PutObjectIf(ctx, op.Key, op.Data, op.Metadata, op.Precondition)
+		etag, err := backend.PutObjectIf(ctx, op.Key, op.Data, op.Metadata, op.Precondition)
 		if err != nil {
 			result.Error = err.Error()
 			result.Conditional = classifyConditional(err)
@@ -644,13 +669,13 @@ func (c *Coordinator) executeLocally(parent context.Context, nodeID string, op *
 			result.ETag = etag
 		}
 	case OpTypeDelete:
-		if err := c.backend.DeleteObject(ctx, op.Key); err != nil {
+		if err := backend.DeleteObject(ctx, op.Key); err != nil {
 			result.Error = err.Error()
 		} else {
 			result.Success = true
 		}
 	case OpTypeList:
-		objs, err := c.backend.ListObjects(ctx, op.Key, 0)
+		objs, err := backend.ListObjects(ctx, op.Key, 0)
 		if err != nil {
 			result.Error = err.Error()
 		} else {
@@ -702,6 +727,37 @@ func (c *Coordinator) handleNetworkOperation(ctx context.Context, msg *GossipMes
 	}
 
 	if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperationResp, resp); err != nil {
+		// An oversize response is not a lost packet, and the requester must not be left to time out on
+		// it (#399). The bytes cannot fit in a datagram — with the default 8192-byte MaxGossipPacket a
+		// payload tops out at 5802, so any read past that is refused — but the *verdict* fits, so send
+		// the failure in place of the data.
+		//
+		// Retrying the send would be pointless: the size is a property of the response, not of the
+		// network, so the second attempt is the same number of bytes. Before this, the requester saw
+		// "operation timed out waiting for remote response" 30 seconds later while the real reason was
+		// logged at Warn on a different host, which sends an operator to look at the network.
+		if errors.Is(err, ErrMessageOversize) {
+			slog.Warn("operation response does not fit a gossip datagram; reporting the size to the requester",
+				"sender_id", senderID, "request_id", nm.RequestID, "key", nm.Operation.Key,
+				"payload_bytes", len(result.Data), "error", err)
+
+			resp.Result = &NodeResult{
+				NodeID:  result.NodeID,
+				Success: false,
+				Error: fmt.Sprintf("%s of %q produced %d bytes, which does not fit a gossip datagram: %v",
+					nm.Operation.Type, nm.Operation.Key, len(result.Data), err),
+				Latency: result.Latency,
+			}
+
+			if err := c.cluster.gossip.sendConsensusMsg(node.Address, MessageTypeNodeOperationResp, resp); err != nil {
+				// The failure report is small — no Data, and an error string naming one key — so this is a
+				// misconfigured limit rather than a payload problem, and there is nothing smaller to send.
+				slog.Warn("failed to send oversize-response report", "sender_id", senderID, "error", err)
+			}
+
+			return
+		}
+
 		slog.Warn("failed to send operation response", "sender_id", senderID, "error", err)
 	}
 }

@@ -133,6 +133,17 @@ const (
 	MessageTypeCacheInvalidate MessageType = "cache_invalidate"
 )
 
+// ErrMessageOversize means a sealed datagram exceeded MaxGossipPacket and was refused before it
+// reached the socket. See [GossipProtocol.sendMessage] for why that is refused rather than truncated.
+//
+// It is a sentinel because one caller can act on it. Gossip is a UDP transport, so there is a hard
+// ceiling on what a message can carry — with the default 8192-byte limit, a payload of object bytes
+// tops out at 5802 after the base64, envelope and MAC — and a sender that hits it should say so
+// rather than treat it as a lost packet. Everything else on this socket is small by construction
+// (membership, votes, an invalidation naming one key), so for those it is a misconfiguration and
+// failing the send is the whole answer.
+var ErrMessageOversize = errors.New("gossip message exceeds max_gossip_packet")
+
 // CacheInvalidateMessage is the payload for MessageTypeCacheInvalidate.
 type CacheInvalidateMessage struct {
 	Key  string `json:"key"`
@@ -1248,8 +1259,13 @@ func (gp *GossipProtocol) sendMessage(addr string, msg *GossipMessage) error {
 		gp.stats.MessagesOversize++
 		gp.stats.mu.Unlock()
 
-		return fmt.Errorf("a %s message is %d bytes sealed, over the %d-byte max_gossip_packet: "+
-			"raise it on every node in the cluster", msg.Type, len(data), gp.config.MaxGossipPacket)
+		// Wraps ErrMessageOversize so a caller that can do something better than fail — send less, or
+		// report the size to the peer that is waiting — can tell this apart from a socket error without
+		// matching on the text. See [Coordinator.handleNetworkOperation] (#399), which was dropping this
+		// error entirely and letting the requester time out 30 seconds later instead.
+		return fmt.Errorf("%w: a %s message is %d bytes sealed, over the %d-byte max_gossip_packet: "+
+			"raise it on every node in the cluster", ErrMessageOversize, msg.Type, len(data),
+			gp.config.MaxGossipPacket)
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
