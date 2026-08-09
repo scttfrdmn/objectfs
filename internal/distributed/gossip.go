@@ -1121,6 +1121,12 @@ func (gp *GossipProtocol) performGossip() {
 	gp.localNode.CacheHitRate = fresh.CacheHitRate
 	gp.localNode.Operations = fresh.Operations
 
+	// The capacity and the request count behind the hit rate, so that a peer's figures are as readable as
+	// this node's: without the denominator, a hit rate of 0.0 arriving from a peer cannot be told from a
+	// peer that has served nothing. See [NodeInfo.CacheRequests].
+	gp.localNode.CacheCapacity = fresh.CacheCapacity
+	gp.localNode.CacheRequests = fresh.CacheRequests
+
 	incarnation := uint32(1)
 	if self, exists := gp.memberlist[gp.localNode.ID]; exists {
 		incarnation = self.Incarnation

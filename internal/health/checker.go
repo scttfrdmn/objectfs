@@ -26,6 +26,9 @@ type Checker struct {
 	// boundAddr is what the listener reports, which is not necessarily Config.HTTPAddr: a caller
 	// asking for port 0 gets whatever the kernel assigned, and [Checker.Addr] is how it finds out.
 	boundAddr string
+
+	// cluster holds what /health/cluster reports, under its own lock. See [clusterProviderHolder].
+	cluster clusterProviderHolder
 }
 
 // Config represents health checker configuration
@@ -618,6 +621,8 @@ func (c *Checker) serveHealth(ctx context.Context, ln net.Listener) {
 			slog.Error("health: error writing HTTP response", "error", err)
 		}
 	})
+
+	mux.HandleFunc(c.ClusterPath(), c.serveClusterStatus)
 
 	server := &http.Server{
 		Handler:           mux,

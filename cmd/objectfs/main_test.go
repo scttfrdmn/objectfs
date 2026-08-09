@@ -71,7 +71,7 @@ func TestHelpSubcommandNamesEveryCommand(t *testing.T) {
 			// than as one substring, because the failure mode is a command that exists and is
 			// undocumented — which is how `mount` came to be named in configs/systemd/objectfs@.service
 			// for several releases without existing at all.
-			for _, cmd := range []string{"mount", "unmount", "version", "help"} {
+			for _, cmd := range []string{"mount", "unmount", "cluster", "version", "help"} {
 				if !strings.Contains(stdout, cmd) {
 					t.Errorf("objectfs %s does not mention the %q command, so the only way to learn "+
 						"it exists is to read the source", arg, cmd)

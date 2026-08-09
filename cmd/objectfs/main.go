@@ -94,6 +94,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// word; an operator reaching for one and getting "unknown command" has learned nothing.
 		return runUnmount(args[1:], stdout, stderr)
 
+	case "cluster":
+		return runCluster(args[1:], stdout, stderr)
+
 	case "version", "--version", "-version":
 		emit(stdout, "objectfs version %s\n", version)
 
@@ -134,6 +137,7 @@ Usage: objectfs <command> [options]
 Commands:
   mount     Mount a bucket on a directory
   unmount   Unmount a filesystem by path
+  cluster   Inspect the cluster state of a running instance
   version   Print the version and exit
   help      Print this message
 
@@ -144,6 +148,8 @@ Examples:
   objectfs mount --config /etc/objectfs/config.yaml s3://my-bucket /mnt/s3
   objectfs mount --config /etc/objectfs/research-data.yaml --foreground
   objectfs unmount /mnt/s3
+  objectfs cluster status
+  objectfs cluster status --json
 
 The form without a subcommand still works:
   objectfs s3://my-bucket /mnt/s3

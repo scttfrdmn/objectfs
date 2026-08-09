@@ -110,6 +110,7 @@ var subcommands = map[string]bool{
 	"mount":   true,
 	"unmount": true,
 	"umount":  true,
+	"cluster": true,
 	"version": true,
 	"help":    true,
 }

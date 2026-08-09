@@ -729,7 +729,11 @@ func TestCalculateClusterStats_SumsCacheSizeAcrossAliveNodes(t *testing.T) {
 
 	stats := cm.GetStats()
 
-	// 1000 + 3000, plus whatever the self node reports — zero here, since nothing refreshed it.
+	// 1000 + 3000, plus whatever the self node reports. That used to be zero because nothing refreshed
+	// the self entry at all — a defect, since a node then omitted its own cache from the cluster total.
+	// [ClusterManager.refreshSelfEntry] now refreshes it, and it is still zero here for the honest
+	// reason: no cache is injected into this manager, so there is nothing to report.
+	// TestStatusSnapshot_IncludesThisNodesOwnCacheFigures covers the case where there is.
 	if stats.TotalCacheSize != 4000 {
 		t.Errorf("TotalCacheSize = %d, want 4000 (dead node's 9000000 excluded)", stats.TotalCacheSize)
 	}

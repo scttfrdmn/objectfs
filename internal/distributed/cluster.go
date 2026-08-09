@@ -147,6 +147,27 @@ type NodeInfo struct {
 	CacheSize    int64   `json:"cache_size"`
 	CacheHitRate float64 `json:"cache_hit_rate"`
 	Operations   int64   `json:"operations"`
+
+	// CacheCapacity is what the node's cache reports it can hold, and zero means it does not report one
+	// rather than that it can hold nothing. The Redis-backed cache is the real case — it has no capacity
+	// of its own to publish, so [types.CacheStats.Capacity] comes back zero — while the in-process
+	// multi-level cache sums the configured maximum of each enabled level.
+	//
+	// CacheRequests is hits plus misses, and it is here so that CacheHitRate can be told apart from a
+	// cache that has served nothing. Those are different states and the rate alone cannot express them:
+	// zero requests gives a rate of 0.0 by arithmetic, which is identical to a cache that misses every
+	// single read. The first is a mount that started a second ago and the second is an emergency. This is
+	// the same class of defect as #222 — fields declared, never assigned, published as zeros — except
+	// that here the zero is genuinely computed and still means nothing, which is harder to spot.
+	//
+	// Both are advertised in the alive message like the two above, so a peer's figures are as readable
+	// as the local node's. That is what costs them their place on the wire: at ~40 bytes per member they
+	// take the sealed sync from ~415 to ~455 bytes per member, so the 8 KiB default datagram carries
+	// about 17 members instead of 19 — see defaultMaxGossipPacket, and
+	// TestNewClusterManager_DefaultMaxGossipPacketHoldsAThreeNodeSync, which is the test that notices
+	// when NodeInfo grows.
+	CacheCapacity int64 `json:"cache_capacity"`
+	CacheRequests int64 `json:"cache_requests"`
 }
 
 // NodeStatus represents the status of a cluster node
@@ -655,6 +676,17 @@ func (cm *ClusterManager) updateStats(ctx context.Context) {
 }
 
 func (cm *ClusterManager) calculateClusterStats() {
+	// This node's own entry first, or the tally below excludes it.
+	//
+	// Until this call existed, refreshLocalStats reached only gp.localNode — the struct the *alive
+	// message* is built from — so a node published its cache figures to every peer and never recorded
+	// them in its own membership map. Two consequences, both visible from a running two-node cluster:
+	// TotalCacheSize summed every node's cache except the local one, and [ClusterManager.StatusSnapshot]
+	// reported "cache not reported" for the node being asked while reporting its peer's figures in full.
+	// The existing test for the sum encodes the old behavior in a comment — "plus whatever the self node
+	// reports — zero here, since nothing refreshed it" — which is the gap observed and not closed.
+	cm.refreshSelfEntry()
+
 	var (
 		totalNodes     int
 		aliveNodes     int
@@ -724,6 +756,52 @@ func (cm *ClusterManager) calculateClusterStats() {
 	}
 }
 
+// refreshSelfEntry samples this node's own figures into its entry in the membership map.
+//
+// Sampled outside cm.mu and assigned under it, because refreshLocalStats takes cm.mu for reading to get
+// at the cache and a Go RWMutex is not reentrant — the same reason [ClusterManager.Start] calls
+// calculateClusterStats after startLocked has released the lock, and the same reason performGossip
+// samples before taking gp.mu.
+//
+// A no-op for a manager whose Start never ran, since Start is what inserts the entry. Nothing is created
+// here: a self entry appearing in the membership map without Start having run would be a node counted as
+// alive by a manager that is not.
+func (cm *ClusterManager) refreshSelfEntry() {
+	// Seeded with a sentinel the four cache fields cannot legitimately take, because refreshLocalStats
+	// signals "there is no cache" by leaving them *untouched* rather than by zeroing them — see its
+	// comment, and TestRefreshLocalStats_LeavesCacheFieldsAloneWithNoCache, which pins that contract.
+	// Reading the sentinel back is how this distinguishes an absent cache from an empty one, and the
+	// distinction is the whole reason the two are not the same value: copying an unmeasured zero onto the
+	// self entry would report a cache that exists and holds nothing.
+	const unset = -1
+
+	fresh := NodeInfo{
+		CacheSize: unset, CacheHitRate: unset, CacheCapacity: unset, CacheRequests: unset,
+	}
+	cm.refreshLocalStats(&fresh)
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	self, exists := cm.nodes[cm.nodeID]
+	if !exists {
+		return
+	}
+
+	// The same fields UpdateNodeInfo takes from a peer's alive message, so this node describes itself the
+	// way its peers describe it. ID, Address, Status and Version are deliberately not touched, for the
+	// reason UpdateNodeInfo does not touch them either.
+	self.MemoryUsage = fresh.MemoryUsage
+	self.Operations = fresh.Operations
+
+	if fresh.CacheSize != unset {
+		self.CacheSize = fresh.CacheSize
+		self.CacheHitRate = fresh.CacheHitRate
+		self.CacheCapacity = fresh.CacheCapacity
+		self.CacheRequests = fresh.CacheRequests
+	}
+}
+
 // refreshLocalStats reads this node's current resource and cache figures into dst.
 //
 // It is called once per gossip round rather than on a ticker of its own, because the only consumer is
@@ -755,6 +833,14 @@ func (cm *ClusterManager) refreshLocalStats(dst *NodeInfo) {
 		cacheStats := cache.Stats()
 		dst.CacheSize = cacheStats.Size
 		dst.CacheHitRate = cacheStats.HitRate
+		dst.CacheCapacity = cacheStats.Capacity
+
+		// The denominator behind HitRate, carried so a reader can tell 0.0 from "nothing asked yet". Both
+		// counters are cumulative over the cache's life, so this only ever grows.
+		dst.CacheRequests = int64(cacheStats.Hits + cacheStats.Misses) //nolint:gosec // see below
+		// The conversion cannot overflow in any real process: it would take 2^63 cache operations, and at
+		// a billion per second that is 292 years. Signed because everything else on this struct is, and a
+		// mixed-signedness pair of related fields is worse than the theoretical wrap.
 	}
 
 	cm.stats.mu.RLock()
@@ -766,7 +852,7 @@ func (cm *ClusterManager) refreshLocalStats(dst *NodeInfo) {
 //
 // The merge is selective, and which fields it leaves alone is the part worth knowing: an existing
 // entry keeps its ID, Address and Version, taking only LastSeen, Status, the four resource fields,
-// the two cache fields and Operations from info. So this cannot rename or re-address a node that is
+// the four cache fields and Operations from info. So this cannot rename or re-address a node that is
 // already a member — a gossip message claiming a new address for a known ID updates its liveness and
 // nothing else. Metadata is merged key-by-key rather than replaced, so a key absent from info
 // survives.
@@ -790,6 +876,8 @@ func (cm *ClusterManager) UpdateNodeInfo(nodeID string, info *NodeInfo) {
 		existing.NetworkBandwidth = info.NetworkBandwidth
 		existing.CacheSize = info.CacheSize
 		existing.CacheHitRate = info.CacheHitRate
+		existing.CacheCapacity = info.CacheCapacity
+		existing.CacheRequests = info.CacheRequests
 		existing.Operations = info.Operations
 
 		// Update metadata
