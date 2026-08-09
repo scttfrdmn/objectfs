@@ -28,6 +28,14 @@ type Coordinator struct {
 	// pendingOps maps requestID → response channel for in-flight remote ops.
 	pendingOpsMu sync.Mutex
 	pendingOps   map[string]chan *NodeResult
+
+	// announcements maps a key to the peers claiming to hold it, and never to this node — see
+	// [Coordinator.recordAnnouncement]. Lazily created, bounded by maxAnnouncedKeys, entries expiring at
+	// announcementTTL. Guarded by its own mutex rather than by c.mu, because its writer is the gossip
+	// receive goroutine and its reader is a filesystem read on a cache miss: sharing the lock that
+	// serializes remote operation execution would put every announcement behind an S3 round trip.
+	announcementsMu sync.RWMutex
+	announcements   map[string][]heldKey
 }
 
 // NodeOperationMessage is the on-wire request for a remote node execution.
@@ -307,6 +315,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	// Start background tasks
 	go c.cleanupOperations(ctx)
 	go c.updateLoadBalancerStats(ctx)
+	go c.cleanupAnnouncements(ctx)
 
 	return nil
 }
@@ -982,6 +991,7 @@ func (c *Coordinator) GetStats() map[string]any {
 	// happen is the reason the audit distrusted this package's numbers.
 	return map[string]any{
 		"active_operations": activeOps,
+		"announced_keys":    c.announcedKeys(),
 		"load_balancer":     &loadBalancerStats,
 	}
 }

@@ -95,6 +95,18 @@ type ClusterConfig struct {
 	// no code in the repository, and the subsystem whose name it carried put an object's own bytes back
 	// to itself on N-1 peers; both it and the CacheReplicator are gone. Actual cache warming is #141.
 
+	// AnnouncementTTL is how long a peer's claim to hold a key in its cache is believed (#140).
+	//
+	// Tuning, not correctness: what expiry decides is whether this node bothers asking a peer's cache
+	// about a key, and [types.DistributedCoordinator] already requires every caller to check what comes
+	// back against the ETag it asked for — because a holder can evict at any moment, TTL or no TTL. Too
+	// long wastes a round trip on a peer that has evicted; too short sends a read to S3 that a peer could
+	// have served. Both are slower and neither is wrong.
+	//
+	// Left at zero it becomes defaultAnnouncementTTL. Sized against the traversals warming exists for —
+	// see that constant for the reasoning.
+	AnnouncementTTL time.Duration `yaml:"announcement_ttl"`
+
 	// Performance settings
 	MaxConcurrentOps int           `yaml:"max_concurrent_ops"`
 	OperationTimeout time.Duration `yaml:"operation_timeout"`
@@ -936,7 +948,24 @@ func (cm *ClusterManager) invalidateCacheKey(m CacheInvalidateMessage) error {
 
 // GetCoordinator returns the operation coordinator
 func (cm *ClusterManager) GetCoordinator() types.DistributedCoordinator {
-	return &coordinatorWrapper{cm.coordinator}
+	return &coordinatorWrapper{cm.getCoordinator()}
+}
+
+// getCoordinator returns the coordinator, which may be nil.
+//
+// Deliberately without cm.mu, unlike almost everything else that touches a ClusterManager field. This one
+// is assigned exactly once, in [NewClusterManager], before any goroutine that could read it exists — the
+// `go` statements that start the receive loop and the background tasks are all downstream of that
+// assignment, so publication is already ordered and a lock would only add contention. It would add it in
+// the worst place, too: [GossipProtocol.handleCacheAnnounce] calls this from the receive goroutine, and
+// startLocked holds cm.mu for *writing* across gossip.Start, so a lock here would stall inbound messages
+// behind the rest of startup for no benefit.
+//
+// Nil is therefore not a startup window but a ClusterManager that did not come from the constructor.
+// Guarded anyway, and for the same reason [coordinatorWrapper.AnnounceKey] guards: the alternative is a
+// panic on the gossip receive goroutine, which takes the whole cluster's membership down with it.
+func (cm *ClusterManager) getCoordinator() *Coordinator {
+	return cm.coordinator
 }
 
 // coordinatorWrapper adapts Coordinator to DistributedCoordinator interface
@@ -955,30 +984,39 @@ func (cw *coordinatorWrapper) ExecuteOperation(ctx context.Context, op any) (any
 	return nil, fmt.Errorf("invalid operation type: %T", op)
 }
 
-// AnnounceKey is not implemented yet and says so.
+// AnnounceKey tells peers this node holds ann's bytes. Implemented in #140; see
+// [Coordinator.AnnounceKey].
 //
-// The gossip message type it needs does not exist — [MessageTypeCacheInvalidate] is the only
-// cache-related one — so there is nothing to send and no receiver to send it to. #140 builds both.
-//
-// It returns an error rather than nil because a nil here would mean "announced" to every caller, and
-// #284 deleted a CacheReplicator that did exactly that: it added bytes to BytesReplicated when gossip
-// was not running and it had sent nothing, and it survived four releases because the only test covering
-// it asserted that its field was non-nil. A caller told [types.ErrNotSupported] falls back to reading
-// from the object store, which is correct and merely slower.
-func (cw *coordinatorWrapper) AnnounceKey(_ context.Context, ann types.KeyAnnouncement) error {
-	return fmt.Errorf("announcing %q to peers is not implemented (#140): %w", ann.Key, types.ErrNotSupported)
+// The nil check is what the stub this replaced was for. Both methods returned [types.ErrNotSupported]
+// unconditionally, and the reasoning recorded there survives the implementation and is why this guard
+// exists rather than a bare delegation: a nil answer here would mean "announced" to every caller, and
+// #284 deleted a CacheReplicator that did exactly that — it counted bytes as replicated when gossip was
+// not running and it had sent nothing, and it survived four releases because the only test covering it
+// asserted that its field was non-nil. A caller told ErrNotSupported falls back to the object store,
+// which is correct and merely slower.
+func (cw *coordinatorWrapper) AnnounceKey(ctx context.Context, ann types.KeyAnnouncement) error {
+	if cw.Coordinator == nil {
+		return fmt.Errorf("cannot announce %q: this coordinator has no cluster: %w", ann.Key,
+			types.ErrNotSupported)
+	}
+
+	return cw.Coordinator.AnnounceKey(ctx, ann)
 }
 
-// QueryKeyOwnership is not implemented yet and says so, for the reason on [coordinatorWrapper.AnnounceKey]:
-// nothing announces, so no node has ownership information to report.
+// QueryKeyOwnership reports the peers claiming to hold key. Implemented in #140; see
+// [Coordinator.QueryKeyOwnership].
 //
-// Specifically it does not return an empty slice with a nil error. That is the documented answer for a
-// key no peer has cached, so returning it here would be indistinguishable from a working query against
-// a cold cluster — and a caller measuring peer-fetch hit rates would read a flat zero as "warming does
-// not help" rather than "warming is not built".
-func (cw *coordinatorWrapper) QueryKeyOwnership(_ context.Context, key string) ([]types.KeyAnnouncement, error) {
-	return nil, fmt.Errorf("querying which peers hold %q is not implemented (#140): %w", key,
-		types.ErrNotSupported)
+// Note what the guard does *not* do: return an empty slice and a nil error. That is the documented answer
+// for a key no peer has cached, so giving it for "there is no coordinator" would be indistinguishable
+// from a working query against a cold cluster — and a caller measuring warming hit rates would read a
+// flat zero as "warming does not help" rather than "warming is not running".
+func (cw *coordinatorWrapper) QueryKeyOwnership(ctx context.Context, key string) ([]types.KeyAnnouncement, error) {
+	if cw.Coordinator == nil {
+		return nil, fmt.Errorf("cannot query which peers hold %q: this coordinator has no cluster: %w",
+			key, types.ErrNotSupported)
+	}
+
+	return cw.Coordinator.QueryKeyOwnership(ctx, key)
 }
 
 // InvalidateKey broadcasts a cache invalidation for key at etag. This one is real: the message type,

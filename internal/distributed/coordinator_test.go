@@ -1239,25 +1239,34 @@ func TestClusterManager_InvalidateCacheKey_NoGossip(t *testing.T) {
 	}
 }
 
-// TestCoordinatorWrapper_UnimplementedMethodsRefuse pins that the two cache-coordination methods with no
-// implementation say so, rather than reporting success.
+// TestCoordinatorWrapper_CacheCoordinationOnAnUnstartedCluster pins the two cache-coordination methods
+// against a constructed-but-not-started cluster, where they answer *differently* — and the difference is
+// the point.
 //
-// The assertion is errors.Is against types.ErrNotSupported and not merely "err != nil", because the
-// caller of AnnounceKey is a cache write path that has to distinguish "this cluster cannot announce" —
-// fall back to the object store, permanently — from a transient send failure worth retrying.
+// Both used to be stubs returning [types.ErrNotSupported] unconditionally, and this test asserted exactly
+// that. #140 implemented them, and only one of the two still refuses: announcing is a broadcast, so with
+// no socket open there is nobody to tell and success would be a lie, while querying is a read of a local
+// map that gossip filled — a cluster that has heard from nobody honestly holds nothing, and that is the
+// documented empty answer rather than a failure.
 //
-// #284 deleted a CacheReplicator that returned nil having sent nothing, counted the bytes as replicated,
-// and survived four releases because the only test covering it asserted that its field was non-nil.
-// These are the assertions that would have caught it.
-func TestCoordinatorWrapper_UnimplementedMethodsRefuse(t *testing.T) {
+// The refusal is asserted with errors.Is rather than "err != nil", because the caller of AnnounceKey is a
+// cache write path that must tell "this cluster cannot announce" — fall back to the object store,
+// permanently — from a transient send failure worth retrying. #284 deleted a CacheReplicator that returned
+// nil having sent nothing, counted the bytes as replicated, and survived four releases because the only
+// test covering it asserted its field was non-nil.
+func TestCoordinatorWrapper_CacheCoordinationOnAnUnstartedCluster(t *testing.T) {
 	t.Parallel()
 
 	cm := makeClusterWithNode(t, "wrapper-refuse")
 	coord := cm.GetCoordinator()
 	ctx := t.Context()
 
-	t.Run("AnnounceKey", func(t *testing.T) {
+	t.Run("AnnounceKey refuses", func(t *testing.T) {
 		t.Parallel()
+
+		// gossip.conn is nil rather than gossip itself: NewClusterManager builds the protocol and only
+		// Start opens its socket, so this is the state a mount is in before Start and after Stop — a whole
+		// gossip object whose every send would dial out from an unbound port and reach nobody.
 		err := coord.AnnounceKey(ctx, types.KeyAnnouncement{
 			Key: "some/key", NodeID: "wrapper-refuse", ETag: `"v1"`, Size: 10,
 		})
@@ -1265,21 +1274,25 @@ func TestCoordinatorWrapper_UnimplementedMethodsRefuse(t *testing.T) {
 			t.Errorf("AnnounceKey = %v, want ErrNotSupported", err)
 		}
 		if err != nil && !strings.Contains(err.Error(), "some/key") {
-			t.Errorf("error %q does not name the key it failed to announce", err)
+			t.Errorf("error %q does not name the key it failed to announce, which is what an operator "+
+				"debugging cold reads needs from it", err)
 		}
 	})
 
-	t.Run("QueryKeyOwnership", func(t *testing.T) {
+	t.Run("QueryKeyOwnership answers empty", func(t *testing.T) {
 		t.Parallel()
+
 		holders, err := coord.QueryKeyOwnership(ctx, "some/key")
-		if !errors.Is(err, types.ErrNotSupported) {
-			t.Errorf("QueryKeyOwnership = %v, want ErrNotSupported", err)
+		if err != nil {
+			t.Errorf("QueryKeyOwnership = %v; a local read of what peers have announced cannot fail just "+
+				"because no peer has announced anything", err)
 		}
-		// An empty slice with a nil error is the documented answer for "no peer holds this", so returning
-		// it here would be indistinguishable from a working query against a cold cluster.
-		if holders != nil {
-			t.Errorf("QueryKeyOwnership returned %d holders alongside its error; a caller that reads the "+
-				"slice before the error must find nothing", len(holders))
+		if len(holders) != 0 {
+			t.Errorf("got %d holders on a cluster that has never received a message: %+v", len(holders), holders)
+		}
+		if holders == nil {
+			t.Error("holders is nil; the contract is an empty slice, so a caller can range over it without " +
+				"distinguishing the two")
 		}
 	})
 }

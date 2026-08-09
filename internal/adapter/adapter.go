@@ -477,11 +477,16 @@ func (a *Adapter) clusterCoordinator() types.DistributedCoordinator {
 //
 // The two ClusterConfig types are disjoint and this is the only conversion between them, which is
 // most of why #139 existed: internal/config.ClusterConfig has seven fields an operator can set,
-// internal/distributed.ClusterConfig has eighteen, and there was no function anywhere that turned one
+// internal/distributed.ClusterConfig has nineteen, and there was no function anywhere that turned one
 // into the other. Fields left unset here are filled by applyConfigDefaults — the timeouts, the gossip
 // triple, and the concurrency and retry settings are all tuning for a subsystem whose defaults are
 // measured (see defaultMaxGossipPacket), so exposing them as YAML before anyone needs to change one
-// would be seven more keys that mostly should not be touched.
+// would be eight more keys that mostly should not be touched.
+//
+// AnnouncementTTL (#140) is the newest of those and is left unset for the same reason, with one
+// difference worth recording: its default is applied at the point of use in
+// [distributed.Coordinator.announcementTTL] rather than in applyConfigDefaults, because a zero there is
+// not a slower cluster but a silently inert one — every announcement would expire on arrival.
 //
 // EnableConsensus is deliberately not set and has no key in the config schema. See
 // [distributed.ClusterConfig.EnableConsensus]: coordination in ObjectFS is compare-and-swap against
