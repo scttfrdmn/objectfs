@@ -165,7 +165,13 @@ func (mc *MetricsCollector) RecordFallbackEvent() {
 	mc.metrics.FallbackEvents++
 }
 
-// SetAccelerationEnabled sets whether acceleration is enabled
+// SetAccelerationEnabled records whether acceleration is currently in effect.
+//
+// "Currently in effect", not "configured". Until #204 this was called once, from NewBackend, with
+// cfg.UseAccelerate — so the field reported the operator's request and never the outcome: a mount could
+// say acceleration was enabled, have fallen back on its first request, and have used the standard
+// endpoint ever since. The gate's OnStateChange now calls this on every transition, which is what makes
+// AccelerationEnabled a fact about the mount.
 func (mc *MetricsCollector) SetAccelerationEnabled(enabled bool) {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()

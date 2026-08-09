@@ -46,6 +46,7 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 	cfg.Storage.S3.Endpoint = "https://s3.example.invalid"
 	cfg.Storage.S3.ForcePathStyle = true
 	cfg.Storage.S3.UseAcceleration = true
+	cfg.Storage.S3.AccelerationRetry = 90 * time.Second
 	cfg.Storage.S3.StorageTier = "GLACIER_IR"
 	cfg.Storage.S3.MaxRetries = 7
 	cfg.Storage.S3.Multipart = config.MultipartConfig{
@@ -114,6 +115,15 @@ func TestBuildS3ConfigMapsEveryConfiguredValue(t *testing.T) {
 		{field: "Endpoint", got: got.Endpoint, want: "https://s3.example.invalid"},
 		{field: "ForcePathStyle", got: got.ForcePathStyle, want: true},
 		{field: "UseAccelerate", got: got.UseAccelerate, want: true},
+
+		{
+			field: "AccelerationRetry",
+			got:   got.AccelerationRetry,
+			want:  90 * time.Second,
+			why: "90s is neither zero nor the gate's 5-minute default, so a mapping that dropped this " +
+				"field would still produce a working fallback at the wrong period — and the period is how " +
+				"long a mount stays un-accelerated after one error (#204)",
+		},
 
 		{
 			field: "StorageTier",

@@ -67,6 +67,12 @@ type Backend struct {
 	// Circuit breaker for resilience
 	circuitManager *circuit.Manager
 
+	// accelerationGate decides whether a request may use the accelerate endpoint, and is what gives the
+	// fallback a way back (#204). Always non-nil on a constructed backend, including when acceleration
+	// is off — an always-closed gate in front of a nil accelerated client costs nothing and is one path
+	// instead of two.
+	accelerationGate *accelerationGate
+
 	// Retry logic for error recovery
 	retryer *retry.Retryer
 
@@ -194,7 +200,13 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 		return nil, fmt.Errorf("failed to create client manager: %w", err)
 	}
 
-	// Initialize metrics collector
+	// Initialize metrics collector.
+	//
+	// SetAccelerationEnabled here is the *initial* state and nothing else. It used to be the only call
+	// to it, which made BackendMetrics.AccelerationEnabled a copy of the config flag: a mount could
+	// report acceleration enabled, have fallen back on its first request, and have served everything
+	// since over the standard endpoint. The gate below re-sets it on every transition, so the field
+	// reports what is happening rather than what was asked for (#204).
 	metricsCollector := NewMetricsCollector()
 	metricsCollector.SetAccelerationEnabled(cfg.UseAccelerate)
 
@@ -219,6 +231,7 @@ func NewBackend(ctx context.Context, bucket string, cfg *Config) (*Backend, erro
 		tierValidator:       tierValidator,
 		singlePartCopyLimit: maxSinglePartCopy,
 		copyPartSize:        defaultCopyPartSize,
+		accelerationGate:    newAccelerationGate(clientManager, metricsCollector, cfg.AccelerationRetry, logger),
 	}
 
 	backend.pricingManager = pricingManager
@@ -1729,6 +1742,51 @@ func (b *Backend) GetMetrics() BackendMetrics {
 	return b.metricsCollector.GetMetrics()
 }
 
+// AccelerationStats reports the Transfer Acceleration state and its counters, for whoever is exporting
+// them.
+//
+// This exists because GetMetrics had no caller outside this package, which was the other half of #204:
+// the fallback state was tracked accurately and reachable by nothing, so an operator whose mount had
+// silently dropped to the standard endpoint had no scrape, log line, or health check that said so. The
+// throughput loss was invisible.
+//
+// A purpose-built struct rather than returning BackendMetrics, because the consumer is the metrics
+// surface and the mapping it needs is a set of numbers with settled names. BackendMetrics carries
+// twenty-odd fields on four unrelated subjects and a time.Duration that a gauge cannot take; handing
+// that to internal/adapter would put the choice of what to export, and the unit conversions, in the
+// caller.
+func (b *Backend) AccelerationStats() AccelerationStats {
+	m := b.metricsCollector.GetMetrics()
+
+	return AccelerationStats{
+		Configured:  b.config.UseAccelerate,
+		Active:      b.clientManager.IsAccelerationActive(),
+		GateState:   b.accelerationGate.state(),
+		Requests:    m.AcceleratedRequests,
+		Bytes:       m.AcceleratedBytes,
+		Fallbacks:   m.FallbackEvents,
+		AvgLatency:  m.AccelerationLatency,
+		RetryPeriod: b.accelerationGate.retryPeriod(),
+	}
+}
+
+// AccelerationStats is the Transfer Acceleration state as an exporter sees it.
+//
+// Configured and Active are both here and they are different questions — which is the distinction #204
+// turned on. Configured is what the operator asked for and never changes; Active is whether requests are
+// going to the accelerate endpoint right now. Configured true with Active false is the fallback in
+// effect, and it is the state that used to be unreportable.
+type AccelerationStats struct {
+	Configured  bool          `json:"configured"`
+	Active      bool          `json:"active"`
+	GateState   circuit.State `json:"gate_state"`
+	Requests    int64         `json:"requests"`
+	Bytes       int64         `json:"bytes"`
+	Fallbacks   int64         `json:"fallbacks"`
+	AvgLatency  time.Duration `json:"avg_latency"`
+	RetryPeriod time.Duration `json:"retry_period"`
+}
+
 // Close closes the backend and releases resources
 func (b *Backend) Close() error {
 	return b.clientManager.Close()
@@ -2679,11 +2737,32 @@ func (b *Backend) IsFullyHealthy() bool {
 // "BucketAlreadyExists" is gone with no replacement. Its comment claimed it was "sometimes returned
 // for acceleration errors"; it is CreateBucket's name collision, and ObjectFS does not create buckets.
 //
-// The remaining message-only check is for a failure with no API error at all: reaching
-// <bucket>.s3-accelerate.amazonaws.com can fail in DNS or TLS before S3 answers. That is genuinely an
-// acceleration failure and genuinely needs the fallback. It matches the endpoint hostname label rather
-// than the word "acceleration", because a hostname cannot appear in a standard-endpoint error.
-func (b *Backend) isAccelerationError(err error) bool {
+// The remaining message-only checks are for failures with no API error at all, of which there are two
+// kinds and only one was handled.
+//
+// The first: reaching <bucket>.s3-accelerate.amazonaws.com can fail in DNS or TLS before S3 answers.
+// That is genuinely an acceleration failure and genuinely needs the fallback. It matches the endpoint
+// hostname label rather than the word "acceleration", because a hostname cannot appear in a
+// standard-endpoint error.
+//
+// The second is the AWS SDK refusing to build the request at all, and it is the one this function used
+// to miss entirely:
+//
+//	operation error S3: GetObject, resolve auth scheme: resolve endpoint: endpoint rule error,
+//	A custom endpoint cannot be combined with S3 Accelerate
+//
+// The SDK's endpoint ruleset rejects UseAccelerate together with a BaseEndpoint, so it never reaches
+// the network and never produces an APIError. `use_acceleration: true` with any `endpoint:` set — which
+// is every MinIO, Ceph, RustFS or Wasabi deployment that copies the acceleration example — therefore
+// failed *every* GET and PUT with STORAGE_READ / STORAGE_WRITE, with no fallback, for the life of the
+// mount. Verified by probe against the substrate endpoint, which is also where
+// TestAccelerationOnACustomEndpointFallsBackRatherThanFailing now keeps it verified.
+//
+// Whether that combination should be refused at config load instead is a fair question and the answer
+// is no, for the reason the project thesis gives: acceleration is a performance capability, so the
+// degradation rule is to fall back silently and keep serving. Failing the mount would be the
+// correctness rule applied to the wrong kind of capability.
+func isAccelerationError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -2706,12 +2785,65 @@ func (b *Backend) isAccelerationError(err error) bool {
 		return false
 	}
 
-	// No API error: a transport failure reaching the accelerate endpoint itself, which carries the
-	// hostname and no code.
-	return strings.Contains(err.Error(), "s3-accelerate")
+	// No API error. Two shapes, per the comment above: a transport failure reaching the accelerate
+	// endpoint, which carries the hostname; and the SDK's endpoint ruleset refusing to build the
+	// request, which carries the ruleset's own wording and never touches the network.
+	//
+	// Both matched on lowercase, because "S3 Accelerate" in the ruleset message and "s3-accelerate" in
+	// a hostname differ in case as well as in punctuation.
+	//
+	// Over the whole chain rather than err.Error(), and that is not belt-and-braces — it is the
+	// difference between this working and not. Both of these arrive here already translated:
+	// executeWithAccelerationFallback's fn calls b.translateError before returning, so what this sees is
+	// an *errors.ObjectFSError whose Cause is the SDK error. ObjectFSError.Error() renders its own code
+	// and message and deliberately does not include the cause, so the top-level string is
+	// "[s3-backend:GetObject] STORAGE_READ: GetObject operation failed" — with no trace of the ruleset
+	// message anywhere in it. Matching on err.Error() alone therefore classified nothing, which is how the
+	// custom-endpoint defect survived the first attempt at fixing it.
+	return errMessageChainContains(err, "s3-accelerate") ||
+		errMessageChainContains(err, "cannot be combined with s3 accelerate")
 }
 
-// executeWithAccelerationFallback executes an S3 operation with automatic fallback
+// errMessageChainContains reports whether needle appears, case-insensitively, in the text of err or of
+// any error it wraps.
+//
+// It exists because two of the wrapping styles in this codebase behave differently under Error():
+// fmt.Errorf("%w") includes the wrapped text, so the top-level string carries everything, while
+// [errors.ObjectFSError] renders only its own code and message and keeps its cause reachable solely via
+// Unwrap. A matcher over service prose has to look at every level or it silently stops matching the
+// moment its input is wrapped by the second kind — which is every error the S3 backend returns.
+//
+// needle must be lowercase; each level is lowered before comparison.
+func errMessageChainContains(err error, needle string) bool {
+	for e := err; e != nil; e = stderr.Unwrap(e) {
+		if strings.Contains(strings.ToLower(e.Error()), needle) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// executeWithAccelerationFallback runs fn against the accelerate endpoint when it is available, and
+// against the standard endpoint when it is not.
+//
+// # The fallback is no longer for the life of the mount
+//
+// It was, and that was #204: one acceleration error and every later request in the mount's life used
+// the standard endpoint, with nothing anywhere reporting it — so the throughput loss was invisible and
+// the only cure was a restart. The gate ([accelerationGate]) withdraws the endpoint on an acceleration
+// error, holds it out for Config.AccelerationRetry, then lets exactly one request try again. See
+// newAccelerationGate for why that is a circuit breaker rather than a timestamp comparison.
+//
+// The reason the old behavior was defensible and still wrong: its trigger case — a bucket with no
+// Transfer Acceleration configuration — really does not resolve on its own, but it is not the only
+// trigger. A DNS or TLS failure reaching the accelerate endpoint matches too, and so does a transient
+// InvalidRequest. Those resolve in seconds, and a mount that hit one lost acceleration until it was
+// restarted.
+//
+// A request that arrives while the gate is open pays nothing: gate.attempt returns without sending, and
+// this falls straight through to the standard endpoint, which is the same cost the old permanent
+// fallback had.
 func (b *Backend) executeWithAccelerationFallback(
 	ctx context.Context,
 	operation string,
@@ -2723,40 +2855,62 @@ func (b *Backend) executeWithAccelerationFallback(
 	// gets "active, and here it is" as one answer under one lock.
 	acceleratedClient := b.clientManager.GetAcceleratedClient()
 	if acceleratedClient == nil {
-		client, err := b.clientManager.GetPooledClient()
-		if err != nil {
-			return fmt.Errorf("%s: %w", operation, err)
-		}
-		defer b.clientManager.ReturnPooledClient(client)
-
-		return fn(client)
+		return b.executeOnStandardEndpoint(operation, fn)
 	}
 
 	start := time.Now()
-	err := fn(acceleratedClient)
+
+	// The gate both permits the attempt and records its outcome. An acceleration error inside here has
+	// already tripped it — and therefore already called DisableAcceleration, through OnStateChange — by
+	// the time attempt returns.
+	err, attempted := b.accelerationGate.attempt(func() error { return fn(acceleratedClient) })
+
+	if !attempted {
+		// The gate is open, or its single half-open probe is already in flight on another goroutine.
+		// Either way nothing was sent, so this is not a retry.
+		return b.executeOnStandardEndpoint(operation, fn)
+	}
+
 	duration := time.Since(start)
 
 	if err == nil {
-		// Success with acceleration
 		b.metricsCollector.RecordAcceleratedRequest(0, duration)
 
 		return nil
 	}
 
-	// Not an acceleration error: the caller's retry and circuit-breaker wrappers own it.
-	if !b.isAccelerationError(err) {
+	// Not an acceleration error: the caller's retry and circuit-breaker wrappers own it. The gate
+	// counted it as a success, which is correct — a NoSuchKey over the accelerate endpoint is evidence
+	// the endpoint works.
+	if !isAccelerationError(err) {
 		return err
 	}
 
 	b.logger.Warn("S3 Transfer Acceleration error detected, falling back to standard endpoint",
 		"operation", operation,
+		"retry_after", b.config.AccelerationRetry,
 		"error", err.Error())
 	b.metricsCollector.RecordFallbackEvent()
-	b.clientManager.DisableAcceleration(fmt.Sprintf("acceleration error: %v", err))
 
-	// Retry with the standard client. This fallback is for the life of the mount — nothing
-	// re-enables acceleration afterwards.
-	return fn(b.clientManager.GetStandardClient())
+	return b.executeOnStandardEndpoint(operation, fn)
+}
+
+// executeOnStandardEndpoint runs fn on a pooled client.
+//
+// The pool rather than clientManager.standardClient, and this is a fix rather than a refactor: the
+// fallback retry used GetStandardClient while the "acceleration was never on" path used the pool, so
+// which client served a request depended on whether acceleration had ever been tried. They are
+// configured identically — clientOptions is applied to both — so nothing observable diverged, but two
+// paths through the same operation is how they come to diverge later, and one of them bypassed the pool
+// entirely, which is what bounds concurrent connections.
+func (b *Backend) executeOnStandardEndpoint(operation string, fn func(client *s3.Client) error) error {
+	client, err := b.clientManager.GetPooledClient()
+	if err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	defer b.clientManager.ReturnPooledClient(client)
+
+	return fn(client)
 }
 
 // putObjectMultipart performs a multipart upload for large objects with parallel

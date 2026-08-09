@@ -165,6 +165,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-release: the row says what that build did on 2026-08-08, and the mount-time probe is what
   protects a deployment if a later beta regresses.
 
+- **`objectfs_s3_acceleration`, so an operator can see whether Transfer Acceleration is in effect**
+  ([#204]). One gauge family with a `statistic` label, matching `objectfs_predictive_cache`, carrying
+  `configured`, `active`, `requests`, `bytes`, `fallbacks`, `avg_latency_seconds` and
+  `retry_period_seconds`. `configured` and `active` are separate series and the difference between them
+  is the point: **1 and 0 is a mount that was asked to accelerate and is not**, and neither series alone
+  can say that. Before this, `BackendMetrics.AccelerationEnabled` — whose only writer was `NewBackend`,
+  passing the config flag, behind a `GetMetrics` with no caller outside its own package — reported
+  acceleration enabled on a mount that had been serving every byte over the standard endpoint since its
+  first request.
+
+  Registered whether or not acceleration is configured, unlike `objectfs_predictive_cache`, whose absence
+  is meaningful. `configured 0` says the operator asked for the standard endpoint; an absent family says
+  this build does not report acceleration — and which of those they are looking at is the first question
+  an operator investigating slow reads has to answer. `sdks/testdata/metrics-scrape.txt` carries the
+  family with `configured 1, active 0`, so both SDK suites parse the state worth alerting on rather than a
+  healthy one.
+
+- **`storage.s3.acceleration_retry`** ([#204]). How long a Transfer Acceleration fallback lasts before one
+  request is allowed to try the accelerate endpoint again; default 5 minutes, ignored unless
+  `use_acceleration` is true. It must carry a unit — the loader rejects a bare number, because yaml.v2
+  reads `300` into a `time.Duration` as 300 *nanoseconds* with no error, which would put one request per
+  300 ns against the accelerate endpoint.
+
 ### Changed
 
 - **BREAKING: `cluster.enabled: true` now requires a gossip secret, including for a Redis-only
@@ -230,6 +253,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reading the output that matters.
 
 ### Fixed
+
+- **A Transfer Acceleration fallback was permanent for the life of the mount** ([#204]).
+  `DisableAcceleration` fired on the first acceleration error and `EnableAcceleration` had no caller
+  anywhere in the tree, so every later request took the standard endpoint until ObjectFS restarted. A
+  thirty-second DNS failure reaching the accelerate endpoint therefore cost a long-lived mount its
+  acceleration for weeks, and nothing reported that it had happened.
+
+  One request may now try the accelerate endpoint again after `storage.s3.acceleration_retry`. The
+  mechanism is `internal/circuit`'s breaker rather than a second bespoke recovery: withdrawn is its open
+  state, probing is half-open with `MaxRequests: 1`, so **exactly one probe is in flight at a time** and a
+  permanently broken endpoint costs one failed request per period rather than one per read — which is the
+  cost that justified making the fallback one-way in the first place. The bound is what a mutex around two
+  fields could not have expressed, and it is verified by mutation: raising `MaxRequests` to 64 fails
+  `TestOnlyOneProbeIsInFlightAtATime` and nothing else.
+
+- **`use_acceleration: true` together with any `endpoint:` failed every read and write, permanently.**
+  The AWS SDK refuses the combination before a request leaves the process — `A custom endpoint cannot be
+  combined with S3 Accelerate` — and that refusal is not a `smithy.APIError`, so it was not classified as
+  an acceleration error and never triggered the fallback. Every `GetObject` and `PutObject` returned
+  `STORAGE_READ`/`STORAGE_WRITE` for the life of the mount on every MinIO, Ceph, RustFS or Wasabi
+  deployment that copied the acceleration example. It now falls back and keeps serving, silently, because
+  acceleration is a performance capability and slower is a correct outcome.
+
+  The first fix for this did not work, and the end-to-end test is what caught it: `isAccelerationError`
+  matched against `err.Error()`, but the backend's `translateError` wraps the SDK error in an
+  `*errors.ObjectFSError` whose `Error()` renders its own code and message and deliberately **omits its
+  cause** — so what the classifier saw was `[s3-backend:GetObject] STORAGE_READ: GetObject operation
+  failed`, with no trace of the ruleset message anywhere in it. It now walks the whole `Unwrap` chain.
+  Two wrapping styles in this codebase behave differently under `Error()`, and a matcher over service
+  prose silently stops matching the moment its input is wrapped by the second kind — which is every error
+  the S3 backend returns.
+
+  `testaws.Fault` grew a `Message` field for this. A fault could produce an S3 error *code* and not a
+  message, so no injected fault could express a condition S3 reports only in prose, and the fallback
+  branch was reachable only by calling the classifier directly — which proves the classifier and not the
+  behavior.
 
 - **The predictive cache's statistics were computed on every read of every mount and discarded at
   unmount** ([#223]). `GetPredictiveStats` existed and nothing could reach it: the mount holds its
@@ -2814,6 +2873,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#399]: https://github.com/scttfrdmn/objectfs/issues/399
 [#223]: https://github.com/scttfrdmn/objectfs/issues/223
 [#222]: https://github.com/scttfrdmn/objectfs/issues/222
+[#204]: https://github.com/scttfrdmn/objectfs/issues/204
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378

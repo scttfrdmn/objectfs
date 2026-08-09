@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -140,6 +141,20 @@ type Fault struct {
 	// consider retryable produces a request that fails once and stays failed.
 	Code string
 
+	// Message is the S3 error message in the XML body. Defaults to "injected by testaws".
+	//
+	// It exists because ObjectFS has a classifier that a code alone cannot drive: S3 reports every
+	// Transfer Acceleration failure as InvalidRequest and distinguishes it only by the message, so
+	// isAccelerationError is a conjunction of the two. With a fixed message a Fault could produce
+	// the code and never the condition, and the acceleration fallback — the path deciding whether a
+	// mount keeps serving when the accelerate endpoint is unusable — had no way to be exercised
+	// against a real endpoint.
+	//
+	// The general form: a matcher over service prose is a matcher the harness has to be able to
+	// feed, or the branch behind it is reachable only by calling the classifier directly, which
+	// proves the classifier and not the behavior.
+	Message string
+
 	// Times is how many matching requests to fail. Zero means one — a Fault that fails nothing is
 	// never what a caller meant, and reading `Times: 0` as "unlimited" would turn a typo into a
 	// test that hangs on the retry budget.
@@ -226,6 +241,9 @@ func (ts *TestServer) InjectFault(f Fault) {
 	}
 	if f.Code == "" {
 		f.Code = "InternalError"
+	}
+	if f.Message == "" {
+		f.Message = "injected by testaws"
 	}
 
 	ts.rec.mu.Lock()
@@ -332,17 +350,32 @@ func (ts *TestServer) controlPlane(method, path string, body []byte) {
 
 // serveFault writes an S3-shaped error response. The body matters: the AWS SDK parses the Code out
 // of it to decide whether the error is retryable, and a bare status with an empty body classifies
-// differently from the same status with an InternalError body.
+// differently from the same status with an InternalError body. The Message matters for the same kind
+// of reason on ObjectFS's side — see [Fault.Message].
 func serveFault(w http.ResponseWriter, spec Fault) {
 	body := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Error><Code>` + spec.Code + `</Code>` +
-		`<Message>injected by testaws</Message>` +
+		`<Message>` + xmlEscape(spec.Message) + `</Message>` +
 		`<RequestId>testaws-injected</RequestId></Error>`
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(spec.Status)
 	_, _ = w.Write([]byte(body))
+}
+
+// xmlEscape escapes a fault message for the XML body.
+//
+// [Fault.Message] is caller-supplied, and an unescaped "&" or "<" in it produces a body the SDK's XML
+// decoder rejects — which surfaces as a deserialization failure carrying no error code at all, so the
+// test sees neither the code it injected nor the message. Escaping keeps a mistyped message a wrong
+// message rather than a broken response.
+func xmlEscape(s string) string {
+	var b strings.Builder
+
+	_ = xml.EscapeText(&b, []byte(s))
+
+	return b.String()
 }
 
 // countingBody wraps a response body to count the bytes that pass through it.

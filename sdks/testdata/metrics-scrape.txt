@@ -117,3 +117,12 @@ objectfs_predictive_cache{service="objectfs",statistic="prefetch_efficiency"} 0.
 objectfs_predictive_cache{service="objectfs",statistic="prefetch_hits"} 31
 objectfs_predictive_cache{service="objectfs",statistic="prefetch_requests"} 96
 objectfs_predictive_cache{service="objectfs",statistic="prefetch_waste"} 12
+# HELP objectfs_s3_acceleration S3 Transfer Acceleration state and counters, by statistic name
+# TYPE objectfs_s3_acceleration gauge
+objectfs_s3_acceleration{service="objectfs",statistic="active"} 0
+objectfs_s3_acceleration{service="objectfs",statistic="avg_latency_seconds"} 0.0184
+objectfs_s3_acceleration{service="objectfs",statistic="bytes"} 1.687552e+06
+objectfs_s3_acceleration{service="objectfs",statistic="configured"} 1
+objectfs_s3_acceleration{service="objectfs",statistic="fallbacks"} 1
+objectfs_s3_acceleration{service="objectfs",statistic="requests"} 412
+objectfs_s3_acceleration{service="objectfs",statistic="retry_period_seconds"} 300

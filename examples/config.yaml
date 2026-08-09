@@ -31,6 +31,24 @@ storage:
     use_acceleration: false           # S3 Transfer Acceleration (bucket must have it enabled)
     force_path_style: false           # true for most S3-compatible servers
 
+    # How long a Transfer Acceleration fallback lasts before one request is allowed to try the
+    # accelerate endpoint again. Ignored unless use_acceleration is true; 0 means the default of 5m.
+    #
+    # Must carry a unit. `acceleration_retry: 300` is read as 300 *nanoseconds*, which would put one
+    # request per 300ns against the accelerate endpoint — so the loader rejects a bare number here.
+    #
+    # The fallback used to be permanent for the life of the mount (#204): a thirty-second DNS failure
+    # reaching the accelerate endpoint cost a long-lived mount its acceleration until restart, and
+    # nothing reported it. Exactly one request probes at a time, so a still-broken endpoint costs one
+    # request per period and not a retry per read. Watch
+    # objectfs_s3_acceleration{statistic="configured"} against statistic="active": 1 and 0 is a mount
+    # that was asked to accelerate and is not.
+    #
+    # Note that acceleration cannot be combined with `endpoint` above — the AWS SDK refuses the pair —
+    # so on a non-AWS store setting both means every request falls back. That is a silent slowdown
+    # rather than an error, deliberately, since acceleration is a performance capability.
+    acceleration_retry: 5m
+
     # S3 storage class for written objects. Validated at load: an unrecognized class used to be
     # silently replaced with STANDARD, so `STANDARD_1A` — digit one for capital I — was billed as
     # STANDARD with nothing reporting a problem.

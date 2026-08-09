@@ -348,12 +348,15 @@ func (cm *ClientManager) DisableAcceleration(reason string) {
 
 // EnableAcceleration re-enables Transfer Acceleration if configured.
 //
-// Nothing in ObjectFS calls this. The fallback is one-way for the life of the mount: once an
-// acceleration error is seen, every subsequent request uses the standard endpoint until restart.
-// docs/s3-acceleration.md claimed an "automatic re-enable after successful standard operations";
-// there is no such path, and the doc now says so. Kept as the supported way to re-enable for an
-// embedder that wants to retry periodically, since the alternative — deleting it — leaves callers
-// with no way to undo a fallback at all.
+// Called by accelerationGate when its breaker goes half-open, which is the one path back from a
+// fallback (#204). Until then nothing called it and the fallback was one-way for the life of the
+// mount: one acceleration error, whatever its cause, sent every subsequent request to the standard
+// endpoint until restart. A thirty-second DNS failure reaching the accelerate endpoint therefore cost
+// a long-lived mount its acceleration permanently, and nothing reported it had happened.
+//
+// The gate, not this method, decides *when*. Re-enabling on any schedule of its own would put this
+// method in the business of retry policy, and the retry has to be capped to one in-flight probe —
+// which is the breaker's MaxRequests, not something a mutex around two fields can express.
 func (cm *ClientManager) EnableAcceleration() {
 	cm.accelMu.Lock()
 	defer cm.accelMu.Unlock()
