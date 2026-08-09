@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docs/admin-guide/operations.md` and `docs/admin-guide/troubleshooting.md`** ([#148]), the day-two
+  half of the admin guide, plus `internal/config/docs_admin_guide_test.go` to keep them true.
+
+  Troubleshooting is a decision tree for four symptoms — a mount that fails, a low cache hit rate,
+  gossip that never forms, and S3 costs above expectation — and every branch ends at a command rather
+  than at advice. The mount branch opens with a message-to-exit-code table, because the two codes
+  already narrow the tree: **exit 2 is a wrong command line or config file and exit 1 is a correct
+  command whose operation failed**, so the code alone says whether to re-read the config or look at the
+  host. Two orderings are documented for the same reason — the config file is loaded before either
+  positional argument, and the storage URI is validated before the mount point, so `objectfs mount
+  s3://b /nonexistent` names the bucket and says nothing about the directory.
+
+  Two entries exist to stop a correct system being treated as broken. A **single-pass workload has a
+  correctly near-zero hit rate**: one `tar` over a dataset larger than the cache has no reuse to
+  capture, so the page says to establish that reuse exists before enlarging anything. And **`objectfs
+  cluster status` exits 0 when clustering is disabled**, which is the default rather than a fault — a
+  page that documented that as nonzero would have every single-node mount alerting.
+
+  The gossip branch documents the port collision that looks like a misconfiguration and is not: gossip
+  and the metrics endpoint both default to **8080**, gossip on UDP and metrics on TCP, and the two bind
+  simultaneously because they are separate port namespaces — verified by binding both in one process
+  rather than assumed. What it does mean is that a firewall rule written for "port 8080" without a
+  protocol may open only the one you were not thinking about. #148's body specified 7946, memberlist's
+  default and this project's nowhere.
+
+  Operations covers single-node and rolling upgrades, capacity changes, secret rotation and what to
+  alert on. **Stop, do not kill** is the load-bearing part: a `SIGKILL` leaves the kernel holding a
+  mount whose server is gone and loses any dirty range that had not reached S3, which is why the systemd
+  unit's `ExecStop` runs `objectfs unmount` with `TimeoutStopSec=90`. The message `objectfs: shutdown
+  failed, so data may not have reached S3` is named as a **stop-the-rollout signal** — it is the one
+  message this program exists to be able to print. Secret rotation is documented as **not rolling**,
+  with the reason stated: two secrets in one cluster is a partition by design, so a rolling rotation
+  would self-inflict the silent-partition failure the rest of the guide is about.
+
+  Two of #148's specified procedures **could not be written and are listed as absent rather than
+  approximated**, the same treatment [#152] got. "Upgrade nodes one at a time, leader last" and
+  "leader-failure recovery (Raft election)" describe nothing: no leader is elected on a mount path, so
+  `objectfs cluster status` prints `Role: n/a` on every node and the order is the operator's to choose —
+  an upgrade procedure saying "leader last" sends someone looking for a leader that never appears, which
+  reads like a broken cluster. "Verify quorum" and a node that "degrades to `ConsistencyEventual`" are
+  wrong twice over: there is no quorum condition anywhere, and that type was removed in 0.12.0. And
+  "log rotation and data-directory management" has no keys to manage.
+
+  The gate is the reason to trust the numbers. The four existing doc tests cannot see what these pages
+  get wrong — one parses YAML blocks, one checks Go symbols, one resolves links, one checks changelog
+  entries, and a `curl` against a metrics endpoint is prose to all four. So the new test derives both
+  ports from `NewDefault()`, checks **every** `http://` URL on each page rather than looking for one
+  correct occurrence, checks each `objectfs <sub>` invocation against the five commands the binary has,
+  cross-checks every `objectfs_*` name against `sdks/testdata/metrics-scrape.txt` — a real scrape of a
+  running registry — and asserts the leader, quorum and consistency phrases stay absent. Nine mutations
+  were run against it and two initially survived, both instructive: a metrics `curl` repointed at
+  Prometheus's own 9090 passed, because the page names `127.0.0.1:8080` further down in the
+  TCP-versus-UDP paragraph and a substring check was satisfied by a sentence that had nothing to do with
+  the command; and the same held when only one of four URLs was wrong, hiding behind three correct
+  siblings. Both are now caught. The test's own first run also found a claim needing the opposite
+  assertion: the page names `objectfs_cache_hit_rate` in order to say the gauge deliberately does not
+  exist, so that name is checked for **absence** from the fixture — exempting it would have missed the
+  day someone adds the gauge and the page starts telling operators to compute by hand a number the
+  endpoint publishes.
+
 - **Validation for the `cluster:` config block, a cluster section in `objectfs mount --dry-run`, and
   `docs/admin-guide/distributed.md`** ([#152]). Nothing validated this block before: `Validate` checked
   storage, cache, network, monitoring and mount, and returned before reaching clustering. Four states
@@ -3280,6 +3340,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#141]: https://github.com/scttfrdmn/objectfs/issues/141
 [#142]: https://github.com/scttfrdmn/objectfs/issues/142
 [#143]: https://github.com/scttfrdmn/objectfs/issues/143
+[#148]: https://github.com/scttfrdmn/objectfs/issues/148
 [#150]: https://github.com/scttfrdmn/objectfs/issues/150
 [#152]: https://github.com/scttfrdmn/objectfs/issues/152
 [#207]: https://github.com/scttfrdmn/objectfs/issues/207
