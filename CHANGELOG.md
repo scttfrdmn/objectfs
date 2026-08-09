@@ -51,7 +51,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing in it reports success, shows up in `module list`, and surfaces as "command not found" inside
   a batch job hours later, at which point the module system looks right and ObjectFS looks broken.
 
+- **`objectfs cluster status`, and the `/health/cluster` endpoint it reads** ([#147]). Reports
+  membership, per-node cache figures and announced-key counts for a running instance, with `--json` for
+  scripting. `--endpoint` names the health server; `--config` reads it from a config file. The endpoint
+  answers 200 whenever it can answer at all, because the status code reports the endpoint's health and
+  the payload reports the cluster's — conflating them makes a degraded cluster indistinguishable from
+  an unreachable mount. The exit code is non-zero for **dead or suspect nodes**, not for loss of quorum:
+  quorum is a Raft concept, ObjectFS coordinates by compare-and-swap against S3, and a two-node cluster
+  with one node down works correctly. Clustering disabled exits 0, since that is the default
+  configuration and anything else would page on every single-node mount.
+
+  Several figures an operator might expect are **deliberately absent, and say so**, because a number
+  nobody assigns is worse than no number. Leader and role appear only when `enable_consensus` is set —
+  a mount leaves consensus off, so `IsLeader` is false on every node of a healthy cluster, and the
+  report states that election is not running and coordination is CAS. A cache hit rate is reported as
+  "not measured" until the cache has served a request, because a rate of 0.0 by arithmetic is
+  indistinguishable from a cache that misses every read. "Top keys by access" is not reported at all:
+  no per-key access counter is reachable from the cluster layer, and the nearest available quantity
+  orders by last-announced, which under that label would be a proxy read as the real thing.
+
 ### Fixed
+
+- **A node never recorded its own cache figures in its membership map** ([#147]). `refreshLocalStats`
+  reached only the struct the gossip alive-message is built from, so a node published its cache size
+  and hit rate to every peer and never stored them for itself. Every node showed each peer's cache in
+  full and its own as "not reported", and the cluster-wide `TotalCacheSize` omitted the local node —
+  under-reporting the total by one node's worth on every node. The existing test comment had recorded
+  the symptom as expected behaviour ("zero here, since nothing refreshed it"), which is why reading the
+  tests did not surface it; running the new command against a live two-node cluster did.
 
 - **`preremove.sh` never matched a real mount.** Its unmount loop looked for `type fuse.objectfs` in
   `/proc/mounts`, and ObjectFS mounts report **`fuse.s3`** — `internal/fuse/mount.go` sets
@@ -3068,6 +3095,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#207]: https://github.com/scttfrdmn/objectfs/issues/207
 [#137]: https://github.com/scttfrdmn/objectfs/issues/137
 [#145]: https://github.com/scttfrdmn/objectfs/issues/145
+[#147]: https://github.com/scttfrdmn/objectfs/issues/147
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#282]: https://github.com/scttfrdmn/objectfs/issues/282

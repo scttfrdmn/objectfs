@@ -235,6 +235,22 @@ func (m *Monitor) RegisterComponent(component HealthyComponent) error {
 	)
 }
 
+// SetClusterStatusProvider registers what the monitor's /health/cluster endpoint reports.
+//
+// It forwards to the checker, which owns the listener. The adapter holds a *Monitor and not a *Checker,
+// so without this the endpoint would have no way to be given anything to serve — and an endpoint with no
+// provider answers `enabled: false`, which is indistinguishable from a mount that is genuinely not
+// clustered. That is exactly the kind of silence #139 was filed for: every part of internal/distributed
+// worked and nothing wired it to a mount.
+func (m *Monitor) SetClusterStatusProvider(provider ClusterStatusProvider) {
+	m.checker.SetClusterStatusProvider(provider)
+}
+
+// ClusterStatusPath returns the path the monitor serves cluster status on, for logging it at startup.
+func (m *Monitor) ClusterStatusPath() string {
+	return m.checker.ClusterPath()
+}
+
 // GetStatus returns the current system health status
 func (m *Monitor) GetStatus() *ServiceStatus {
 	version := "1.0.0" // This would come from build info

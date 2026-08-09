@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -617,6 +618,48 @@ func TestRefreshLocalStats_ReadsTheInjectedCache(t *testing.T) {
 	}
 }
 
+// TestRefreshLocalStats_SaturatesCacheRequestsRatherThanWrapping pins the clamp on the uint64 → int64
+// conversion behind CacheRequests.
+//
+// Unreachable in a real process — 2^63 cache operations is 292 years at a billion per second — and
+// tested anyway, because the alternative to the clamp was a lint suppression and a suppression cannot
+// be tested at all. gosec flags the conversion (G115); the reason to fix it rather than silence it is
+// what happens if it ever does wrap. A negative CacheRequests reads as "nothing has asked yet" to the
+// `requests > 0` guard that decides whether a hit rate is reported, so the busiest cache in the
+// cluster would report `hit=not measured` — a wrong answer dressed as an honest absence, which is the
+// failure mode this whole status surface is built to avoid.
+//
+// Two cases, because the sum is uint64 arithmetic and wraps on its own: a total above MaxInt64 that
+// does not wrap, and Hits+Misses overflowing uint64 entirely. A check placed after the cast would miss
+// the second, having already lost the overflow.
+func TestRefreshLocalStats_SaturatesCacheRequestsRatherThanWrapping(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		hits, misses uint64
+	}{
+		{"above MaxInt64", math.MaxInt64, 10},
+		{"sum wraps uint64", math.MaxUint64, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cm := makeClusterWithNode(t, "stats-saturate")
+			cm.SetCache(&mockCache{stats: types.CacheStats{Hits: tc.hits, Misses: tc.misses}})
+
+			var got NodeInfo
+			cm.refreshLocalStats(&got)
+
+			if got.CacheRequests != math.MaxInt64 {
+				t.Errorf("CacheRequests = %d, want MaxInt64 (%d).\nHits=%d Misses=%d. A value that is "+
+					"not the clamp means the conversion wrapped; if it is negative, the hit-rate guard "+
+					"will report this cache as having served nothing.",
+					got.CacheRequests, int64(math.MaxInt64), tc.hits, tc.misses)
+			}
+		})
+	}
+}
+
 // TestRefreshLocalStats_LeavesCacheFieldsAloneWithNoCache verifies that an absent cache is
 // distinguishable from an empty one.
 //
@@ -729,7 +772,11 @@ func TestCalculateClusterStats_SumsCacheSizeAcrossAliveNodes(t *testing.T) {
 
 	stats := cm.GetStats()
 
-	// 1000 + 3000, plus whatever the self node reports — zero here, since nothing refreshed it.
+	// 1000 + 3000, plus whatever the self node reports. That used to be zero because nothing refreshed
+	// the self entry at all — a defect, since a node then omitted its own cache from the cluster total.
+	// [ClusterManager.refreshSelfEntry] now refreshes it, and it is still zero here for the honest
+	// reason: no cache is injected into this manager, so there is nothing to report.
+	// TestStatusSnapshot_IncludesThisNodesOwnCacheFigures covers the case where there is.
 	if stats.TotalCacheSize != 4000 {
 		t.Errorf("TotalCacheSize = %d, want 4000 (dead node's 9000000 excluded)", stats.TotalCacheSize)
 	}

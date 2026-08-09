@@ -286,10 +286,21 @@ func (a *Adapter) Start(ctx context.Context) error {
 			}
 		}
 
+		// What /health/cluster reports, registered before Start binds the listener so there is no window
+		// in which the endpoint is reachable and answers "not clustered" for a mount that is. #147 asked
+		// for a client that reads this endpoint; the endpoint did not exist, and this is the line that
+		// makes it report something real rather than the unregistered default.
+		//
+		// A closure over the adapter rather than the manager, because a.clusterMgr is nil when clustering
+		// is off — capturing its value here would register a provider that reports a cluster from a nil
+		// pointer. See [Adapter.clusterStatus].
+		a.monitor.SetClusterStatusProvider(health.ClusterStatusFunc(a.clusterStatus))
+
 		if err := a.monitor.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start health monitor: %w", err)
 		}
-		slog.Info("health monitor started", "addr", a.config.Monitoring.HealthChecks.Addr)
+		slog.Info("health monitor started", "addr", a.config.Monitoring.HealthChecks.Addr,
+			"cluster_status_path", a.monitor.ClusterStatusPath())
 	}
 
 	// 8. Mount filesystem
@@ -457,6 +468,26 @@ func (a *Adapter) startCluster(ctx context.Context) error {
 		"seed_nodes", len(a.config.Cluster.SeedNodes))
 
 	return nil
+}
+
+// clusterStatus is what /health/cluster reports for this mount.
+//
+// Read from a.clusterMgr per call rather than captured, for two reasons that both matter. The health
+// monitor is started after startCluster but its provider must survive a Stop that clears nothing — and
+// more importantly, a nil manager and a running one are different answers, so the check has to happen at
+// request time. A provider closed over the field's value at registration would report a cluster from a
+// nil pointer.
+//
+// The disabled answer names the setting that would turn clustering on, because that is what an operator
+// reading it needs next. It is not an error: `cluster.enabled` defaults to false, so this is the answer
+// almost every ObjectFS instance gives, and a client must be able to tell it from a failure.
+func (a *Adapter) clusterStatus() any {
+	if a.clusterMgr == nil {
+		return distributed.ClusterStatusDisabled("this mount is not running cluster coordination: " +
+			"set cluster.enabled in the configuration file to join a cluster")
+	}
+
+	return a.clusterMgr.StatusSnapshot()
 }
 
 // clusterCoordinator returns the coordinator the filesystem should use, or nil when clustering is off.
