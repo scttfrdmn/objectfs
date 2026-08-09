@@ -58,6 +58,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordination declines to start there. The page's title and overview said "S3-Compatible Object
   Storage" where the project targets AWS S3. Replaced with what varies, which is coordination, and a
   link to the probed matrix — plain filesystem use is unaffected on any S3-compatible endpoint.
+- **`scripts/pjdfstest.sh` now says it runs on demand only, and why** ([#352]). The script works —
+  real `mount` subcommand, prerequisite checks, an EXIT/INT/TERM trap, `${PIPESTATUS[0]}` propagated
+  past the `tee` — and nothing runs it. That is a statement about infrastructure, not about the
+  script: it needs `/dev/fuse`, real credentials and a real bucket, and this repository has no
+  scheduled real-AWS job at all, so wiring it in means adding one with a bucket and a role. Written
+  into the script header and beside `make test-posix`, matching what `make test-fuse-mount` already
+  does, because the failure mode of an unrun conformance suite is that it reads as a passing one.
+
+  Kept rather than deleted: it is the only *third-party* POSIX conformance suite this project has, and
+  `internal/difftest` — which does run in CI — makes a weaker claim, comparing against the local OS
+  filesystem over an operation sequence this repository chose rather than one nobody here wrote and
+  cannot have tuned to what already works. Both notes point at `README.md`'s supported-operations
+  table for reading the output: ObjectFS is not POSIX-compliant, so a clean run is not the goal, and
+  the useful question is whether the failing set grew.
 
 ### Fixed
 
@@ -2534,6 +2548,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#385]: https://github.com/scttfrdmn/objectfs/issues/385
 [#384]: https://github.com/scttfrdmn/objectfs/issues/384
 [#367]: https://github.com/scttfrdmn/objectfs/issues/367
+[#352]: https://github.com/scttfrdmn/objectfs/issues/352
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378
