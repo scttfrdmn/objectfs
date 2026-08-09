@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 # pjdfstest.sh — run the pjdfstest POSIX compliance suite against ObjectFS.
 #
+# ON DEMAND ONLY. Nothing runs this automatically, and that is a statement about infrastructure
+# rather than about the script, which works. It needs /dev/fuse, real AWS credentials, and a real
+# bucket, so a GitHub-hosted runner cannot execute it: there is no scheduled real-AWS job in this
+# repository at all (the only cron: in the tree belongs to the security scan). Wiring it into CI
+# would mean adding one, with a bucket and a role, which is a decision with a cost attached and not
+# something a script comment can make.
+#
+# Written down instead of left implied, because the failure mode of an unrun conformance suite is
+# that it reads as a passing one. `internal/fuse/kernel_options_live_test.go` documents its own
+# unrunnability for the same reason, and `make test-fuse-mount` says so beside its target. Tracked as
+# https://github.com/scttfrdmn/objectfs/issues/352.
+#
+# Kept rather than deleted: this is the only *third-party* POSIX conformance suite this project has.
+# `internal/difftest` is the closest thing that does run in CI, and it makes a weaker claim — it
+# compares ObjectFS against the local OS filesystem over an operation sequence this repository chose,
+# where pjdfstest is a suite nobody here wrote and cannot have tuned to what already works. Run it by
+# hand before a release, and read README.md's supported-operations table for what is expected to fail
+# by design: ObjectFS is not a POSIX-compliant filesystem, so a clean pjdfstest run is not the goal —
+# knowing which cases fail, and that the set has not grown, is.
+#
 # Prerequisites:
 #   - pjdfstest binary in $PATH (https://github.com/pjd/pjdfstest)
 #   - ./bin/objectfs binary (run `make build` first)

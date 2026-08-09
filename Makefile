@@ -330,9 +330,19 @@ test-fuse-mount:
 	@echo "$(COLOR_BLUE)Running kernel-observable FUSE tests (requires /dev/fuse)...$(COLOR_RESET)"
 	@go test -race -tags=fuse_mount -run 'TestDirectIO|TestKeepCache' ./internal/fuse/
 
-# POSIX compliance test using pjdfstest.
-# Requires: pjdfstest in PATH, OBJECTFS_TEST_BUCKET set, and a running mount.
-# Run `make build` first.
+# Third-party POSIX conformance, via pjdfstest. ON DEMAND ONLY — no CI job runs this, and none can:
+# it needs /dev/fuse, real AWS credentials and a real bucket, and this repository has no scheduled
+# real-AWS job at all (the only cron: in the tree belongs to the security scan). Adding one means a
+# bucket and a role, which is a decision with a cost attached — issue #352.
+#
+# Said out loud here and in the script's header because the failure mode of an unrun conformance suite
+# is that it reads as a passing one. `make test-fuse-mount` above is the same situation for the same
+# reason, and internal/difftest is what does run: a differential oracle over an operation sequence
+# this repository chose, which is a weaker claim than a suite nobody here wrote.
+#
+# Requires: pjdfstest in PATH, OBJECTFS_TEST_BUCKET set. `build` runs first via the prerequisite.
+# ObjectFS is not POSIX-compliant, so a clean run is not the goal — README.md's supported-operations
+# table is what to read the results against, and the useful question is whether the failing set grew.
 test-posix: build
 	@echo "$(COLOR_BLUE)Running pjdfstest POSIX compliance suite...$(COLOR_RESET)"
 	@scripts/pjdfstest.sh
