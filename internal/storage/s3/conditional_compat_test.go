@@ -53,10 +53,20 @@ package s3_test
 // bucket. Each test creates its own bucket and removes it, including any incomplete multipart uploads,
 // since a bucket holding one cannot be deleted and this suite creates uploads that may not complete.
 //
-// Or against Wasabi, or any other S3-compatible store, by pointing the same variables at it. Wasabi
-// needs a real account and was not reachable when this landed; that is recorded in the matrix as
-// unverified-for-want-of-an-endpoint rather than inferred from documentation, which is the state that
-// produced #285 in the first place.
+// Against Wasabi, which has no local or emulated form — it needs a real account and the real service.
+// The region is part of the endpoint host, and a bucket created in one is not reachable through another:
+//
+//	OBJECTFS_COMPAT_ENDPOINT=https://s3.wasabisys.com OBJECTFS_COMPAT_REGION=us-east-1 \
+//	  OBJECTFS_COMPAT_ACCESS_KEY=... OBJECTFS_COMPAT_SECRET_KEY=... \
+//	  go test -race -tags=s3compat -v -count=1 ./internal/storage/s3/
+//
+// Wasabi accepts every conditional header and evaluates none of them, so it is the endpoint that
+// exercises the recorded-not-failed paths below: the capability probe reports unsupported, PutObjectIf
+// returns ErrNotSupported, and TestCompatConcurrentAbsentWritersElectExactlyOne skips because a refused
+// write leaves no contenders to arbitrate between. That is the fail-closed direction and the suite
+// passes on it.
+//
+// Or against any other S3-compatible store, by pointing the same variables at it.
 //
 // Every test here is written to *record* what an endpoint does and fail only on what would be unsafe.
 // So a store that declines conditional writes outright passes: refusing is harmless, since PutObjectIf
@@ -326,10 +336,20 @@ func TestCompatCapabilityProbeMatchesObservedBehavior(t *testing.T) {
 	enforcesAbsence := secondErr != nil
 	t.Logf("If-None-Match: * over an existing key -> %s", compatCode(secondErr))
 
+	// Recorded, not failed. An endpoint that ignores If-None-Match entirely is a matrix row, and the
+	// probe below is what decides whether it is a problem: this is the fail-closed direction, so
+	// PutObjectIf returns ErrNotSupported and nothing races. The check that matters is the probe
+	// agreeing, which the switch at the end of this test makes.
+	//
+	// This was a t.Errorf until Wasabi was probed, and the message it printed was the finding rather
+	// than a defect — the suite's contract is to fail only on what would be unsafe. It had never fired
+	// because AWS, MinIO, RGW and RustFS all enforce absence on PutObject; Wasabi is the first endpoint
+	// to reach it, and it made the run red for behavior the probe had already correctly refused.
 	if !enforcesAbsence {
 		if got := compatGet(t, ctx, client, bucket, key); !bytes.Equal(got, []byte("first")) {
-			t.Errorf("the endpoint accepted If-None-Match: * over an existing key and replaced its "+
-				"contents with %q. Two writers asserting absence would both believe they won", got)
+			t.Logf("FINDING: the endpoint accepted If-None-Match: * over an existing key and replaced "+
+				"its contents with %q. Two writers asserting absence would both believe they won, so "+
+				"conditional writes must be reported unsupported — asserted below", got)
 		}
 	}
 

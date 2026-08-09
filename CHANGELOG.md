@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wasabi probed and added to the conditional-write compatibility matrix.** It is the first endpoint
+  in the matrix to answer success to **every** cell: `If-None-Match: *` over an existing key replaces
+  it, `If-Match` with an ETag that cannot possibly match performs the write, and `If-Match` against an
+  absent key creates it. Conditional headers are accepted and never evaluated. The capability probe
+  reports `ConditionalWrite=false`, `PutObjectIf` returns `ErrNotSupported`, and coordination features
+  decline to start — the fail-closed direction, and the reason this is less dangerous than Ceph RGW,
+  which enforces *some* preconditions and so passes a probe that only asks whether one was ever
+  evaluated. Plain filesystem use is unaffected; this is a coordination limitation, not a storage one.
+
+  "Every request succeeds" is also what a client dropping the header would look like, so the SDK was
+  ruled out at the wire before the row was written — the same standard the RGW quoted-ETag row was held
+  to. With a request dumper in place, `If-Match` is present as a header *and* inside
+  `SignedHeaders=…;if-match;…`, Wasabi answers `200`, and a following `GET` returns the contender's
+  bytes. The row is dated rather than versioned because Wasabi returns no `Server` header and publishes
+  no build identifier, so re-run the suite rather than reading the date as a guarantee.
+
 - **RustFS `1.0.0-beta.12` probed and added to the conditional-write compatibility matrix.** Run, not
   read: the same `s3compat` suite that produced the AWS, MinIO and RGW rows, pointed at a local
   container, with each of the four cells the suite does not print measured on its own key. It is the
@@ -44,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link to the probed matrix — plain filesystem use is unaffected on any S3-compatible endpoint.
 
 ### Fixed
+
+- **A compatibility probe reported a finding by failing the run.** `conditional_compat_test.go`
+  called `t.Errorf` when an endpoint accepted `If-None-Match: *` over an existing key and replaced its
+  contents, which contradicts the suite's own contract: record what an endpoint does and fail only on
+  what would be unsafe. That cell is safe, because it is exactly what the capability probe detects and
+  refuses. The branch had never fired — AWS, MinIO, RGW and RustFS all enforce absence on `PutObject`
+  — and Wasabi is the first endpoint to reach it, turning a correctly-refused endpoint into a red run.
+  It is now a `t.Logf("FINDING: ...")`, and the assertion that matters is the one below it: the probe
+  must report the capability unsupported.
 
 - **A flaky test that failed a CI run, in a helper written to make tests reliable.**
   `testhttp.FreeAddr` binds `127.0.0.1:0`, records the address and closes the listener — which

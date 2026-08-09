@@ -37,7 +37,7 @@ indistinguishable until it matters.
 | MinIO | `RELEASE.2025-09-07T16-13-09Z` (commit `07c3a429bfed433e49018cb0f78a52145d4bedeb`) | container, local |
 | Ceph RGW | `19.2.0 squid` (commit `16063ff2022298c9300e49a547a16ffda59baf13`) | `quay.io/ceph/demo`, local |
 | RustFS | `1.0.0-beta.12` (revision `8601179c3989d131fb68fa311fd517fe281270fe`, image digest `sha256:186743df6fdf85c1f10ce246bbee5fb22f1d35c3ec1a73fc9058c560c5f6b505`) | `docker.io/rustfs/rustfs`, local |
-| Wasabi | — | **not probed.** No endpoint was available. See [Wasabi](#wasabi) below. |
+| Wasabi | unversioned — `s3.wasabisys.com` (`us-east-1`), probed 2026-08-08. The service returns no `Server` header and publishes no build identifier, so this row is dated rather than versioned | the real service, an account's own credentials; each test creates its own bucket and removes it |
 
 ## The matrix
 
@@ -45,20 +45,20 @@ Cells are the HTTP status and S3 error code as returned, because that pair is wh
 `translateConditionalError` dispatches on. A row naming a code is a row a mapping can be checked
 against; a row naming a message is not, since message text is not stable.
 
-| Check | AWS S3 | MinIO | Ceph RGW 19.2.0 | RustFS 1.0.0-beta.12 |
-|---|---|---|---|---|
-| `If-None-Match: *`, key absent | success | success | success | success |
-| `If-None-Match: *`, key exists | `412 PreconditionFailed`, holder's bytes intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact |
-| `If-Match` with the **quoted** ETag the store just returned | success | success | **`412 PreconditionFailed`** | success |
-| `If-Match` with the bare hex digest | success | success | success | success |
-| `If-Match: *` | **`501 NotImplemented`** | success | success | success |
-| `If-Match` with a **stale** ETag | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` |
-| `If-Match`, key **absent** | `404 NoSuchKey` | `404 NoSuchKey` | **`412 PreconditionFailed`** | `404 NoSuchKey` |
-| 8 concurrent `If-None-Match: *` on one key | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` |
-| Precondition on `CompleteMultipartUpload`, key exists | `412`, holder intact | `412`, holder intact | **success — contender's bytes land** | `412`, holder intact |
-| Multipart ETag (`<hex>-<N>`) reused in a later `If-Match` | — | success | success | success |
-| `DeleteObject` with a stale `If-Match` | `412 PreconditionFailed`, object survives | **success — object deleted** | **success — object deleted** | `412 PreconditionFailed`, object survives |
-| **ObjectFS capability probe verdict** | supported | supported | **unsupported** | supported |
+| Check | AWS S3 | MinIO | Ceph RGW 19.2.0 | RustFS 1.0.0-beta.12 | Wasabi |
+|---|---|---|---|---|---|
+| `If-None-Match: *`, key absent | success | success | success | success | success |
+| `If-None-Match: *`, key exists | `412 PreconditionFailed`, holder's bytes intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact | `412 PreconditionFailed`, intact | **success — contender's bytes land** |
+| `If-Match` with the **quoted** ETag the store just returned | success | success | **`412 PreconditionFailed`** | success | success |
+| `If-Match` with the bare hex digest | success | success | success | success | success |
+| `If-Match: *` | **`501 NotImplemented`** | success | success | success | success |
+| `If-Match` with a **stale** ETag | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` | `412 PreconditionFailed` | **success — the write lands** |
+| `If-Match`, key **absent** | `404 NoSuchKey` | `404 NoSuchKey` | **`412 PreconditionFailed`** | `404 NoSuchKey` | **success — the key is created** |
+| 8 concurrent `If-None-Match: *` on one key | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` | 1 winner, 7 × `412` | not run — the probe refuses first, so there is no race to arbitrate |
+| Precondition on `CompleteMultipartUpload`, key exists | `412`, holder intact | `412`, holder intact | **success — contender's bytes land** | `412`, holder intact | **success — contender's bytes land** |
+| Multipart ETag (`<hex>-<N>`) reused in a later `If-Match` | — | success | success | success | success |
+| `DeleteObject` with a stale `If-Match` | `412 PreconditionFailed`, object survives | **success — object deleted** | **success — object deleted** | `412 PreconditionFailed`, object survives | **success — object deleted** |
+| **ObjectFS capability probe verdict** | supported | supported | **unsupported** | supported | **unsupported** |
 
 ## What the exceptional cells mean
 
@@ -148,21 +148,41 @@ declining to start rather than as two lease holders. Nothing about this row chan
 posture, which is that AWS S3 is the target and an S3-compatible endpoint gets best-effort support —
 what it changes is that a RustFS deployment is not expected to lose coordination.
 
-### Wasabi
+### Wasabi accepts every conditional header and evaluates none of them
 
-**Unverified. No endpoint was available when this page was written**, and Wasabi has no local or
-emulated form to stand up — it needs a real account against the real service.
+Wasabi is the first endpoint probed here that answers **success to every cell**. Not one 412, not one
+404, not one 501 — `If-None-Match: *` over an existing key replaces it, `If-Match` with an ETag that
+cannot possibly match performs the write, `If-Match` against a key that does not exist creates it.
+The headers are accepted and the writes happen regardless.
 
-Recorded as unverified rather than filled in from Wasabi's documentation, deliberately. Two rows on
-this page were documentation reads before 2026-08-08 and both were wrong: MinIO was recorded as
-"source read, server enforcement unverified" and enforces everything AWS enforces, while Ceph RGW was
-recorded as "no conditional write support — documentation absence" and in fact implements it
-*partially*, which is strictly more dangerous than not implementing it. A documented behavior is a
-claim about an endpoint; only a probe is an observation of one.
+This is the shape the top of this page calls the dangerous variation, and it is why the probe asserts
+rather than asks. Two writers asserting `If-None-Match: *` on the same lease key would both be told
+they won.
 
-The capability probe treats Wasabi like any other unknown endpoint — it establishes the answer at
-mount time from the endpoint in front of it, so an unprobed store is not an unguarded one. Filling in
-this row needs credentials and the suite above; it does not need any new code.
+**The SDK was ruled out at the wire before this row was written.** "Every request succeeds" is also
+exactly what a client dropping the header would look like, and the RGW quoted-ETag row above was held
+to the same standard. With an `http.RoundTripper` dumper in place: `If-Match: "f97c…"` is present as a
+request header *and* inside `SignedHeaders=…;if-match;…`, so it is signed and cannot be stripped in
+transit; Wasabi answers `200`; and a `GET` afterwards returns the contender's bytes where an enforcing
+store returns the holder's. The finding is about the service.
+
+**It fails closed, which is the difference between this row and RGW's.** The probe reports
+`ConditionalWrite=false` with the detail *"the endpoint accepted an If-Match that could not possibly
+match and performed the write anyway, so it does not evaluate preconditions"*, `PutObjectIf` returns
+`types.ErrNotSupported`, and a coordination feature declines to start. Nothing races, because nothing
+runs. RGW is more dangerous precisely because it enforces *some* preconditions: it passes a probe that
+only checks whether a precondition was ever evaluated, and then loses the guarantee on multipart. An
+endpoint that ignores preconditions uniformly is detected by the first thing that looks.
+
+The concurrency test therefore **skips** on Wasabi rather than failing:
+`TestCompatConcurrentAbsentWritersElectExactlyOne` exists to check that exactly one of N contenders
+wins, and there are no contenders when `PutObjectIf` refuses to issue the write. A skip there is the
+suite agreeing with the probe.
+
+**No version to record.** Wasabi returns no `Server` header and publishes no build identifier, so the
+Endpoints table dates this row instead of versioning it. Re-run the suite rather than reading the date
+as a guarantee — this is a hosted service and the row cannot be pinned to a build the way MinIO,
+RGW, and RustFS can.
 
 ## What ObjectFS does about it
 
@@ -191,6 +211,7 @@ where the failure is loud.
 | **MinIO** ≥ `RELEASE.2025-09-07` | Coordination features work. Enforcement is real, verified here rather than assumed — but it is an extension of the S3 API, not a contract, so the version above is part of the claim. |
 | **Ceph RGW** ≤ 19.2.0 | Coordination features **refuse to start**, correctly. Conditional writes are partially implemented in a way that cannot be worked around from the client: no CAS (ETag rejected), and multipart writes unconditional. Use a coordination backend other than the object store. |
 | **RustFS** `1.0.0-beta.12` | Coordination features work. It matched AWS on every cell probed, including the two RGW fails. It is a pre-release, so re-run the suite against the build you deploy rather than trusting this row — the probe will refuse at mount time if a later beta regresses. |
+| **Wasabi** | Coordination features **refuse to start**, correctly. Conditional headers are accepted and never evaluated, so there is nothing to work around from the client. Use a coordination backend other than the object store. Everything else — reads, writes, multipart, tiering — is unaffected: this is a coordination limitation, not a storage one. |
 | **anything else** | The probe decides at mount time. If it reports unsupported, `ConditionalWriteDetail` says what the endpoint did; add a row here by running the `s3compat` suite against it. |
 
 ## Keeping this page honest
