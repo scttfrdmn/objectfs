@@ -287,6 +287,50 @@ func (c *MultiLevelCache) GetLevelStats(levelName string) (types.CacheStats, err
 	return types.CacheStats{}, fmt.Errorf("cache level %s not found or not enabled", levelName)
 }
 
+// GetPredictiveCache returns the [PredictiveCache] wrapping L1, or nil when L1 is not wrapped.
+//
+// It exists because nothing else can reach it. initializeLevels wraps L1 in a PredictiveCache whenever
+// prefetch is enabled — which multiLevelConfigFrom does unconditionally, so every mount — and stores it
+// as a types.Cache in a CacheLevel. types.Cache is six methods about bytes, GetLevelStats returns a
+// types.CacheStats, and Close reaches the level only through an unexported type assertion. So the
+// predictive statistics were computed on every read and discarded at unmount (#223).
+//
+// This name is not arbitrary: docs/features/read-ahead.md documented `cache.GetPredictiveCache()`
+// before it existed, TestDocumentedGoSymbolsExist caught it as absent, and the documentation now
+// describes this. Renaming it means changing that page in the same commit.
+//
+// Returning the concrete type rather than an interface is deliberate — the caller wants
+// GetPredictiveStats, which is the one thing types.Cache cannot express, and an interface with one
+// method that one type implements is a longer way to say *PredictiveCache.
+func (c *MultiLevelCache) GetPredictiveCache() *PredictiveCache {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, level := range c.levels {
+		if pc, ok := level.Cache.(*PredictiveCache); ok {
+			return pc
+		}
+	}
+
+	return nil
+}
+
+// PredictiveStats returns the predictive cache's statistics, and false when there is no predictive layer.
+//
+// The convenience form of [MultiLevelCache.GetPredictiveCache] for the common case, which is a caller
+// that wants the numbers and not the cache — including the metrics surface, where a nil check on a
+// returned pointer is the kind of thing that gets dropped and publishes zeros. The boolean makes "there
+// is no predictive layer" distinguishable from "it has predicted nothing yet", which #222 is the argument
+// for: those two are the same struct otherwise.
+func (c *MultiLevelCache) PredictiveStats() (PredictiveStats, bool) {
+	pc := c.GetPredictiveCache()
+	if pc == nil {
+		return PredictiveStats{}, false
+	}
+
+	return pc.GetPredictiveStats(), true
+}
+
 // SetBackend sets the storage backend used by Warmup to pre-populate the cache.
 // It may be called any time before Warmup is invoked.
 func (c *MultiLevelCache) SetBackend(b types.Backend) {

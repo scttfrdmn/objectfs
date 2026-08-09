@@ -162,8 +162,41 @@ class ParseScrapeTest(unittest.TestCase):
             'objectfs_cache_size_bytes',
             'objectfs_active_connections',
             'objectfs_errors_total',
+            'objectfs_predictive_cache',
         ):
             self.assertIn(name, found)
+
+    def test_predictive_statistics_are_labelled_not_named(self):
+        # The predictive cache is one family labelled by ``statistic`` rather than a metric per
+        # number, so the set of statistics can grow without a metric rename -- which is a change
+        # every SDK and dashboard would otherwise have to follow. That only works if the parser
+        # keeps the label, so this asserts on the label rather than on the family's presence.
+        statistics = {
+            sample['labels'].get('statistic'): sample['value']
+            for sample in self.parsed['samples']
+            if sample['name'] == 'objectfs_predictive_cache'
+        }
+
+        for name in (
+            'predictions_total',
+            'predictions_correct',
+            'prediction_accuracy',
+            'avg_confidence',
+            'prefetch_requests',
+            'prefetch_hits',
+            'prefetch_bytes',
+            'prefetch_waste',
+            'prefetch_efficiency',
+            'evictions_total',
+            'evictions_intelligent',
+        ):
+            self.assertIn(name, statistics)
+
+        # A ratio, derived in Go when the totals are written rather than at scrape time. 61 of 186
+        # is deliberately not a round number: 0.0, 0.5 and 1.0 are all values a broken parser can
+        # produce by accident.
+        self.assertAlmostEqual(statistics['prediction_accuracy'], 61 / 186, places=6)
+        self.assertEqual(statistics['predictions_total'], 186.0)
 
     def test_operator_labels_survive_the_parse(self):
         # monitoring.metrics.custom_labels attaches these to every series. An SDK that

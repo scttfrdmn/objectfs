@@ -104,3 +104,16 @@ objectfs_operation_size_bytes_count{operation="write",service="objectfs"} 1
 objectfs_operations_total{operation="read",service="objectfs",status="error"} 1
 objectfs_operations_total{operation="read",service="objectfs",status="success"} 1
 objectfs_operations_total{operation="write",service="objectfs",status="success"} 1
+# HELP objectfs_predictive_cache Predictive cache statistics, by statistic name
+# TYPE objectfs_predictive_cache gauge
+objectfs_predictive_cache{service="objectfs",statistic="avg_confidence"} 0.42
+objectfs_predictive_cache{service="objectfs",statistic="evictions_intelligent"} 24
+objectfs_predictive_cache{service="objectfs",statistic="evictions_total"} 40
+objectfs_predictive_cache{service="objectfs",statistic="prediction_accuracy"} 0.3279569892473118
+objectfs_predictive_cache{service="objectfs",statistic="predictions_correct"} 61
+objectfs_predictive_cache{service="objectfs",statistic="predictions_total"} 186
+objectfs_predictive_cache{service="objectfs",statistic="prefetch_bytes"} 393216
+objectfs_predictive_cache{service="objectfs",statistic="prefetch_efficiency"} 0.3229166666666667
+objectfs_predictive_cache{service="objectfs",statistic="prefetch_hits"} 31
+objectfs_predictive_cache{service="objectfs",statistic="prefetch_requests"} 96
+objectfs_predictive_cache{service="objectfs",statistic="prefetch_waste"} 12

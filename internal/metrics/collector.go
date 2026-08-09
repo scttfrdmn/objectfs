@@ -28,6 +28,10 @@ type Collector struct {
 	cacheSizeGauge    *prometheus.GaugeVec
 	activeConnections prometheus.Gauge
 	errorCounter      *prometheus.CounterVec
+	predictiveGauge   *prometheus.GaugeVec
+
+	// periodic are the callbacks updateLoop invokes on every tick, registered by OnPeriodicUpdate.
+	periodic []func()
 
 	// Internal tracking
 	operations map[string]*OperationMetrics
@@ -337,6 +341,50 @@ func (c *Collector) UpdateActiveConnections(count int) {
 	c.activeConnections.Set(float64(count))
 }
 
+// UpdatePredictiveCache publishes the predictive cache's statistics, one series per named statistic.
+//
+// Takes a map rather than a cache.PredictiveStats so that internal/metrics does not import
+// internal/cache. The adapter imports both and is where the two meet; a metrics package that knows the
+// cache's types is one the cache cannot later import, and it makes this family's shape a matter of
+// agreement between two packages rather than of one struct.
+//
+// Names come from the caller and reach the scrape as label values, so they are the contract:
+// sdks/testdata/metrics-scrape.txt captures them and TestSDKFixtureMatchesTheLiveScrape fails on a
+// rename, which is what makes both SDK suites notice.
+func (c *Collector) UpdatePredictiveCache(stats map[string]float64) {
+	if !c.config.Enabled {
+		return
+	}
+
+	for name, value := range stats {
+		c.predictiveGauge.With(prometheus.Labels{"statistic": name}).Set(value)
+	}
+}
+
+// OnPeriodicUpdate registers a callback for updateLoop to invoke on every tick.
+//
+// This is how a gauge whose value lives elsewhere gets refreshed. Counters and histograms are pushed at
+// the moment of the operation, but the predictive cache's totals are state held by the cache, and
+// scraping them means asking — so something has to ask on a schedule. updatePeriodicMetrics was an empty
+// function with a comment saying "this would update metrics that need periodic updates"; this is that,
+// with the caller supplying what to ask rather than this package knowing.
+//
+// Callbacks run on the update goroutine, sequentially, and must not block for long: one that does delays
+// every later callback by the same amount. Registering after Start is safe — updatePeriodicMetrics reads
+// the list under the lock on each tick — which the adapter relies on: it starts the collector first,
+// because a bind failure should fail the mount before anything else is built, and the cache whose
+// statistics it registers does not exist until several steps later.
+func (c *Collector) OnPeriodicUpdate(update func()) {
+	if update == nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.periodic = append(c.periodic, update)
+}
+
 // GetMetrics returns current metrics
 func (c *Collector) GetMetrics() map[string]any {
 	c.mu.RLock()
@@ -483,6 +531,26 @@ func (c *Collector) initMetrics() error {
 		[]string{"operation", "type"},
 	)
 
+	// Predictive cache metrics.
+	//
+	// One gauge family labeled by "statistic" rather than a metric per number. The values are a mix of
+	// monotonic counters and ratios derived from them, and the set will change as the predictive layer
+	// does — a label keeps that from being a metric-name change each time, which is a change both SDKs and
+	// every dashboard would have to follow.
+	//
+	// A gauge and not a counter even for the counting ones: they are read by scraping a snapshot of the
+	// cache's own totals rather than incremented here, and prometheus.Counter has no Set.
+	c.predictiveGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "predictive_cache",
+			Help:        "Predictive cache statistics, by statistic name",
+			ConstLabels: labels,
+		},
+		[]string{"statistic"},
+	)
+
 	return nil
 }
 
@@ -495,6 +563,7 @@ func (c *Collector) registerMetrics() error {
 		c.cacheSizeGauge,
 		c.activeConnections,
 		c.errorCounter,
+		c.predictiveGauge,
 	}
 
 	for _, metric := range metrics {
@@ -538,9 +607,19 @@ func (c *Collector) updateLoop(ctx context.Context) {
 	}
 }
 
+// updatePeriodicMetrics invokes every callback registered through OnPeriodicUpdate.
+//
+// The callbacks are copied out under the lock and run without it: a callback reads state from another
+// subsystem, which may take that subsystem's own lock, and holding this one across that is how two
+// packages that each look correct deadlock together.
 func (c *Collector) updatePeriodicMetrics() {
-	// This would update metrics that need periodic updates
-	// For example, current cache sizes, connection counts, etc.
+	c.mu.RLock()
+	callbacks := append([]func(){}, c.periodic...)
+	c.mu.RUnlock()
+
+	for _, update := range callbacks {
+		update()
+	}
 }
 
 // HTTP handlers

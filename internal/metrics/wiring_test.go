@@ -171,6 +171,7 @@ func TestExportedNamesAreTheOnesDocumentedAndScraped(t *testing.T) {
 	c.UpdateCacheSize("L1", 1<<20)
 	c.UpdateActiveConnections(3)
 	c.RecordError("read", errors.New("timeout while reading"))
+	c.UpdatePredictiveCache(map[string]float64{"predictions_total": 1})
 
 	got := gatherNames(t, c)
 
@@ -182,6 +183,7 @@ func TestExportedNamesAreTheOnesDocumentedAndScraped(t *testing.T) {
 		"objectfs_cache_size_bytes",
 		"objectfs_active_connections",
 		"objectfs_errors_total",
+		"objectfs_predictive_cache",
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("%s is not exported; doc.go documents it and both SDKs scrape for it. Exported: %v",
@@ -214,6 +216,7 @@ func TestCustomLabelsReachEveryMetric(t *testing.T) {
 	c.UpdateCacheSize("L1", 1<<20)
 	c.UpdateActiveConnections(1)
 	c.RecordError("read", errors.New("boom"))
+	c.UpdatePredictiveCache(map[string]float64{"predictions_total": 1})
 
 	mfs, err := c.registry.Gather()
 	if err != nil {

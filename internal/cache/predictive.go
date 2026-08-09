@@ -19,6 +19,14 @@ type PredictiveCache struct {
 	evictionMgr *IntelligentEvictionManager
 	config      *PredictiveCacheConfig
 	stats       *PredictiveStats
+
+	// ledger remembers what a prefetch stored, so a later read can be attributed to it, and predictions
+	// remembers what the predictor said would be read next. Two ledgers and not one: a prediction that
+	// no worker acted on — because the rate limiter refused it, or the queue was full, or there is no
+	// backend — is still a prediction whose accuracy is worth knowing, and conflating the two would score
+	// the predictor on the prefetcher's throughput.
+	ledger      *rangeLedger
+	predictions *rangeLedger
 }
 
 // PredictiveCacheConfig configures predictive caching behavior
@@ -50,36 +58,45 @@ type PredictiveCacheConfig struct {
 	PatternAnalysisDepth int           `yaml:"pattern_analysis_depth"`
 }
 
-// PredictiveStats tracks predictive cache performance
+// PredictiveStats tracks predictive cache performance.
+//
+// Every field here is assigned by the cache on a path a mount takes. That is worth stating because it
+// was not true: this struct declared seventeen fields, of which fourteen — PredictionAccuracy,
+// PrefetchEfficiency, CacheHitImprovement, LatencyReduction, BandwidthSavings, ModelAccuracy and the
+// rest — were written by nothing anywhere in the repository, and the three that were written included
+// PrefetchHits, which required an AccessEvent with Prefetch set true, which nothing constructed. So a
+// caller reaching these numbers would have read zeros and had no way to tell them from a cache that had
+// prefetched nothing. #222's percentiles were the same defect in a different package, and the answer is
+// the same: a statistic that cannot be computed should not be exported. The deleted fields described a
+// trained model, an eviction-accuracy follow-up and a counterfactual hit-rate comparison, none of which
+// this cache does; adding them means building those mechanisms, not adding a field back.
+//
+// The counters are the primary values and the ratios derive from them, so a reader that distrusts a
+// ratio can recompute it. Access under mu, or through [PredictiveCache.GetPredictiveStats], which
+// copies.
 type PredictiveStats struct {
 	mu sync.RWMutex
 
-	// Prediction metrics
+	// Prediction metrics. A prediction is one [types.PrefetchCandidate] the predictor emitted, and it is
+	// counted correct when a later read hits the range it named — see PredictiveCache.Get.
 	PredictionsTotal   uint64  `json:"predictions_total"`
 	PredictionsCorrect uint64  `json:"predictions_correct"`
 	PredictionAccuracy float64 `json:"prediction_accuracy"`
 	AvgConfidence      float64 `json:"avg_confidence"`
 
-	// Prefetch metrics
+	// Prefetch metrics. A request is a candidate a worker acted on; a hit is a subsequent read served
+	// from bytes that worker stored. Waste is the remainder — fetched and evicted or never read — and is
+	// the number that says whether prefetch is earning its bandwidth.
 	PrefetchRequests   uint64  `json:"prefetch_requests"`
 	PrefetchHits       uint64  `json:"prefetch_hits"`
-	PrefetchWaste      uint64  `json:"prefetch_waste"` // Prefetched but never used
+	PrefetchBytes      int64   `json:"prefetch_bytes"`
+	PrefetchWaste      uint64  `json:"prefetch_waste"`
 	PrefetchEfficiency float64 `json:"prefetch_efficiency"`
 
-	// Eviction metrics
-	EvictionsTotal       uint64  `json:"evictions_total"`
-	EvictionsIntelligent uint64  `json:"evictions_intelligent"` // ML-driven evictions
-	EvictionAccuracy     float64 `json:"eviction_accuracy"`     // How often evicted items stayed evicted
-
-	// Performance impact
-	CacheHitImprovement float64 `json:"cache_hit_improvement"`
-	LatencyReduction    float64 `json:"latency_reduction"`
-	BandwidthSavings    float64 `json:"bandwidth_savings"`
-
-	// Model performance
-	ModelAccuracy     float64       `json:"model_accuracy"`
-	ModelTrainingTime time.Duration `json:"model_training_time"`
-	LastModelUpdate   time.Time     `json:"last_model_update"`
+	// Eviction metrics. Intelligent evictions are those the scoring path chose, as opposed to the base
+	// cache's own LRU, which runs when the scorer produces no candidates.
+	EvictionsTotal       uint64 `json:"evictions_total"`
+	EvictionsIntelligent uint64 `json:"evictions_intelligent"`
 }
 
 // AccessPredictor implements machine learning-based access pattern prediction
@@ -284,6 +301,8 @@ func NewPredictiveCache(config *PredictiveCacheConfig) (*PredictiveCache, error)
 		evictionMgr: evictionMgr,
 		config:      config,
 		stats:       &PredictiveStats{},
+		ledger:      newRangeLedger(),
+		predictions: newRangeLedger(),
 	}
 
 	// Initialize feature weights with reasonable defaults
@@ -315,12 +334,25 @@ func (pc *PredictiveCache) Get(key string, offset, size int64) []byte {
 	data := pc.baseCache.Get(key, offset, size)
 	event.Hit = data != nil
 
+	// Whether this read was served by something a prefetch worker stored. Consulted before the predictor
+	// runs, so a prediction made *by* this read cannot be credited *to* it — which is how a prefetcher
+	// scores 100% against itself.
+	//
+	// event.Prefetch was declared for this and set false at both of its two construction sites, so
+	// PrefetchHits — guarded by `event.Hit && event.Prefetch` — could never be incremented. That was the
+	// defect: the field existed, the guard read it, and nothing ever made it true.
+	if event.Hit {
+		event.Prefetch = pc.ledger.claim(key, offset, size)
+	}
+	pc.recordPrediction(key, offset, size)
+
 	// Update predictor with access pattern
 	if pc.config.EnablePrediction {
 		pc.predictor.RecordAccess(event)
 
 		// Trigger predictions and prefetching
 		if predictions := pc.predictor.PredictNextAccess(key); len(predictions) > 0 {
+			pc.recordPredictions(predictions)
 			pc.triggerPrefetch(predictions)
 		}
 	}
@@ -392,11 +424,19 @@ func (pc *PredictiveCache) Stats() types.CacheStats {
 	return baseStats
 }
 
-// GetPredictiveStats returns detailed predictive cache statistics
+// GetPredictiveStats returns a snapshot of this cache's predictive statistics.
+//
+// Field by field rather than by struct copy, because PredictiveStats holds the mutex guarding it and
+// copying it would copy the lock — `go vet`'s copylocks catches that, and the caller would be locking a
+// copy of a lock that protects nothing.
+//
+// Reachable on a mount through [MultiLevelCache.PredictiveStats]. It was not: the mount's instance is
+// held as an opaque types.Cache inside a CacheLevel with no accessor reaching past it, so these numbers
+// were computed and discarded at unmount (#223).
 func (pc *PredictiveCache) GetPredictiveStats() PredictiveStats {
 	pc.stats.mu.RLock()
 	defer pc.stats.mu.RUnlock()
-	// Create a copy to avoid returning a mutex
+
 	return PredictiveStats{
 		PredictionsTotal:     pc.stats.PredictionsTotal,
 		PredictionsCorrect:   pc.stats.PredictionsCorrect,
@@ -404,17 +444,11 @@ func (pc *PredictiveCache) GetPredictiveStats() PredictiveStats {
 		AvgConfidence:        pc.stats.AvgConfidence,
 		PrefetchRequests:     pc.stats.PrefetchRequests,
 		PrefetchHits:         pc.stats.PrefetchHits,
+		PrefetchBytes:        pc.stats.PrefetchBytes,
 		PrefetchWaste:        pc.stats.PrefetchWaste,
 		PrefetchEfficiency:   pc.stats.PrefetchEfficiency,
 		EvictionsTotal:       pc.stats.EvictionsTotal,
 		EvictionsIntelligent: pc.stats.EvictionsIntelligent,
-		EvictionAccuracy:     pc.stats.EvictionAccuracy,
-		CacheHitImprovement:  pc.stats.CacheHitImprovement,
-		LatencyReduction:     pc.stats.LatencyReduction,
-		BandwidthSavings:     pc.stats.BandwidthSavings,
-		ModelAccuracy:        pc.stats.ModelAccuracy,
-		ModelTrainingTime:    pc.stats.ModelTrainingTime,
-		LastModelUpdate:      pc.stats.LastModelUpdate,
 	}
 }
 
@@ -836,6 +870,11 @@ func (pc *PredictiveCache) processPrefetchJob(job *PrefetchJob) {
 			if err == nil {
 				pc.baseCache.Put(candidate.Path, candidate.Offset, data)
 				job.BytesFetched += int64(len(data))
+
+				// Recorded against the bytes actually returned, not against candidate.Size: a ranged GET at
+				// the end of an object returns short, and a ledger entry claiming more than was stored would
+				// never be claimed by any read — scoring a correct prefetch as waste.
+				pc.recordPrefetch(candidate.Path, candidate.Offset, int64(len(data)))
 			}
 		}
 	}
@@ -870,6 +909,7 @@ func (pc *PredictiveCache) intelligentEvict(sizeNeeded int64) bool {
 		pc.stats.mu.Lock()
 		pc.stats.EvictionsTotal++
 		pc.stats.EvictionsIntelligent++
+		pc.stats.recomputeRatiosLocked()
 		pc.stats.mu.Unlock()
 	}
 
@@ -970,16 +1010,140 @@ func (rl *RateLimiter) Allow(bytes int64) bool {
 
 // Statistics and monitoring
 
-func (pc *PredictiveCache) updateStats(event AccessEvent, latency time.Duration) {
+// recordPredictions notes what the predictor just claimed would be read next, and counts the claims.
+//
+// Called before triggerPrefetch, and separately from it, so a prediction the prefetcher declined to act
+// on still counts against accuracy. The two are different questions — "was the predictor right" and "did
+// prefetching help" — and the second is not a fair proxy for the first on a mount, where the prefetcher's
+// backend is nil and it fetches nothing at all.
+func (pc *PredictiveCache) recordPredictions(candidates []types.PrefetchCandidate) {
+	confidence := 0.0
+	for _, candidate := range candidates {
+		confidence += float64(candidate.Priority) / 100.0
+	}
+
+	// Counted before the ranges are published, for the reason recordPrefetch's comment gives: a
+	// prediction is claimable the moment it is in the ledger, and PredictionsCorrect must not be able to
+	// run ahead of PredictionsTotal.
+	func() {
+		pc.stats.mu.Lock()
+		defer pc.stats.mu.Unlock()
+
+		n := uint64(len(candidates))
+		pc.stats.PredictionsTotal += n
+
+		// A running mean over every prediction ever made, kept incrementally because the individual
+		// confidences are not retained. Weighted by n so a burst of candidates does not count as one
+		// sample.
+		if total := pc.stats.PredictionsTotal; total > 0 {
+			pc.stats.AvgConfidence += (confidence - float64(n)*pc.stats.AvgConfidence) / float64(total)
+		}
+
+		pc.stats.recomputeRatiosLocked()
+	}()
+
+	for _, candidate := range candidates {
+		pc.predictions.record(candidate.Path, candidate.Offset, candidate.Size)
+	}
+}
+
+// recordPrediction credits the predictor when a read lands in a range it named.
+//
+// Consulted for every read, hit or miss: a prediction is correct if the *application* read those bytes,
+// which is the thing being predicted, and whether the cache happened to hold them is a separate question
+// that PrefetchHits answers. Scoring only hits would make accuracy a function of cache capacity.
+func (pc *PredictiveCache) recordPrediction(key string, offset, size int64) {
+	if !pc.predictions.claim(key, offset, size) {
+		return
+	}
+
 	pc.stats.mu.Lock()
 	defer pc.stats.mu.Unlock()
 
-	// Update prediction accuracy if we had predictions
+	pc.stats.PredictionsCorrect++
+	pc.stats.recomputeRatiosLocked()
+}
+
+// recordPrefetch notes bytes a worker stored, so a later read can be attributed to the prefetch.
+//
+// # The denominator is counted before the range is published
+//
+// A range in a ledger is claimable the instant it is there, by any reader, on any goroutine. Recording
+// the range first — which is what this did — opens a window in which the numerator can be incremented
+// while the denominator has not been: a read claims the range, updateStats counts a PrefetchHit, and
+// PrefetchRequests is still what it was. With several readers against one prefetch worker that window
+// is not theoretical. CI caught PrefetchHits at 4 against PrefetchRequests at 1, reported as
+// "efficiency 4" by TestGetPredictiveStatsIsSafeUnderConcurrentReads, which 40 local runs of the same
+// test did not reproduce.
+//
+// Neither lock can be held across both halves. The ledger is written by prefetch workers while a read
+// holds the stats lock, and the reverse order exists too, so a function taking both would deadlock —
+// the same constraint that made takeUnclaimed a drained counter rather than a direct read. Ordering
+// the two uncontended sections is what is available, and it is sufficient: a hit can only be counted
+// after the range is published, which is after the request that published it was counted. The reverse
+// window, where the denominator leads, makes the ratio momentarily *low* rather than impossible.
+//
+// A ratio above 1 is worse than one that is briefly low. It is not a value the statistic can take, so
+// it tells an operator reading a dashboard that the instrumentation is broken — and it says so for the
+// life of the mount, because these are cumulative counters and nothing subtracts. recordPredictions
+// orders itself the same way and for the same reason.
+func (pc *PredictiveCache) recordPrefetch(key string, offset, length int64) {
+	func() {
+		pc.stats.mu.Lock()
+		defer pc.stats.mu.Unlock()
+
+		pc.stats.PrefetchRequests++
+		pc.stats.PrefetchBytes += length
+		pc.stats.recomputeRatiosLocked()
+	}()
+
+	pc.ledger.record(key, offset, length)
+}
+
+func (pc *PredictiveCache) updateStats(event AccessEvent, latency time.Duration) {
+	// Waste is collected here rather than at eviction because the ledger cannot take the stats lock: it is
+	// written from the prefetch workers while a read holds that lock, and the reverse order exists too, so
+	// having either reach into the other invites a deadlock. takeUnclaimed drains a counter instead.
+	wasted := pc.ledger.takeUnclaimed()
+
+	pc.stats.mu.Lock()
+	defer pc.stats.mu.Unlock()
+
+	pc.stats.PrefetchWaste += wasted
+
+	// Bytes served from a range a prefetch worker stored. event.Prefetch is set by Get from the ledger;
+	// before #223 nothing set it, so this branch was unreachable and PrefetchHits stayed zero on every
+	// mount.
 	if event.Hit && event.Prefetch {
 		pc.stats.PrefetchHits++
 	}
 
-	// Update other metrics as needed
+	pc.stats.recomputeRatiosLocked()
+
+	// latency is accepted and unused. It was the input to LatencyReduction, which would need the latency
+	// of the read that *did not happen* to be a reduction of anything — a counterfactual this cache has no
+	// way to observe. The field is gone; the parameter stays because the measurement is genuinely taken at
+	// the call site and a future comparison against the backend's own latency (internal/storage/s3 already
+	// tracks it) is the shape that could use it.
+	_ = latency
+}
+
+// recomputeRatiosLocked derives the ratio fields from the counters. Caller holds stats.mu.
+//
+// Derived on write rather than on read so that [PredictiveCache.GetPredictiveStats] cannot return a
+// struct whose ratios disagree with its counters — and because every one of these was zero for the
+// lifetime of this type, which is what #223 is about. A ratio with no denominator stays zero rather than
+// becoming NaN: NaN serializes to invalid JSON, and `null` in a metrics field reads as an outage.
+func (s *PredictiveStats) recomputeRatiosLocked() {
+	if s.PredictionsTotal > 0 {
+		s.PredictionAccuracy = float64(s.PredictionsCorrect) / float64(s.PredictionsTotal)
+	}
+
+	// Against requests, not against hits plus waste: a prefetch that has been fetched but not yet read or
+	// evicted is neither, and excluding it would make efficiency jump around as the ledger fills.
+	if s.PrefetchRequests > 0 {
+		s.PrefetchEfficiency = float64(s.PrefetchHits) / float64(s.PrefetchRequests)
+	}
 }
 
 // Initialize model with reasonable defaults

@@ -142,11 +142,11 @@ far more than it returns.
 - **Paused-then-resumed readers** — raise `ttl`. A log tailer between batches otherwise re-establishes
   its sequential run from scratch every time.
 
-There are no read-ahead metrics on a mount. The predictive cache computes prediction accuracy and
-prefetch efficiency, but the mount's instance is wrapped in an opaque `types.Cache` with no accessor
-reaching past it, so those numbers have nowhere to go —
-[#223](https://github.com/scttfrdmn/objectfs/issues/223). Until that lands, bytes transferred is
-measured from outside: CloudWatch, or a request count against a known read volume.
+There are no metrics for *this* read-ahead manager on a mount. The predictive cache below it does export
+its own, as of [#223](https://github.com/scttfrdmn/objectfs/issues/223) — see
+[the predictive cache's statistics](#the-predictive-caches-statistics) below for what they measure and why
+they are not a substitute. For the manager on this page, bytes transferred is still measured from outside:
+CloudWatch, or a request count against a known read volume.
 
 ## Not the same thing as parallel reads
 
@@ -187,11 +187,51 @@ fmt.Printf("Prediction Accuracy: %.2f%%\n", stats.PredictionAccuracy)
 That is a *second* predictive cache, independent of the mount's. It observes the accesses you make
 through it and nothing the filesystem does.
 
+### The predictive cache's statistics
+
+The mount's own instance is reachable, and it publishes to `/metrics`. Every value arrives as one series
+of `objectfs_predictive_cache`, labelled by `statistic`:
+
+```text
+objectfs_predictive_cache{service="objectfs",statistic="predictions_total"} 186
+objectfs_predictive_cache{service="objectfs",statistic="predictions_correct"} 61
+objectfs_predictive_cache{service="objectfs",statistic="prediction_accuracy"} 0.327
+```
+
+| `statistic` | Means |
+|---|---|
+| `predictions_total`, `predictions_correct`, `prediction_accuracy` | Ranges the predictor named, and how many a read then landed inside. Correctness is scored on the *application's* read, hit or miss — whether the cache happened to hold the bytes is `prefetch_hits`'s question, and scoring only hits would make accuracy a function of cache capacity |
+| `prefetch_requests`, `prefetch_hits`, `prefetch_bytes`, `prefetch_efficiency` | Ranges a prefetch worker actually stored, how many were read before eviction, and the bytes involved. Efficiency is hits over requests |
+| `prefetch_waste` | Ranges fetched and evicted having never been read. This is the cost side of the bet the Tuning section above is about, and the only number that reports it from inside |
+| `evictions_total`, `evictions_intelligent` | Evictions, and how many the intelligent manager chose rather than plain LRU |
+
+Two things to know before reading them:
+
+- **A gauge, not a counter, even for the counting statistics.** They are snapshots of the cache's own
+  running totals, read on the collector's schedule (30 s), so use `max_over_time` rather than `rate` on
+  them. `prediction_accuracy` and `prefetch_efficiency` are ratios in `[0, 1]`, derived when the totals
+  are written rather than at scrape time.
+- **The family is absent, not zero, when there is no predictive layer to ask.** A distributed
+  (Redis-backed) cache has none. Absent and zero are different claims and the exporter keeps them
+  distinguishable — zeros would say the predictor never fires.
+- **`prefetch_*` reads zero on today's mount path** while the prediction and eviction statistics
+  populate. The mount builds its predictive cache without a backend to fetch through, so the workers
+  dequeue jobs and store nothing. That is the honest report of what is running, not a defect in the
+  counters, and the prediction numbers above it are unaffected.
+
+The read-ahead manager on this page is a *different* subsystem, and these statistics say nothing about
+it: `min_sequential`, `window_size` and `concurrent_reads` tune the manager, not the predictive cache.
+
 ## Implementation
 
 - `internal/fuse/optimizations.go` — the detector, the prefetch workers, and `prefetchLength`
 - `internal/config/config.go` — `ReadAheadConfig`, its defaults and its validation
-- `internal/adapter/adapter.go` — `buildReadAheadConfig`, the mapping from YAML to the manager
+- `internal/adapter/adapter.go` — `buildReadAheadConfig`, the mapping from YAML to the manager, and
+  `exportPredictiveStats`, which publishes the predictive cache's statistics on every collector tick
+- `internal/cache/predictive.go` — the predictive cache, its `PredictiveStats`, and the range ledger the
+  attribution rests on
+- `internal/cache/multilevel.go` — `GetPredictiveCache` and `PredictiveStats`, the accessors that reach
+  past the opaque `types.Cache`
 
 ## Related
 
