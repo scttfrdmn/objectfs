@@ -171,7 +171,11 @@ internal/circuit         96
 # disagreeing with the parser the mount used. The 32 statements still uncovered are the codec-table
 # construction failures in buildDecoders and NewCompressor, unreachable without breaking
 # SupportedAlgorithms itself.
-internal/compression     87
+#
+# 87 → 90 with #184's skip. Ratcheted because the new statements arrived covered rather than because a
+# suite was widened over old ones: AlreadyCompressed is three statements and the table test drives all
+# of them, so the floor follows the code up. The 32 uncovered statements above are still the same 32.
+internal/compression     90
 # internal/config goes from 83 to 86 with the validation the config plumbing added. The two points
 # that raise is worth are in what the new tests assert rather than in the number: each case checks
 # that the rejection message names the YAML path, because the failure being prevented is not "a bad

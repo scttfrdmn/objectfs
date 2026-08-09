@@ -173,19 +173,29 @@ page and not that table.
 
 ## What actually compresses
 
-Most research data does not, because it arrived compressed. `internal/compression/analyzer.go` already
-recognizes these by magic bytes, and every one of them is at or near its entropy limit — compressing it
-again spends CPU to add a few bytes:
+Most research data does not, because it arrived compressed. ObjectFS recognizes these by magic bytes and
+**skips them** — the codec is not run at all — because every one is at or near its entropy limit, so
+compressing it again spends CPU to add a few bytes:
 
 gzip · zstd · bzip2 · lz4 · xz · zip · PNG · JPEG · GIF · WebP · MP4/MOV/M4A · Matroska · Ogg · MP3 · PDF
 
 The formats that matter for research computing are worse than that list suggests, because their
-compression is *internal* and so invisible to a magic-byte check on the container:
+compression is *internal* and so invisible to a magic-byte check on the container. **These are not
+skipped**, and knowing which of the two lists your data is on is the difference between the skip helping
+you and not:
 
-- **BAM, CRAM** — BGZF, which is gzip per block
-- **Parquet, ORC** — per-column codecs, usually snappy or zstd
-- **Zarr, HDF5/NetCDF-4** — per-chunk filters, frequently zlib or blosc
-- **`.tar.gz`, `.tar.zst`, `.tar.bz2`** — compressed by construction
+- **BAM, CRAM** — BGZF, which is gzip per block. A BAM *is* skipped, because BGZF's first block starts
+  with gzip's magic bytes, so the container looks like gzip from the front. CRAM is not — its magic is
+  `CRAM`, and the compression is per-container inside
+- **Parquet, ORC** — per-column codecs, usually snappy or zstd. Magic is `PAR1`/`ORC`, so not skipped
+- **Zarr, HDF5/NetCDF-4** — per-chunk filters, frequently zlib or blosc. Not skipped
+- **`.tar.gz`, `.tar.zst`, `.tar.bz2`** — compressed by construction, and skipped: the compression is
+  the outer layer, so its magic is at the front where the check looks
+
+For the not-skipped four, the `min_size` and the "compressed form was no smaller" fallback are what
+protect you: the codec runs, produces nothing smaller, and the original is stored. You pay the CPU and
+save nothing. That is the case for leaving compression off on such a bucket rather than relying on the
+skip.
 
 What does compress:
 
@@ -201,9 +211,39 @@ files are more repetitive than real data usually is; the source tree is the real
 For a typical genomics or imaging bucket, compression saves close to nothing. Check before enabling:
 list the extensions in the bucket and see what fraction is on the second list rather than the first.
 
-ObjectFS does not yet make this check for you — it compresses whatever it is handed above `min_size`,
-including data it cannot help. The analyzer that would skip those formats exists and has no caller;
-[#184](https://github.com/scttfrdmn/objectfs/issues/184) wires it up.
+### The skip, and what it is worth
+
+ObjectFS checks the first 4 KiB of every object above `min_size` and returns it unchanged when the
+leading bytes name a compressed format ([#184](https://github.com/scttfrdmn/objectfs/issues/184)). The
+codec is not entered, so nothing is spent. Measured on an Apple M4 Max at zstd level 3, comparing the
+write path with and without the check:
+
+| object | without the skip | with it |
+|---|---|---|
+| 8 MiB zstd frame | 1.85 ms, 33 MiB allocated | 3 ns, zero allocations |
+| 1 MiB zstd frame | 237 µs, 4.3 MiB allocated | 3 ns, zero allocations |
+| 64 KiB zstd frame | 7.4 µs, 112 KiB allocated | 3 ns, zero allocations |
+| 1 MiB of compressible text | 91.5 µs | 90.4 µs |
+
+The last row is the one that decides whether this is worth having: data the skip does *not* apply to
+must not pay for it. The check is a magic-byte comparison on the first bytes — 17 ns, no allocation — so
+it is not measurable next to the codec pass it precedes. It is deliberately not the full analyzer, whose
+Shannon-entropy pass over the sample costs 3.8 µs and would have been +53% on a 64 KiB text write for a
+number the decision does not use.
+
+Reproduce with, on a quiet machine:
+
+```bash
+go test ./internal/compression/ -run '^$' \
+  -bench 'BenchmarkCompressAlreadyCompressed|BenchmarkCompressCompressibleText|BenchmarkGateVersusAnalyze' \
+  -benchmem -count=6
+```
+
+What the skip does **not** do is decide by compressibility. Entropy is evidence that compression will
+not help, not proof, and no threshold for it has been measured here — so a high-entropy object with no
+recognizable magic bytes still gets a codec pass, and is protected only by the "compressed form was no
+smaller" fallback. Whether to add an entropy gate, and where the threshold would sit, is the open half
+of #184.
 
 ---
 
@@ -311,6 +351,13 @@ measurement with its parameters stated. Nothing here is estimated.
 - **Payloads** for the amplification table alternate 4 KiB of low-entropy generated text with 4 KiB of
   `/dev/urandom`, giving a 44.8% zstd level 3 ratio at every size. The CSV in the exit-integrity table is
   277,793 bytes of `row<N>,<N>` lines.
+- **The skip table** is `go test -bench` output on an Apple M4 Max, darwin/arm64, six runs per case
+  compared with `benchstat`; every difference it reports is at p=0.002 except the 1 MiB text row, where
+  the two are indistinguishable, which is the result that row is there to state. It touches no bucket —
+  the compressor is called directly, so the figures are CPU and allocation only, with no network in
+  them. Fixtures are real zstd frames built in the benchmark rather than magic-byte prefixes over noise,
+  because zstd gives up on random bytes faster than on a frame it produced itself, which would have
+  understated the saving.
 - **Objects were written by `aws s3api put-object`**, not by ObjectFS, with the body, `Content-Encoding`,
   and `objectfs-original-size` metadata ObjectFS would have written. That keeps the reader side —
   which is what these tables measure — independent of the writer.
@@ -327,5 +374,6 @@ measurement with its parameters stated. Nothing here is estimated.
 
 - [Read-ahead & Predictive Caching](read-ahead.md) — what is served without an S3 request at all
 - [Multipart Uploads](multipart-uploads.md) — the other decision that depends on object size
-- [#184](https://github.com/scttfrdmn/objectfs/issues/184) — skip data that is already compressed
+- [#184](https://github.com/scttfrdmn/objectfs/issues/184) — the skip above; its remaining half is
+  whether per-object algorithm selection and an entropy gate are wanted at all
 - [#185](https://github.com/scttfrdmn/objectfs/issues/185) — seekable framing, which removes costs 2 and 3
