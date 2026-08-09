@@ -369,7 +369,6 @@ internal/cache           85
 # removing the branch stays a decision about the exported surface.
 pkg/archive              100
 
-pkg/api                  73
 pkg/errors               48
 pkg/health               93
 pkg/recovery             86

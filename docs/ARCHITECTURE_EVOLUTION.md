@@ -13,6 +13,11 @@
 >   name, and it is the layer a second protocol would bind to.
 > - `internal/filesystem/interface.go` exists and declares a fuller surface than `internal/vfs`
 >   implements, but its only implementation is a mock. It is a contract, not a component.
+> - The HTTP-handler column of the Phase 2 diagram shows "REST API". There *was* a `pkg/api` declaring
+>   12 routes; it was deleted in [#367](https://github.com/scttfrdmn/objectfs/issues/367) for having no
+>   importer, and a running mount serves only `/metrics` and `/health`. The diagram is not redrawn,
+>   because a proposal for a WebDAV/REST surface is a reasonable thing to propose — but nothing in the
+>   tree corresponds to that box now, which is the difference between this file and a description.
 >
 > Multi-protocol work is tracked in
 > [#181](https://github.com/scttfrdmn/objectfs/issues/181) (SMB, then NFS) and

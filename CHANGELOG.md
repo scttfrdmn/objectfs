@@ -161,6 +161,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `health.Checker.Addr()` now exists, matching `metrics.Collector.Addr()` — which also means an
   operator running the health endpoint on port 0 can find out where it went.
 
+### Removed
+
+- **`pkg/api` — 12 declared HTTP routes nothing ever served** ([#367]). 559 lines of handlers and 999
+  lines of tests for `/health`, `/health/components`, `/health/live`, `/health/ready`, `/status`,
+  `/status/operations`, `/status/history`, `/api/v1/mounts`, `/info` and the rest, with **zero
+  importers** outside the package. A running mount's real HTTP surface is two endpoints: `/metrics`
+  from `internal/metrics` and `/health` from `internal/health`. Nothing users could reach is gone,
+  because nothing users could reach was ever there.
+
+  Deleted rather than left waiting for a caller, because a declared-but-unserved surface is worse than
+  an absent one: it produces documentation that cannot be checked against behavior. It already did —
+  the six fabricated endpoints [#336] had to correct in the docs playground looked plausible *because*
+  a package in this tree declared their shapes, and a reviewer comparing docs to code would have found
+  the routes and stopped there. The `docs/index.md` "not yet wired up" row is replaced with a note
+  saying it was deleted and why; a dead `/api/rest` sidebar entry in `docs-platform` (a link to a page
+  that never existed) went with it; and the "REST API" box in
+  `docs/ARCHITECTURE_EVOLUTION.md`'s Phase 2 diagram is annotated rather than redrawn, since that file
+  is explicitly a proposal and its header already lists where it diverges from the code.
+
+  The `pkg/api 73` floor is out of `.coverage-floors`. Its 999 lines of tests were the reason the floor
+  was as high as it was, which is worth stating: a package can be well tested and still not be part of
+  the product, and coverage cannot tell the difference.
+
 ## [0.12.0] - 2026-08-08
 
 Coordination stops pretending. ObjectFS's distributed layer had a consistency taxonomy, a Raft log,
@@ -2510,6 +2533,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#284]: https://github.com/scttfrdmn/objectfs/issues/284
 [#385]: https://github.com/scttfrdmn/objectfs/issues/385
 [#384]: https://github.com/scttfrdmn/objectfs/issues/384
+[#367]: https://github.com/scttfrdmn/objectfs/issues/367
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378
