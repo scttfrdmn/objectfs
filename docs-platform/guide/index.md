@@ -51,11 +51,14 @@ which is the trap stated as a feature.
 - **AWS S3 storage classes**, including Intelligent-Tiering, selectable per mount
 - **S3 Transfer Acceleration**, with fallback to the standard endpoint on error
 - **Server-side encryption** — SSE-S3 or SSE-KMS, with bucket keys — on every write
+- **Cost visibility** — `objectfs_s3_cost` on the metrics endpoint reports the mount's billable
+  requests by pricing group, bytes retrieved, and what each costs at the configured tier's published
+  rates. Counted in the AWS SDK's response path, so a multipart write is the several hundred requests
+  AWS bills rather than the one call the filesystem made
 
 ObjectFS does not call the S3 lifecycle API, so it does not manage lifecycle policies; set those on
-the bucket. Cost tracking and tier transitions have code but no path from a mount that reaches
-them — see the [Not yet wired up](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md)
-table.
+the bucket. Automatic tier transitions have code but no path from a mount that reaches them — see the
+[Not yet wired up](https://github.com/scttfrdmn/objectfs/blob/main/docs/index.md) table.
 
 ### 🏗️ Operational
 

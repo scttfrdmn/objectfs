@@ -126,3 +126,19 @@ objectfs_s3_acceleration{service="objectfs",statistic="configured"} 1
 objectfs_s3_acceleration{service="objectfs",statistic="fallbacks"} 1
 objectfs_s3_acceleration{service="objectfs",statistic="requests"} 412
 objectfs_s3_acceleration{service="objectfs",statistic="retry_period_seconds"} 300
+# HELP objectfs_s3_cost S3 cost and billable request counters, by statistic name, pricing region, and storage tier
+# TYPE objectfs_s3_cost gauge
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="bytes_retrieved",tier="STANDARD_IA"} 4e+09
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="bytes_stored",tier="STANDARD_IA"} 1.2e+10
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="free_requests",tier="STANDARD_IA"} 17
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="list_requests",tier="STANDARD_IA"} 88
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="rate_per_gb_month",tier="STANDARD_IA"} 0.0125
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="rate_per_gb_retrieved",tier="STANDARD_IA"} 0.01
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="rate_per_list_request",tier="STANDARD_IA"} 1e-06
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="rate_per_read_request",tier="STANDARD_IA"} 1e-06
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="rate_per_write_request",tier="STANDARD_IA"} 1e-05
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="read_requests",tier="STANDARD_IA"} 6391
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="request_cost_dollars",tier="STANDARD_IA"} 0.018519
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="retrieval_cost_dollars",tier="STANDARD_IA"} 0.04
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="storage_cost_dollars_per_month",tier="STANDARD_IA"} 0.15
+objectfs_s3_cost{region="us-west-2",service="objectfs",statistic="write_requests",tier="STANDARD_IA"} 1204

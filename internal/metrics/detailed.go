@@ -120,20 +120,6 @@ type NetworkUtilizationMetrics struct {
 	LastUpdateTime     time.Time `json:"last_update_time"`
 }
 
-// CostMetrics tracks cost per operation
-type CostMetrics struct {
-	OperationType        OperationType `json:"operation_type"`
-	RequestCount         int64         `json:"request_count"`
-	StorageCost          float64       `json:"storage_cost_usd"`       // Storage cost ($/GB-month)
-	RequestCost          float64       `json:"request_cost_usd"`       // API request cost
-	DataTransferCost     float64       `json:"data_transfer_cost_usd"` // Data transfer cost
-	TotalCost            float64       `json:"total_cost_usd"`         // Total cost for this operation
-	BytesTransferred     int64         `json:"bytes_transferred"`
-	CostPerRequest       float64       `json:"cost_per_request_usd"`
-	CostPerGB            float64       `json:"cost_per_gb_usd"`
-	EstimatedMonthlyCost float64       `json:"estimated_monthly_cost_usd"`
-}
-
 // DetailedPerformanceMetrics aggregates all detailed metrics
 type DetailedPerformanceMetrics struct {
 	mu                  sync.RWMutex
@@ -141,7 +127,6 @@ type DetailedPerformanceMetrics struct {
 	FileMetrics         map[string]*FileOperationMetrics            `json:"-"` // Not serialized by default (large)
 	CacheBreakdown      map[OperationType]*CacheBreakdownMetrics    `json:"cache_breakdown"`
 	NetworkUtilization  *NetworkUtilizationMetrics                  `json:"network_utilization"`
-	CostMetrics         map[OperationType]*CostMetrics              `json:"cost_metrics"`
 	StartTime           time.Time                                   `json:"start_time"`
 	LastUpdateTime      time.Time                                   `json:"last_update_time"`
 	TotalOperations     int64                                       `json:"total_operations"`
@@ -159,7 +144,6 @@ func NewDetailedPerformanceMetrics(maxTrackedFiles int, trackFiles bool) *Detail
 		OperationMetrics:   make(map[OperationType]*DetailedOperationMetrics),
 		FileMetrics:        make(map[string]*FileOperationMetrics),
 		CacheBreakdown:     make(map[OperationType]*CacheBreakdownMetrics),
-		CostMetrics:        make(map[OperationType]*CostMetrics),
 		NetworkUtilization: &NetworkUtilizationMetrics{},
 		StartTime:          time.Now(),
 		LastUpdateTime:     time.Now(),
@@ -307,46 +291,22 @@ func (dpm *DetailedPerformanceMetrics) RecordNetworkOperation(
 	}
 }
 
-// RecordCost records cost metrics for an operation
-func (dpm *DetailedPerformanceMetrics) RecordCost(
-	opType OperationType,
-	requestCost, storageCost, transferCost float64,
-	bytesTransferred int64,
-) {
-	dpm.mu.Lock()
-	defer dpm.mu.Unlock()
-
-	if dpm.CostMetrics[opType] == nil {
-		dpm.CostMetrics[opType] = &CostMetrics{
-			OperationType: opType,
-		}
-	}
-
-	cm := dpm.CostMetrics[opType]
-	cm.RequestCount++
-	cm.RequestCost += requestCost
-	cm.StorageCost += storageCost
-	cm.DataTransferCost += transferCost
-	cm.TotalCost = cm.RequestCost + cm.StorageCost + cm.DataTransferCost
-	cm.BytesTransferred += bytesTransferred
-
-	// Calculate per-request and per-GB costs
-	if cm.RequestCount > 0 {
-		cm.CostPerRequest = cm.TotalCost / float64(cm.RequestCount)
-	}
-	if cm.BytesTransferred > 0 {
-		gb := float64(cm.BytesTransferred) / (1024 * 1024 * 1024)
-		cm.CostPerGB = cm.TotalCost / gb
-	}
-
-	// Estimate monthly cost based on current rate
-	uptime := time.Since(dpm.StartTime)
-	if uptime > 0 {
-		hoursRunning := uptime.Hours()
-		hoursInMonth := float64(24 * 30)
-		cm.EstimatedMonthlyCost = (cm.TotalCost / hoursRunning) * hoursInMonth
-	}
-}
+// A RecordCost method sat here, with a CostMetrics struct of ten fields per operation type. It was
+// deleted rather than wired up, for issue 226.
+//
+// It had no caller outside this file's tests, and the reason it could not usefully acquire one is that
+// the caller would have had to supply the rates: it took requestCost, storageCost and transferCost as
+// float64 dollars and did arithmetic on them, so every price would have been decided by whoever called
+// it rather than by internal/awsrates. Two of its calculations were wrong in ways that would have
+// survived any amount of wiring — cost per GB divided by 1 << 30 where AWS bills decimal GB, a 7.4%
+// understatement, and an estimated monthly cost extrapolated from process uptime, which reports a
+// mount's first minute as if the month would continue at that rate.
+//
+// objectfs_s3_cost is the replacement and is a different shape. It counts requests in the SDK's
+// Deserialize step, where the count cannot disagree with what S3 received, and reads its rates from the
+// pricing manager rather than from an argument — see internal/storage/s3/cost_tally.go and
+// Backend.CostStats. Per-operation-type cost is the one thing it does not carry; if that is wanted,
+// the tally is the place to add a label, not this collector.
 
 // GetOperationMetrics returns metrics for a specific operation type
 func (dpm *DetailedPerformanceMetrics) GetOperationMetrics(opType OperationType) *DetailedOperationMetrics {
@@ -441,7 +401,6 @@ func (dpm *DetailedPerformanceMetrics) Reset() {
 	dpm.OperationMetrics = make(map[OperationType]*DetailedOperationMetrics)
 	dpm.FileMetrics = make(map[string]*FileOperationMetrics)
 	dpm.CacheBreakdown = make(map[OperationType]*CacheBreakdownMetrics)
-	dpm.CostMetrics = make(map[OperationType]*CostMetrics)
 	dpm.NetworkUtilization = &NetworkUtilizationMetrics{}
 	dpm.StartTime = time.Now()
 	dpm.LastUpdateTime = time.Now()

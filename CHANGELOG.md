@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A mount now publishes what it is spending at AWS** ([#226]). `objectfs_s3_cost` is a new gauge family
+  carrying billable request counts by pricing group, bytes retrieved, three dollar figures, and — beside
+  each — the rate it was computed at, labelled with the region the rates were resolved for and the storage
+  tier they belong to. Before this, `internal/awsrates` held a rate table verified against the live AWS
+  Pricing API by an integration test, and **every path from a rate to a user was severed**: the
+  access-pattern report was gated behind a config key no mount could set, `internal/cost` had zero
+  importers, and `metrics.RecordCost` had no caller anywhere.
+
+  **The requests are counted in the AWS SDK's own response path, not at the wrapper layer**, and that is
+  the substance of it rather than a detail. The eight places this backend records metrics are not
+  one-to-one with billable calls: a 5 GB `PutObject` is one wrapper call and **641 requests** to S3 — one
+  `CreateMultipartUpload`, 639 `UploadPart`s, one `CompleteMultipartUpload` — and a large `CopyObject`,
+  a parallel ranged read and the capability probes fan out the same way, one of them counted nowhere at
+  all. Every one of those errors is in the direction that flatters. A middleware in the SDK's Deserialize
+  step, installed on every client this package builds including the connection pool's, cannot disagree
+  with what S3 received because it *is* what S3 received. It counts per **attempt**, since the retryer
+  re-enters that step; it requires a response, since a connect or DNS failure never reached S3 and is not
+  billed; and it counts **only statuses below 500**, because AWS does not bill for its own server errors
+  and does bill 4xx — a `HeadObject` returning 404 is a charged read, and 5xx during an S3 event would
+  otherwise inflate the figure at the moment an operator is looking at it hardest.
+
+  Four pricing groups, not AWS's two request tiers: writes, lists, reads, and the free operations. Lists
+  are separate from writes even though the published price list calls both "Tier1", because on
+  DEEP_ARCHIVE a PUT is $0.05 per 1,000 and a LIST is $0.005 per 1,000 — a **factor of ten**, and pricing
+  a directory traversal at the write rate would overstate it worst on the class where the error is largest.
+  Classification is by operation-name prefix and an unrecognized operation counts as a write, so an
+  operation this code has never heard of makes the reported cost too high rather than too low.
+
+  What the figures are is stated narrowly, because a cost number that implies more than it knows is worse
+  than none. They are **this process's spend since it started**, at list prices for the first volume band:
+  not a bill, and not a reconciliation of one. `bytes_stored` is what this mount has uploaded, not the
+  bucket's size — nothing lists the bucket, since that would be a billed request per scrape to publish a
+  metric. Every figure is monotonic and there is no reset, because rate-of-change is the form a useful
+  alert on cost takes and a counter something can zero is one that will be zeroed. A fresh mount reports
+  `read_requests` of 1 before any filesystem work: `NewBackend`'s health check is a `HeadBucket`, AWS bills
+  it, and the tests assert that 1 rather than asserting zero.
+
+  Verified against a recording proxy rather than against the counter's own arithmetic: the tests compare
+  what the tally counted with what the S3 endpoint actually received, including a multipart write where
+  both sides must agree *and* the count must exceed the number of parts, and an injected 500 where the
+  counted total must equal the observed total minus the server errors. The dollar assertions state AWS's
+  published rates as literals and divide in the test, per the lesson from [#220]: the old tests passed
+  `1024*1024*1024` bytes, called it one GB, and asserted the per-GB rate came back — an expectation that
+  holds under both the right divisor and the wrong one. Byte-to-GB conversion goes through
+  `awsrates.GBFromBytes` throughout, and the mutation to a binary divisor is caught with a ratio of
+  0.9313, which is exactly the 7.4% gap.
+
 - **A cache miss now reads further when a peer holds more of the object** ([#142]). A read that misses
   asks the cluster who holds the key and, if some peer holds a range reaching past what was just read,
   reads ahead to the end of that range — capped at 4 MiB per miss. The bytes come from **S3, not from the
@@ -498,6 +545,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator running the health endpoint on port 0 can find out where it went.
 
 ### Removed
+
+- **`internal/cost` — a second cost-calculation package with no importer** ([#226]). 710 lines and 540
+  lines of tests: `Calculator`, `Reporter`, `AlertManager`, `PriceTable`, per-tenant accumulation, ROI
+  reporting against a Standard baseline, and budget-threshold alerting with soft and hard limits. Zero
+  importers outside itself, and no configuration path ever existed for the tenants or the budgets it was
+  built around — a single-mount filesystem has no source of tenant identity, and being under `internal/`
+  it cannot be consumed by another module either. With `objectfs_s3_cost` now publishing from the backend,
+  the only caller it could ever have has a reachable path that does not go through it.
+
+  Deleted rather than kept as the calculation layer, because two cost-calculation packages where one is
+  unreachable is precisely the arrangement that produced [#209]: the same rate written in five places, two
+  of them disagreeing by a factor of ten, so what a write cost depended on which package a caller reached
+  for. Its `pricing_drift_test.go` was the guard against that shape and the half worth keeping moved to
+  `internal/storage/s3`, where it now asserts that every rate a caller can reach through `PricingManager`
+  is `internal/awsrates`' own value, **exactly**, for every storage class the config loader accepts —
+  storage, PUT, GET, LIST and retrieval, not storage alone, since a partial regression that leaves requests
+  on constants passes a storage-only check. Verified by mutation: a private PUT rate in the manager fails it
+  with the ratio named, and a round factor of ten in that ratio is reported as what it is.
+
+  One rate now has no consumer as a result: `awsrates.EgressPerGB`, whose only reader was the deleted
+  calculator. It stays in the generated table, since it comes from AWS's price list and a mount that ever
+  reports egress will want it, and the relocated guard says in a comment that there is no plumbing to check.
+
+- **`metrics.RecordCost` and `CostMetrics`** ([#226]). Ten fields of per-operation cost on the detailed
+  collector, populated by a method with no caller outside this package's tests. The issue asked to wire it
+  or delete it but not to leave a third unreachable path; it is deleted, because the shape could not be
+  usefully wired: it took request, storage and transfer costs as `float64` dollars, so every price would
+  have been decided by the call site rather than by `internal/awsrates` — the exact arrangement above. Two
+  of its calculations were also wrong in ways no amount of wiring would have corrected. Cost per GB divided
+  by `1 << 30` where AWS bills decimal GB, understating by 7.4%. And `EstimatedMonthlyCost` extrapolated
+  from process uptime, so a mount thirty seconds old reported its first half-minute as the whole month's
+  rate — a figure that is most wrong exactly when someone is most likely to read it.
+
+  The rest of `DetailedPerformanceMetrics` stays. Its latency percentiles were assigned and its histogram
+  bucketing fixed this release ([#222]), so only the cost half was dead. `internal/metrics/doc.go` and the
+  `docs/index.md` row say so, including that per-operation-type cost is the one thing `objectfs_s3_cost`
+  does not carry and that it belongs as a label on the tally rather than as a second collector.
 
 - **`pkg/api` — 12 declared HTTP routes nothing ever served** ([#367]). 559 lines of handlers and 999
   lines of tests for `/health`, `/health/components`, `/health/live`, `/health/ready`, `/status`,
@@ -2873,6 +2957,9 @@ had no message authentication, and a cluster will not start without a shared sec
 [#399]: https://github.com/scttfrdmn/objectfs/issues/399
 [#223]: https://github.com/scttfrdmn/objectfs/issues/223
 [#222]: https://github.com/scttfrdmn/objectfs/issues/222
+[#226]: https://github.com/scttfrdmn/objectfs/issues/226
+[#220]: https://github.com/scttfrdmn/objectfs/issues/220
+[#209]: https://github.com/scttfrdmn/objectfs/issues/209
 [#204]: https://github.com/scttfrdmn/objectfs/issues/204
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390

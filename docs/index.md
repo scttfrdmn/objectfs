@@ -91,15 +91,23 @@ them**. Verified by import graph, not by reading the code:
 
 | Capability | Package | Status |
 |---|---|---|
-| Cost tracking and per-operation billing | `internal/cost` | no importer outside itself |
 | TAR.ZST archive access without extraction | `internal/archive` | no importer outside itself |
-| Detailed per-file performance metrics | `internal/metrics` detailed collector | constructor has no non-test caller |
+| Detailed per-file performance metrics | `internal/metrics` detailed collector | constructor has no non-test caller; its cost half was deleted rather than wired ([#226](https://github.com/scttfrdmn/objectfs/issues/226)) |
 | ML tier prediction driving cache promotion | `internal/analytics` | imported by `internal/cache`, but the `Predictor` field is never set on the mount path, so the size heuristic always runs |
 | Multi-node coordination | `internal/distributed` | imported only by tests |
 | Automatic tier transitions and lifecycle rules | `internal/storage/s3` cost optimizer | `AnalyzeAndOptimize` has no caller on the mount path; lifecycle rules are a bucket-level API call this backend never makes. The five config keys that described them were removed in v0.11.0 rather than left accepting values ([#203](https://github.com/scttfrdmn/objectfs/issues/203)) |
 
 They are listed here rather than deleted from the docs because the code exists and may be wired up;
 what they are not is a feature of the shipping product. Each is tracked as its own issue.
+
+Cost tracking left this table by being wired up. It was the first row, `internal/cost` with no importer
+outside itself; a running mount now publishes `objectfs_s3_cost` — billable request counts by pricing
+group, bytes retrieved, dollar figures, and the rates each was computed at — counted in the AWS SDK's
+own response path, so the count is what S3 received rather than what the wrapper layer thought it sent.
+`internal/cost` itself was **deleted** ([#226](https://github.com/scttfrdmn/objectfs/issues/226)): it
+was a second cost-calculation package, per-tenant in a filesystem with no tenants, and the arrangement
+of two such packages where one is unreachable is what produced the 10× rate disagreement
+[#209](https://github.com/scttfrdmn/objectfs/issues/209) found. `metrics.RecordCost` went the same way.
 
 One row left this table by the other route. A REST API — `pkg/api`, 12 declared routes, no importer —
 was **deleted** rather than kept waiting ([#367](https://github.com/scttfrdmn/objectfs/issues/367)).

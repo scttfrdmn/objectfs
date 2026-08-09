@@ -301,38 +301,6 @@ func TestRecordNetworkOperation_PeakRates(t *testing.T) {
 	}
 }
 
-func TestRecordCost(t *testing.T) {
-	t.Parallel()
-
-	dpm := NewDetailedPerformanceMetrics(100, false)
-
-	// Record cost for read operations
-	requestCost := 0.0004                         // $0.0004 per request
-	storageCost := 0.023                          // $0.023 per GB-month
-	transferCost := 0.09                          // $0.09 per GB
-	bytesTransferred := int64(1024 * 1024 * 1024) // 1GB
-
-	dpm.RecordCost(OpRead, requestCost, storageCost, transferCost, bytesTransferred)
-
-	costMetrics := dpm.CostMetrics[OpRead]
-	if costMetrics == nil {
-		t.Fatal("Expected cost metrics for read operations")
-	}
-
-	if costMetrics.RequestCount != 1 {
-		t.Errorf("Expected request_count=1, got %d", costMetrics.RequestCount)
-	}
-
-	expectedTotal := requestCost + storageCost + transferCost
-	if costMetrics.TotalCost != expectedTotal {
-		t.Errorf("Expected total_cost=%f, got %f", expectedTotal, costMetrics.TotalCost)
-	}
-
-	if costMetrics.BytesTransferred != bytesTransferred {
-		t.Errorf("Expected bytes_transferred=%d, got %d", bytesTransferred, costMetrics.BytesTransferred)
-	}
-}
-
 func TestCacheBreakdown(t *testing.T) {
 	t.Parallel()
 
@@ -421,7 +389,6 @@ func TestReset(t *testing.T) {
 	// Record some operations
 	dpm.RecordOperation(OpRead, "/test/file.txt", 100*time.Millisecond, 1024, CacheSourceL1, nil)
 	dpm.RecordNetworkOperation(1024, 2048, 1*time.Second, nil)
-	dpm.RecordCost(OpRead, 0.001, 0.023, 0.09, 1024*1024)
 
 	// Verify metrics exist
 	if dpm.TotalOperations == 0 {

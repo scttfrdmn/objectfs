@@ -96,9 +96,11 @@ Gauges:
   - objectfs_active_connections: Current active S3 connections
   - objectfs_predictive_cache{statistic}: Read-ahead statistics, by statistic name
   - objectfs_s3_acceleration{statistic}: Transfer Acceleration state and counters, by statistic name
+  - objectfs_s3_cost{statistic,region,tier}: Billable requests, bytes, dollars, and the rates each
+    figure was computed at
 
-The last two are one family each with a statistic label rather than a metric per statistic, because
-both sets grow: a new label value is something a dashboard and both SDKs pick up for free, where a
+The last three are one family each with a statistic label rather than a metric per statistic, because
+all three sets grow: a new label value is something a dashboard and both SDKs pick up for free, where a
 new name is a change every consumer has to follow. Their values are a snapshot the adapter re-reads
 on each update tick, so they are gauges even where the underlying number is a running total —
 objectfs_s3_acceleration{statistic="fallbacks"} is set to the backend's count, not incremented.
@@ -107,6 +109,18 @@ objectfs_s3_acceleration carries statistic="configured" and statistic="active" s
 difference between them is the point (#204): configured 1 with active 0 is a mount that was asked to
 accelerate and is not, which before this family existed was reported nowhere. Alert on the pair, not
 on either alone.
+
+objectfs_s3_cost carries two labels beyond statistic, and both are required to read it (#226). region
+is the region the rates were resolved for, which is not always the configured one — an unpublished
+region falls back to us-east-1 — and tier is the storage class every rate below depends on, which
+differs tenfold between STANDARD and DEEP_ARCHIVE for a write. Summing the family across mounts without
+grouping by both adds figures computed at different prices. The rate_per_* statistics are published
+alongside the dollar figures so a dashboard can show the arithmetic rather than only its result: #209
+was a per-1,000 price stored as if it were per-request, and a scrape that carries the rate makes that
+class of error visible without waiting for a bill. Every figure is monotonic and never reset, because
+rate-of-change is the form a useful alert on cost takes and a counter that can decrease cannot support
+one. See internal/storage/s3.Backend.CostStats for what the numbers are and are not — they are this
+process's spend since it started, not a reconciliation of an invoice.
 
 Every series additionally carries the operator's monitoring.metrics.custom_labels as constant
 labels — service="objectfs" by default. Consumers must parse the label block: a name identifies a
@@ -295,9 +309,18 @@ Complete example of metrics integration:
 # DetailedPerformanceMetrics is not wired up
 
 detailed.go holds a second, richer collector — per-operation latency, per-file access counts, a
-cache-source breakdown, network utilization, and per-operation cost. NewDetailedPerformanceMetrics
-has no caller outside this package's own tests, so nothing a mount does reaches any of it. It is
-here because it may be wired up, not because it runs.
+cache-source breakdown, and network utilization. NewDetailedPerformanceMetrics has no caller outside
+this package's own tests, so nothing a mount does reaches any of it. It is here because it may be
+wired up, not because it runs.
+
+It also held per-operation cost, and that half was **deleted** rather than wired, for #226. A caller
+would have had to supply the rates as float64 dollars, so every price would have been decided by the
+call site instead of by internal/awsrates — and two of its calculations were wrong in ways no amount of
+wiring would have fixed: cost per GB divided by 1 << 30 where AWS bills decimal GB, and a monthly
+estimate extrapolated from process uptime, which reports a mount's first minute as the whole month's
+rate. objectfs_s3_cost is the replacement, and it counts in the SDK's response path where the count
+cannot disagree with what S3 received. The one thing it does not carry is cost per operation type; that
+belongs as a label on the tally, not as a second collector.
 
 Its latency percentiles are estimates, which is worth knowing before reading them as measurements.
 P50Latency, P95Latency and P99Latency are computed from LatencyHistogram by interpolating within the

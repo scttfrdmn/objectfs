@@ -125,6 +125,32 @@ func liveScrape(t *testing.T) string {
 		"retry_period_seconds": 300,
 	})
 
+	// The cost family (#226), published by a mount from the S3 backend's request tally. Two labels beyond
+	// statistic, and they are the part most likely to be mishandled: an SDK that reads objectfs_s3_cost as
+	// one series per statistic gets a collision the moment a fleet has two tiers, so the fixture pins a
+	// region and a tier that are not the defaults — us-west-2 and STANDARD_IA, not us-east-1 and STANDARD.
+	//
+	// The figures are consistent with each other rather than arbitrary, because their relationships are
+	// checkable: 1,204 writes at $0.00001 and 88 lists and 6,391 reads at $0.000001 come to $0.018519,
+	// and 4 GB retrieved at $0.01/GB is exactly $0.04. An extractor that pairs a statistic with the wrong
+	// value produces a total that does not reconcile, which is a failure a reviewer can see by hand.
+	c.UpdateS3Cost("us-west-2", "STANDARD_IA", map[string]float64{
+		"write_requests":                 1204,
+		"list_requests":                  88,
+		"read_requests":                  6391,
+		"free_requests":                  17,
+		"bytes_retrieved":                4e9,
+		"bytes_stored":                   12e9,
+		"request_cost_dollars":           1204*0.00001 + 88*0.000001 + 6391*0.000001,
+		"retrieval_cost_dollars":         4 * 0.01,
+		"storage_cost_dollars_per_month": 12 * 0.0125,
+		"rate_per_write_request":         0.00001,
+		"rate_per_list_request":          0.000001,
+		"rate_per_read_request":          0.000001,
+		"rate_per_gb_retrieved":          0.01,
+		"rate_per_gb_month":              0.0125,
+	})
+
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
