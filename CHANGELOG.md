@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Validation for the `cluster:` config block, a cluster section in `objectfs mount --dry-run`, and
+  `docs/admin-guide/distributed.md`** ([#152]). Nothing validated this block before: `Validate` checked
+  storage, cache, network, monitoring and mount, and returned before reaching clustering. Four states
+  are now refused at startup and two are warned about, and which of the two lists a setting belongs on
+  is decided by whether there is any deployment in which it is correct.
+
+  The one worth reading is **a wildcard `advertise_addr`, which is now refused**. `listen_addr`
+  defaults to `0.0.0.0:8080` and `advertise_addr` is the next key in the file, so copying the value
+  down is the obvious mistake — and it is the worst one available. `advertise_addr` is what peers are
+  told to dial, and a peer that dials a wildcard reaches *its own loopback*: measured with
+  `net.DialUDP`, `0.0.0.0:8080` resolves to `remote=127.0.0.1:8080` and `[::]:8080` to
+  `remote=[::1]:8080`, and the dial **succeeds**. Since gossip is one-way UDP, no send fails and no
+  reply is expected, so a three-node cluster becomes three clusters of one, each mounting, serving
+  reads and reporting healthy — and each able to serve an object a peer has already overwritten. A
+  data-integrity outcome with no error anywhere is the kind this project fails closed on.
+
+  Also refused: a **negative `replication_factor`** (`applyConfigDefaults` only substitutes for `0`, so
+  a negative value survives, `LoadBalancer.SelectNodes` returns no nodes for any count `<= 0`, and every
+  write fails with `no target nodes selected` — naming neither the key nor the value), a
+  **non-host:port** address, a **non-numeric port**, and **port 0 on `advertise_addr`**. Port 0 is
+  allowed on `listen_addr`, because the asymmetry is real and measured: `ListenUDP` on `127.0.0.1:0`
+  binds and the kernel assigns a port, while `DialUDP` to `127.0.0.1:0` fails with `can't assign
+  requested address`. That is why this does not reuse `validateListenAddr` — its port-0 advice is
+  correct for a monitoring endpoint and wrong here.
+
+  Two settings are **warnings on `--dry-run`, not errors**, because each is right in one deployment and
+  wrong in another: an empty `seed_nodes` is how the first node of a new cluster is configured, and a
+  loopback `advertise_addr` is what `NewDefault` sets and what the shipped Compose file uses. Refusing
+  either would break a real deployment; ignoring either ships a silent partition. Warnings go to stderr
+  and **the exit code stays 0**, so a config-management tool can still bring up a first node.
+
+  The dry-run section prints the resolved block — including an empty `node_id` rendered as `(generated
+  at startup, new on every restart)` — and reports the cluster secret **by source, never by value**:
+  `from OBJECTFS_CLUSTER_SECRET`, `from <path>`, or `not configured — the cluster will refuse to
+  start`. A dry run is the kind of output that gets pasted into an issue, and which of the two sources
+  is in use is the hardest thing to establish from outside, since the environment leaves no trace in
+  the file.
+
+  Three of the six documentation sections #152 asked for **could not be written, and are not faked**.
+  `cluster.persistent_log`, `cluster.data_dir` and `peer_fetch_timeout` have zero occurrences in the
+  tree, so the in-memory-to-persistent-log upgrade procedure describes nothing; the consistency-modes
+  section is replaced by CAS-against-S3, because `ConsistencyEventual`/`Session`/`Strong` were removed
+  in 0.12.0 and survive only as a comment recording their removal. The issue's own proposed check —
+  `enabled && advertise_addr == ""` — can never fire, verified by calling `Validate`: `NewDefault` sets
+  the field and `applyConfigDefaults` sets it again. The page's limitations section lists what is
+  absent instead, including that the cache-sizing formula must **not** multiply by
+  `replication_factor`: the cluster makes no copies, S3 holds the single one, and the factor is a
+  selection width.
+
 - **`.deb` and `.rpm` packages, and the uninstall script they make reachable** ([#207], [#137]).
   `make package-linux` builds both formats for amd64 and arm64 from one `nfpm.yaml`. The package
   installs the binary to `/usr/bin`, the systemd template unit to `/usr/lib/systemd/system` (the
@@ -3226,6 +3275,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#142]: https://github.com/scttfrdmn/objectfs/issues/142
 [#143]: https://github.com/scttfrdmn/objectfs/issues/143
 [#150]: https://github.com/scttfrdmn/objectfs/issues/150
+[#152]: https://github.com/scttfrdmn/objectfs/issues/152
 [#207]: https://github.com/scttfrdmn/objectfs/issues/207
 [#137]: https://github.com/scttfrdmn/objectfs/issues/137
 [#145]: https://github.com/scttfrdmn/objectfs/issues/145

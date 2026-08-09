@@ -597,6 +597,20 @@ writes, which fail closed rather than degrading, and MinIO is a measured row in
 LocalStack is not. A green Compose run means the mesh forms — not that behavior is correct on AWS,
 which is what the integration suite is for.
 
+### Distributed mode
+
+[docs/admin-guide/distributed.md](docs/admin-guide/distributed.md) is the operator's guide: every
+`cluster:` key with its default, how to size a cache per node, growing and shrinking a cluster, and
+what clustering deliberately does not do. Read the limitations section first if you are deciding
+whether to deploy it — `internal/distributed` is experimental, and the parts an earlier design named
+that do not exist are listed there rather than described.
+
+The failure mode to know about before anything else: a misconfigured cluster does not fail. Each node
+comes up as a cluster of one, mounts, serves reads, and reports healthy while receiving no cache
+invalidation from any peer — so it can serve an object another node has already overwritten. Gossip is
+one-way UDP, so there is no handshake to fail. `objectfs mount --dry-run` prints the resolved cluster
+block and warns about the two settings that cause it.
+
 ### Cost estimation and institutional discounts
 
 Storage-cost estimates use a built-in rate table, and an institution with negotiated rates can

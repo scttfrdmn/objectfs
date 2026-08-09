@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -289,6 +290,8 @@ func mountWithFlags(f *mountFlags, stdout, stderr io.Writer) int {
 		emit(stdout, "  cache size:      %s\n", cfg.Performance.CacheSize)
 		emit(stdout, "  max concurrency: %d\n", cfg.Performance.MaxConcurrency)
 
+		emitClusterDryRun(stdout, stderr, cfg)
+
 		return exitOK
 	}
 
@@ -448,6 +451,90 @@ func runUnmount(args []string, stdout, stderr io.Writer) int {
 
 	return exitOK
 }
+
+// emitClusterDryRun prints the cluster block --dry-run resolved, and the warnings Validate cannot give.
+//
+// Nothing at all is printed when clustering is off, which is almost every mount: a block of "enabled:
+// false" and six empty values is noise in the output of the check an operator runs to see whether their
+// file is good.
+//
+// The warnings are the reason this is more than a print. Two cluster settings are legal, common, and
+// wrong in a way only the operator can judge, so refusing them would break real deployments and
+// ignoring them leaves a silent single-node cluster:
+//
+//   - No seed nodes. A node with no seeds still forms a cluster — of itself. It mounts, serves reads,
+//     and reports healthy, and the first node of a new cluster genuinely has nothing to seed from, so
+//     this cannot be an error. But on the second node it means the cluster never formed.
+//   - A loopback advertise address. Correct for a single-host compose file, and on a real host it tells
+//     every peer to reach this node at their own loopback.
+//
+// Warnings go to stderr while the values go to stdout, so `objectfs mount --dry-run | grep` keeps
+// working and a config-management run that captures stdout does not silently swallow them. The exit
+// code stays 0 — these are not validation failures, and a tool that treats them as one would be unable
+// to bring up the first node of any cluster.
+func emitClusterDryRun(stdout, stderr io.Writer, cfg *config.Configuration) {
+	if !cfg.Cluster.Enabled {
+		return
+	}
+
+	emit(stdout, "\nCluster config:\n")
+	emit(stdout, "  enabled:            true\n")
+
+	// The empty node ID is reported as what it will become rather than as blank, because that is the
+	// question an operator is asking: NewClusterManager generates "node-" plus eight random hex bytes
+	// when this is unset, which means it differs on every restart of the same node.
+	nodeID := cfg.Cluster.NodeID
+	if nodeID == "" {
+		nodeID = "(generated at startup, new on every restart)"
+	}
+
+	emit(stdout, "  node_id:            %s\n", nodeID)
+	emit(stdout, "  listen_addr:        %s\n", cfg.Cluster.ListenAddr)
+	emit(stdout, "  advertise_addr:     %s\n", cfg.Cluster.AdvertiseAddr)
+
+	if len(cfg.Cluster.SeedNodes) == 0 {
+		emit(stdout, "  seed_nodes:         (none)\n")
+	} else {
+		emit(stdout, "  seed_nodes:         %s\n", strings.Join(cfg.Cluster.SeedNodes, ", "))
+	}
+
+	emit(stdout, "  replication_factor: %d\n", cfg.Cluster.ReplicationFactor)
+
+	// The secret is reported by source and never by value, and the file is reported as a path only.
+	// Which of the two is in use is the thing that is actually hard to know from outside, and it is
+	// what a mount refuses to start without.
+	switch {
+	case os.Getenv(clusterSecretEnv) != "":
+		emit(stdout, "  cluster secret:     from %s\n", clusterSecretEnv)
+	case cfg.Cluster.SecretFile != "":
+		emit(stdout, "  cluster secret:     from %s\n", cfg.Cluster.SecretFile)
+	default:
+		emit(stdout, "  cluster secret:     not configured — the cluster will refuse to start\n")
+	}
+
+	if len(cfg.Cluster.SeedNodes) == 0 {
+		emit(stderr, "objectfs mount: warning: cluster.seed_nodes is empty, so this node will not join "+
+			"an existing cluster — it will form a cluster of one, mount successfully, and report "+
+			"healthy while receiving no cache invalidations from any peer. That is correct for the "+
+			"first node of a new cluster and is a silent partition on any other\n")
+	}
+
+	if host, _, err := net.SplitHostPort(cfg.Cluster.AdvertiseAddr); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			emit(stderr, "objectfs mount: warning: cluster.advertise_addr is %s, a loopback address. "+
+				"Peers on other hosts that dial it reach their own loopback instead of this node. That "+
+				"is correct for a single-host development cluster and wrong everywhere else\n",
+				cfg.Cluster.AdvertiseAddr)
+		}
+	}
+}
+
+// clusterSecretEnv duplicates distributed.ClusterSecretEnv, which cmd/objectfs does not import.
+//
+// A string rather than a new import because this is the only thing needed from that package here, and
+// the pair is pinned by TestClusterSecretEnvMatchesTheDistributedPackage — a duplicated constant that
+// nothing compares is how the value drifts.
+const clusterSecretEnv = "OBJECTFS_CLUSTER_SECRET"
 
 // validateMountPoint checks the directory is one that can be mounted on.
 //
