@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"runtime"
 	"sync"
 	"time"
@@ -837,10 +838,24 @@ func (cm *ClusterManager) refreshLocalStats(dst *NodeInfo) {
 
 		// The denominator behind HitRate, carried so a reader can tell 0.0 from "nothing asked yet". Both
 		// counters are cumulative over the cache's life, so this only ever grows.
-		dst.CacheRequests = int64(cacheStats.Hits + cacheStats.Misses) //nolint:gosec // see below
-		// The conversion cannot overflow in any real process: it would take 2^63 cache operations, and at
-		// a billion per second that is 292 years. Signed because everything else on this struct is, and a
-		// mixed-signedness pair of related fields is worse than the theoretical wrap.
+		//
+		// Saturating rather than converting, and rather than suppressing the warning. Hits and Misses are
+		// uint64 and CacheRequests is int64, because every other field on NodeInfo is signed and a
+		// mixed-signedness pair of related fields is its own bug. Reaching 2^63 operations would take 292
+		// years at a billion per second, so this is unreachable — but the failure mode if it were ever
+		// reached is a *negative* request count, which HitRate's "did anything ask yet" guard reads as
+		// "nothing asked yet", silently hiding a busy cache instead of reporting a wrapped number. A
+		// clamp costs one comparison per gossip round and is testable; a nolint comment is neither.
+		//
+		// The sum is checked before the cast, not after: Hits+Misses is uint64 arithmetic and wraps on
+		// its own, so a post-cast check would be reasoning about a value that had already lost the
+		// overflow.
+		if total := cacheStats.Hits + cacheStats.Misses; total > math.MaxInt64 ||
+			total < cacheStats.Hits {
+			dst.CacheRequests = math.MaxInt64
+		} else {
+			dst.CacheRequests = int64(total)
+		}
 	}
 
 	cm.stats.mu.RLock()
