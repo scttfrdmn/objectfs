@@ -24,7 +24,8 @@ credit the reporter by whatever name or handle they give.
 
 | Version | Supported |
 |---|---|
-| 0.12.0 | ✅ |
+| 0.13.0 | ✅ |
+| 0.12.0 | ❌ Superseded. No known security defect. Note that a mount on it never started cluster coordination at all (#139), so its `cluster.*` settings had no security posture to speak of — 0.13.0 is the first release where they do, and it refuses to start a cluster without a gossip secret |
 | 0.11.0 | ❌ Superseded. No known security defect, but its gossip protocol has no message authentication (#206), so a cluster on an untrusted network is only as safe as that network |
 | 0.10.3 | ❌ Superseded. No known security defect; it simply predates the release above, and only the latest release gets fixes |
 | 0.10.2 | ❌ Superseded. Importable and does not lose data, but it was tagged before eleven of its twelve milestone issues merged, so it lacks all of the correctness and cost fixes in v0.10.3 |
