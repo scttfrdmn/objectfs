@@ -28,7 +28,7 @@ import (
 // TestAMountPublishesItsPredictiveStatistics is the end-to-end assertion, over HTTP.
 //
 // It reads through the mount's own cache and scrapes the mount's own endpoint. Every layer skipped is a
-// layer where the value could be dropped, and each of #223's neighbours in this milestone was exactly
+// layer where the value could be dropped, and each of #223's neighbors in this milestone was exactly
 // that kind of drop: a collector that was never started (#211), a Config.Labels the collector never read,
 // an accessor nothing called.
 //
@@ -360,7 +360,7 @@ func predictiveSeries(t *testing.T, scrape string) map[string]float64 {
 
 	out := map[string]float64{}
 
-	for _, line := range strings.Split(scrape, "\n") {
+	for line := range strings.SplitSeq(scrape, "\n") {
 		if !strings.HasPrefix(line, "objectfs_predictive_cache{") {
 			continue
 		}

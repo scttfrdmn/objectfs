@@ -199,13 +199,18 @@ describe('parseScrape', () => {
       'evictions_total',
       'evictions_intelligent',
     ]) {
-      assert.ok(statistics.has(name), `statistic=${name} missing from the parsed scrape`);
+      assert.ok(
+        statistics.has(name),
+        `statistic=${name} missing from the parsed scrape`
+      );
     }
 
     // A ratio, derived in Go when the totals are written rather than at scrape time. 61 of 186 is
     // deliberately not a round number: 0, 0.5 and 1 are all values a broken parser can produce by
     // accident.
-    assert.ok(Math.abs((statistics.get('prediction_accuracy') ?? 0) - 61 / 186) < 1e-6);
+    assert.ok(
+      Math.abs((statistics.get('prediction_accuracy') ?? 0) - 61 / 186) < 1e-6
+    );
     assert.equal(statistics.get('predictions_total'), 186);
   });
 

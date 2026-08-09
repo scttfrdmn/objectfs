@@ -632,11 +632,7 @@ func TestGetPredictiveStatsIsSafeUnderConcurrentReads(t *testing.T) {
 	stop := make(chan struct{})
 
 	// The metrics surface's access pattern: one reader, on a schedule, for the life of the mount.
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -651,7 +647,7 @@ func TestGetPredictiveStatsIsSafeUnderConcurrentReads(t *testing.T) {
 				}
 			}
 		}
-	}()
+	})
 
 	for r := range 4 {
 		wg.Add(1)
