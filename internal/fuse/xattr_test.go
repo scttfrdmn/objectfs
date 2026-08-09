@@ -18,6 +18,7 @@ package fuse
 import (
 	"bytes"
 	"context"
+	"math"
 	"strings"
 	"syscall"
 	"testing"
@@ -641,11 +642,37 @@ func TestSetxattrHonorsCreateAndReplaceFlags(t *testing.T) {
 		t.Errorf("XATTR_REPLACE left the value as %q, want %q", got, "second")
 	}
 
-	// Both flags at once is EINVAL, per setxattr(2).
+	// Both flags at once, against a *missing* attribute, is answered per-platform because the kernels
+	// disagree — see bothXattrFlagsErrno. darwin returns EINVAL; linux has no combined-flag check, so the
+	// REPLACE arm fires and it is ENODATA. This assertion used to say EINVAL unconditionally, which is
+	// darwin's answer and what setxattr(2)'s man page describes, and it was green on darwin and red on CI.
+	//
+	// Expressed through the same platform hook the implementation uses, with a fallback of errNoXattr
+	// rather than repeating a platform constant here: hardcoding either errno in the test is the mistake
+	// being fixed. xattr_oracle_test.go is what pins the value against the real kernel.
 	both := uint32(unix.XATTR_CREATE | unix.XATTR_REPLACE)
-	if errno := x.node.Setxattr(ctx, "user.g", []byte("v"), both); errno != syscall.EINVAL {
-		t.Errorf("setxattr with both XATTR_CREATE and XATTR_REPLACE returned %s, want EINVAL",
-			errnoName(errno))
+	wantBoth := bothXattrFlagsErrno()
+	if wantBoth == 0 {
+		wantBoth = errNoXattr
+	}
+	if errno := x.node.Setxattr(ctx, "user.g", []byte("v"), both); errno != wantBoth {
+		t.Errorf("setxattr with both XATTR_CREATE and XATTR_REPLACE on a missing attribute returned %s, "+
+			"want %s", errnoName(errno), errnoName(wantBoth))
+	}
+
+	// And against an attribute that *exists*, where the two kernels differ in the other direction: still
+	// EINVAL on darwin, but EEXIST on linux because there the CREATE arm is what fires. user.f exists by
+	// this point, set above.
+	wantBothPresent := bothXattrFlagsErrno()
+	if wantBothPresent == 0 {
+		wantBothPresent = syscall.EEXIST
+	}
+	if errno := x.node.Setxattr(ctx, "user.f", []byte("v"), both); errno != wantBothPresent {
+		t.Errorf("setxattr with both flags on an existing attribute returned %s, want %s",
+			errnoName(errno), errnoName(wantBothPresent))
+	}
+	if got, _ := x.get(t, "user.f"); string(got) != "second" {
+		t.Errorf("a refused both-flags setxattr changed the value to %q, want %q", got, "second")
 	}
 
 	// The two constants must not be the same number, or every test above is checking one code path
@@ -653,6 +680,52 @@ func TestSetxattrHonorsCreateAndReplaceFlags(t *testing.T) {
 	if unix.XATTR_CREATE == unix.XATTR_REPLACE {
 		t.Fatal("unix.XATTR_CREATE and unix.XATTR_REPLACE are the same value on this platform, so the " +
 			"create and replace cases above are indistinguishable")
+	}
+}
+
+// TestXattrSizeSaturatesRatherThanWrapping pins the clamp on the int → uint32 conversion that every
+// getxattr and listxattr reply passes through.
+//
+// Unreachable through the filesystem: an attribute is bounded by vfs.XattrBudget, well under 2 KB. Tested
+// anyway, because the alternative to the clamp was a lint suppression and a suppression cannot be tested
+// at all — and because the mutation check showed the clamp was uncovered. Deleting it (returning a bare
+// uint32(n)) left every other test in this package green.
+//
+// The reason it is a clamp and not a truncation is what the wrap would do to a *reader*. Both values this
+// function returns are a buffer size the caller allocates and then reads into. A wrapped length smaller
+// than the value gives a caller that allocates a short buffer and gets no ERANGE — because the filesystem
+// compared the same wrapped number — so it reads a truncated attribute and cannot tell. MaxUint32 is not
+// mistakable for a real attribute size, so the caller's own allocation fails instead.
+//
+// The 1<<32 case is skipped on a 32-bit platform, where an int cannot hold it and the conversion is not
+// lossy in the first place; the guard is a compile-time-safe comparison rather than a build tag.
+func TestXattrSizeSaturatesRatherThanWrapping(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		n    int
+		want uint32
+	}{
+		{"zero", 0, 0},
+		{"an ordinary attribute", 11, 11},
+		{"the largest value that fits", math.MaxUint32, math.MaxUint32},
+		{"one past it", math.MaxUint32 + 1, math.MaxUint32},
+		{"negative, which no length is but the type allows", -1, math.MaxUint32},
+	} {
+		if tc.n > 0 && uint64(tc.n) > uint64(math.MaxInt) {
+			continue // unrepresentable as an int on this platform
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := xattrSize(tc.n); got != tc.want {
+				t.Errorf("xattrSize(%d) = %d, want %d. A value that is neither the input nor the clamp "+
+					"means the conversion wrapped, and a wrapped size is a short buffer a caller fills "+
+					"with a truncated attribute while believing it is whole.", tc.n, got, tc.want)
+			}
+		})
 	}
 }
 

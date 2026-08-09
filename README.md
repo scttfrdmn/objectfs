@@ -210,6 +210,14 @@ rewrite of the object.
 Directories have no extended attributes: `setfattr` on one is `ENOTSUP`, and a listing is empty. See
 [Not implemented](#not-implemented).
 
+One errno differs by platform, and it differs because the kernels do. A `setxattr` naming both
+`XATTR_CREATE` and `XATTR_REPLACE` is `EINVAL` on macOS, which is also what `setxattr(2)`'s Linux man
+page describes — but Linux does not implement it that way: `fs/xattr.c` has no combined-flag check, so
+the flags are tested independently and the result is `ENODATA` when the attribute is missing and
+`EEXIST` when it exists. ObjectFS matches whichever kernel it is running under rather than picking one,
+so a program's behavior on an ObjectFS mount matches its behavior on the local filesystem of the same
+host.
+
 ### Errors by design
 
 These fail, and the failure is the correct answer rather than a missing feature.

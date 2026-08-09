@@ -227,13 +227,30 @@ func TestXattrErrnosAgreeWithTheLocalFilesystem(t *testing.T) {
 			},
 		},
 		{
-			what: "setxattr naming both XATTR_CREATE and XATTR_REPLACE",
+			// The case the two kernels answer differently, which is why it is here and not only in a unit
+			// test: darwin returns EINVAL, linux runs the REPLACE arm and returns ENODATA. An assertion
+			// written by hand would have picked one. user.b does not exist at this point.
+			what: "setxattr naming both XATTR_CREATE and XATTR_REPLACE, attribute missing",
 			objectfs: func() syscall.Errno {
 				return x.node.Setxattr(ctx, "user.b", []byte("v"),
 					uint32(unix.XATTR_CREATE|unix.XATTR_REPLACE))
 			},
 			reference: func() syscall.Errno {
 				return oracle.set("user.b", []byte("v"), uint32(unix.XATTR_CREATE|unix.XATTR_REPLACE))
+			},
+		},
+		{
+			// The same flags against an attribute that exists, where the platforms differ in the other
+			// direction: EINVAL on darwin again, but EEXIST on linux because there the CREATE arm fires
+			// first. Both arms of the divergence are covered, so a fix that satisfied one by hardcoding an
+			// errno would fail here. user.a exists by now.
+			what: "setxattr naming both flags, attribute present",
+			objectfs: func() syscall.Errno {
+				return x.node.Setxattr(ctx, "user.a", []byte("v"),
+					uint32(unix.XATTR_CREATE|unix.XATTR_REPLACE))
+			},
+			reference: func() syscall.Errno {
+				return oracle.set("user.a", []byte("v"), uint32(unix.XATTR_CREATE|unix.XATTR_REPLACE))
 			},
 		},
 		{

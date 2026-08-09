@@ -76,6 +76,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `ENOTSUP` rather than go-fuse's default of "no such attribute" so that a caller can tell
   "this filesystem cannot" from "that attribute is missing".
 
+  **One errno is per-platform, because the kernels disagree.** A `setxattr` naming both `XATTR_CREATE`
+  and `XATTR_REPLACE` is `EINVAL` on macOS — also what `setxattr(2)`'s Linux man page describes — but
+  Linux's `fs/xattr.c` has no combined-flag check at all: it tests each flag independently against
+  whether the attribute exists, giving `ENODATA` when it is missing and `EEXIST` when it is present.
+  ObjectFS answers as the kernel it is running under does, so a program behaves the same on an ObjectFS
+  mount as on the local filesystem of the same host. This was found by the differential oracle on CI
+  and could not have been found locally: the oracle compares against the *local* OS filesystem, so on
+  macOS ObjectFS and the reference agreed on the wrong-for-Linux answer and every test was green.
+
   **Names and values are encoded, not stored verbatim**, and the reasons are worth stating because
   the naive mapping is silently lossy in three separate ways. A user-metadata key is an HTTP header
   name: S3 lower-cases it in transit, so `user.Foo` and `user.foo` would overwrite each other, and it

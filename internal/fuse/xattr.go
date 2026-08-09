@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"strings"
 	"syscall"
 
@@ -114,6 +115,29 @@ func refuseXattrNamespace(name string) bool {
 	return false
 }
 
+// xattrSize converts a byte count to the uint32 the go-fuse contract returns, saturating rather than
+// wrapping.
+//
+// Unreachable by construction on the value path: an attribute is bounded by [vfs.XattrBudget], under 2 KB,
+// and a full listing by the same budget. It is here because "unreachable" is an argument about today's
+// callers and the cast is a property of the function. gosec flags it (G115) and the fix is a clamp rather
+// than a suppression, for the reason internal/distributed/cluster.go records at the same conversion: a
+// clamp is testable and a `//nolint` is not, and this repository runs gosec a second time standalone,
+// where the suppression has no effect anyway.
+//
+// The failure mode if it ever did wrap is the reason to saturate rather than truncate. Both numbers this
+// returns are a *buffer size* the caller allocates and then reads into: a wrapped length smaller than the
+// value is a caller that sizes a short buffer, gets no ERANGE because the filesystem also compared the
+// wrapped number, and reads a truncated attribute as if it were whole — silent data loss on a read path.
+// MaxUint32 cannot be mistaken for a real attribute size and fails the caller's own allocation instead.
+func xattrSize(n int) uint32 {
+	if n < 0 || n > math.MaxUint32 {
+		return math.MaxUint32
+	}
+
+	return uint32(n)
+}
+
 // xattrRead answers a getxattr against a value that is already known, applying the size protocol.
 //
 // dest is the caller's buffer, which may be empty. The returned size is the attribute's full length in
@@ -124,13 +148,13 @@ func xattrRead(value, dest []byte) (uint32, syscall.Errno) {
 		// rewrites an ERANGE to OK here, so answering either way works — but returning the size with an
 		// error to a *direct* caller (a test, a future in-process consumer) would be a failure with a
 		// number attached, which is harder to use correctly.
-		return uint32(len(value)), 0
+		return xattrSize(len(value)), 0
 	}
 	if len(dest) < len(value) {
-		return uint32(len(value)), syscall.ERANGE
+		return xattrSize(len(value)), syscall.ERANGE
 	}
 
-	return uint32(copy(dest, value)), 0
+	return xattrSize(copy(dest, value)), 0
 }
 
 // xattrNameList renders attribute names as listxattr's reply: each name NUL-terminated, concatenated.
@@ -243,8 +267,23 @@ func (f *FileNode) Setxattr(ctx context.Context, attr string, data []byte, flags
 	create := flags&unix.XATTR_CREATE != 0
 	replace := flags&unix.XATTR_REPLACE != 0
 
+	// Naming both flags is the one case where the two kernels genuinely disagree, so it is answered
+	// per-platform by [bothXattrFlagsErrno] rather than by a single errno here. Measured on both, not read
+	// off a man page: darwin returns EINVAL whether or not the attribute exists, while linux has no
+	// combined-flag check at all — its fs/xattr.c tests each flag independently against existence, making
+	// `CREATE|REPLACE` ENODATA on a missing attribute and EEXIST on a present one. Both are
+	// self-consistent, and any single hardcoded answer is wrong on one of them.
+	//
+	// This function returned EINVAL unconditionally at first, which is darwin's answer and the Linux man
+	// page's description of it. xattr_oracle_test.go caught it on CI and could not have caught it locally:
+	// the oracle compares against the *local* OS filesystem, so on darwin ObjectFS and the reference agreed
+	// and the test was green. A unit test asserting EINVAL was green there too. That is what the oracle is
+	// for — a hand-written expectation encodes the platform of whoever wrote it.
 	if create && replace {
-		return syscall.EINVAL
+		if errno := bothXattrFlagsErrno(); errno != 0 {
+			return errno
+		}
+		// Otherwise fall through: the switch below reproduces this kernel's answer from the flags alone.
 	}
 
 	if create || replace {
