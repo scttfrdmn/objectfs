@@ -159,6 +159,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 
 	a.exportPredictiveStats()
 	a.exportAccelerationStats()
+	a.exportCostStats()
 
 	// 4. Initialize the write path.
 	//
@@ -664,6 +665,57 @@ func (a *Adapter) exportAccelerationStats() {
 			"fallbacks":            float64(stats.Fallbacks),
 			"avg_latency_seconds":  stats.AvgLatency.Seconds(),
 			"retry_period_seconds": stats.RetryPeriod.Seconds(),
+		})
+	}
+
+	publish()
+	a.metrics.OnPeriodicUpdate(publish)
+}
+
+// exportCostStats publishes what this mount is spending at AWS to the metrics surface on every tick.
+//
+// #226: the cost machinery was accurate and unobservable. The rates are checked against AWS's published
+// price list, the arithmetic handles billing minimums and the archive classes' per-object overhead, and
+// no path led to a user — CostOptimizer's report was gated behind a config key no mount could act on,
+// internal/cost had no importer, and metrics.RecordCost had no caller. This is the path.
+//
+// Registered unconditionally, on the same reasoning as the acceleration family: `write_requests 0` is a
+// different fact from an absent family, and an operator asking "is this mount expensive" needs to know
+// which of the two they are looking at.
+//
+// The request counts come from a smithy middleware on every S3 client rather than from the backend's
+// operation wrappers, because the two disagree by more than a little: one PutObject above the multipart
+// threshold is one wrapper call and hundreds of billable requests. See s3.CostStats.
+func (a *Adapter) exportCostStats() {
+	if a.metrics == nil || a.backend == nil {
+		return
+	}
+
+	publish := func() {
+		stats := a.backend.CostStats()
+
+		// Keys become the `statistic` label, so they are the contract two SDKs read through
+		// sdks/testdata/metrics-scrape.txt.
+		//
+		// The rates are published alongside the costs they produced so a dashboard can show the
+		// arithmetic and not only its result. #209 was a per-1,000 price stored as if it were
+		// per-request — a tenfold error that lived in code no scrape could contradict; a mount that
+		// publishes the rate it used makes that class of mistake visible in a graph.
+		a.metrics.UpdateS3Cost(stats.Region, stats.Tier, map[string]float64{
+			"write_requests":                 float64(stats.WriteRequests),
+			"list_requests":                  float64(stats.ListRequests),
+			"read_requests":                  float64(stats.ReadRequests),
+			"free_requests":                  float64(stats.FreeRequests),
+			"bytes_retrieved":                float64(stats.BytesRetrieved),
+			"bytes_stored":                   float64(stats.StoredBytes),
+			"request_cost_dollars":           stats.RequestCost,
+			"retrieval_cost_dollars":         stats.RetrievalCost,
+			"storage_cost_dollars_per_month": stats.StorageCostPerMonth,
+			"rate_per_write_request":         stats.RatePerWriteRequest,
+			"rate_per_list_request":          stats.RatePerListRequest,
+			"rate_per_read_request":          stats.RatePerReadRequest,
+			"rate_per_gb_retrieved":          stats.RatePerGBRetrieved,
+			"rate_per_gb_month":              stats.RatePerGBMonth,
 		})
 	}
 

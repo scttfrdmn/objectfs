@@ -17,8 +17,8 @@ import (
 )
 
 // clientOptions returns the s3.Options mutator that applies the endpoint and addressing settings
-// from cfg. Every S3 client ObjectFS builds must go through this, including the connection pool's
-// factory.
+// from cfg, and installs the cost tally's accounting middleware. Every S3 client ObjectFS builds must
+// go through this, including the connection pool's factory.
 //
 // It exists because the pool's factory previously called s3.NewFromConfig with no options at all
 // while the direct clients applied Endpoint and ForcePathStyle. HeadObject, DeleteObject,
@@ -26,7 +26,12 @@ import (
 // S3 while PutObject and GetObject addressed the configured endpoint — making a MinIO, Ceph, or
 // emulator deployment fail in a way that looks like a credentials problem. One mutator, used
 // everywhere, is what stops the two from drifting apart again.
-func clientOptions(cfg *Config) func(*s3.Options) {
+//
+// The tally rides along for the same reason: it has to see every client or the request count it
+// publishes is a count of some of the requests, which is worse than no count at all. tally may be
+// nil, which installs no middleware — that is for a caller building a client for something other
+// than a mount.
+func clientOptions(cfg *Config, tally *costTally) func(*s3.Options) {
 	return func(o *s3.Options) {
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
@@ -36,6 +41,9 @@ func clientOptions(cfg *Config) func(*s3.Options) {
 		}
 		if cfg.UseDualStack {
 			o.EndpointOptions.UseDualStackEndpoint = aws.DualStackEndpointStateEnabled
+		}
+		if tally != nil {
+			tally.install(o)
 		}
 	}
 }
@@ -67,6 +75,13 @@ type ClientManager struct {
 	config            *Config
 	logger            *slog.Logger
 	networkMonitor    *network.Monitor // Tracks bytes/connections for this client
+
+	// tally counts the billable AWS requests every client this manager owns has made.
+	//
+	// It lives here rather than on Backend because this is where the clients are built, and a tally the
+	// clients cannot be constructed without is a tally that cannot be forgotten for one of them. See
+	// [costTally] for why the count is taken at the SDK layer.
+	tally *costTally
 
 	// transport is retained so Close can release the sockets it is holding idle.
 	//
@@ -161,8 +176,12 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 			"metadata. Set storage.s3.region (for example \"us-west-2\"), or export AWS_REGION")
 	}
 
+	// One tally shared by every client below, so the count is per-mount rather than per-client. A
+	// request costs the same whether it went out over the accelerated endpoint or a pooled client.
+	tally := &costTally{}
+
 	// Create standard S3 client without acceleration
-	standardClient := s3.NewFromConfig(awsCfg, clientOptions(cfg))
+	standardClient := s3.NewFromConfig(awsCfg, clientOptions(cfg, tally))
 
 	// Create accelerated S3 client if Transfer Acceleration is enabled
 	var acceleratedClient *s3.Client
@@ -170,7 +189,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	accelerationActive := false
 
 	if cfg.UseAccelerate {
-		acceleratedClient = s3.NewFromConfig(awsCfg, clientOptions(cfg), func(o *s3.Options) {
+		acceleratedClient = s3.NewFromConfig(awsCfg, clientOptions(cfg, tally), func(o *s3.Options) {
 			o.UseAccelerate = true
 		})
 		primaryClient = acceleratedClient
@@ -189,7 +208,7 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 	// that skips the endpoint sends them to real AWS S3 while the rest of the backend talks to the
 	// configured endpoint.
 	pool, err := NewConnectionPool(ctx, cfg.PoolSize, bucket, func() (*s3.Client, error) {
-		return s3.NewFromConfig(awsCfg, clientOptions(cfg)), nil
+		return s3.NewFromConfig(awsCfg, clientOptions(cfg, tally)), nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %w", err)
@@ -204,8 +223,24 @@ func NewClientManager(ctx context.Context, bucket string, cfg *Config, logger *s
 		logger:             logger,
 		accelerationActive: accelerationActive,
 		networkMonitor:     mon,
+		tally:              tally,
 		transport:          transport,
 	}, nil
+}
+
+// RequestCounts returns the billable AWS requests this manager's clients have made, by pricing group,
+// and the bytes they have retrieved.
+//
+// Monotonic for the life of the manager and never reset — a cost figure that can go down is one no
+// rate-of-change query can be written against. Counting starts at construction, so a mount restarted
+// mid-month reports its own requests and not the month's; pricing that as a monthly projection is the
+// caller's decision, not this method's.
+func (cm *ClientManager) RequestCounts() costCounts {
+	if cm.tally == nil {
+		return costCounts{}
+	}
+
+	return cm.tally.snapshot()
 }
 
 // GetClient returns the main S3 client — whichever of the accelerated and standard clients is

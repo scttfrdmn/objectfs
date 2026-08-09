@@ -205,7 +205,10 @@ internal/config          88
 # The uncovered remainder is the crypto/rand and json.Marshal error arms, which need a failing
 # encoder rather than a failing endpoint.
 internal/coord           89
-internal/cost            98
+# internal/cost sat here at 98 until #226 deleted it: a per-tenant cost calculator with no importer,
+# no configuration path to the tenants or budgets it was built around, and — being under internal/ —
+# no way for another module to become its caller either. 98% covered and not part of the product,
+# which is the same lesson pkg/api's floor carried: coverage cannot tell the difference.
 internal/difftest        75
 internal/distributed     67
 # 100, and it can hold there: the package is one type with five methods and two free functions, no

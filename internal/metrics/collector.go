@@ -30,6 +30,7 @@ type Collector struct {
 	errorCounter      *prometheus.CounterVec
 	predictiveGauge   *prometheus.GaugeVec
 	accelerationGauge *prometheus.GaugeVec
+	costGauge         *prometheus.GaugeVec
 
 	// periodic are the callbacks updateLoop invokes on every tick, registered by OnPeriodicUpdate.
 	periodic []func()
@@ -379,6 +380,32 @@ func (c *Collector) UpdateS3Acceleration(stats map[string]float64) {
 	}
 }
 
+// UpdateS3Cost publishes what this mount is spending at AWS, one series per named statistic.
+//
+// region and tier are the same for every statistic in a call, so they are parameters rather than map
+// keys: they label the whole reading, and a map that could carry two regions at once would be able to
+// express a state the source cannot be in. See the family's comment in initMetrics for why a dollar
+// figure has to name both.
+//
+// A map for the names for the same reason [Collector.UpdatePredictiveCache] takes one: internal/metrics
+// must not import internal/storage/s3. The adapter imports both and is where they meet.
+//
+// The names are the contract, captured in sdks/testdata/metrics-scrape.txt and asserted by
+// TestSDKFixtureMatchesTheLiveScrape, so both SDK suites fail on a rename.
+func (c *Collector) UpdateS3Cost(region, tier string, stats map[string]float64) {
+	if !c.config.Enabled {
+		return
+	}
+
+	for name, value := range stats {
+		c.costGauge.With(prometheus.Labels{
+			"statistic": name,
+			"region":    region,
+			"tier":      tier,
+		}).Set(value)
+	}
+}
+
 // OnPeriodicUpdate registers a callback for updateLoop to invoke on every tick.
 //
 // This is how a gauge whose value lives elsewhere gets refreshed. Counters and histograms are pushed at
@@ -590,6 +617,39 @@ func (c *Collector) initMetrics() error {
 		[]string{"statistic"},
 	)
 
+	// What this mount is spending at AWS.
+	//
+	// The family exists because cost was accurate and unreachable (#226). The rates are verified against
+	// AWS's published price list, the arithmetic accounts for billing minimums and per-object overhead —
+	// and every path to a user was severed: CostOptimizer's access-pattern report was gated behind a
+	// config key no mount could act on, internal/cost had no importer, and metrics.RecordCost had no
+	// caller. A number nobody can read is not a feature.
+	//
+	// Two labels beyond "statistic", which the predictive and acceleration families do not have:
+	//
+	//   - "region" is the region rates were read for, which is not always the configured one — an
+	//     unpublished region falls back to us-east-1. A dollar figure labeled with the region that was
+	//     asked for rather than the one it was priced in cannot be checked against a bill.
+	//   - "tier" is the storage class, which decides every rate. Per-request prices differ 10× between
+	//     STANDARD and DEEP_ARCHIVE, so a cost series aggregated across a fleet without this is a sum of
+	//     incomparable numbers.
+	//
+	// Both are fixed for the life of a mount: the region resolves once in the pricing manager's
+	// constructor, and Backend.SetStorageTier has no caller outside its own tests. If a tier ever does
+	// change at runtime, the series carrying the old one will persist until the process exits — worth
+	// knowing, and cheaper than the alternative of resetting the family on every tick, which would empty
+	// it for any scrape that landed mid-reset.
+	c.costGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   c.config.Namespace,
+			Subsystem:   c.config.Subsystem,
+			Name:        "s3_cost",
+			Help:        "S3 cost and billable request counters, by statistic name, pricing region, and storage tier",
+			ConstLabels: labels,
+		},
+		[]string{"statistic", "region", "tier"},
+	)
+
 	return nil
 }
 
@@ -604,6 +664,7 @@ func (c *Collector) registerMetrics() error {
 		c.errorCounter,
 		c.predictiveGauge,
 		c.accelerationGauge,
+		c.costGauge,
 	}
 
 	for _, metric := range metrics {
