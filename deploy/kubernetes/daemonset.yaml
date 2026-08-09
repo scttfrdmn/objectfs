@@ -1,0 +1,128 @@
+# ObjectFS as a single-node mount on every host in the cluster.
+#
+# This is #146's DaemonSet, and it is deliberately *not* clustered. A DaemonSet's pods get generated
+# names that change on reschedule and no stable per-pod DNS, so there is no identity for gossip to use
+# and no address a seed list could name — which is why statefulset.yaml exists for the clustered case.
+# What a DaemonSet is genuinely right for is the shape here: one mount per host, each independent, each
+# reading the same bucket. Nothing coordinates, so nothing needs an identity.
+#
+# The consequence is worth being explicit about rather than leaving implied: because these nodes are not
+# in a cluster, they do not exchange cache invalidations. Each pod's cache is its own. If a writer
+# elsewhere overwrites an object, a pod here serves its cached copy until the entry's TTL expires
+# (cache.ttl). For a read-mostly or read-only dataset — which is the common HPC case, and what this
+# project is for — that is fine and cheap. For a dataset written concurrently from more than one place,
+# it is a stale read, and the StatefulSet is the answer.
+#
+#   kubectl apply -f deploy/kubernetes/configmap.yaml -f deploy/kubernetes/daemonset.yaml
+#
+# No secrets needed for the unclustered case beyond S3 credentials, and on AWS prefer IRSA to those:
+# annotate the ServiceAccount in statefulset.yaml with a role and delete the AWS_* entries below.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: objectfs
+  labels:
+    app.kubernetes.io/name: objectfs-node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: objectfs-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: objectfs-node
+    spec:
+      serviceAccountName: objectfs
+      # Same reasoning as the StatefulSet: a FUSE mount is unmounted by its own process on a signal,
+      # and SIGKILL at the end of the grace period leaves the kernel holding a mount whose server is
+      # gone, plus any dirty range that had not reached S3. 30s is enough for an idle mount and not for
+      # one flushing.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: objectfs
+          image: ghcr.io/scttfrdmn/objectfs:latest
+          args:
+            - mount
+            - --config=/etc/objectfs/config.yaml
+            - --foreground
+          ports:
+            - name: health
+              containerPort: 8081
+          securityContext:
+            # SYS_ADMIN is mount(2). Not `privileged: true`, which would be every capability and every
+            # device for the sake of this one.
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            # No cluster variables at all, which is what makes this the unclustered workload. The
+            # ConfigMap has `cluster.enabled: false` and nothing here overrides it.
+            #
+            # Health off loopback is still required: the kubelet probes over the pod IP, so a loopback
+            # listener refuses the connection and the pod is restarted forever by a liveness probe that
+            # could never have passed.
+            - name: OBJECTFS_HEALTH_ADDR
+              value: 0.0.0.0:8081
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: objectfs-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: objectfs-s3
+                  key: secret-access-key
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            # Ten failures at 30s, not three. Readiness failing removes the pod from a Service;
+            # liveness failing kills it, discarding buffered writes and doing nothing about a slow
+            # backend. So liveness is patient on purpose.
+            failureThreshold: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/objectfs
+              readOnly: true
+            - name: fuse
+              mountPath: /dev/fuse
+            # hostPath, unlike the StatefulSet's emptyDir, because the point of a DaemonSet mount is
+            # that other pods on the host can reach it — which needs a path on the host and
+            # `mountPropagation: Bidirectional` to make the mount visible outside this container's
+            # namespace. Both are left commented: Bidirectional propagation requires a privileged
+            # container on some versions, and a hostPath that a pod mounts over is worth an operator's
+            # deliberate decision rather than a default.
+            #
+            # HostToContainer is not sufficient here. This pod is the one creating the mount, so the
+            # propagation has to go outward.
+            - name: mountpoint
+              mountPath: /mnt/objectfs
+              # mountPropagation: Bidirectional
+      volumes:
+        - name: config
+          configMap:
+            name: objectfs-config
+        - name: fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
+        - name: mountpoint
+          emptyDir: {}
+          # Replace the emptyDir above with this to expose the mount to the host:
+          # hostPath:
+          #   path: /mnt/objectfs
+          #   type: DirectoryOrCreate

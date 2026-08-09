@@ -133,6 +133,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute change, so the fallback would drop attributes during ObjectFS's own writes. Lifting the
   2 KB ceiling is therefore a deliberate, probed, migrating change, not a silent fallback.
 
+- **Deployment manifests, and the five cluster environment variables they need** ([#146]).
+  `deploy/kubernetes/` holds a StatefulSet, a DaemonSet, a headless Service and a ConfigMap;
+  `deploy/docker/` holds a three-node Compose cluster over MinIO. `deploy/` was previously an empty
+  directory.
+
+  **Finding it first: four of the environment variables this work is built on did not exist.**
+  [#146]'s specification configured its nodes with `OBJECTFS_CLUSTER_ENABLED`, `_NODE_ID`,
+  `_ADVERTISE_ADDR` and `_SEEDS`, and `getEnvMappings` held none of them — established by calling it,
+  not by grep: 24 mappings, no cluster entries. Both `sdks/python/README.md` and
+  `sdks/javascript/README.md` already told operators to `export OBJECTFS_CLUSTER_ENABLED=true`. The
+  outcome that produces is the worst available: every pod starts, mounts, and serves reads, each one a
+  cluster of one, with no error anywhere — because an unread variable cannot complain. Cache
+  invalidations from peers are never received, so a node serves an object another node has already
+  overwritten. Five variables are now read (`_LISTEN_ADDR` is the fifth), and
+  `internal/config/deploy_test.go` compares every `OBJECTFS_*` name in every manifest against
+  `getEnvMappings` in both directions.
+
+  `OBJECTFS_CLUSTER_ENABLED` uses `strconv.ParseBool` and **returns** the error, joining the two
+  monitoring toggles rather than the feature flags that coerce anything but `"true"` to false. The
+  asymmetry is deliberate and it is an integrity argument: coerced to false, the mount succeeds, serves
+  reads, and is invisible to every peer, which is a stale read with nothing logged. `_SEEDS` is
+  comma-separated with entries trimmed and empties dropped, so a manifest wrapped across lines does not
+  produce an empty seed — which would reach the gossip layer as an address to dial and be reported as an
+  unreachable peer rather than as the configuration error it is.
+
+  **A StatefulSet, where [#146] specified a DaemonSet, and both are shipped.** A clustered node needs a
+  stable identity: `node_id` names it in gossip, `advertise_addr` is what peers dial back, and a seed
+  list must name something still there after a restart. A DaemonSet's pods get generated names that
+  change on reschedule and no per-pod DNS, so no seed list can be written. A StatefulSet plus a headless
+  Service gives each replica an ordinal name and a resolvable record, and the three per-pod values come
+  from the downward API — which is the second reason the environment variables must exist, since one
+  ConfigMap is shared by every replica and cannot carry a per-pod value. `advertise_addr` is built from
+  the DNS name rather than `status.podIP` because a pod IP changes on reschedule and a peer holding the
+  old one only sees a member that stopped answering. The DaemonSet is kept for the genuinely
+  uncoordinated case — one independent mount per host — and says plainly that those nodes exchange no
+  invalidations, so each cache is its own until `cache.ttl` expires.
+
+  **MinIO, not the LocalStack [#146] specified.** Coordination rests on conditional writes, and a
+  conditional write is a *correctness* capability: per the project thesis it fails closed rather than
+  degrading, so an endpoint that accepts `If-None-Match` and ignores it does not yield a slower cluster
+  but two nodes each believing it holds the same exclusive claim.
+  `docs/design/conditional-write-compatibility.md` is the probed matrix and MinIO is a row in it,
+  measured at a pinned release, enforcing preconditions as AWS does. LocalStack is not a row. Standing
+  the development environment on an unmeasured endpoint would make it the one place a coordination bug
+  is invisible. The image is pinned by release tag for the same reason the matrix records commits.
+
+  Two things the manifests get right that are invisible until they are wrong, both now asserted in
+  tests. `OBJECTFS_HEALTH_ADDR` moves the health endpoint off loopback: `DefaultHealthAddr` is
+  `127.0.0.1:8081`, correct for a host install of an unauthenticated endpoint and unusable in a pod,
+  where the kubelet probes over the pod IP, gets a refused connection, never passes readiness, and is
+  restarted forever by a liveness probe that could not have succeeded — while the manifest names the
+  right port and path throughout. And `terminationGracePeriodSeconds` is 120 rather than the default 30,
+  because a FUSE mount is unmounted by its own process on a signal: SIGKILL at the end of the grace
+  period leaves the kernel holding a mount whose server is gone, and any dirty range that had not
+  reached S3 is lost. Liveness is also deliberately far more patient than readiness (10 failures against
+  3), since readiness failing removes a pod from a Service while liveness failing kills it — discarding
+  buffered writes and doing nothing about a slow backend.
+
+  `internal/config/deploy_test.go` is the gate, and it exists because a schema validator cannot be one.
+  `kubeconform` approves all five resources here and would equally approve a container invoking a
+  subcommand that does not exist — the same hole `systemd-analyze verify` left in the shipped unit for a
+  year. So it checks what a schema cannot: that every `objectfs` command line uses a subcommand and
+  flags scraped from `cmd/objectfs/main.go`, that every `OBJECTFS_*` name is read by something, that the
+  ConfigMap's embedded config loads through `LoadFromFile` — the real strict unmarshal, so an invented
+  key fails here rather than at pod startup — and that health is bound off loopback in every pod spec.
+  All four were verified by mutation. `kubeconform -strict` and `docker-compose config` were also run;
+  the latter caught a defect in the Compose file's own placeholder secret, where 64 unquoted zeros were
+  read by YAML as the integer `0`, giving a one-byte secret that fails `minSecretLen` while nothing in
+  the file appeared to set it — and which a real `openssl rand -hex 32` value would almost never
+  reproduce, since it usually contains a letter.
+
 ### Fixed
 
 - **A node never recorded its own cache figures in its membership map** ([#147]). `refreshLocalStats`
@@ -3162,6 +3233,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#165]: https://github.com/scttfrdmn/objectfs/issues/165
 [#167]: https://github.com/scttfrdmn/objectfs/issues/167
+[#146]: https://github.com/scttfrdmn/objectfs/issues/146
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#282]: https://github.com/scttfrdmn/objectfs/issues/282
 [#283]: https://github.com/scttfrdmn/objectfs/issues/283

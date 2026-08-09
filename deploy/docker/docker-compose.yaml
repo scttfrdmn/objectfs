@@ -1,0 +1,166 @@
+# A three-node ObjectFS cluster over a local S3 endpoint, for developing distributed mode.
+#
+# This is #146's local half. It is a development harness and says so in several places below, because
+# every simplification it makes for the sake of one `podman compose up` is a thing a real deployment
+# must not copy: the cluster secret is in this file, the S3 credentials are in this file, and the
+# containers run with SYS_ADMIN so they can mount FUSE.
+#
+#   podman compose -f deploy/docker/docker-compose.yaml up --build
+#   podman compose -f deploy/docker/docker-compose.yaml exec objectfs-1 objectfs cluster status
+#   podman compose -f deploy/docker/docker-compose.yaml down -v
+#
+# `docker compose` works identically; podman is what this was written against.
+#
+# MinIO, not LocalStack. #146's issue body specified LocalStack, and that is the one part of its spec
+# not followed here, for a reason this project has written down at length. Coordination in ObjectFS is
+# built on conditional writes, and a conditional write is a *correctness* capability: per CLAUDE.md it
+# fails closed rather than degrading, so an endpoint that accepts `If-None-Match` and ignores it does
+# not produce a slower cluster, it produces two nodes each believing it holds the same exclusive claim.
+# docs/design/conditional-write-compatibility.md is the probed matrix, and MinIO is a row in it —
+# measured, at a pinned release, enforcing preconditions exactly as AWS does. LocalStack is not a row.
+# Standing this file up on an endpoint whose precondition behaviour nobody has measured would make the
+# development environment the one place a coordination bug is invisible.
+#
+# What this deliberately does not model: AWS. The matrix's own header says AWS S3 is the only row
+# verified against the real service and the only one CI keeps verified. A green run here means the
+# gossip mesh forms and the mounts work — not that a behaviour is correct on the backend nearly every
+# user runs. For that, `AWS_PROFILE=aws AWS_REGION=us-west-2 go test -race -tags=integration ./...`.
+---
+name: objectfs-cluster
+
+services:
+  # ---------------------------------------------------------------------------------------------
+  # The S3 endpoint. Pinned by digest, not by tag: `latest` moved under this project once already
+  # (the compat matrix records MinIO at RELEASE.2025-09-07T16-13-09Z with its commit, for exactly
+  # this reason), and a development environment that silently changes its backend between two
+  # `up` invocations is a debugging session nobody can reproduce.
+  # ---------------------------------------------------------------------------------------------
+  minio:
+    image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: objectfs
+      MINIO_ROOT_PASSWORD: objectfs123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      # The readiness probe, not the liveness one. `/minio/health/live` answers before the object
+      # layer is up, so a node that started on it would get a connection refused from its first
+      # HeadBucket and fail the mount — the exact race a healthcheck exists to remove.
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # One-shot: create the bucket the three nodes mount. A separate service rather than an entrypoint
+  # wrapper on each node, because three nodes racing to create the same bucket is a race this file
+  # would be teaching people to write.
+  create-bucket:
+    image: docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 objectfs objectfs123
+        mc mb --ignore-existing local/objectfs-dev
+        echo "bucket objectfs-dev ready"
+
+  # ---------------------------------------------------------------------------------------------
+  # The three ObjectFS nodes.
+  #
+  # Every node runs the same image and the same config file; what differs is four environment
+  # variables. That is not a stylistic choice — three of them have no config-file alternative in a
+  # multi-replica deployment, which is why internal/config now reads them (see the cluster block in
+  # getEnvMappings). A ConfigMap or a baked-in config.yaml is shared by every replica, so per-node
+  # identity has to arrive some other way, and the environment is the way both compose and
+  # Kubernetes offer.
+  #
+  # SYS_ADMIN and /dev/fuse are what a FUSE mount needs and cannot be reduced away: mounting is a
+  # privileged operation. `privileged: true` is *not* used, and the difference is worth keeping —
+  # SYS_ADMIN plus the one device is a much smaller grant than all capabilities plus every device.
+  #
+  # OBJECTFS_CLUSTER_SECRET is inline here and must never be inline anywhere real. A cluster refuses
+  # to start without a secret because an unauthenticated gossip port lets any host on the network
+  # join and announce ownership of cached objects (#206); the value below is 64 hex characters of
+  # nothing in particular, published in a git repository, and therefore worth exactly as much as no
+  # secret at all. deploy/kubernetes/ uses a Secret for this. Generate a real one with:
+  #
+  #   openssl rand -hex 32
+  # ---------------------------------------------------------------------------------------------
+  objectfs-1: &objectfs-node
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      # FUSE needs mount(2), which the default seccomp profile blocks. Without this the container
+      # starts, runs, and fails at the mount with EPERM — a failure that looks like a permissions
+      # problem in the bucket rather than in the sandbox.
+      - apparmor:unconfined
+    command:
+      - mount
+      - --config=/etc/objectfs/config.yaml
+      - --foreground
+    volumes:
+      - ./node-config.yaml:/etc/objectfs/config.yaml:ro
+    environment: &objectfs-env
+      OBJECTFS_S3_ENDPOINT: http://minio:9000
+      OBJECTFS_S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: objectfs
+      AWS_SECRET_ACCESS_KEY: objectfs123
+      OBJECTFS_CLUSTER_ENABLED: "true"
+      OBJECTFS_CLUSTER_LISTEN_ADDR: 0.0.0.0:8080
+      # Not a secret. See the block comment above.
+      #
+      # Quoted, and the first version of this line was not, which is worth recording because the
+      # failure was silent and pointed somewhere else. The placeholder was 64 zeros unquoted; YAML
+      # reads that as the integer zero, and `docker-compose config` renders it back as "0". A 1-byte
+      # secret is below minSecretLen (32), so every node would refuse to start citing a secret length
+      # nothing in this file appears to set. Worse, a *real* secret from `openssl rand -hex 32` almost
+      # always contains a letter and so does not coerce — meaning the placeholder would fail in a way
+      # the real value never does, which is the least useful direction for an example to be wrong in.
+      OBJECTFS_CLUSTER_SECRET: "objectfs-development-cluster-not-a-secret-0123456789abcdef"
+      # Both listeners move off loopback, which is the default. A container's health endpoint on
+      # 127.0.0.1 is reachable only from inside that container, so compose's own healthcheck can
+      # see it but nothing else can — and in Kubernetes the kubelet probes over the pod IP and gets
+      # a connection refused. Same one-line fix in both places; see the k8s manifests.
+      OBJECTFS_HEALTH_ADDR: 0.0.0.0:8081
+      OBJECTFS_METRICS_ADDR: 0.0.0.0:8080
+      OBJECTFS_CLUSTER_NODE_ID: objectfs-1
+      OBJECTFS_CLUSTER_ADVERTISE_ADDR: objectfs-1:8080
+      # Every node seeds from node 1, including node 1 itself. Seeding from oneself is a no-op
+      # rather than an error, and listing one well-known seed everywhere is what keeps this file
+      # from needing a different value per node beyond identity.
+      OBJECTFS_CLUSTER_SEEDS: objectfs-1:8080
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  objectfs-2:
+    <<: *objectfs-node
+    environment:
+      <<: *objectfs-env
+      OBJECTFS_CLUSTER_NODE_ID: objectfs-2
+      OBJECTFS_CLUSTER_ADVERTISE_ADDR: objectfs-2:8080
+
+  objectfs-3:
+    <<: *objectfs-node
+    environment:
+      <<: *objectfs-env
+      OBJECTFS_CLUSTER_NODE_ID: objectfs-3
+      OBJECTFS_CLUSTER_ADVERTISE_ADDR: objectfs-3:8080

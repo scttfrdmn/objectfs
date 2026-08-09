@@ -1,0 +1,250 @@
+# ObjectFS as a clustered StatefulSet.
+#
+# A StatefulSet and not the DaemonSet #146's issue body specified, and the reason is the thing this
+# whole change is about. A clustered ObjectFS node needs a stable identity: `cluster.node_id` names it
+# in gossip, `cluster.advertise_addr` is the address peers dial back on, and the seed list has to name
+# something that will still be there after a restart. A DaemonSet gives pods generated names that
+# change on every reschedule and no stable DNS, so a seed list cannot be written and a peer that comes
+# back is a new member rather than the same one returning. A StatefulSet plus a headless Service gives
+# each replica an ordinal name and a resolvable per-pod DNS record, which is what the seed list below
+# is made of.
+#
+# The DaemonSet shape is still the right one for a *single-node* mount on every host — one mount per
+# node, no cluster, no identity to keep — and that is daemonset.yaml in this directory. Both are here
+# because they answer different questions, not because one supersedes the other.
+#
+#   kubectl apply -f deploy/kubernetes/
+#
+# Before that: create the two secrets. Neither is in this repository and neither should be.
+#
+#   kubectl create secret generic objectfs-cluster --from-literal=secret="$(openssl rand -hex 32)"
+#   kubectl create secret generic objectfs-s3 \
+#     --from-literal=access-key-id=... --from-literal=secret-access-key=...
+#
+# On AWS, prefer IRSA to the objectfs-s3 secret entirely: annotate the ServiceAccount with a role and
+# delete the two AWS_* entries below. The SDK's default credential chain picks the role up with no
+# further configuration, and a role is not a long-lived key sitting in etcd.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: objectfs
+  labels:
+    app.kubernetes.io/name: objectfs
+  # For IRSA, annotate here and drop the AWS_* env entries in the StatefulSet:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<role>
+---
+# Headless, which is what makes the per-pod DNS records exist. `clusterIP: None` means no virtual IP
+# and no load balancing: instead each pod gets objectfs-<ordinal>.objectfs.<namespace>.svc, which is
+# the name the seed list uses and the name a peer dials. A normal ClusterIP Service would give one
+# address that round-robins across all three, which is the opposite of what gossip needs — a member
+# has to be able to reach one specific peer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: objectfs
+  labels:
+    app.kubernetes.io/name: objectfs
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: objectfs
+  ports:
+    - name: gossip
+      port: 8080
+      targetPort: gossip
+      protocol: TCP
+    - name: health
+      port: 8081
+      targetPort: health
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: objectfs
+  labels:
+    app.kubernetes.io/name: objectfs
+spec:
+  serviceName: objectfs
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: objectfs
+  # Parallel, not the default OrderedReady. OrderedReady starts pod 0, waits for it to be Ready, then
+  # starts pod 1 — and readiness here means the health endpoint answers, which happens after the mount
+  # comes up. Every replica seeds from objectfs-0, so ordered start is not required for the mesh to
+  # form, and parallel start means a three-node cluster is up in one pod's start time rather than
+  # three. It also matters on a rolling restart: OrderedReady would take the cluster down to one node
+  # in the middle of it.
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: objectfs
+    spec:
+      serviceAccountName: objectfs
+      # A FUSE mount is torn down by the process that made it, on a signal. The default 30s is enough
+      # for an idle mount and not for one with buffered writes to flush, and the cost of getting it
+      # wrong is asymmetric: SIGKILL at the end of the grace period leaves the kernel with a mount
+      # whose server is gone, and any dirty range that had not reached S3 is lost. Integrity first.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: objectfs
+          image: ghcr.io/scttfrdmn/objectfs:latest
+          args:
+            - mount
+            - --config=/etc/objectfs/config.yaml
+            - --foreground
+          ports:
+            - name: gossip
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          securityContext:
+            # SYS_ADMIN is mount(2) and cannot be reduced away — mounting is privileged. What *is*
+            # reduced: this is not `privileged: true`, which would grant every capability and every
+            # device, and allowPrivilegeEscalation stays false so a setuid binary inside the container
+            # gains nothing beyond this one capability.
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: false
+            # The image creates and runs as uid 1000. Named here as well as in the image so the
+            # manifest is checkable on its own: a PodSecurity policy or an admission controller reads
+            # this, not the image's USER line.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            # ---------------------------------------------------------------------------------------
+            # The three per-pod values. This is the reason the cluster environment variables exist:
+            # every pod in this StatefulSet mounts the same ConfigMap, so a per-pod value cannot come
+            # from a config file, and the downward API delivers a pod's own identity as an environment
+            # variable and in no other form.
+            # ---------------------------------------------------------------------------------------
+            - name: OBJECTFS_CLUSTER_ENABLED
+              value: "true"
+            # metadata.name is the pod's ordinal name — objectfs-0, objectfs-1, objectfs-2 — which a
+            # StatefulSet guarantees is stable across reschedules. That stability is what makes it
+            # usable as a cluster identity; a Deployment's generated suffix is not.
+            - name: OBJECTFS_CLUSTER_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # The headless Service's per-pod record, assembled from the two above. Not status.podIP:
+            # a pod IP changes on reschedule, and a peer holding the old one has no way to learn the
+            # new one — it just sees a member that stopped answering. The DNS name survives the
+            # reschedule, which is the whole reason the Service above is headless.
+            - name: OBJECTFS_CLUSTER_ADVERTISE_ADDR
+              value: $(POD_NAME).objectfs.$(POD_NAMESPACE).svc:8080
+            - name: OBJECTFS_CLUSTER_LISTEN_ADDR
+              value: 0.0.0.0:8080
+            # Seed from ordinal 0 only, and every pod including pod 0 itself, which is a no-op rather
+            # than an error. One seed is enough for a mesh to form and it avoids the alternative:
+            # listing all replicas, which would have to be edited every time `replicas` changes and
+            # would silently name pods that do not exist if it were not.
+            - name: OBJECTFS_CLUSTER_SEEDS
+              value: objectfs-0.objectfs.$(POD_NAMESPACE).svc:8080
+            # ---------------------------------------------------------------------------------------
+            # Both listeners off loopback. This is not optional in Kubernetes, and getting it wrong
+            # fails in a way that looks unrelated: the kubelet probes over the *pod IP*, so a health
+            # endpoint bound to 127.0.0.1 refuses the connection, the readiness probe never passes,
+            # and the pod is restarted forever by a liveness probe that could never have succeeded.
+            # Loopback is the right default for a host install of an unauthenticated endpoint
+            # (config.DefaultHealthAddr) and the wrong one here.
+            # ---------------------------------------------------------------------------------------
+            - name: OBJECTFS_HEALTH_ADDR
+              value: 0.0.0.0:8081
+            - name: OBJECTFS_METRICS_ADDR
+              value: 0.0.0.0:8080
+            # The gossip secret. A cluster refuses to start without one, because an unauthenticated
+            # gossip port lets any host that can reach it join and announce ownership of cached
+            # objects (#206) — a peer's announcement is believed, so a hostile member can direct
+            # reads at itself. OBJECTFS_CLUSTER_SECRET takes precedence over cluster.secret_file and
+            # is the form an orchestrator injects; the file form additionally requires mode 0600,
+            # which a projected Secret volume does not give you.
+            - name: OBJECTFS_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: objectfs-cluster
+                  key: secret
+            # Delete these two when using IRSA. See the header.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: objectfs-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: objectfs-s3
+                  key: secret-access-key
+          # Both probes on /health, with different thresholds rather than different endpoints.
+          #
+          # The failureThreshold difference is the load-bearing part. Readiness failing takes the pod
+          # out of the Service; liveness failing kills it. A mount that is slow to answer because S3
+          # is slow should stop receiving traffic and must not be killed — restarting it discards
+          # buffered writes and does nothing about the backend. So liveness is deliberately far more
+          # patient than readiness.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/objectfs
+              readOnly: true
+            - name: fuse
+              mountPath: /dev/fuse
+            # The mount point itself, and the reason it is a volume rather than just a directory in
+            # the image: `mountPropagation: Bidirectional` is what makes the FUSE mount visible
+            # outside this container. Without it the mount exists only in this container's mount
+            # namespace, so a sidecar or another container in the pod sees an empty directory — which
+            # is the shape almost every real use of this has.
+            #
+            # Bidirectional requires a privileged container in some Kubernetes versions and is
+            # therefore commented out rather than enabled by default; uncomment it, and the matching
+            # entry in volumes, when a consumer needs to see the mount. HostToContainer is the
+            # weaker, safer direction and is not enough here — this pod is the one *creating* the
+            # mount.
+            - name: mountpoint
+              mountPath: /mnt/objectfs
+              # mountPropagation: Bidirectional
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              # No CPU limit, deliberately. A CFS quota throttles a process that is mid-flush, and
+              # what that produces is a FUSE server that stops answering the kernel for tens of
+              # milliseconds at a time — read latency that looks like the backend being slow. The
+              # memory limit stays, because the failure mode there is unbounded growth.
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: objectfs-config
+        - name: fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
+        - name: mountpoint
+          emptyDir: {}

@@ -493,6 +493,106 @@ func TestLoadFromEnvGovernsTheListeners(t *testing.T) {
 	}
 }
 
+// TestLoadFromEnvConfiguresACluster covers the five cluster variables together.
+//
+// They exist for #146's manifests, and three of the five have no alternative: `node_id` and
+// `advertise_addr` are per-pod, a ConfigMap is shared by every pod that mounts it, and Kubernetes hands
+// a pod its own name and IP through the downward API — which arrives as an environment variable and
+// nothing else. A StatefulSet cannot give each replica a distinct identity any other way.
+//
+// The reason to test them rather than trust the table is that all four of the names #146's issue body
+// used were absent from it, and both SDK READMEs documented OBJECTFS_CLUSTER_ENABLED. The failure that
+// produced was silent in the worst direction: three nodes up, each one a cluster of one, no error
+// anywhere, cache invalidations from peers never received. An unread variable cannot complain.
+//
+// t.Setenv forbids t.Parallel; see the comment on TestLoadFromEnv.
+//
+//nolint:paralleltest // t.Setenv forbids t.Parallel
+func TestLoadFromEnvConfiguresACluster(t *testing.T) {
+	t.Run("each variable reaches the field the cluster reads", func(t *testing.T) {
+		t.Setenv("OBJECTFS_CLUSTER_ENABLED", "true")
+		t.Setenv("OBJECTFS_CLUSTER_NODE_ID", "objectfs-1")
+		t.Setenv("OBJECTFS_CLUSTER_LISTEN_ADDR", "0.0.0.0:8080")
+		t.Setenv("OBJECTFS_CLUSTER_ADVERTISE_ADDR", "10.1.2.3:8080")
+		t.Setenv("OBJECTFS_CLUSTER_SEEDS", "objectfs-0.objectfs:8080,objectfs-1.objectfs:8080")
+
+		cfg := NewDefault()
+		if cfg.Cluster.Enabled {
+			t.Fatal("cluster must default to disabled for the Enabled assertion below to mean anything")
+		}
+
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+
+		if !cfg.Cluster.Enabled {
+			t.Error("OBJECTFS_CLUSTER_ENABLED=true did not reach cluster.enabled, so a deployment that " +
+				"asks for a cluster gets a silent single-node mount — which is what both SDK READMEs " +
+				"documented before this variable existed")
+		}
+		if cfg.Cluster.NodeID != "objectfs-1" {
+			t.Errorf("cluster.node_id = %q, want the exported value. This one comes from the downward "+
+				"API and has no config-file alternative in a StatefulSet", cfg.Cluster.NodeID)
+		}
+		if cfg.Cluster.ListenAddr != "0.0.0.0:8080" {
+			t.Errorf("cluster.listen_addr = %q, want the exported value", cfg.Cluster.ListenAddr)
+		}
+		if cfg.Cluster.AdvertiseAddr != "10.1.2.3:8080" {
+			t.Errorf("cluster.advertise_addr = %q, want the exported value. A wrong advertise address "+
+				"is a node peers cannot dial back", cfg.Cluster.AdvertiseAddr)
+		}
+
+		wantSeeds := []string{"objectfs-0.objectfs:8080", "objectfs-1.objectfs:8080"}
+		if len(cfg.Cluster.SeedNodes) != len(wantSeeds) {
+			t.Fatalf("cluster.seed_nodes = %v, want %v", cfg.Cluster.SeedNodes, wantSeeds)
+		}
+		for i, want := range wantSeeds {
+			if cfg.Cluster.SeedNodes[i] != want {
+				t.Errorf("cluster.seed_nodes[%d] = %q, want %q", i, cfg.Cluster.SeedNodes[i], want)
+			}
+		}
+	})
+
+	// Whitespace and a trailing comma, which is what a manifest wrapped for readability produces. An
+	// empty seed would reach the gossip layer as an address to dial and be reported as an unreachable
+	// peer rather than as the configuration error it is, so it is dropped here instead.
+	t.Run("the seed list tolerates the whitespace a manifest introduces", func(t *testing.T) {
+		t.Setenv("OBJECTFS_CLUSTER_SEEDS", " a:8080 ,\n b:8080 ,, ")
+
+		cfg := NewDefault()
+		if err := cfg.LoadFromEnv(); err != nil {
+			t.Fatalf("LoadFromEnv() error = %v", err)
+		}
+
+		if len(cfg.Cluster.SeedNodes) != 2 {
+			t.Fatalf("cluster.seed_nodes = %#v, want exactly [a:8080 b:8080] — an empty or untrimmed "+
+				"entry becomes a peer the node dials and reports as unreachable", cfg.Cluster.SeedNodes)
+		}
+		if cfg.Cluster.SeedNodes[0] != "a:8080" || cfg.Cluster.SeedNodes[1] != "b:8080" {
+			t.Errorf("cluster.seed_nodes = %#v, want [a:8080 b:8080]", cfg.Cluster.SeedNodes)
+		}
+	})
+
+	// A non-boolean must fail startup naming the variable, like the two monitoring toggles and unlike
+	// the feature flags, which coerce. The asymmetry is the point and it is stronger here: coerced to
+	// false, the mount succeeds, serves reads, and is invisible to every peer — so it can serve a stale
+	// object after another node overwrote it, having never received the invalidation. Integrity is what
+	// is at stake, not a feature being off.
+	t.Run("OBJECTFS_CLUSTER_ENABLED refuses a non-boolean", func(t *testing.T) {
+		t.Setenv("OBJECTFS_CLUSTER_ENABLED", "yes-please")
+
+		err := NewDefault().LoadFromEnv()
+		if err == nil {
+			t.Fatal("OBJECTFS_CLUSTER_ENABLED=yes-please was accepted. Coerced to false it is a node " +
+				"that mounts, serves reads, and never hears a peer's invalidation — a stale read with " +
+				"nothing logged")
+		}
+		if !contains(err.Error(), "OBJECTFS_CLUSTER_ENABLED") {
+			t.Errorf("the error does not name the variable at fault: %v", err)
+		}
+	})
+}
+
 func TestLoadFromEnv_S3Region(t *testing.T) {
 	// t.Setenv requires sequential execution; no t.Parallel here.
 

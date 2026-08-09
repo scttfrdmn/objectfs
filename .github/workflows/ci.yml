@@ -585,6 +585,86 @@ jobs:
           -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'
 
   # ---------------------------------------------------------------------------------------------
+  # deploy-manifests — deploy/kubernetes/ and deploy/docker/, which operators are told to apply.
+  #
+  # The same two-halves structure as systemd-unit below, for the same reason and against the same
+  # defect. `go test` checks that every objectfs command line in a manifest uses a subcommand the
+  # binary dispatches and flags it parses, that every OBJECTFS_* name is read by something, and that
+  # the ConfigMap's embedded config survives the real strict unmarshal. This job adds the half that
+  # needs tools rather than Go: schema validation and the Compose parser.
+  #
+  # Neither half is enough alone, and the shape of what each one misses is worth naming. kubeconform
+  # approves any string in an `args:` list, so a container invoking a subcommand that does not exist
+  # is schema-valid — exactly the hole `systemd-analyze verify` left in the shipped unit for a year.
+  # Conversely `go test` cannot know whether a manifest is valid Kubernetes at all: it reads the
+  # files as text and as loose YAML, so a misplaced key under `spec:` or a probe field that moved
+  # between API versions passes it and fails `kubectl apply`.
+  #
+  # -strict, which rejects unknown fields. Without it a typo'd field name is silently ignored by the
+  # validator exactly as it is by the API server, which is the failure this is here to catch: a
+  # `terminationGracePeriodSecond` (singular) would leave the default 30s in place, and 30s is the
+  # value that SIGKILLs a mount through buffered writes.
+  #
+  # `docker compose config` is the Compose half, and it is not a formality — it caught a real defect
+  # in this file's own placeholder secret, where 64 unquoted zeros parsed as the integer 0 and
+  # rendered back as "0", a one-byte secret failing minSecretLen with nothing in the file appearing
+  # to set it. It also expands the YAML anchors, which is the only way to confirm the three nodes end
+  # up with three distinct identities rather than three copies of node 1's.
+  #
+  # What this job deliberately does not do: apply anything. That needs a cluster and a FUSE-capable
+  # runner, and it is worth having as its own job rather than as a half-measure here.
+  # ---------------------------------------------------------------------------------------------
+  deploy-manifests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+    - name: The manifests name env vars the binary reads and flags it parses
+      run: go test ./internal/config/ -v -run 'TestDeploy'
+
+    - name: The Kubernetes manifests are valid, with no unknown fields
+      run: |
+        # Pinned by version rather than tracking latest: this validates against bundled schemas, and a
+        # validator that changes under the repository would turn an unrelated PR red.
+        curl -fsSL \
+          https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+          | tar -xz kubeconform
+        ./kubeconform -strict -summary deploy/kubernetes/
+
+    - name: The Compose file parses, and the three nodes get three identities
+      run: |
+        docker compose -f deploy/docker/docker-compose.yaml config > /tmp/compose-resolved.yaml
+
+        # The anchors are what make one node definition serve three, so the thing worth asserting is
+        # that they produced three *different* node IDs. A merge key that overrode the wrong field, or
+        # an override accidentally deleted, yields three nodes claiming the same identity in gossip —
+        # which is a cluster that forms and then disagrees about who owns what, not one that fails.
+        ids=$(grep -c 'OBJECTFS_CLUSTER_NODE_ID' /tmp/compose-resolved.yaml)
+        distinct=$(grep 'OBJECTFS_CLUSTER_NODE_ID' /tmp/compose-resolved.yaml | sort -u | wc -l)
+        if [ "$ids" != "3" ] || [ "$distinct" != "3" ]; then
+          echo "::error::expected 3 nodes with 3 distinct OBJECTFS_CLUSTER_NODE_ID values, got" \
+            "$ids nodes and $distinct distinct. Two nodes sharing an identity is a cluster that" \
+            "forms and then disagrees about who owns which key."
+          grep 'OBJECTFS_CLUSTER_NODE_ID' /tmp/compose-resolved.yaml
+          exit 1
+        fi
+
+        # The placeholder secret must survive YAML as a string of usable length. 64 unquoted zeros
+        # became the integer 0 here once; minSecretLen is 32, so that is a cluster refusing to start
+        # over a value the file appears to set correctly.
+        secret=$(grep -m1 'OBJECTFS_CLUSTER_SECRET' /tmp/compose-resolved.yaml | sed 's/.*: *//')
+        if [ "${#secret}" -lt 32 ]; then
+          echo "::error::the resolved OBJECTFS_CLUSTER_SECRET is ${#secret} bytes, under" \
+            "minSecretLen (32). An unquoted numeric-looking secret is coerced by YAML; quote it."
+          exit 1
+        fi
+
+  # ---------------------------------------------------------------------------------------------
   # systemd-unit — configs/systemd/objectfs@.service, which operators are told to install.
   #
   # Two halves, and they check different things. `go test` checks that every objectfs command line
