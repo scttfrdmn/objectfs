@@ -32,23 +32,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: Build
-        run: go build ./...
+    - name: Build
+      run: go build ./...
 
-      - name: Vet
-        run: go vet ./...
+    - name: Vet
+      run: go vet ./...
 
       # The full suite. Every test that needs an S3 endpoint gets one in-process from substrate,
       # so this needs no credentials and reaches no network.
-      - name: Test
-        run: go test -race -timeout 20m ./...
+    - name: Test
+      run: go test -race -timeout 20m ./...
 
   # ---------------------------------------------------------------------------------------------
   # build-tags — compile every build tag in the repo.
@@ -87,15 +87,15 @@ jobs:
         # artifact, and compiling it is what keeps it runnable.
         tag: [aws_s3, benchmark, distributed, e2e, integration, fuse_mount, s3compat]
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: Compile the ${{ matrix.tag }} tag
-        run: go vet -tags=${{ matrix.tag }} ./...
+    - name: Compile the ${{ matrix.tag }} tag
+      run: go vet -tags=${{ matrix.tag }} ./...
 
   # ---------------------------------------------------------------------------------------------
   # coverage — a floor per package, ratcheting toward 80%.
@@ -111,12 +111,12 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
       # CGO_ENABLED is stated rather than inherited (#361). It was neither set nor unset here, so the
       # job took the runner's default of cgo *on*, and sdks/c — the one package whose coverage depends
@@ -131,19 +131,19 @@ jobs:
       # output is a coverage number, which is a much worse failure to read. The cross-build matrix and
       # the release build set 0 deliberately, because there the point is a static binary; here the
       # point is measuring every package, so the value that compiles every package is the right one.
-      - name: Measure per-package coverage
-        env:
-          CGO_ENABLED: 1
-        run: go test -covermode=atomic -coverprofile=coverage.out -timeout 20m ./...
+    - name: Measure per-package coverage
+      env:
+        CGO_ENABLED: 1
+      run: go test -covermode=atomic -coverprofile=coverage.out -timeout 20m ./...
 
-      - name: Enforce per-package floors
-        run: ./scripts/coverage-gate.sh coverage.out .coverage-floors
+    - name: Enforce per-package floors
+      run: ./scripts/coverage-gate.sh coverage.out .coverage-floors
 
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: coverage
-          path: coverage.out
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: coverage
+        path: coverage.out
 
   # ---------------------------------------------------------------------------------------------
   # lint — golangci-lint against the config in this repo.
@@ -157,22 +157,22 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
+    - uses: actions/checkout@v7
+      with:
           # golangci-lint needs the merge base to diff against, which a shallow clone does not have.
-          fetch-depth: 0
+        fetch-depth: 0
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
       # --new-from-merge-base resolves origin/<base> with git, so the ref has to exist locally.
       # fetch-depth: 0 above fetches all branches for a push, but a pull_request checkout fetches
       # the merge ref, and the base branch is not guaranteed among them. Fetching it explicitly
       # costs seconds and removes the case where the gate silently degrades to linting everything.
-      - name: Fetch the base branch for the diff
-        run: git fetch --no-tags origin ${{ github.base_ref || 'main' }}
+    - name: Fetch the base branch for the diff
+      run: git fetch --no-tags origin ${{ github.base_ref || 'main' }}
 
       # install-only, then invoke the binary directly in the steps below.
       #
@@ -181,27 +181,27 @@ jobs:
       # the action and passed the whole-repo count as a bare `golangci-lint run` — which was
       # `command not found`, because nothing but the action puts it on PATH. The `|| true` on that
       # step meant a missing binary and a clean repo were the same observation.
-      - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.12.2
-          install-only: true
+    - name: Install golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+        version: v2.12.2
+        install-only: true
 
-      - name: Verify the lint configuration parses
-        run: golangci-lint config verify
+    - name: Verify the lint configuration parses
+      run: golangci-lint config verify
 
-      - name: Lint changed code (blocking)
-        run: |
-          golangci-lint run \
-            --new-from-merge-base=origin/${{ github.base_ref || 'main' }} \
-            --timeout=10m
+    - name: Lint changed code (blocking)
+      run: |
+        golangci-lint run \
+          --new-from-merge-base=origin/${{ github.base_ref || 'main' }} \
+          --timeout=10m
 
-      - name: Whole-repo finding count (informational)
-        if: always()
-        run: |
-          # Not a gate. It is here so the backlog has a number attached to it in every run,
-          # rather than being a thing everyone knows is large and nobody can quantify.
-          golangci-lint run --timeout=10m ./... 2>&1 | tail -30 || true
+    - name: Whole-repo finding count (informational)
+      if: always()
+      run: |
+        # Not a gate. It is here so the backlog has a number attached to it in every run,
+        # rather than being a thing everyone knows is large and nobody can quantify.
+        golangci-lint run --timeout=10m ./... 2>&1 | tail -30 || true
 
   # ---------------------------------------------------------------------------------------------
   # fuzz-smoke — 60 seconds per target, from the committed corpus outward.
@@ -255,34 +255,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {pkg: ./internal/vfs, target: FuzzExtentList}
-          - {pkg: ./internal/vfs, target: FuzzAttrFromMetadata}
-          - {pkg: ./internal/vfs, target: FuzzNodeLifecycle}
-          - {pkg: ./internal/difftest, target: FuzzOperationSequence}
-          - {pkg: ./internal/adapter, target: FuzzConfigConstructsBackend}
-          - {pkg: ./internal/storage/s3, target: FuzzRoundTrip}
-          - {pkg: ./internal/storage/s3, target: FuzzSliceRange}
-          - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
-          - {pkg: ./internal/awsname, target: FuzzValidateRegion}
-          - {pkg: ./internal/coord, target: FuzzNewConfig}
+        - {pkg: ./internal/vfs, target: FuzzExtentList}
+        - {pkg: ./internal/vfs, target: FuzzAttrFromMetadata}
+        - {pkg: ./internal/vfs, target: FuzzNodeLifecycle}
+        - {pkg: ./internal/difftest, target: FuzzOperationSequence}
+        - {pkg: ./internal/adapter, target: FuzzConfigConstructsBackend}
+        - {pkg: ./internal/storage/s3, target: FuzzRoundTrip}
+        - {pkg: ./internal/storage/s3, target: FuzzSliceRange}
+        - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
+        - {pkg: ./internal/awsname, target: FuzzValidateRegion}
+        - {pkg: ./internal/coord, target: FuzzNewConfig}
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: Fuzz ${{ matrix.target }}
-        run: .github/scripts/fuzz-smoke.sh '${{ matrix.pkg }}' '${{ matrix.target }}' 60
+    - name: Fuzz ${{ matrix.target }}
+      run: .github/scripts/fuzz-smoke.sh '${{ matrix.pkg }}' '${{ matrix.target }}' 60
 
       # A counterexample is the whole point of the job, so it has to leave the machine.
-      - uses: actions/upload-artifact@v7
-        if: failure()
-        with:
-          name: fuzz-failure-${{ matrix.target }}
-          path: |
-            **/testdata/fuzz/**
+    - uses: actions/upload-artifact@v7
+      if: failure()
+      with:
+        name: fuzz-failure-${{ matrix.target }}
+        path: |
+          **/testdata/fuzz/**
 
   # ---------------------------------------------------------------------------------------------
   # cross-build — must fail, not warn.
@@ -312,39 +312,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {goos: linux, goarch: amd64}
-          - {goos: linux, goarch: arm64}
-          - {goos: linux, goarch: arm, goarm: '7'}
-          - {goos: linux, goarch: '386'}
-          - {goos: darwin, goarch: amd64}
-          - {goos: darwin, goarch: arm64}
+        - {goos: linux, goarch: amd64}
+        - {goos: linux, goarch: arm64}
+        - {goos: linux, goarch: arm, goarm: '7'}
+        - {goos: linux, goarch: '386'}
+        - {goos: darwin, goarch: amd64}
+        - {goos: darwin, goarch: arm64}
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
       # setup-go runs before GOOS/GOARCH are in scope, deliberately: those are set per step below
       # rather than on the job, so nothing about the toolchain install or its cache keys is asked to
       # reason about a cross-compilation target.
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-        env:
-          CGO_ENABLED: 0
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+    - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+      env:
+        CGO_ENABLED: 0
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
           # Empty for every non-arm cell, which the toolchain ignores.
-          GOARM: ${{ matrix.goarm }}
-        run: go build ./cmd/objectfs
+        GOARM: ${{ matrix.goarm }}
+      run: go build ./cmd/objectfs
 
-      - name: Type-check tests for ${{ matrix.goos }}/${{ matrix.goarch }}
-        env:
-          CGO_ENABLED: 0
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-        run: go vet ./internal/... ./pkg/... ./cmd/...
+    - name: Type-check tests for ${{ matrix.goos }}/${{ matrix.goarch }}
+      env:
+        CGO_ENABLED: 0
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        GOARM: ${{ matrix.goarm }}
+      run: go vet ./internal/... ./pkg/... ./cmd/...
 
   # ---------------------------------------------------------------------------------------------
   # sdk-metrics — the two SDK suites that parse sdks/testdata/metrics-scrape.txt.
@@ -366,11 +366,11 @@ jobs:
   sdk-metrics:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
 
       # `pytest tests/` rather than the one metrics file, so tests/test_storage.py,
       # tests/test_config.py and tests/test_client.py are covered by this step as they land —
@@ -385,44 +385,44 @@ jobs:
       # the gate asserts against whatever was committed last, which is the shape of the defect it
       # exists to catch (#385): to_yaml emitted sixteen keys the Go schema does not define, and
       # save_to_file wrote a document the daemon refused at startup.
-      - name: Python SDK tests
-        working-directory: sdks/python
-        run: |
-          # `-r requirements.txt` first, then the package with --no-deps, so the tree installed here
-          # is the frozen one and not a fresh resolution of six `>=` floors. Before this the job
-          # resolved every floor on every run, which is the defect #337 fixed for docs-site in a
-          # different language: a break could appear or vanish with no commit behind it.
-          #
-          # --no-deps on the second line is what makes the first line authoritative. Without it pip
-          # re-resolves install_requires and can move a version the requirements file pinned.
-          #
-          # setup.py is still installed rather than the sources being put on sys.path, and still
-          # matters: the tests import objectfs.monitoring, objectfs/__init__.py imports the client,
-          # and installing `.` means this job fails if setup.py stops being installable — which
-          # nothing else in CI checks.
-          #
-          # `pip check` afterwards catches the one thing this arrangement can get wrong: a pin in
-          # requirements.txt that does not satisfy install_requires. Cheap, and it fails with the
-          # conflicting package named.
-          pip install --quiet -r requirements.txt
-          pip install --quiet --no-deps .
-          pip check
-          pytest tests/ -q
+    - name: Python SDK tests
+      working-directory: sdks/python
+      run: |
+        # `-r requirements.txt` first, then the package with --no-deps, so the tree installed here
+        # is the frozen one and not a fresh resolution of six `>=` floors. Before this the job
+        # resolved every floor on every run, which is the defect #337 fixed for docs-site in a
+        # different language: a break could appear or vanish with no commit behind it.
+        #
+        # --no-deps on the second line is what makes the first line authoritative. Without it pip
+        # re-resolves install_requires and can move a version the requirements file pinned.
+        #
+        # setup.py is still installed rather than the sources being put on sys.path, and still
+        # matters: the tests import objectfs.monitoring, objectfs/__init__.py imports the client,
+        # and installing `.` means this job fails if setup.py stops being installable — which
+        # nothing else in CI checks.
+        #
+        # `pip check` afterwards catches the one thing this arrangement can get wrong: a pin in
+        # requirements.txt that does not satisfy install_requires. Cheap, and it fails with the
+        # conflicting package named.
+        pip install --quiet -r requirements.txt
+        pip install --quiet --no-deps .
+        pip check
+        pytest tests/ -q
 
       # Node 22, not 20: 20 went end-of-life in April 2026, so it stops receiving security fixes
       # while this job keeps installing it. sdks/javascript declares `node >=16`, so nothing here
       # constrains the upper end — the pin was just never revisited. 22 is the active LTS.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22'
 
-      - name: TypeScript SDK install
-        working-directory: sdks/javascript
+    - name: TypeScript SDK install
+      working-directory: sdks/javascript
         # `npm ci` now that package-lock.json is committed. Without a lockfile this job resolved the
         # manifest ranges fresh on every run, so what CI tested was not what anyone had installed
         # locally, and a Dependabot alert against a transitive dependency tracked the range rather
         # than the nested copy actually in the tree — which is how one alert closed with no fix.
-        run: npm ci --no-audit --no-fund
+      run: npm ci --no-audit --no-fund
 
       # This step is the one that was missing, and its absence is why the SDK shipped 48 type
       # errors: `npm test` runs jest, which through ts-jest only typechecks the files a test
@@ -433,15 +433,15 @@ jobs:
       #
       # Ordered before `npm test` deliberately: a type error is a clearer failure than whatever
       # a test does when the code does not typecheck.
-      - name: TypeScript SDK build
-        working-directory: sdks/javascript
-        run: npm run build
+    - name: TypeScript SDK build
+      working-directory: sdks/javascript
+      run: npm run build
 
-      - name: TypeScript SDK tests
-        working-directory: sdks/javascript
+    - name: TypeScript SDK tests
+      working-directory: sdks/javascript
         # ts-jest typechecks the suite as it runs it, which is the only place *.test.ts gets
         # typechecked at all: tsconfig.json excludes **/*.test.ts from the build above.
-        run: npm test
+      run: npm test
 
       # `npm run lint` had never run successfully anywhere: the eslintConfig in package.json
       # extended "@typescript-eslint/recommended" instead of "plugin:@typescript-eslint/recommended",
@@ -451,9 +451,9 @@ jobs:
       # 23 no-explicit-any warnings remain and are not failures; the config sets that rule to "warn"
       # deliberately, since the SDK's public surface takes `Record<string, any>` in several places.
       # Errors are zero and this step holds that.
-      - name: TypeScript SDK lint
-        working-directory: sdks/javascript
-        run: npm run lint
+    - name: TypeScript SDK lint
+      working-directory: sdks/javascript
+      run: npm run lint
 
       # Java, for the same reason as the `tsc` step above and with the same history: nothing in this
       # repository had ever run Maven, and `mvn compile` failed with four errors — an import of
@@ -464,15 +464,15 @@ jobs:
       #
       # `mvn -B test` rather than `compile`: the tests use MockWebServer, so they need no network
       # beyond Maven's own dependency resolution and no credentials.
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: maven
+    - uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: '17'
+        cache: maven
 
-      - name: Java SDK build and test
-        working-directory: sdks/java
-        run: mvn -B test
+    - name: Java SDK build and test
+      working-directory: sdks/java
+      run: mvn -B test
 
       # C, the fourth SDK and the last one nothing in CI touched. Unlike the JavaScript and Java
       # cases, it does build — `go build ./...` compiles the cgo Go side because sdks/c is a package
@@ -489,14 +489,14 @@ jobs:
       # `make test` builds the library, compiles tests/test_basic.c against the public header, and
       # runs both that binary and the Python ctypes smoke test. The integration halves of both skip
       # themselves without OBJECTFS_TEST_BUCKET, so this needs no credentials and reaches no network.
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: C SDK build and test
-        working-directory: sdks/c
-        run: make test
+    - name: C SDK build and test
+      working-directory: sdks/c
+      run: make test
 
   # ---------------------------------------------------------------------------------------------
   # docs-site — `vitepress build` on docs-platform/, which nothing had ever run.
@@ -536,19 +536,19 @@ jobs:
   docs-site:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22'
 
-      - name: Install docs-platform dependencies
-        working-directory: docs-platform
-        run: npm ci --no-audit --no-fund
+    - name: Install docs-platform dependencies
+      working-directory: docs-platform
+      run: npm ci --no-audit --no-fund
 
-      - name: Build documentation site
-        working-directory: docs-platform
-        run: npx vitepress build .
+    - name: Build documentation site
+      working-directory: docs-platform
+      run: npx vitepress build .
 
   # ---------------------------------------------------------------------------------------------
   # config-examples — every config file this repository publishes, in a file or in a doc, must
@@ -572,17 +572,17 @@ jobs:
   config-examples:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: Load and validate every shipped and documented config
-        run: |
-          go test ./internal/config/ -v \
-            -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'
+    - name: Load and validate every shipped and documented config
+      run: |
+        go test ./internal/config/ -v \
+          -run 'TestShippedConfigs|TestDocumentedConfigYAML|TestLoadFromFile|TestTopLevelKeys'
 
   # ---------------------------------------------------------------------------------------------
   # systemd-unit — configs/systemd/objectfs@.service, which operators are told to install.
@@ -607,31 +607,323 @@ jobs:
   systemd-unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
-      - name: The unit calls the binary the binary actually is
-        run: go test ./internal/config/ -v -run 'TestSystemdUnit'
+    - name: The unit calls the binary the binary actually is
+      run: go test ./internal/config/ -v -run 'TestSystemdUnit'
 
-      - name: The unit is well-formed systemd
-        run: |
-          # ExecStart's binary does not exist on the runner and ExecStartPre's directories are not
-          # creatable, so analyze reports those as warnings on stderr. Its exit code covers syntax
-          # and directive validity, which is the half being checked here; a stub binary at the
-          # unit's own path silences the executable-not-found line so a real error stands out.
-          sudo install -d /usr/bin
-          sudo tee /usr/bin/objectfs >/dev/null <<'STUB'
-          #!/bin/sh
-          exit 0
-          STUB
-          sudo chmod +x /usr/bin/objectfs
+    - name: The unit is well-formed systemd
+      run: |
+        # ExecStart's binary does not exist on the runner and ExecStartPre's directories are not
+        # creatable, so analyze reports those as warnings on stderr. Its exit code covers syntax
+        # and directive validity, which is the half being checked here; a stub binary at the
+        # unit's own path silences the executable-not-found line so a real error stands out.
+        sudo install -d /usr/bin
+        sudo tee /usr/bin/objectfs >/dev/null <<'STUB'
+        #!/bin/sh
+        exit 0
+        STUB
+        sudo chmod +x /usr/bin/objectfs
 
-          sudo cp configs/systemd/objectfs@.service /etc/systemd/system/
-          systemd-analyze verify /etc/systemd/system/objectfs@example.service
+        sudo cp configs/systemd/objectfs@.service /etc/systemd/system/
+        systemd-analyze verify /etc/systemd/system/objectfs@example.service
+
+  # ---------------------------------------------------------------------------------------------
+  # packaging — the deb and the rpm are built, installed, and removed, on a real dpkg.
+  #
+  # Its own job for the reason systemd-unit is: what it checks cannot be checked by `go test`. The
+  # Go tests in internal/config/packaging_test.go read nfpm.yaml against the filesystem and *run*
+  # the two maintainer scripts against a scratch root, which covers every coupling and every
+  # idempotency claim — but not whether dpkg accepts the archive, and not whether it runs the
+  # scriptlets in the states it actually runs them in.
+  #
+  # #207's diagnosis was that scripts/preremove.sh could never run, because a pre-removal hook is
+  # invokable only by a package manager and there was no packaging in the tree. So the check that
+  # matters is a package manager invoking it. `apt-get remove` with a mount absent is the passing
+  # path; the failure path (a mount that will not unmount, where the script refuses) is covered by
+  # the Go tests, because creating a busy FUSE mount on a runner needs /dev/fuse and a bucket.
+  #
+  # dpkg only. There is no rpm on ubuntu-latest and installing one gives a database with no
+  # distribution behind it, so `rpm -i` would fail on unrelated dependency resolution rather than
+  # on anything about this package. The rpm is still *built* here — nfpm's rpm writer is where a
+  # malformed spec would surface — and `rpm -qp` under a container is the follow-on worth having.
+  # ---------------------------------------------------------------------------------------------
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+    - name: nfpm.yaml agrees with the scripts, the Makefile and the version constant
+      run: go test ./internal/config/ -v -run 'TestPackag|TestPostinstall|TestPreremove|TestMakefile'
+
+    - name: Build the deb and the rpm
+      run: make package-linux
+
+    - name: Install the deb, and let the postinstall scriptlet run
+      run: |
+        # apt-get update first: installing a local .deb still resolves Recommends (fuse3) against
+        # the package lists, and a runner image's lists are as old as the image.
+        sudo apt-get update
+        sudo apt-get install -y ./dist/objectfs_*_amd64.deb
+
+        # The scriptlet's own claims, checked against the filesystem rather than against its
+        # output: the config it copies, the unit it installs, and a binary that runs.
+        test -f /etc/objectfs/config.yaml
+        test -f /usr/lib/systemd/system/objectfs@.service
+        test -f /usr/share/objectfs/configs/example.yaml
+        objectfs version
+
+        # 0600, because it is the file an operator will paste a key into.
+        [ "$(stat -c %a /etc/objectfs/config.yaml)" = "600" ]
+
+    # The end of the chain #145 and #207 are two halves of, and the only step that runs all of it:
+    # nfpm computes a destination, dpkg installs it, Lmod finds it by walking MODULEPATH, and the
+    # modulefile derives a prefix from its own location and puts the binary on PATH. Each of those is
+    # covered in isolation elsewhere — packaging_test.go on the dst, modulefiles_test.go on a staged
+    # tree — and neither can see a disagreement between them. The failure they miss is a real one and
+    # silent: an install that succeeds, a `module avail` that lists objectfs, and a `module load` that
+    # exports nothing useful.
+    #
+    # Lmod only, not both, and the omission is deliberate rather than an oversight: what is being
+    # tested here is the *installed path*, which both files share, and the modulefiles job above runs
+    # both interpreters against a staged copy. Installing environment-modules here as well would buy a
+    # second reading of the same dst.
+    - name: The installed modulefile loads under Lmod and reports the packaged version
+      run: |
+        sudo apt-get install -y lmod
+
+        # From the constant, with release.yml's expression, because the version is in the *filename*.
+        V=$(sed -n 's/^[[:space:]]*version = "\(.*\)"/\1/p' cmd/objectfs/main.go)
+        test -n "$V"
+
+        test -f "/usr/share/modulefiles/objectfs/$V.lua"
+        test -f "/usr/share/modulefiles/objectfs/$V"
+
+        # One module, one version — not two. Both files land in the same directory by design, and the
+        # question this answers is what a module system makes of that. Lmod prefers the .lua and
+        # collapses them; a listing with two entries, or with a version named "objectfs", means the
+        # layout is wrong in a way `test -f` cannot see.
+        avail=$(env -i MODULEPATH=/usr/share/modulefiles PATH=/usr/bin:/bin HOME="$HOME" \
+          /usr/share/lmod/lmod/libexec/lmod bash avail 2>&1)
+        echo "$avail"
+        if [ "$(printf '%s\n' "$avail" | grep -c "objectfs/$V\b")" != "1" ]; then
+          echo "::error::\`module avail\` does not list exactly one objectfs/$V. Shipping the Lmod" \
+            "and TCL files into one directory is supposed to yield a single module; see nfpm.yaml."
+          exit 1
+        fi
+
+        out=$(env -i MODULEPATH=/usr/share/modulefiles PATH=/usr/bin:/bin HOME="$HOME" \
+          /usr/share/lmod/lmod/libexec/lmod bash load objectfs 2>&1)
+        echo "$out"
+
+        # The version, bound to the variable rather than found anywhere in the output. Lmod's own
+        # bookkeeping (_LMFILES_, LOADEDMODULES) contains the version whatever the modulefile
+        # computed, so a substring search here passes on a file that got it wrong — measured, in
+        # modulefiles_test.go's comment at TestModulefilesLoadUnderRealModuleSystems.
+        if ! printf '%s\n' "$out" | grep -qE "^OBJECTFS_VERSION=$V;?$"; then
+          echo "::error::loading the installed module did not export OBJECTFS_VERSION=$V. The" \
+            "modulefile reads its version out of its own install path, so this is nfpm.yaml's dst" \
+            "and the modulefile disagreeing."
+          exit 1
+        fi
+
+        # No PATH change, and that is the assertion rather than an omission.
+        #
+        # This is the one place where the packaged layout and a versioned HPC install differ, and the
+        # difference is the point of the modulefile's systemBinDirs list. The deb installs the binary
+        # to /usr/bin, which is already on every login PATH, so prepending it would be the hoisting
+        # defect the file documents: Lmod replays the inverse of a prepend at unload, so hoisting
+        # /usr/bin ahead of a site's own directories leaves it hoisted after `module unload`. A site
+        # that installs to /sw/objectfs/<version> does get a prepend, which is what the staged-tree
+        # test in the modulefiles job covers.
+        #
+        # So the check is that the load emitted no PATH assignment and the binary is reachable anyway.
+        if printf '%s\n' "$out" | grep -qE '^PATH='; then
+          echo "::error::loading the installed module changed PATH. The binary is in /usr/bin, which" \
+            "is in the modulefile's systemBinDirs, so it must not be prepended — Lmod would leave it" \
+            "hoisted after \`module unload\`. See the systemBinDirs comment in configs/modules/objectfs.lua."
+          exit 1
+        fi
+        command -v objectfs
+
+    - name: Reinstalling does not overwrite the operator's config
+      run: |
+        # The #137 case, on a real dpkg rather than against a scratch root: postinst runs again on
+        # every reinstall and every upgrade, and this is the file whose replacement would be data
+        # loss noticed only at the next mount.
+        #
+        # `dpkg -i` of the same version, not `dpkg-reconfigure`: reconfigure goes through debconf,
+        # which this package has no config script for, and `dpkg --configure` on an
+        # already-configured package is a no-op that never reaches postinst. Reinstalling the same
+        # .deb does run it, with the "configure" action, which is the invocation being tested.
+        #
+        # It also runs prerm with "upgrade", since dpkg treats replacing a package as one — so this
+        # step covers the other half of the #207 fix at the same time: the outgoing script must
+        # recognise an upgrade and leave mounts and units alone. Nothing is mounted on the runner,
+        # so what is observable here is that it does not fail; is_upgrade's mount-preserving branch
+        # is covered against a scratch /proc/mounts by TestPreremoveLeavesMountsAloneOnUpgrade.
+        echo "# edited by the operator" | sudo tee -a /etc/objectfs/config.yaml >/dev/null
+        sudo cp /etc/objectfs/config.yaml /tmp/expected.yaml
+        # 0750, an operator-tightened directory mode that must also survive. This is the other half
+        # of #137: the previous postinstall.sh ran `chmod 755` unconditionally, so every upgrade
+        # silently widened it back. 0750 rather than 0640 because a directory without its execute
+        # bit cannot be traversed at all, which would be testing a mode no operator would set.
+        sudo chmod 750 /etc/objectfs
+
+        sudo dpkg -i ./dist/objectfs_*_amd64.deb
+
+        sudo diff /tmp/expected.yaml /etc/objectfs/config.yaml
+        [ "$(stat -c %a /etc/objectfs)" = "750" ]
+        sudo chmod 755 /etc/objectfs
+
+    - name: Remove the package, and assert nothing is left enabled or mounted
+      run: |
+        # This step is #207. Before the packaging existed, nothing in the repository could reach
+        # scripts/preremove.sh at all.
+        sudo apt-get remove -y objectfs
+
+        # No objectfs@ unit remains enabled.
+        if systemctl list-unit-files 'objectfs@*.service' --state=enabled --no-legend | grep .; then
+          echo "::error::an objectfs@ unit is still enabled after removal"
+          exit 1
+        fi
+
+        # No objectfs mount remains. Both spellings, because the mount reports fuse.s3 (Subtype
+        # "s3") rather than fuse.objectfs — which is the assumption the old preremove.sh was
+        # written against, and the reason its unmount loop had never matched a real mount.
+        if grep -E 'fuse\.(objectfs|s3)' /proc/mounts; then
+          echo "::error::an objectfs mount survived removal"
+          exit 1
+        fi
+
+        # The configuration is preserved, and the scriptlet says so on the way out — an operator
+        # retrying a removal should not have to wonder whether their config went with it.
+        test -f /etc/objectfs/config.yaml
+
+        # The package's own files are gone, which is the other half of a removal working. Every
+        # path here is one nfpm.yaml ships, so dpkg owns it and `remove` — not just `purge` — takes
+        # it.
+        test ! -f /usr/bin/objectfs
+        test ! -f /usr/lib/systemd/system/objectfs@.service
+        test ! -f /usr/share/objectfs/configs/example.yaml
+
+        # The modulefiles too, and this one is worth asserting rather than assuming: a leftover
+        # modulefile is worse than a leftover data file, because `module load objectfs` would still
+        # appear to work and would then refuse with "no objectfs binary found" — the fail-closed path
+        # doing its job, in a situation that should not exist. Their dst is computed from the version,
+        # so it is also the entry most likely to end up unowned by dpkg.
+        if find /usr/share/modulefiles/objectfs -type f 2>/dev/null | grep .; then
+          echo "::error::a modulefile survived removal, so \`module avail\` still lists objectfs" \
+            "after the package is gone"
+          exit 1
+        fi
+
+    - name: Purge, and record what it does and does not remove
+      run: |
+        sudo apt-get purge -y objectfs
+
+        # /etc/objectfs/config.yaml SURVIVES a purge, and this step asserts that rather than
+        # wishing otherwise, because it is the current behaviour and a CI step that asserted the
+        # opposite would be a red build describing a feature nobody wrote.
+        #
+        # Why it survives: the file is created by scripts/postinstall.sh, not shipped by the
+        # package, so dpkg does not own it and does not track it as a conffile. That is deliberate
+        # (see nfpm.yaml — a packaged file under /etc prompts on upgrade and hangs unattended apt),
+        # and the cost is that only a postremove scriptlet keyed on the "purge" action could delete
+        # it. There is no postremove scriptlet: it was outside the packaging this change set out to
+        # land, and deleting an operator's configuration is not a thing to add without deciding it
+        # on purpose.
+        #
+        # The consequence to know: `apt purge objectfs` followed by a reinstall keeps the old
+        # config, because postinstall.sh copies only when the file is absent.
+        test -f /etc/objectfs/config.yaml
+
+  # ---------------------------------------------------------------------------------------------
+  # modulefiles — configs/modules/ under real Lmod and real TCL Modules.
+  #
+  # Its own job because it needs two interpreters no other job wants, and because without it the
+  # tests that matter most here do not run at all. `TestModulefilesLoadUnderRealModuleSystems` and
+  # `TestModulefilesRefuseToLoadWithoutABinaryUnderRealModuleSystems` call `t.Skipf` when neither
+  # `lmod` nor `modulecmd.tcl` is on the box — correct on a developer laptop, and on a bare runner
+  # it means `go test` exits 0 having checked nothing an HPC site cares about.
+  #
+  # That gap is not hypothetical. The structural checks in modulefiles_test.go read the files; only
+  # the interpreter can tell you that Lmod resolves a two-level `name/version` tree and makes the
+  # *version* the name if you add a third level, that TCL's `prepend-path` skips a directory already
+  # on PATH while Lmod's hoists it to the front and leaves it there after `module unload`, or that a
+  # refusal emits zero environment changes rather than half-applying. Every one of those was a real
+  # defect in this feature's first draft, and every one is invisible without the real thing.
+  #
+  # So the skip is an error here, on the same reasoning as the labels job below: a gate that reports
+  # success for work it did not do is worse than no gate.
+  # ---------------------------------------------------------------------------------------------
+  modulefiles:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+    # Both, not either. They disagree in ways the modulefiles have to absorb — see the PATH
+    # comment above — so a site running one is not evidence about a site running the other.
+    - name: Install Lmod and TCL Modules
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y lmod environment-modules
+
+    # The interpreters have to be where modulefiles_test.go looks, and the test's response to their
+    # absence is a skip. Checking it here instead means a packaging change reports as "the path
+    # moved, here is where it went" rather than as a green run — and it reports before the test,
+    # rather than as a grep for a string in its output.
+    - name: The interpreters are where the test looks for them
+      run: |
+        for path in /usr/share/lmod/lmod/libexec/lmod /usr/lib/x86_64-linux-gnu/modulecmd.tcl; do
+          if [ ! -x "$path" ]; then
+            echo "::error::$path is not executable, so the test that needs it would skip and this" \
+              "job would pass having checked only the structural half."
+            echo "What the packages actually installed:"
+            dpkg -L lmod environment-modules | grep -E 'lmod$|modulecmd' || true
+            echo "Add the path to the candidate list in internal/config/modulefiles_test.go."
+            exit 1
+          fi
+        done
+
+    - name: The modulefiles load, and refuse, under both module systems
+      run: |
+        set -o pipefail
+        go test ./internal/config/ -v -run 'TestModulefiles' 2>&1 | tee modulefiles.log
+
+        # Backstop to the check above, and not redundant with it: both real-interpreter tests have a
+        # second skip condition the filesystem check cannot see — the refusal test skips when
+        # /usr/bin/objectfs exists, since the modulefile's fallback search then finds a binary and
+        # there is no absent-binary case left to run. This job installs no objectfs, which is why it
+        # is its own job and not a step in `packaging`. If that ever changes, this catches it.
+        #
+        # One pattern per subtest rather than one for the family, because a skip of either
+        # interpreter leaves the other reporting for both.
+        for t in Load Refuse; do
+          for system in lmod tcl-modules; do
+            if grep -qE "^ *--- SKIP: TestModulefiles${t}[A-Za-z]*/${system} " modulefiles.log; then
+              echo "::error::TestModulefiles${t}.../${system} skipped instead of running, so this" \
+                "job checked only the structural half. That is a CI configuration failure, not a" \
+                "pass. The skip message in the log says which condition fired."
+              exit 1
+            fi
+          done
+        done
 
   # ---------------------------------------------------------------------------------------------
   # labels — .github/labels.yml against the labels the repository actually has, both directions.
@@ -652,28 +944,28 @@ jobs:
       contents: read
       issues: read
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache: true
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
 
       # The API half of the gate skips when gh cannot reach the API, which is right for a laptop and
       # wrong here: a skipped gate reports success. So the output is checked for the skip, because
       # `go test` exits 0 either way and this job exists to be the one place that cannot happen.
-      - name: Label taxonomy matches the repository
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -o pipefail
-          go test ./internal/config/ -v \
-            -run 'TestLabelsYAMLIsWellFormed|TestLabelsYAMLMatchesTheRepository|TestDependabotLabelsAreDefined|TestSyncLabelsScriptCanParseTheFile' \
-            2>&1 | tee labels.log
+    - name: Label taxonomy matches the repository
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -o pipefail
+        go test ./internal/config/ -v \
+          -run 'TestLabelsYAMLIsWellFormed|TestLabelsYAMLMatchesTheRepository|TestDependabotLabelsAreDefined|TestSyncLabelsScriptCanParseTheFile' \
+          2>&1 | tee labels.log
 
-          if grep -q 'SKIP.*TestLabelsYAMLMatchesTheRepository' labels.log; then
-            echo "::error::the label comparison skipped instead of running, so this job checked" \
-              "only the offline half. gh could not reach the API — that is a CI configuration" \
-              "failure, not a pass."
-            exit 1
-          fi
+        if grep -q 'SKIP.*TestLabelsYAMLMatchesTheRepository' labels.log; then
+          echo "::error::the label comparison skipped instead of running, so this job checked" \
+            "only the offline half. gh could not reach the API — that is a CI configuration" \
+            "failure, not a pass."
+          exit 1
+        fi

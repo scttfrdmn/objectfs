@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`.deb` and `.rpm` packages, and the uninstall script they make reachable** ([#207], [#137]).
+  `make package-linux` builds both formats for amd64 and arm64 from one `nfpm.yaml`. The package
+  installs the binary to `/usr/bin`, the systemd template unit to `/usr/lib/systemd/system` (the
+  packager's directory — `/etc/systemd/system` is where an operator's override goes, and systemd gives
+  that precedence), and the example config to `/usr/share`, from where `postinstall.sh` copies it to
+  `/etc/objectfs/config.yaml` only if that file does not already exist.
+
+  [#207] was that `scripts/preremove.sh` existed and could not run: only a package manager invokes a
+  pre-removal hook, and there was no packaging, so `grep -r preremove` returned the script and nothing
+  else. Both scriptlets are now wired, and both were rewritten around the guard-check-then-act pattern
+  [#137] asks for — the previous `postinstall.sh` ran `chmod 755 /etc/objectfs` unconditionally, so
+  every upgrade silently widened a directory an operator had tightened.
+
+  Two decisions worth stating because they are not the obvious ones. **`fuse3` is a Recommends, not a
+  Depends**: `fusermount3` is needed only for an *unprivileged* mount — a root mount goes through
+  `mount(2)` directly — so a build server or a container image can install this package without pulling
+  in a setuid helper, and `postinstall.sh` warns with the per-distribution command when it is absent.
+  **Nothing is shipped under `/etc`**: a packaged file there is a dpkg conffile, and dpkg prompts on
+  upgrade to merge it, which hangs an unattended `apt upgrade`. The cost is that
+  `/etc/objectfs/config.yaml` survives `apt purge`, which CI asserts rather than wishes otherwise.
+
+  A removal with a live mount **fails** rather than proceeding. dpkg honours that as a refusal; rpm
+  reports it and erases anyway, because `%preun` is not a veto, and the script's header says so. An
+  upgrade is detected and leaves mounts and units alone.
+
+- **Lmod and TCL Modules modulefiles** ([#145]), in `configs/modules/`, installed by the packages to
+  `/usr/share/modulefiles/objectfs/<version>` so that `module load objectfs` works on a packaged host
+  with no further steps. Both derive their prefix from their own location and export
+  `OBJECTFS_VERSION` read back out of the install path, so `cmd/objectfs/main.go` stays the only place
+  a version is written down. `OBJECTFS_MODULE_PREFIX` overrides the derivation for a site whose module
+  tree lives apart from its builds.
+
+  They **refuse to load** when no binary is found, listing the paths searched. Locating the binary is a
+  correctness capability, not a performance one: a modulefile that puts a directory on `PATH` with
+  nothing in it reports success, shows up in `module list`, and surfaces as "command not found" inside
+  a batch job hours later, at which point the module system looks right and ObjectFS looks broken.
+
+### Fixed
+
+- **`preremove.sh` never matched a real mount.** Its unmount loop looked for `type fuse.objectfs` in
+  `/proc/mounts`, and ObjectFS mounts report **`fuse.s3`** — `internal/fuse/mount.go` sets
+  `Subtype: "s3"`. The pattern had nothing to match against, so the one thing the script existed to do
+  could not happen. Fixed, and asserted against a scratch `/proc/mounts` and by a real
+  install/remove cycle in CI. This is the same defect class as the JS SDK's `isMounted`, which checked
+  the same string that was never emitted.
+
+### Changed
+
+- **`shellcheck` runs on every shell script** in pre-commit, and three pre-existing findings in
+  `scripts/pjdfstest.sh` and `scripts/cleanup-aws-test.sh` are fixed. Two new CI jobs cover the work
+  above by doing it for real rather than by reading files: `packaging` installs the `.deb` with `dpkg`,
+  reinstalls it over an edited config, then removes and purges it, asserting at each step; `modulefiles`
+  installs Lmod *and* TCL Modules and **fails if either test skips**, because the interpreter tests
+  return a pass having checked nothing when the interpreter is absent, which is the state of a bare
+  runner.
+
 ## [0.13.0] - 2026-08-09
 
 Two things that existed and did nothing now do something.
@@ -3002,6 +3060,9 @@ had no message authentication, and a cluster will not start without a shared sec
 [#142]: https://github.com/scttfrdmn/objectfs/issues/142
 [#143]: https://github.com/scttfrdmn/objectfs/issues/143
 [#150]: https://github.com/scttfrdmn/objectfs/issues/150
+[#207]: https://github.com/scttfrdmn/objectfs/issues/207
+[#137]: https://github.com/scttfrdmn/objectfs/issues/137
+[#145]: https://github.com/scttfrdmn/objectfs/issues/145
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#282]: https://github.com/scttfrdmn/objectfs/issues/282

@@ -1,0 +1,203 @@
+# nfpm configuration — one file, both packages.
+#
+# `make package-linux` builds the deb and the rpm from this. Everything variable comes in through the
+# environment rather than being written here:
+#
+#   OBJECTFS_VERSION  the `version` constant from cmd/objectfs/main.go — never a literal below
+#   OBJECTFS_ARCH     amd64 | arm64, selecting the staged binary and the package architecture
+#
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+
+name: objectfs
+
+# The version is an environment variable, not a number, and internal/config/packaging_test.go fails
+# if it ever becomes a number.
+#
+# CLAUDE.md's rule: the `version` constant in cmd/objectfs/main.go is the only authority, because
+# this repository once gave five different answers to "what version is this?" and every one of them
+# was correct on the day it was typed. .github/workflows/release.yml already refuses to publish a tag
+# that disagrees with the constant. A literal here would be a sixth copy, and the one most likely to
+# go unnoticed — nothing reads a package's version back to compare it, so `objectfs version` inside
+# objectfs_0.12.0_amd64.deb would say 0.13.0 and no gate anywhere would notice.
+#
+# The Makefile target extracts it with the same sed expression release.yml uses.
+version: ${OBJECTFS_VERSION}
+arch: ${OBJECTFS_ARCH}
+platform: linux
+
+# Release 1 rather than a git count. The package revision is about the *packaging* changing for an
+# unchanged upstream version, which does not happen here: every release of ObjectFS is a new version
+# constant. A monotonically increasing number derived from git would make two builds of the same
+# commit produce differently-named packages.
+release: '1'
+
+maintainer: Scott Friedman <3011922+scttfrdmn@users.noreply.github.com>
+vendor: ObjectFS
+homepage: https://github.com/scttfrdmn/objectfs
+license: Apache-2.0
+
+# No `bugs.url`, no repository URL, and deliberately no reference to a package repository. There is
+# no published apt or yum repository for ObjectFS; naming one here would put an address into every
+# installed package's metadata that nothing serves.
+
+description: |
+  FUSE filesystem presenting a POSIX interface over AWS S3.
+
+  ObjectFS mounts an S3 bucket as a directory tree for research computing and institutional
+  deployments: reads, writes, directory listings, and metadata, with a local cache and read-ahead.
+  It is not a POSIX-compliant filesystem — hard links, mmap-shared writes, and byte-range locking
+  are unsupported by design. See the supported-operations table in the README for what works and
+  which tools are known not to.
+
+section: utils
+priority: optional
+
+# Recommends, not Depends, and the distinction is the whole of #137's "installation must succeed even
+# on systems without FUSE".
+#
+# fuse3 supplies fusermount3, which is what an *unprivileged* mount goes through. A root mount does
+# not need it at all: internal/fuse tries a direct mount(2) and then umount(2). So a machine without
+# fuse3 can install this package, run `objectfs version`, and mount as root — and a build server or
+# a container image being prepared for later use has no reason to pull in a setuid helper. Depends
+# would make apt refuse the install; Recommends installs it by default on Debian and lets
+# --no-install-recommends decline it. scripts/postinstall.sh warns when it is absent and prints the
+# per-distribution command, which is the honest treatment of a soft prerequisite.
+recommends:
+- fuse3
+
+contents:
+  # The binary. Staged by `make build-linux` as build/objectfs-linux-<arch>; `expand: true` is what
+  # allows ${OBJECTFS_ARCH} to appear in a src path (nfpm only expands contents entries that ask).
+- src: ./build/objectfs-linux-${OBJECTFS_ARCH}
+  dst: /usr/bin/objectfs
+  expand: true
+  file_info:
+    mode: 0755
+
+  # /usr/lib/systemd/system, not /etc/systemd/system. A unit under /etc is the operator's — that is
+  # where a local override or a hand-written unit lives, and systemd gives it precedence. A unit
+  # shipped by a package belongs under /usr/lib/systemd/system, which is also where both dpkg (via
+  # usrmerge) and rpm expect it, so an operator can still drop a modified copy into /etc and have it
+  # win without fighting the package manager over the same path.
+  #
+  # Installed but not enabled. objectfs@ is a template and an instance name is meaningless without a
+  # matching /etc/objectfs/<name>.yaml naming a bucket, so there is no instance a package could
+  # sensibly enable.
+- src: ./configs/systemd/objectfs@.service
+  dst: /usr/lib/systemd/system/objectfs@.service
+  file_info:
+    mode: 0644
+
+  # The example config goes to /usr/share, and scripts/postinstall.sh copies it to
+  # /etc/objectfs/config.yaml if and only if that file does not already exist.
+  #
+  # It is emphatically *not* installed to /etc directly. A packaged file under /etc is a dpkg
+  # conffile: dpkg tracks its checksum and, on upgrade, prompts the operator to choose between their
+  # version and the package's. An interactive prompt in the middle of an unattended `apt upgrade`
+  # is a hung machine. Copy-if-absent from /usr/share gives the operator sole ownership of the file
+  # they put credentials-adjacent settings into, and gives the package a pristine copy to compare
+  # against — `diff /usr/share/objectfs/configs/example.yaml /etc/objectfs/config.yaml` is a useful
+  # thing to be able to run.
+  #
+  # internal/config/packaging_test.go asserts this destination is the exact path postinstall.sh
+  # reads, so the two cannot drift.
+- src: ./configs/example.yaml
+  dst: /usr/share/objectfs/configs/example.yaml
+  file_info:
+    mode: 0644
+
+  # The full-schema reference, next to the copyable one. Every key at its built-in default, which is
+  # what internal/config/shipped_test.go's allDefaultsByDesign exemption records — it is
+  # documentation of the schema rather than a starting point, and an operator looking for a setting
+  # that configs/example.yaml omits needs it locally rather than on a web page.
+- src: ./examples/config.yaml
+  dst: /usr/share/objectfs/configs/full-schema.yaml
+  file_info:
+    mode: 0644
+
+  # The HPC modulefiles. Two things about these destinations are unusual and both are load-bearing.
+  #
+  # **The version is in the filename, not in a directory.** Every other rule here has a fixed dst;
+  # these two put ${OBJECTFS_VERSION} in the leaf. That is not a stylistic choice — it is how both
+  # module systems decide what `module load objectfs/0.13.0` means. MODULEPATH points at
+  # /usr/share/modulefiles, the directory under it is the module *name*, and the file inside it is the
+  # *version*. Ship it as objectfs/objectfs.lua and `module avail` lists a module named objectfs with
+  # a version called "objectfs"; add a third level and Lmod makes the version the name.
+  #
+  # **The TCL file has no extension.** objectfs.tcl installed as `0.13.0` with nothing after it,
+  # because the filename *is* the version string and `0.13.0.tcl` would be reported as version
+  # "0.13.0.tcl". Lmod is the exception: it requires .lua to parse a file as Lua at all, and strips it
+  # before reporting the version. So the two formats disagree here and the disagreement is correct.
+  #
+  # Both files read their own version back out of this path — Lmod through myModuleVersion(), TCL
+  # through `file tail $ModulesCurrentModulefile` — so ${OBJECTFS_VERSION} reaching the filename is
+  # what keeps cmd/objectfs/main.go the only place a version is written down. A wrong dst here is not
+  # a cosmetic bug: it is `module load objectfs` exporting the wrong OBJECTFS_VERSION.
+  #
+  # expand: true is required for the ${OBJECTFS_VERSION} in dst, and internal/config/packaging_test.go
+  # asserts both entries carry it — without it nfpm ships a file literally named
+  # "${OBJECTFS_VERSION}.lua", which installs successfully and is unloadable.
+  #
+  # Not conditional on a module system being present. They are two small text files that do nothing
+  # until something adds /usr/share/modulefiles to MODULEPATH, and a site that runs neither Lmod nor
+  # Modules never notices them — whereas a site that runs one should not have to fetch a file from a
+  # source checkout to use a package it already installed.
+- src: ./configs/modules/objectfs.lua
+  dst: /usr/share/modulefiles/objectfs/${OBJECTFS_VERSION}.lua
+  expand: true
+  file_info:
+    mode: 0644
+- src: ./configs/modules/objectfs.tcl
+  dst: /usr/share/modulefiles/objectfs/${OBJECTFS_VERSION}
+  expand: true
+  file_info:
+    mode: 0644
+
+- src: ./LICENSE
+  dst: /usr/share/doc/objectfs/LICENSE
+  file_info:
+    mode: 0644
+
+- src: ./README.md
+  dst: /usr/share/doc/objectfs/README.md
+  file_info:
+    mode: 0644
+
+  # The directories, owned by the package so the package manager knows it created them and can
+  # remove the empty ones on purge.
+  #
+  # scripts/postinstall.sh also creates these, and that is not a second authority — it is the guard
+  # check pattern #137 asks for. The script is run by the package (where these already exist, so
+  # ensure_dir returns immediately) and by hand from a source checkout (where they do not). What the
+  # script will not do is chmod one that already exists, which is how the previous version widened an
+  # operator-tightened /etc/objectfs back to 0755 on every upgrade.
+  #
+  # /etc/objectfs is 0755 rather than 0750: the config file inside it is 0600, and a mode that stops
+  # a non-root user from listing the directory stops them reading /etc/objectfs/<their>.yaml too.
+- dst: /etc/objectfs
+  type: dir
+  file_info:
+    mode: 0755
+- dst: /var/cache/objectfs
+  type: dir
+  file_info:
+    mode: 0755
+- dst: /var/log/objectfs
+  type: dir
+  file_info:
+    mode: 0755
+- dst: /mnt/objectfs
+  type: dir
+  file_info:
+    mode: 0755
+
+# The scriptlets. These two lines are the whole of #207: scripts/preremove.sh was a working uninstall
+# script that nothing in the repository referenced, because only a package manager can invoke a
+# pre-removal hook and there was no packaging.
+#
+# Top-level rather than under `overrides`, so one script serves both formats. They read their action
+# argument in both conventions — dpkg's "configure"/"remove"/"upgrade" and rpm's instance count — and
+# preremove.sh branches on it, because an upgrade must not tear down running mounts.
+scripts:
+  postinstall: ./scripts/postinstall.sh
+  preremove: ./scripts/preremove.sh

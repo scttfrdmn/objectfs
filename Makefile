@@ -80,7 +80,8 @@ help:
 	@echo "  $(COLOR_GREEN)clean$(COLOR_RESET)          Clean build artifacts"
 	@echo "  $(COLOR_GREEN)install$(COLOR_RESET)        Install binary to GOPATH/bin"
 	@echo "  $(COLOR_GREEN)docker$(COLOR_RESET)         Build Docker image"
-	@echo "  $(COLOR_GREEN)package$(COLOR_RESET)        Create distribution packages"
+	@echo "  $(COLOR_GREEN)package$(COLOR_RESET)        Create distribution tarballs"
+	@echo "  $(COLOR_GREEN)package-linux$(COLOR_RESET)  Create .deb and .rpm packages (nfpm, amd64 + arm64)"
 	@echo "  $(COLOR_GREEN)version$(COLOR_RESET)        Show version information"
 	@echo ""
 	@echo "$(COLOR_BOLD)Development workflow (solo dev):$(COLOR_RESET)"
@@ -261,6 +262,46 @@ package: build-all | $(DIST_DIR)/.mkdir
 			echo "Packaging $$name..."; \
 			tar -czf $(DIST_DIR)/$$name.tar.gz -C $(BUILD_DIR) $$name; \
 		fi \
+	done
+	@echo "$(COLOR_GREEN)Packages created in $(DIST_DIR)/$(COLOR_RESET)"
+
+# Build the Linux .deb and .rpm packages, via nfpm and nfpm.yaml.
+#
+# This is the target #207 is about. Before it, `scripts/preremove.sh` was a working uninstall script
+# that nothing in the repository referenced — only a package manager can invoke a pre-removal hook,
+# and there was no packaging system in the tree at all. `package` above makes tarballs, which have no
+# scriptlets and no maintainer scripts.
+#
+# The version comes out of cmd/objectfs/main.go with the same sed expression
+# .github/workflows/release.yml uses to check a tag against it. Not $(VERSION): that is `git describe`,
+# which on a dirty tree or an untagged commit produces things like v0.12.0-14-gabc123-dirty, and
+# neither dpkg nor rpm accepts a hyphenated version in that position. The constant is the authority
+# CLAUDE.md names, and internal/config/packaging_test.go fails if a literal version ever appears in
+# nfpm.yaml.
+#
+# Four packages: {deb, rpm} × {amd64, arm64}. Both formats from one config, which is why nfpm rather
+# than a debian/ directory plus a .spec — two hand-maintained descriptions of the same install layout
+# is two places for it to drift.
+NFPM_VERSION := v2.47.0
+NFPM ?= $(shell command -v nfpm 2>/dev/null || echo $(shell go env GOPATH)/bin/nfpm)
+PKG_VERSION := $(shell sed -n 's/^[[:space:]]*version = "\(.*\)"/\1/p' cmd/objectfs/main.go)
+
+.PHONY: package-linux
+package-linux: build-linux | $(DIST_DIR)/.mkdir
+	@if [ -z "$(PKG_VERSION)" ]; then \
+		echo "$(COLOR_RED)could not read the version constant from cmd/objectfs/main.go$(COLOR_RESET)"; \
+		exit 1; \
+	fi
+	@if [ ! -x "$(NFPM)" ]; then \
+		echo "$(COLOR_YELLOW)nfpm not found; installing $(NFPM_VERSION)...$(COLOR_RESET)"; \
+		go install github.com/goreleaser/nfpm/v2/cmd/nfpm@$(NFPM_VERSION); \
+	fi
+	@echo "$(COLOR_BLUE)Building deb and rpm packages for objectfs $(PKG_VERSION)...$(COLOR_RESET)"
+	@for arch in amd64 arm64; do \
+		for format in deb rpm; do \
+			OBJECTFS_VERSION=$(PKG_VERSION) OBJECTFS_ARCH=$$arch \
+				$(NFPM) package --config nfpm.yaml --packager $$format --target $(DIST_DIR)/ || exit 1; \
+		done; \
 	done
 	@echo "$(COLOR_GREEN)Packages created in $(DIST_DIR)/$(COLOR_RESET)"
 
