@@ -36,6 +36,22 @@ type Coordinator struct {
 	// serializes remote operation execution would put every announcement behind an S3 round trip.
 	announcementsMu sync.RWMutex
 	announcements   map[string][]heldKey
+
+	// selfAnnounced is what *this* node has told peers it holds, one entry per key, under the same mutex
+	// and the same TTL as announcements.
+	//
+	// It is a second map rather than an entry in the first one, and that separation is load-bearing:
+	// announcements answers [Coordinator.QueryKeyOwnership], which is asked *because a read missed this
+	// node's own cache*, so a self-claim there is a holder guaranteed not to hold, returned in place of a
+	// peer that does. See [Coordinator.AnnounceKey].
+	//
+	// What it exists for is [Coordinator.recentHoldings], which a node answers a join with (#143). Without
+	// it a two-node cluster warms nothing at all: A's announcements map holds only B's claims, so A tells a
+	// joining C about B and never about the cache A itself has been filling. The cache cannot be enumerated
+	// instead — [types.Cache] stores bytes with no version beside them, and an announcement without an ETag
+	// is refused precisely because a version is what makes it actionable — so the only record of what this
+	// node holds *and at which version* is what it announced.
+	selfAnnounced map[string]heldKey
 }
 
 // NodeOperationMessage is the on-wire request for a remote node execution.

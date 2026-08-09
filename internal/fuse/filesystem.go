@@ -1115,6 +1115,15 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 	// Trigger read-ahead analysis. OnRead tolerates a nil manager.
 	fh.fs.readAhead.OnRead(fh.file.path, off, int64(len(data)))
 
+	// And read further on a peer's evidence, if any peer holds more of this object than was just read
+	// (#142). A no-op on a single-node mount, where the coordinator is nil.
+	//
+	// Here rather than in fetchUncached, which is where the announcement is made, because the prefetcher
+	// calls fetchUncached too: warming from there would let each warm's own GET query ownership and queue
+	// another, so one miss could walk the whole object one window at a time on nothing but its own output.
+	// This is the application's read, and only the application's read.
+	fh.fs.warmFromPeers(ctx, fh.file.path, off, int64(len(data)))
+
 	return fuse.ReadResultData(data), 0
 }
 

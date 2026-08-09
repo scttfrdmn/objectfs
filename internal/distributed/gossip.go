@@ -140,6 +140,15 @@ const (
 	// [GossipProtocol.handleCacheAnnounce]. Metadata over gossip, bytes from S3 — a datagram cannot hold
 	// a 128 KiB read, which is what makes that split a constraint rather than a preference (#399).
 	MessageTypeCacheAnnounce MessageType = "cache_announce"
+
+	// MessageTypeCacheWarmup tells a node that has just joined which keys the sender holds, so the joiner
+	// starts with a view of what is hot in this cluster instead of learning it one miss at a time (#143).
+	// The payload is a [CacheWarmupMessage].
+	//
+	// It carries announcements, which is to say metadata: the same constraint as
+	// [MessageTypeCacheAnnounce], for the same reason, and here it also bounds how many entries a message
+	// can hold. See [GossipProtocol.marshalWarmupChunk].
+	MessageTypeCacheWarmup MessageType = "cache_warmup"
 )
 
 // ErrMessageOversize means a sealed datagram exceeded MaxGossipPacket and was refused before it
@@ -172,6 +181,22 @@ type CacheInvalidateMessage struct {
 	// Deleted marks an invalidation caused by the key being removed rather than replaced. A receiver
 	// cannot infer this from an empty ETag, because an unconditional put has one too.
 	Deleted bool `json:"deleted,omitempty"`
+}
+
+// CacheWarmupMessage is the payload for MessageTypeCacheWarmup: the keys the sender holds, freshest
+// first, as many as fit one datagram.
+//
+// A slice of full [types.KeyAnnouncement]s rather than of bare keys, because the ETag is what makes an
+// entry actionable — the receiver records these into the same ownership map that
+// [Coordinator.QueryKeyOwnership] answers from, and that map's whole contract is that a caller checks
+// what it fetches against the version it wanted. Keys alone would populate it with claims no reader could
+// verify.
+//
+// There is no count field and no "more to follow" flag. Each message is a complete, independently useful
+// statement of "these keys, as I hold them" — the same property that makes [SyncMessage] chunkable — so a
+// lost message costs the joiner the keys it carried and nothing else.
+type CacheWarmupMessage struct {
+	Keys []types.KeyAnnouncement `json:"keys"`
 }
 
 // JoinMessage represents a join request
@@ -565,6 +590,8 @@ func (gp *GossipProtocol) handleIncomingMessage(ctx context.Context, data []byte
 		gp.handleCacheInvalidate(msg)
 	case MessageTypeCacheAnnounce:
 		gp.handleCacheAnnounce(msg)
+	case MessageTypeCacheWarmup:
+		gp.handleCacheWarmup(msg)
 	}
 }
 
@@ -681,7 +708,18 @@ func (gp *GossipProtocol) handleJoinMessage(msg *GossipMessage) {
 
 	// Send sync message back to the joining node (in a goroutine to avoid
 	// holding the lock while sendSyncMessage attempts to reacquire it for reading).
-	go func() { _ = gp.sendSyncMessage(joinMsg.Node.Address) }()
+	//
+	// The warmup follows the sync, on the same goroutine and in that order, and both parts of that are
+	// deliberate. A goroutine because gp.mu is held here and both sends reacquire it for reading; after
+	// the sync because membership is what the joiner needs first — a node that knows which keys are hot
+	// but not who its peers are cannot act on either. Sequential rather than a second goroutine so the
+	// two do not race to the same socket while the joiner's receive loop is still starting.
+	//
+	// Cache warming is #143. It sends nothing when this node holds nothing.
+	go func() {
+		_ = gp.sendSyncMessage(joinMsg.Node.Address)
+		gp.sendCacheWarmup(joinMsg.Node.Address)
+	}()
 }
 
 func (gp *GossipProtocol) handleLeaveMessage(msg *GossipMessage) {

@@ -80,6 +80,18 @@ func (r *recordingCoordinator) invalidations() []invalidation {
 	return append([]invalidation(nil), r.invalidated...)
 }
 
+// queries returns the keys whose ownership was asked about, in call order.
+//
+// #142's read path asks peers who holds a key it just missed, and one of the things worth asserting is
+// that it does *not* ask — with no coordinator, and with read-ahead disabled, since a query whose answer
+// is discarded is a gossip broadcast per cache miss.
+func (r *recordingCoordinator) queries() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.queried...)
+}
+
 // invalidatedKeys returns just the keys, for the assertions that do not care about versions.
 func (r *recordingCoordinator) invalidatedKeys() []string {
 	keys := make([]string, 0, len(r.invalidated))
