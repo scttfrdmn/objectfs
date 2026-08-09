@@ -22,7 +22,15 @@ bucket does. The Raft issues are closed (#128, #130, #133, #151) and the replace
 taxonomy) and #285 (verifying non-AWS backends).
 
 So what is below describes code that exists and has shrunk, not a design being completed.
-Gossip-based membership and leader election stay.
+Gossip-based membership stays.
+
+What changed in v0.13.0 (#139): a mount reaches this package. Until then nothing outside
+internal/distributed constructed a [ClusterManager], so `cluster.enabled: true` in an operator's
+configuration started none of this — internal/adapter now does, when that key is set. And the
+consensus engine is off on that path: [ClusterConfig.EnableConsensus] is new, defaults to false, and a
+mount leaves it false, because a filesystem read consults no leader and a cluster below quorum should
+not degrade a mount that never needed one. Elections still run when a caller asks for them, which is
+what the -tags=distributed suite does; they do not run under a mount.
 
 Architecture
 
@@ -113,10 +121,12 @@ distributed:
 	openssl rand -hex 32 > /etc/objectfs/cluster.secret
 	chmod 600 /etc/objectfs/cluster.secret
 
-Then name it in the cluster configuration, or set OBJECTFS_CLUSTER_SECRET, which takes precedence
-and is what a container orchestrator injects. The secret is never a field in the YAML configuration:
-packaging installs that file world-readable, so a secret in it would be published to every user on
-the node. A secret file readable by anyone but its owner is refused for the same reason.
+Then name it in the cluster configuration — `cluster.secret_file` in the operator-facing YAML, or
+[ClusterConfig.SecretFile] for a caller of this package — or set OBJECTFS_CLUSTER_SECRET, which takes
+precedence and is what a container orchestrator injects. The *path* is configurable and the secret
+itself never is: packaging installs the configuration file world-readable, so a secret written in it
+would be published to every user on the node. A secret file readable by anyone but its owner is
+refused for the same reason.
 
 Each message carries an HMAC-SHA256 over its exact bytes, plus a timestamp and message ID checked
 against a 30-second freshness window, so a captured datagram cannot be replayed later to reassert

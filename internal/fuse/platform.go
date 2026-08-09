@@ -84,6 +84,11 @@ func CreatePlatformMountManager(ctx context.Context, backend types.Backend, cach
 	// DefaultReadAheadConfig, which is what every mount ran on before this was plumbed.
 	fuseConfig.ReadAhead = config.ReadAhead
 
+	// Nil for every single-node mount, which is the same nil-is-meaningful pattern as ReadAhead above,
+	// with the difference that nothing substitutes a default: nil means the filesystem skips cache
+	// coordination entirely. See FileSystem.coordinator.
+	fuseConfig.Coordinator = config.Coordinator
+
 	if o := config.Options; o != nil {
 		fuseConfig.ReadOnly = o.ReadOnly
 

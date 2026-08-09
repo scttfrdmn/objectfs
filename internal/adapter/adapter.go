@@ -9,6 +9,7 @@ import (
 	"github.com/scttfrdmn/objectfs/internal/awsname"
 	"github.com/scttfrdmn/objectfs/internal/cache"
 	"github.com/scttfrdmn/objectfs/internal/config"
+	"github.com/scttfrdmn/objectfs/internal/distributed"
 	"github.com/scttfrdmn/objectfs/internal/fuse"
 	"github.com/scttfrdmn/objectfs/internal/health"
 	"github.com/scttfrdmn/objectfs/internal/metrics"
@@ -46,6 +47,17 @@ type Adapter struct {
 	mountMgr    fuse.PlatformFileSystem
 	metrics     *metrics.Collector
 	monitor     *health.Monitor
+
+	// clusterMgr is nil unless `cluster.enabled` is set, which is the ordinary case. It is the gossip
+	// layer — membership, cache invalidation, and the key announcements a cold node warms from — and
+	// **not** the Raft engine: see [distributed.ClusterConfig.EnableConsensus], which this deliberately
+	// leaves off.
+	//
+	// This is the field #139 was filed for. Every part of internal/distributed built and tested and
+	// reached no mount, because nothing here constructed one: `cluster.enabled: true` selected a Redis
+	// cache through cache.NewFromConfig and otherwise did nothing at all, so a two-node deployment got
+	// no invalidation and no warming while its configuration said it was clustered.
+	clusterMgr *distributed.ClusterManager
 
 	// mountCtx bounds work that outlives the call that started it — a flush runs when the kernel
 	// decides to, which is typically long after Start has returned. Start's own ctx is the wrong
@@ -172,11 +184,26 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize write path: %w", err)
 	}
 
-	// 5. Initialize platform-specific FUSE filesystem
+	// 5. Start cluster coordination, when configured.
+	//
+	// Before the mount, so that the coordinator the filesystem is handed is already running: a mount
+	// serves reads the moment Mount returns, and a coordinator started afterwards would have a window
+	// in which invalidations were silently dropped.
+	//
+	//nolint:contextcheck // a.mountCtx for the same reason as the write path and read-ahead above: the
+	// gossip receive loop and the membership ticker live as long as the mount, not as long as Start.
+	if err := a.startCluster(a.mountCtx); err != nil {
+		return err
+	}
+
+	// 6. Initialize platform-specific FUSE filesystem
 	mountConfig := &fuse.MountConfig{
 		MountPoint: a.mountPoint,
 		Options:    a.buildMountOptions(),
 		ReadAhead:  a.buildReadAheadConfig(),
+		// Nil when clustering is off, which is what every single-node path branches on. See
+		// FileSystem.coordinator.
+		Coordinator: a.clusterCoordinator(),
 	}
 
 	//nolint:contextcheck // a.mountCtx, not ctx, for the same reason as the write path above and with
@@ -187,7 +214,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	// cancellation, which is the whole point. Stop cancels it, and that is now what stops them.
 	a.mountMgr = fuse.CreatePlatformMountManager(a.mountCtx, a.backend, a.cache, a.writeBuffer, a.metrics, mountConfig)
 
-	// 6. Initialize and start health monitor
+	// 7. Initialize and start health monitor
 	if a.config.Monitoring.HealthChecks.Enabled {
 		monCfg := &health.MonitorConfig{
 			Enabled:          true,
@@ -261,7 +288,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		slog.Info("health monitor started", "addr", a.config.Monitoring.HealthChecks.Addr)
 	}
 
-	// 7. Mount filesystem
+	// 8. Mount filesystem
 	if err := a.mountMgr.Mount(ctx); err != nil {
 		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
@@ -309,13 +336,28 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 3. Cancel the mount context, releasing anything still blocked on a backend call. Only after the
+	// 3. Stop cluster coordination.
+	//
+	// After the flush and before the backend closes, which is the only window that is correct in both
+	// directions. The gossip receive loop executes operations on behalf of peers against a.backend and
+	// evicts from a.cache, so it must stop before either of those is closed — otherwise a peer's
+	// message arriving during teardown reaches a closed backend or a closed cache. And it must stop
+	// after the flush rather than before the unmount, because the flush is the last chance for this
+	// node's own pending writes to become durable and nothing about a running cluster impedes it.
+	if a.clusterMgr != nil {
+		if err := a.clusterMgr.Stop(); err != nil {
+			slog.Error("error stopping cluster manager", "error", err)
+			lastErr = err
+		}
+	}
+
+	// 4. Cancel the mount context, releasing anything still blocked on a backend call. Only after the
 	// flush above: canceling first would abort the flush it exists to permit.
 	if a.cancelMount != nil {
 		a.cancelMount()
 	}
 
-	// 4. Close backend connections
+	// 5. Close backend connections
 	if a.backend != nil {
 		if err := a.backend.Close(); err != nil {
 			slog.Error("error closing backend", "error", err)
@@ -323,7 +365,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 5. Stop health monitor
+	// 6. Stop health monitor
 	if a.monitor != nil {
 		if err := a.monitor.Stop(); err != nil {
 			slog.Error("error stopping health monitor", "error", err)
@@ -331,7 +373,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 6. Clear the cache, then release the goroutines behind it.
+	// 7. Clear the cache, then release the goroutines behind it.
 	//
 	// The Close is what retires the prefetch workers. Prefetch is enabled unconditionally for the
 	// in-process cache, so that mount wraps L1 in a predictive cache with four workers and a statistics
@@ -358,7 +400,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 7. Stop metrics collection
+	// 8. Stop metrics collection
 	if a.metrics != nil {
 		if err := a.metrics.Stop(ctx); err != nil {
 			slog.Error("error stopping metrics collector", "error", err)
@@ -369,6 +411,98 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.started = false
 	slog.Info("ObjectFS adapter stopped successfully")
 	return lastErr
+}
+
+// startCluster brings up gossip-based cluster coordination when `cluster.enabled` is set, and is a
+// no-op otherwise.
+//
+// A failure here fails the mount rather than degrading to a single node, and that asymmetry is
+// deliberate. Coordination is a correctness capability, not a performance one: a node that believes
+// it is clustered and is not will serve cached bytes that a peer has already overwritten, with
+// nothing in its logs to say why. The same reasoning is why the Redis cache fails the mount rather
+// than falling back — see cache.NewFromConfig — and it is the project thesis's rule for the kind of
+// capability this is.
+//
+// The commonest failure by far is the missing cluster secret, which [distributed.LoadClusterSecret]
+// reports naming both places it can come from.
+func (a *Adapter) startCluster(ctx context.Context) error {
+	if !a.config.Cluster.Enabled {
+		return nil
+	}
+
+	clusterMgr, err := distributed.NewClusterManager(a.buildClusterConfig())
+	if err != nil {
+		return fmt.Errorf("failed to initialize cluster manager: %w", err)
+	}
+
+	// Both injections before Start, so the gossip receive loop cannot dispatch a peer's message at a
+	// nil backend or a nil cache. Both setters are safe to call afterwards as well — that is what
+	// [distributed.ClusterManager.SetBackend]'s locking is for — but "before Start" is the ordering
+	// that needs no argument at all.
+	clusterMgr.SetBackend(a.backend)
+	clusterMgr.SetCache(a.cache)
+
+	if err := clusterMgr.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start cluster manager: %w", err)
+	}
+
+	a.clusterMgr = clusterMgr
+	slog.Info("cluster coordination started",
+		"node_id", clusterMgr.GetNodeID(),
+		"listen_addr", a.config.Cluster.ListenAddr,
+		"seed_nodes", len(a.config.Cluster.SeedNodes))
+
+	return nil
+}
+
+// clusterCoordinator returns the coordinator the filesystem should use, or nil when clustering is off.
+//
+// The nil is the point, and it is why this is a method rather than a call to GetCoordinator at the use
+// site. Two things go wrong without the guard. GetCoordinator reads cm.coordinator, so calling it on a
+// nil manager panics — that is what a mount with clustering disabled would do, on every start. And
+// moving the check inside GetCoordinator would not be enough either: it returns
+// `&coordinatorWrapper{...}`, a non-nil [types.DistributedCoordinator] whatever it wraps, so a mount
+// handed one would take the coordinated branch at every `if fs.coordinator != nil` in internal/fuse
+// and dereference the nothing inside. A nil interface is the only value those guards read correctly.
+func (a *Adapter) clusterCoordinator() types.DistributedCoordinator {
+	if a.clusterMgr == nil {
+		return nil
+	}
+
+	return a.clusterMgr.GetCoordinator()
+}
+
+// buildClusterConfig maps the operator-facing cluster: block onto the distributed package's own
+// configuration.
+//
+// The two ClusterConfig types are disjoint and this is the only conversion between them, which is
+// most of why #139 existed: internal/config.ClusterConfig has seven fields an operator can set,
+// internal/distributed.ClusterConfig has eighteen, and there was no function anywhere that turned one
+// into the other. Fields left unset here are filled by applyConfigDefaults — the timeouts, the gossip
+// triple, and the concurrency and retry settings are all tuning for a subsystem whose defaults are
+// measured (see defaultMaxGossipPacket), so exposing them as YAML before anyone needs to change one
+// would be seven more keys that mostly should not be touched.
+//
+// EnableConsensus is deliberately not set and has no key in the config schema. See
+// [distributed.ClusterConfig.EnableConsensus]: coordination in ObjectFS is compare-and-swap against
+// S3, so a mount has no use for a leader, and putting an election on the path of a filesystem read
+// would make a cluster that cannot hold a quorum degrade a mount that never needed one.
+func (a *Adapter) buildClusterConfig() *distributed.ClusterConfig {
+	c := a.config.Cluster
+
+	return &distributed.ClusterConfig{
+		NodeID:        c.NodeID,
+		ListenAddr:    c.ListenAddr,
+		AdvertiseAddr: c.AdvertiseAddr,
+		SeedNodes:     c.SeedNodes,
+
+		// The path only, never the secret — see [config.ClusterConfig.SecretFile]. May be empty, in
+		// which case OBJECTFS_CLUSTER_SECRET is the only source and LoadClusterSecret fails naming
+		// both if it is unset too.
+		SecretFile: c.SecretFile,
+
+		ReplicationFactor: c.ReplicationFactor,
+	}
 }
 
 // startMetrics constructs the metrics collector and binds its HTTP endpoint.

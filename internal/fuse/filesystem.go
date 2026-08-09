@@ -82,6 +82,21 @@ type FileSystem struct {
 
 	metrics types.MetricsCollector
 
+	// coordinator is the cluster's cache coordination, and is **nil on a single-node mount** — which
+	// is every mount that does not set `cluster.enabled`. Nil is the whole of the safety argument: no
+	// path here branches on it except to skip, so a mount without clustering does exactly what it did
+	// before this field existed, at no cost.
+	//
+	// It is deliberately [types.DistributedCoordinator] and not *distributed.ClusterManager. This
+	// package must not import internal/distributed: the dependency would run FUSE → distributed →
+	// gossip → consensus, and the interface is four methods about keys and ETags that a warming
+	// implementation could satisfy without a gossip socket at all.
+	//
+	// What reaches it is the gossip and cache half of clustering only. Consensus is not started on a
+	// mount — see [distributed.ClusterConfig.EnableConsensus] — so nothing on the read or write path
+	// waits on an election.
+	coordinator types.DistributedCoordinator
+
 	// Configuration
 	config *Config
 
@@ -235,6 +250,11 @@ type Config struct {
 	// operator-facing names are config.ReadAheadConfig's, and nothing decodes YAML into this type
 	// anyway. The tags above are kept only because they predate that discovery.
 	ReadAhead *ReadAheadConfig
+
+	// Coordinator is the cluster's cache coordination, or nil for a single-node mount. See
+	// [FileSystem.coordinator], which it is copied to, and [MountConfig.Coordinator], which it comes
+	// from. No yaml tag: it is not a value a config file can express.
+	Coordinator types.DistributedCoordinator
 }
 
 // OpenFile is the per-descriptor state one open(2) produced.
@@ -349,14 +369,15 @@ func NewFileSystem(ctx context.Context, backend types.Backend, cache types.Cache
 	}
 
 	filesystem := &FileSystem{
-		backend:    backend,
-		cache:      cache,
-		buffer:     buffer,
-		metrics:    metrics,
-		config:     config,
-		openFiles:  make(map[uint64]*OpenFile),
-		nextHandle: 1,
-		stats:      &Stats{},
+		backend:     backend,
+		cache:       cache,
+		buffer:      buffer,
+		metrics:     metrics,
+		config:      config,
+		coordinator: config.Coordinator,
+		openFiles:   make(map[uint64]*OpenFile),
+		nextHandle:  1,
+		stats:       &Stats{},
 	}
 
 	// Initialize performance optimizations.

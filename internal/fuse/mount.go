@@ -16,6 +16,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/scttfrdmn/objectfs/pkg/status"
+	"github.com/scttfrdmn/objectfs/pkg/types"
 )
 
 // FilesystemStats represents filesystem operation statistics
@@ -52,6 +53,17 @@ type MountConfig struct {
 	// [DefaultReadAheadConfig], which is what every caller got unconditionally before
 	// performance.read_ahead was wired (#176).
 	ReadAhead *ReadAheadConfig
+
+	// Coordinator is the cluster's cache coordination, or nil for a single-node mount. See
+	// [FileSystem.coordinator], which it is copied to.
+	//
+	// A field rather than a `WithCoordinator(...)` functional option, which is what #139 specified.
+	// This package has no functional-option pattern — there is not one `func With…` constructor
+	// argument in it — so introducing one for a single nilable field would mean two ways to configure a
+	// mount, and the next field would have to choose between them. It has no yaml tag because a
+	// coordinator is not decodable from a config file; `cluster.enabled` is the operator-facing switch,
+	// and internal/adapter is what turns it into this.
+	Coordinator types.DistributedCoordinator
 }
 
 // MountOptions contains FUSE mount options.

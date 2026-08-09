@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cluster.enabled: true` now actually starts cluster coordination** ([#139]). Every part of
+  `internal/distributed` was built, tested and reachable by nothing: no code path anywhere constructed
+  a `ClusterManager`, so a two-node deployment whose configuration said it was clustered got no
+  membership, no cache invalidation and no warming — the `cluster:` block's only live effect was
+  selecting a Redis cache. `internal/adapter` now builds one, injects the backend and cache, starts it
+  before the mount and stops it during teardown, and passes its coordinator down through
+  `MountConfig` to the FileSystem.
+
+  Two things it deliberately does not do. It does not start Raft: `ClusterConfig.EnableConsensus` is
+  new, off by default, and a mount leaves it off, because coordination here is compare-and-swap
+  against S3 — the store evaluates a conditional write, which needs no quorum and keeps working with
+  one node reachable — so an election would decide nothing a filesystem read asks about while making a
+  cluster below quorum degrade a mount that never needed one. And it does not degrade: a cluster that
+  cannot start fails the mount, with the reason, rather than continuing single-node. Coherence is a
+  correctness capability, and a node that believes it is clustered and is not serves cached bytes a
+  peer has already overwritten with nothing in its logs to say why.
+
+  A single-node mount gets a **nil** coordinator, which is what every path added here is guarded by,
+  and that nil is asserted rather than assumed: `GetCoordinator` returns a wrapper that is a non-nil
+  interface value whatever it holds, so the adapter checks before calling it.
+
+- **`cluster.secret_file`, the key `LoadClusterSecret`'s error message had been naming before it
+  existed** ([#139]). A cluster refuses to start without a shared gossip secret ([#206]), the error
+  told operators to set `OBJECTFS_CLUSTER_SECRET` **or** `cluster.secret_file`, and only the first of
+  those was real. The path — never the secret itself — is now a key in the `cluster:` block, and the
+  file it points at must be mode 0600 or startup refuses it. The environment variable still takes
+  precedence, which is what a container orchestrator injects.
+
 - **Wasabi probed and added to the conditional-write compatibility matrix.** It is the first endpoint
   in the matrix to answer success to **every** cell: `If-None-Match: *` over an existing key replaces
   it, `If-Match` with an ETag that cannot possibly match performs the write, and `If-Match` against an
@@ -40,6 +68,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protects a deployment if a later beta regresses.
 
 ### Changed
+
+- **BREAKING: `cluster.enabled: true` now requires a gossip secret, including for a Redis-only
+  deployment** ([#139]). `cluster.enabled` is what selects the shared Redis cache and it is also what
+  starts the gossip layer, so a configuration that set it purely to get Redis will now fail at startup
+  with `no cluster secret configured` until `cluster.secret_file` or `OBJECTFS_CLUSTER_SECRET` is set.
+
+  The coupling is deliberate rather than an oversight of the wiring. A Redis cache shared by several
+  mounts with no invalidation between them is precisely the incoherence the `cluster:` block exists to
+  prevent: one node overwrites an object, the others keep serving what they cached, and nothing in any
+  log says why they disagree. Before this release the invalidation half did not exist at all, so the
+  shared-cache half was the only thing on offer; now that both do, having the cache without the
+  coherence is not a configuration worth supporting. Generate the secret with
+  `openssl rand -hex 32 > /etc/objectfs/cluster.secret && chmod 600 /etc/objectfs/cluster.secret`.
 
 - **The support posture is now stated as a thesis rather than left implicit: AWS S3 is the primary
   backend and ObjectFS uses every S3 capability that benefits it; S3-compatible endpoints are
