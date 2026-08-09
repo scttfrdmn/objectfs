@@ -21,7 +21,7 @@ import (
 // version of this test compared *its* table to awsrates and to this one. With one table left, the
 // half worth keeping is the half about this one.
 //
-// The neighbouring tests in pricing_manager_test.go check the *values* against AWS's published
+// The neighboring tests in pricing_manager_test.go check the *values* against AWS's published
 // figures, stated as literals. This checks the *plumbing*: that the manager reads the canonical table
 // instead of any literal of its own. Both are needed — a package that grows a private copy of the
 // right numbers passes the value tests and fails here, and that is the state #209 was found in.
