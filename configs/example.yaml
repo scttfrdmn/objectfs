@@ -88,3 +88,30 @@ monitoring:
     addr: 127.0.0.1:8081              # /health
     interval: 30s
     timeout: 5s
+
+# Multi-node coordination. Commented out, because a single-node mount needs none of it and every key
+# here is inert with `enabled: false` — see docs/admin-guide/distributed.md for what it does and what
+# it does not do. examples/config.yaml carries the full block with its defaults.
+#
+# Two of these are the ones worth reading twice, and both fail in the same direction: a node that comes
+# up as a cluster of one mounts successfully, serves reads, and reports healthy. Nothing errors, because
+# gossip is one-way UDP; it simply never receives an invalidation from a peer, so it can serve an object
+# another node has already overwritten.
+#
+#   advertise_addr is what peers are told to dial, and it is not listen_addr. Copying 0.0.0.0:8080 into
+#   it is now refused at startup: a peer that dials a wildcard reaches its own loopback, so every peer
+#   would talk to itself in this node's place. Use this host's routable address or its DNS name.
+#
+#   seed_nodes empty is legal — it is how the first node of a new cluster is configured — and on any
+#   other node it means the cluster never formed. `objectfs mount --dry-run` warns about both.
+#
+# cluster:
+#   enabled: true
+#   node_id: node-1                   # empty = generated at startup, new on every restart
+#   listen_addr: 0.0.0.0:8080         # where the gossip socket binds; a wildcard belongs here
+#   advertise_addr: 10.0.1.1:8080     # where peers reach this node; must not be a wildcard
+#   seed_nodes:                       # any existing member; a node seeding from itself is a no-op
+#     - 10.0.1.2:8080
+#     - 10.0.1.3:8080
+#   replication_factor: 3             # selection width, not copies; 0 means the default of 3
+#   secret_file: /etc/objectfs/cluster.secret   # the path, never the secret. mode 0600 or startup refuses it

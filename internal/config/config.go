@@ -1377,7 +1377,164 @@ func (c *Configuration) Validate() error {
 		return err
 	}
 
+	if err := validateClusterConfig(c.Cluster); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// validateClusterConfig rejects a cluster block that would come up as a cluster of one, or as none.
+//
+// Nothing checked the cluster block at all before #152, and the two failures that matters most for are
+// both silent. A cluster is not like the mount point or the region, where the first S3 call fails and
+// an operator goes looking: gossip is fire-and-forget UDP between peers, so a node that no peer can
+// reach mounts successfully, serves reads, reports healthy, and is simply alone. Its cache
+// announcements go nowhere and it never receives an invalidation, which means it can serve an object
+// another node has already overwritten — an integrity outcome reached without a single error message.
+//
+// Only checked when Enabled, for the same reason validateListenAddr is only applied to an enabled
+// listener: refusing a mount over a value in a block that starts nothing would fail single-node users,
+// who are almost everyone, over a setting with no effect.
+//
+// Three rows of #152's proposed table are deliberately absent. `cluster.persistent_log` and
+// `cluster.data_dir` do not exist — zero occurrences in the tree — so the two rules written against
+// them have no field to read, and the empty-seeds warning is not here because Validate returns an
+// error or nothing and has no warning channel; `objectfs mount --dry-run` prints that one instead,
+// where an operator is already reading output. The one row that does exist as written,
+// `advertise_addr == ""`, cannot fire and is replaced by the check below that catches the real case.
+func validateClusterConfig(cfg ClusterConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	// The address peers are told to use, checked as an address first. An unparseable one is not
+	// refused anywhere downstream: net.ResolveUDPAddr runs on the *receiving* peer, when it dials
+	// back, so a typo here is discovered on another host as "failed to resolve address" against a
+	// string that host never configured.
+	//
+	// Port 0 is refused on this one and accepted on the next, which is not an inconsistency but the
+	// measured difference between the two sides of the socket. net.ListenUDP on 127.0.0.1:0 binds and
+	// the kernel assigns a port — that is what a test asks for, and what ClusterManager.GossipAddr's
+	// doc comment describes reporting back. net.DialUDP to 127.0.0.1:0 fails outright with "can't
+	// assign requested address". So an advertised port 0 is an address no peer can reach, and a
+	// listening port 0 is ordinary.
+	if err := validateGossipAddr("cluster.advertise_addr", cfg.AdvertiseAddr, false); err != nil {
+		return err
+	}
+
+	if err := validateGossipAddr("cluster.listen_addr", cfg.ListenAddr, true); err != nil {
+		return err
+	}
+
+	// A wildcard advertise address is the defect this function exists for, and it is not the one
+	// #152 described. The issue's rule was `advertise_addr == ""`, which can never fire: NewDefault
+	// sets 127.0.0.1:8080 and applyConfigDefaults sets it again, so the field is never empty by the
+	// time anything could check it. What operators actually write is the value beside it —
+	// listen_addr is 0.0.0.0:8080 and copying that into advertise_addr looks like the obvious thing
+	// to do.
+	//
+	// Measured, not reasoned about: a peer receiving "0.0.0.0:8080" hands it to net.ResolveUDPAddr
+	// and net.DialUDP, and the connection comes back with remote 127.0.0.1:8080 — the *dialer's* own
+	// loopback. ":8080" behaves the same way and "[::]:8080" dials [::1]:8080. So every peer that
+	// learns this node's address starts sending that node's traffic to itself, and because gossip is
+	// one-way UDP nothing reports a failure at either end. The advertising node stays alive in its
+	// own memberlist, each peer talks to itself in place of it, and the cluster silently partitions
+	// into single nodes.
+	//
+	// Refused rather than rewritten. There is no correct value to substitute — which interface a peer
+	// can reach is a fact about the network, and picking one here would be a guess that fails the
+	// same way when it is wrong, minus the message.
+	if host, _, err := net.SplitHostPort(cfg.AdvertiseAddr); err == nil {
+		if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+			return fmt.Errorf("cluster.advertise_addr is %q, a wildcard address. It is what peers are "+
+				"told to send this node's gossip to, and a peer that dials a wildcard reaches its own "+
+				"loopback instead — so every peer would talk to itself in this node's place, with no "+
+				"error at either end, and the cluster would partition into single nodes that each "+
+				"believe they are clustered. cluster.listen_addr is where 0.0.0.0 belongs; set "+
+				"cluster.advertise_addr to an address peers can reach, such as this host's routable IP "+
+				"or its DNS name", cfg.AdvertiseAddr)
+		}
+	}
+
+	// Loopback is legal and common — a compose file or a single-host test uses it deliberately — so it
+	// is not refused here. It is reported by --dry-run, which is where a value that is right for one
+	// deployment and wrong for another belongs.
+
+	// A negative replication factor is a cluster that cannot write, and it survives every existing
+	// guard. applyConfigDefaults only replaces a zero, so -1 reaches
+	// Coordinator.selectTargetNodes, where min(replicationFactor, len(aliveNodes)) stays negative;
+	// LoadBalancer.SelectNodes returns an empty slice for count <= 0, and executeOnce turns that into
+	// "no target nodes selected" — verified by calling SelectNodes with each value. Every write in the
+	// cluster fails with a message that names neither this key nor its value.
+	if cfg.ReplicationFactor < 0 {
+		return fmt.Errorf("cluster.replication_factor is %d; it cannot be negative. A negative value "+
+			"is not clamped anywhere downstream — target selection returns no nodes and every write "+
+			"fails with \"no target nodes selected\", which names neither this key nor this value. Use "+
+			"0 to accept the default of 3", cfg.ReplicationFactor)
+	}
+
+	return nil
+}
+
+// validateGossipAddr checks a gossip address, allowing port 0 only where the kernel will fill it in.
+//
+// Separate from [validateListenAddr] rather than a flag on it, because the two are answering different
+// questions and one of them has already been got wrong here. validateListenAddr's port-0 message tells
+// the operator to use the `enabled` flag beside the field — advice that belongs to the monitoring
+// endpoints it was written for, where a port of 0 is someone trying to turn a listener off. The cluster
+// block has no such flag per address, and `listen_addr: 127.0.0.1:0` is a real thing this repository's
+// own tests set on purpose so the kernel picks a free port.
+//
+// allowPortZero is the whole difference, and it is measured rather than assumed: net.ListenUDP binds
+// 127.0.0.1:0 and reports back the assigned port, while net.DialUDP to a port 0 fails with "can't
+// assign requested address". A listener may ask for any port; an advertised address must be one a peer
+// can dial.
+func validateGossipAddr(field, addr string, allowPortZero bool) error {
+	if addr == "" {
+		return fmt.Errorf("%s must be set to a host:port. Clustering is enabled, and this is %s, so "+
+			"there is no value to fall back to", field, gossipAddrPurpose(field))
+	}
+
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s is not a host:port address: %q (%w)", field, addr, err)
+	}
+
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("%s has a non-numeric port: %q. A service name is not looked up in "+
+			"/etc/services here; write the number", field, port)
+	}
+
+	if n == 0 && allowPortZero {
+		return nil
+	}
+
+	if n == 0 {
+		return fmt.Errorf("%s has port 0, which no peer can deliver to. Port 0 on a listener means "+
+			"\"let the kernel choose\" and is fine on cluster.listen_addr, but this address is what "+
+			"peers are told to send to. Depending on the platform, a peer either fails the dial with "+
+			"\"can't assign requested address\" or — on Linux — dials and sends successfully while the "+
+			"datagram goes nowhere, reported at neither end. Either way this node is unreachable while "+
+			"appearing configured. If the kernel is choosing the port, read the bound one back and "+
+			"advertise that", field)
+	}
+
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("%s port %d is outside 1-65535", field, n)
+	}
+
+	return nil
+}
+
+// gossipAddrPurpose describes what a gossip address is for, so the empty-value error says which one.
+func gossipAddrPurpose(field string) string {
+	if strings.HasSuffix(field, "advertise_addr") {
+		return "the address peers are told to reach this node at"
+	}
+
+	return "the address the gossip socket binds"
 }
 
 // validateMountConfig checks what the mount block names, when it names anything.

@@ -145,6 +145,7 @@ nav:
     - S3 Transfer Acceleration: s3-acceleration.md
 
   - Operations:
+    - Distributed Mode: admin-guide/distributed.md
     - Error Handling & Recovery: error-handling-recovery.md
     - Logging: enhanced-logging.md
 
