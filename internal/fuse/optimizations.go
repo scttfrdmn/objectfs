@@ -213,6 +213,36 @@ func (ram *ReadAheadManager) prefetchLength(size int64) int64 {
 	return ram.config.WindowSize
 }
 
+// consumedThrough returns the first offset of path that the reader has not read yet, or 0 if this
+// manager has no pattern for it.
+//
+// This is [ReadPattern.predictedNext] under a different name, and the rename is the point: the detector
+// stores it as a prediction of where the reader is going, and [ReadAheadManager.performPrefetch] needs
+// it as a fact about where the reader has been. Both readings are the same number — the end of the last
+// read reported — but only one of them is a bound it is safe to skip bytes on the strength of, and
+// naming it here keeps a future change to the prediction from silently moving the bound.
+//
+// It reads the detector's state rather than probing the cache, and the difference matters twice. A
+// cache probe for each candidate prefix would allocate and copy the bytes it found only to discard
+// them, and — the reason it is not merely wasteful — every probe would land in the cache's hit and miss
+// counters, so the prefetcher would be scored as a reader in a statistic the read path exports.
+//
+// The bound is conservative in the safe direction. A read the detector never saw leaves this behind
+// where the reader actually is, so a prefetch trims less than it could and duplicates a range; it can
+// never run *ahead* of the reader, which would skip bytes nobody has fetched and leave a hole the
+// following read pays for at full price.
+func (ram *ReadAheadManager) consumedThrough(path string) int64 {
+	ram.mu.RLock()
+	defer ram.mu.RUnlock()
+
+	pattern, exists := ram.activeReads[path]
+	if !exists {
+		return 0
+	}
+
+	return pattern.predictedNext
+}
+
 // schedulePrefetch schedules a prefetch operation
 func (ram *ReadAheadManager) schedulePrefetch(path string, offset, size int64) {
 	select {
@@ -277,6 +307,32 @@ func (ram *ReadAheadManager) performPrefetch(mount context.Context, req *Prefetc
 	// it was given and cannot answer for bytes past EOF — so each traversal would re-fetch that tail.
 	if ram.fs.cache.Get(req.path, req.offset, length) != nil {
 		return // Already cached
+	}
+
+	// Advance past bytes the reader has already read, and drop a prefetch left entirely behind it.
+	//
+	// A prefetch is queued, and the reader does not wait for it. Between schedulePrefetch and a worker
+	// picking the request up, the reader may have read the front of the very range predicted for it —
+	// and those reads are then *finished*: absent from the in-flight set, because finish removes them,
+	// and no longer a whole-range cache hit either, because the tail beyond them was never cached and
+	// [types.Cache.Get] answers only for a range it holds in full. So neither the check above nor the
+	// trim below sees them, and the prefetch re-fetches bytes already paid for.
+	//
+	// Measured on CI, which is loaded enough for the queue to fall behind — a 16 KiB file read in 1 KiB
+	// steps transferred 18432 bytes, across GETs of 0-1023 … 4096-5119 and then 3072-16383. That last
+	// request re-read 2048 bytes the reads at 3072 and 4096 had already fetched. The same traversal
+	// passed locally 28 times in a row, because there the worker kept up and the trim below caught it.
+	//
+	// This is the trim below one lifecycle stage later, and both are needed: the reader's own reads move
+	// from in-flight to consumed as it advances, while a *concurrent* flight on the same path — another
+	// handle, or another prefetch — is only ever in the in-flight set.
+	if start := ram.consumedThrough(req.path); start > req.offset {
+		length -= start - req.offset
+		req.offset = start
+
+		if length <= 0 {
+			return
+		}
 	}
 
 	// Trim this prefetch past the end of any read already in flight, and drop it if nothing is left.

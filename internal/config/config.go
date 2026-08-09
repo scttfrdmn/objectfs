@@ -684,11 +684,23 @@ type S3CostOptimization struct {
 // request count and not the guarantee. What replaced it is per-operation rather than per-mount:
 // distributed.DistributedOperation.Precondition, evaluated by S3 on the one write it guards.
 type ClusterConfig struct {
-	Enabled           bool        `yaml:"enabled"`
-	NodeID            string      `yaml:"node_id"`
-	ListenAddr        string      `yaml:"listen_addr"`
-	AdvertiseAddr     string      `yaml:"advertise_addr"`
-	SeedNodes         []string    `yaml:"seed_nodes"`
+	Enabled       bool     `yaml:"enabled"`
+	NodeID        string   `yaml:"node_id"`
+	ListenAddr    string   `yaml:"listen_addr"`
+	AdvertiseAddr string   `yaml:"advertise_addr"`
+	SeedNodes     []string `yaml:"seed_nodes"`
+
+	// SecretFile names the file holding the shared cluster secret that authenticates gossip messages.
+	// A cluster does not start without one, from here or from OBJECTFS_CLUSTER_SECRET, which takes
+	// precedence — see distributed.LoadClusterSecret, whose error already told operators to set this
+	// key before the key existed.
+	//
+	// The *path* is what goes here and never the secret. This file is installed world-readable by
+	// packaging, so a secret written in it would be published to every user on the node; the file this
+	// points at must be mode 0600 or startup refuses it. Generate one with
+	// `openssl rand -hex 32 > /etc/objectfs/cluster.secret && chmod 600 /etc/objectfs/cluster.secret`.
+	SecretFile string `yaml:"secret_file"`
+
 	ReplicationFactor int         `yaml:"replication_factor"`
 	Redis             RedisConfig `yaml:"redis"`
 }

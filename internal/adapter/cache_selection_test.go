@@ -38,6 +38,15 @@ func TestStartReachesTheCacheTheConfigNames(t *testing.T) {
 		mr := miniredis.RunT(t)
 		a := startAdapterWithCluster(t, func(cfg *config.Configuration) {
 			cfg.Cluster.Enabled = true
+
+			// A gossip secret and a loopback port, because as of #139 `cluster.enabled` starts the gossip
+			// layer as well as selecting this cache — and a cluster that cannot start fails the mount, so
+			// without these Start fails before reaching the assertion below. That coupling is deliberate:
+			// a shared cache with no invalidation between its users is the incoherence the whole cluster
+			// block exists to prevent.
+			cfg.Cluster.ListenAddr = "127.0.0.1:0"
+			cfg.Cluster.SecretFile = writeClusterSecret(t)
+
 			cfg.Cluster.Redis = config.RedisConfig{
 				Enabled:    true,
 				Address:    mr.Addr(),

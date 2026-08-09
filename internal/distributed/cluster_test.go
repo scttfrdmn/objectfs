@@ -31,6 +31,17 @@ func testConfig(t *testing.T, nodeID string) *ClusterConfig {
 		ElectionTimeout:   30 * time.Second,
 		HeartbeatInterval: 100 * time.Millisecond,
 		SecretFile:        writeTestSecret(t),
+
+		// On here and off for a mount, which is the asymmetry this package's tests exist to hold: the
+		// consensus code is exercised deliberately by the election suite, and is not started by
+		// [ClusterManager.Start] when a filesystem enables clustering. See
+		// [ClusterConfig.EnableConsensus].
+		//
+		// Set in the shared helper rather than in each election test so that turning it off here is what
+		// a reviewer does to check the gate is real — see
+		// TestClusterManager_Start_DoesNotStartConsensusUnlessAskedTo, which asserts the mount-shaped
+		// configuration directly.
+		EnableConsensus: true,
 	}
 }
 
@@ -175,6 +186,64 @@ func TestNewClusterManager_DefaultMaxGossipPacketHoldsAThreeNodeSync(t *testing.
 	if len(chunks) != 1 {
 		t.Errorf("a three-member sync took %d datagrams at the %d-byte default, want 1: the default "+
 			"cannot carry the smallest cluster that needs a quorum", len(chunks), defaultMaxGossipPacket)
+	}
+}
+
+// TestClusterManager_Start_DoesNotStartConsensusUnlessAskedTo is the assertion behind #139's decision
+// to wire the gossip and cache halves of clustering into a mount and leave Raft unstarted.
+//
+// Coordination here is compare-and-swap against S3, decided by the store on one request, and what a
+// mount enables clustering for — membership, invalidation, and the key announcements that tell a cold
+// node which objects are worth warming — consults no leader. Starting elections anyway would put
+// quorum on the path a filesystem read takes in order to decide nothing that path asks about.
+//
+// The configuration here is deliberately the *mount's* shape rather than testConfig's: testConfig sets
+// EnableConsensus so the election suite keeps working, so a test built on it could not observe this
+// gate at all. What is asserted is that no election happens — a leaderless cluster after several
+// election timeouts' worth of wall clock — rather than that a flag is false, because the flag being
+// false is the code under test and not evidence about it.
+func TestClusterManager_Start_DoesNotStartConsensusUnlessAskedTo(t *testing.T) {
+	t.Parallel()
+
+	// Short timeouts so a running election loop would have fired repeatedly by the time this checks.
+	cfg := testConfig(t, "mount-shaped")
+	cfg.EnableConsensus = false
+	cfg.ElectionTimeout = 20 * time.Millisecond
+	cfg.HeartbeatInterval = 10 * time.Millisecond
+
+	cm, err := NewClusterManager(cfg)
+	if err != nil {
+		t.Fatalf("NewClusterManager: %v", err)
+	}
+	if err := cm.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = cm.Stop() })
+
+	// A one-node cluster elects itself within one timeout when the loop is running —
+	// TestConsensusEngine_SingleNodeLeadershipIsStable relies on exactly that — so 500ms is ~25
+	// timeouts of margin.
+	time.Sleep(500 * time.Millisecond)
+
+	if cm.consensus.IsLeader() {
+		t.Error("consensus elected a leader on a mount-shaped configuration: enabling clustering for " +
+			"cache coordination must not start Raft")
+	}
+	if state := cm.consensus.GetCurrentState(); state != StateFollower {
+		t.Errorf("consensus state is %v, want %v: the election loop is running", state, StateFollower)
+	}
+	if term := cm.consensus.GetCurrentTerm(); term != 0 {
+		t.Errorf("consensus term advanced to %d, want 0: a term only advances by standing for election",
+			term)
+	}
+
+	// And the half that a mount *does* want is running, so this is not passing because Start failed
+	// early or because clustering is off altogether.
+	if cm.gossip.LocalAddr() == "" {
+		t.Error("gossip is not listening, so this asserts nothing about consensus specifically")
+	}
+	if leader := cm.GetLeader(); leader != "" {
+		t.Errorf("cluster reports leader %q with consensus off", leader)
 	}
 }
 

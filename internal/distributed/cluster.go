@@ -49,6 +49,24 @@ type ClusterConfig struct {
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	LeadershipTTL     time.Duration `yaml:"leadership_ttl"`
 
+	// EnableConsensus starts the Raft engine — elections, heartbeats and the replicated log. It is
+	// **off by default**, and a mount does not turn it on.
+	//
+	// Coordination in ObjectFS is compare-and-swap against S3, not Raft: a conditional write is
+	// evaluated by the store, needs no quorum, and keeps working with one node reachable. See
+	// docs/design/conditional-writes-vs-raft.md. What a mount enables clustering *for* is the gossip
+	// layer — membership, cache invalidation, and the key announcements that let a cold node learn
+	// which objects are worth warming (#140, #142) — and none of that consults a leader.
+	//
+	// So this is not a performance switch. Starting consensus on a mount would put leader election on
+	// the path a filesystem read takes, to decide nothing that path asks about, and would make a
+	// cluster that cannot hold a quorum degrade a mount that has no need of one. Left in the tree and
+	// reachable because the `-tags=distributed` suite drives elections deliberately, and because
+	// nothing outside this package calls [ClusterManager.IsLeader] or [ClusterManager.GetLeader] — the
+	// seam is clean, which is what makes leaving it unstarted a one-line decision rather than a
+	// refactor.
+	EnableConsensus bool `yaml:"enable_consensus"`
+
 	// Gossip protocol
 	GossipInterval  time.Duration `yaml:"gossip_interval"`
 	GossipFanout    int           `yaml:"gossip_fanout"`
@@ -333,8 +351,14 @@ func (cm *ClusterManager) startLocked(ctx context.Context) error {
 		return fmt.Errorf("failed to start gossip protocol: %w", err)
 	}
 
-	if err := cm.consensus.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start consensus engine: %w", err)
+	// Consensus is opt-in; see [ClusterConfig.EnableConsensus] for why a mount leaves it off. The
+	// engine is constructed either way, so the gossip receive loop's vote and append-entries arms stay
+	// harmless rather than needing their own guard: with no election loop running, this node never
+	// becomes a candidate and never has a term to defend.
+	if cm.config.EnableConsensus {
+		if err := cm.consensus.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start consensus engine: %w", err)
+		}
 	}
 
 	if err := cm.coordinator.Start(ctx); err != nil {
@@ -376,6 +400,24 @@ func (cm *ClusterManager) Stop() error {
 // GetNodeID returns the current node ID
 func (cm *ClusterManager) GetNodeID() string {
 	return cm.nodeID
+}
+
+// GossipAddr returns the address the gossip socket is actually bound to, or "" if nothing is bound.
+//
+// The bound address rather than the configured one, which is the only version worth reporting: a
+// cluster manager whose Start failed is non-nil and reports its configuration back just as happily as
+// a running one, and `listen_addr: 127.0.0.1:0` — what a test asks for so the kernel picks the port —
+// is not an address any peer can be told about until the bind has happened.
+func (cm *ClusterManager) GossipAddr() string {
+	cm.mu.RLock()
+	gossip := cm.gossip
+	cm.mu.RUnlock()
+
+	if gossip == nil {
+		return ""
+	}
+
+	return gossip.LocalAddr()
 }
 
 // IsLeader returns true if this node is the current leader
@@ -543,15 +585,21 @@ func (cm *ClusterManager) performHealthChecks(ctx context.Context) {
 				node.Status = NodeStatusDead
 				slog.Info("node marked as dead", "node_id", nodeID, "last_seen_ago", timeSinceLastSeen)
 
-				// If the dead node was the leader, trigger election
+				// If the dead node was the leader, trigger election.
+				//
+				// Unreachable with consensus off, since cm.leader is only ever set by an election, but
+				// gated explicitly rather than left to that: relying on it would mean this arm's
+				// correctness depends on no other writer of cm.leader ever appearing.
 				if nodeID == cm.leader {
 					cm.leader = ""
 					cm.isLeader = false
-					go func() {
-						// Use the cluster lifecycle context so the election
-						// goroutine exits cleanly when the manager stops (#110).
-						_ = cm.consensus.TriggerElection(ctx)
-					}()
+					if cm.config.EnableConsensus {
+						go func() {
+							// Use the cluster lifecycle context so the election
+							// goroutine exits cleanly when the manager stops (#110).
+							_ = cm.consensus.TriggerElection(ctx)
+						}()
+					}
 				}
 			}
 

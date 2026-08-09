@@ -305,30 +305,44 @@ features:
   metadata_caching: true
   offline_mode: false
 
-# Multi-node coordination. Experimental and incomplete — the Raft log is not applied and
-# "strong" consistency fans the same PUT to N nodes rather than ordering operations. Do not
-# depend on this for correctness.
+# Multi-node coordination. Still experimental, and what it does and does not do is worth reading
+# before enabling it.
 #
-# The redis: block is the one part of this section that a mount reaches. Setting both `enabled`
-# here and `redis.enabled` below replaces the in-process cache with a shared Redis one for the
-# whole mount; everything else under cluster: is read only by the experimental coordinator.
-# A Redis that cannot be reached at startup fails the mount rather than falling back, so two
-# nodes cannot both come up believing they share a cache when they do not.
+# What `enabled: true` now starts, as of #139: the gossip layer — membership, cache invalidation, and
+# the key announcements that let a node learn which objects its peers hold. That is the whole of it,
+# and it is what a shared cache needs to stay coherent. Until #139 this section started nothing at
+# all: every key below was decoded, defaulted and read by no mount, so a two-node deployment whose
+# configuration said it was clustered got no invalidation and no warming.
 #
-# There is no secret_file key here, and its absence is deliberate rather than an omission. Gossip
-# messages are authenticated with a shared cluster secret and a cluster refuses to start without one
-# (#206), but the secret is configured on internal/distributed.ClusterConfig — a type disjoint from
-# this one (#139) — or through OBJECTFS_CLUSTER_SECRET. It is never a key in this file: packaging
-# installs this configuration world-readable, so a secret written here would be readable by every
-# user on the node. Generate one with `openssl rand -hex 32 > /etc/objectfs/cluster.secret` and
-# `chmod 600` it. Adding the key here before anything reads it would be a setting that silently
-# does nothing, which is the class of defect this file has been cleaned of.
+# What it deliberately does not start: Raft. There are no elections, no leader and no replicated log
+# on a mount. Coordination here is compare-and-swap against S3 — the store evaluates a conditional
+# write, which needs no quorum and keeps working with a single node reachable — so an election would
+# decide nothing a filesystem read asks about while making a cluster that cannot hold a quorum degrade
+# a mount that never needed one.
+#
+# The redis: block is separate from all of the above and works with `enabled` alone: setting both
+# `enabled` here and `redis.enabled` below replaces the in-process cache with a shared Redis one for
+# the whole mount. A Redis that cannot be reached at startup fails the mount rather than falling back,
+# so two nodes cannot both come up believing they share a cache when they do not. Gossip does the same
+# — a cluster that cannot start fails the mount — for the same reason: coherence is a correctness
+# property, and a node that thinks it is clustered and is not serves bytes a peer has overwritten.
 cluster:
   enabled: false
   node_id: ""                         # empty = derived at startup
   listen_addr: 0.0.0.0:8080
   advertise_addr: 127.0.0.1:8080
   seed_nodes: []
+  # Path to the shared secret that authenticates gossip messages. Required whenever `enabled` is true,
+  # here or as OBJECTFS_CLUSTER_SECRET, which takes precedence and is what a container orchestrator
+  # injects; a cluster refuses to start without one, because an unauthenticated gossip port lets any
+  # host on the network join and announce ownership of cached objects (#206).
+  #
+  # The path, never the secret itself. This file is installed world-readable, so a secret written here
+  # would be readable by every user on the node — the file it points at must be mode 0600 or startup
+  # refuses it. Generate one with:
+  #
+  #   openssl rand -hex 32 > /etc/objectfs/cluster.secret && chmod 600 /etc/objectfs/cluster.secret
+  secret_file: ""
   # How many nodes an operation selects, in preference order. Only the first performs the write —
   # there is one copy of the bytes and S3 holds it — so this is a selection width, not a number of
   # copies made.
