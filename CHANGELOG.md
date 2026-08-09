@@ -27,8 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mount(2)` directly — so a build server or a container image can install this package without pulling
   in a setuid helper, and `postinstall.sh` warns with the per-distribution command when it is absent.
   **Nothing is shipped under `/etc`**: a packaged file there is a dpkg conffile, and dpkg prompts on
-  upgrade to merge it, which hangs an unattended `apt upgrade`. The cost is that
-  `/etc/objectfs/config.yaml` survives `apt purge`, which CI asserts rather than wishes otherwise.
+  upgrade to merge it, which hangs an unattended `apt upgrade`. Two consequences, both asserted in CI
+  rather than wished otherwise. `/etc/objectfs/config.yaml` is created by the scriptlet rather than
+  shipped, so nothing in a removal path deletes it — reinstalling keeps the old config, because the
+  copy happens only when the file is absent. And **there is no purge phase at all**: dpkg keeps a
+  removed package in the `rc` state only when it has conffiles, so with none, `apt remove` takes the
+  package out of dpkg's database entirely and `apt purge objectfs` then reports `Unable to locate
+  package`. Removal is complete in one step.
 
   A removal with a live mount **fails** rather than proceeding. dpkg honours that as a refusal; rpm
   reports it and erases anyway, because `%preun` is not a veto, and the script's header says so. An

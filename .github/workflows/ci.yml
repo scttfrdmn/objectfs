@@ -694,10 +694,13 @@ jobs:
     # silent: an install that succeeds, a `module avail` that lists objectfs, and a `module load` that
     # exports nothing useful.
     #
-    # Lmod only, not both, and the omission is deliberate rather than an oversight: what is being
-    # tested here is the *installed path*, which both files share, and the modulefiles job above runs
-    # both interpreters against a staged copy. Installing environment-modules here as well would buy a
-    # second reading of the same dst.
+    # Lmod only, and not by preference: on Ubuntu the `lmod` and `environment-modules` packages
+    # Conflict, so no single runner can have both (see the modulefiles job below, which is a matrix
+    # for that reason). Lmod is the right one to spend this job's single slot on — it is what the
+    # large HPC sites run, and it is the stricter of the two about the name/version tree this dst
+    # computes. What is under test here is the *installed path*, which both modulefiles share, so the
+    # TCL file is not going untested: the modulefiles job runs it against a staged copy of the same
+    # layout.
     - name: The installed modulefile loads under Lmod and reports the packaged version
       run: |
         sudo apt-get install -y lmod
@@ -828,24 +831,50 @@ jobs:
           exit 1
         fi
 
-    - name: Purge, and record what it does and does not remove
+    - name: There is no purge phase, because the package owns nothing under /etc
       run: |
-        sudo apt-get purge -y objectfs
+        # This step used to run `apt-get purge -y objectfs` and assert the config survived it. That
+        # failed, and the failure was informative rather than a bug in the packaging:
+        #
+        #   E: Unable to locate package objectfs
+        #
+        # dpkg keeps a removed package in the `rc` state — removed, config-files remain — only when
+        # it has **conffiles**, and a conffile is precisely what nfpm.yaml declines to create by
+        # shipping nothing under /etc (a packaged file there prompts on upgrade, which hangs an
+        # unattended `apt upgrade`). With no conffiles there is no residual state, so `remove` is
+        # already complete: the package leaves dpkg's database entirely, apt no longer knows the name,
+        # and `purge` has nothing to act on. The previous step's assertions were the whole removal.
+        #
+        # So this asserts that, rather than performing a purge that cannot exist. `dpkg-query` exits
+        # 1 for a package it has no record of, which is the expected outcome here — hence the `if`
+        # rather than a bare call under `set -e`.
+        if state=$(dpkg-query -W -f='${Status}' objectfs 2>/dev/null); then
+          echo "dpkg still has a record of objectfs: $state"
 
-        # /etc/objectfs/config.yaml SURVIVES a purge, and this step asserts that rather than
-        # wishing otherwise, because it is the current behaviour and a CI step that asserted the
-        # opposite would be a red build describing a feature nobody wrote.
+          # `deinstall ok config-files` is the rc state. Reaching it would mean the package started
+          # shipping a conffile, which is a decision with an upgrade-prompt consequence and should
+          # not arrive silently.
+          case "$state" in
+          *config-files*)
+            echo "::error::objectfs is in dpkg's rc state, so it now ships a conffile. That means" \
+              "an upgrade will prompt the operator to merge it, which hangs an unattended apt run —" \
+              "see the /etc reasoning in nfpm.yaml. If this is intended, it needs a postremove" \
+              "scriptlet and this step needs to become a real purge test."
+            exit 1
+            ;;
+          esac
+        else
+          echo "dpkg has no record of objectfs, which is the expected end state."
+        fi
+
+        # And the config file survives, which is the cost of that design stated as an assertion.
+        # It is created by scripts/postinstall.sh rather than shipped, so dpkg never owned it and
+        # nothing in a removal path deletes it. Only a postremove scriptlet keyed on "purge" could,
+        # and there is none: deleting an operator's configuration is not a thing to add without
+        # deciding it on purpose.
         #
-        # Why it survives: the file is created by scripts/postinstall.sh, not shipped by the
-        # package, so dpkg does not own it and does not track it as a conffile. That is deliberate
-        # (see nfpm.yaml — a packaged file under /etc prompts on upgrade and hangs unattended apt),
-        # and the cost is that only a postremove scriptlet keyed on the "purge" action could delete
-        # it. There is no postremove scriptlet: it was outside the packaging this change set out to
-        # land, and deleting an operator's configuration is not a thing to add without deciding it
-        # on purpose.
-        #
-        # The consequence to know: `apt purge objectfs` followed by a reinstall keeps the old
-        # config, because postinstall.sh copies only when the file is absent.
+        # The consequence to know: removing objectfs and reinstalling it keeps the old config,
+        # because postinstall.sh copies only when the file is absent.
         test -f /etc/objectfs/config.yaml
 
   # ---------------------------------------------------------------------------------------------
@@ -866,9 +895,34 @@ jobs:
   #
   # So the skip is an error here, on the same reasoning as the labels job below: a gate that reports
   # success for work it did not do is worse than no gate.
+  #
+  # A MATRIX, one interpreter per leg, and that is forced rather than stylistic: on Ubuntu the `lmod`
+  # and `environment-modules` packages **Conflict**, so they cannot both be installed on one runner.
+  #
+  #   environment-modules : Conflicts: lmod but 8.6.19-1 is to be installed
+  #   lmod : Conflicts: environment-modules but 5.4.0-1 is to be installed
+  #   E: Unable to correct problems, you have held broken packages.
+  #
+  # Measured, by trying it — the first version of this job installed both in one step and failed with
+  # exit 100 before running a single test. They conflict because both ship /usr/bin/modulecmd and both
+  # want to own the shell init snippets in /etc/profile.d. Which is itself the argument for testing
+  # both: a site runs one or the other, never both, and the two disagree on PATH semantics.
   # ---------------------------------------------------------------------------------------------
   modulefiles:
     runs-on: ubuntu-latest
+    strategy:
+      # Both legs run to completion. A failure under Lmod says nothing about TCL and the reviewer
+      # wants both answers from one push.
+      fail-fast: false
+      matrix:
+        include:
+        - system: lmod
+          package: lmod
+          # interpreter must be one of the candidate paths in modulefiles_test.go.
+          interpreter: /usr/share/lmod/lmod/libexec/lmod
+        - system: tcl-modules
+          package: environment-modules
+          interpreter: /usr/lib/x86_64-linux-gnu/modulecmd.tcl
     steps:
     - uses: actions/checkout@v7
 
@@ -877,31 +931,27 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
-    # Both, not either. They disagree in ways the modulefiles have to absorb — see the PATH
-    # comment above — so a site running one is not evidence about a site running the other.
-    - name: Install Lmod and TCL Modules
+    - name: Install ${{ matrix.package }}
       run: |
         sudo apt-get update
-        sudo apt-get install -y lmod environment-modules
+        sudo apt-get install -y ${{ matrix.package }}
 
-    # The interpreters have to be where modulefiles_test.go looks, and the test's response to their
+    # The interpreter has to be where modulefiles_test.go looks, and the test's response to its
     # absence is a skip. Checking it here instead means a packaging change reports as "the path
     # moved, here is where it went" rather than as a green run — and it reports before the test,
     # rather than as a grep for a string in its output.
-    - name: The interpreters are where the test looks for them
+    - name: The interpreter is where the test looks for it
       run: |
-        for path in /usr/share/lmod/lmod/libexec/lmod /usr/lib/x86_64-linux-gnu/modulecmd.tcl; do
-          if [ ! -x "$path" ]; then
-            echo "::error::$path is not executable, so the test that needs it would skip and this" \
-              "job would pass having checked only the structural half."
-            echo "What the packages actually installed:"
-            dpkg -L lmod environment-modules | grep -E 'lmod$|modulecmd' || true
-            echo "Add the path to the candidate list in internal/config/modulefiles_test.go."
-            exit 1
-          fi
-        done
+        if [ ! -x "${{ matrix.interpreter }}" ]; then
+          echo "::error::${{ matrix.interpreter }} is not executable, so the test that needs it" \
+            "would skip and this job would pass having checked only the structural half."
+          echo "What ${{ matrix.package }} actually installed:"
+          dpkg -L ${{ matrix.package }} | grep -E 'lmod$|modulecmd' || true
+          echo "Add the path to the candidate list in internal/config/modulefiles_test.go."
+          exit 1
+        fi
 
-    - name: The modulefiles load, and refuse, under both module systems
+    - name: The modulefiles load, and refuse, under ${{ matrix.system }}
       run: |
         set -o pipefail
         go test ./internal/config/ -v -run 'TestModulefiles' 2>&1 | tee modulefiles.log
@@ -912,17 +962,17 @@ jobs:
         # there is no absent-binary case left to run. This job installs no objectfs, which is why it
         # is its own job and not a step in `packaging`. If that ever changes, this catches it.
         #
-        # One pattern per subtest rather than one for the family, because a skip of either
-        # interpreter leaves the other reporting for both.
+        # THIS leg's subtests only. The other system's subtests skip here by design and correctly —
+        # its interpreter conflicts with this one's package and is genuinely not installed — so
+        # asserting on both would fail every leg. Each system is covered by its own matrix leg, and
+        # `--- SKIP` for the pair is the sum of the two legs, not of one.
         for t in Load Refuse; do
-          for system in lmod tcl-modules; do
-            if grep -qE "^ *--- SKIP: TestModulefiles${t}[A-Za-z]*/${system} " modulefiles.log; then
-              echo "::error::TestModulefiles${t}.../${system} skipped instead of running, so this" \
-                "job checked only the structural half. That is a CI configuration failure, not a" \
-                "pass. The skip message in the log says which condition fired."
-              exit 1
-            fi
-          done
+          if grep -qE "^ *--- SKIP: TestModulefiles${t}[A-Za-z]*/${{ matrix.system }} " modulefiles.log; then
+            echo "::error::TestModulefiles${t}.../${{ matrix.system }} skipped instead of running," \
+              "so this leg checked only the structural half. That is a CI configuration failure, not" \
+              "a pass. The skip message in the log says which condition fired."
+            exit 1
+          fi
         done
 
   # ---------------------------------------------------------------------------------------------
