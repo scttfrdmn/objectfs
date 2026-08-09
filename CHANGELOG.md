@@ -231,6 +231,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Latency percentiles were published as zeros, and the histogram they were meant to come from was a
+  modulo rather than a bucketing** ([#222]). `DetailedOperationMetrics` declared `P50Latency`,
+  `P95Latency` and `P99Latency` with JSON tags and never assigned any of them, so anything serializing
+  the struct reported a filesystem with no tail latency at all — the most flattering possible wrong
+  answer, and one that reads as a measurement rather than as an unimplemented field. They could not have
+  been computed from `LatencyHistogram` in any case: it was indexed by `int(latency.Milliseconds()) %
+  100`, which is a hash of the latency into 100 slots with no ordering, so 50 ms and 250 ms shared a
+  bucket, 1 ms and 1001 ms shared a bucket, and every operation under a millisecond — the expected case
+  for a cache hit — landed in bucket 0 along with everything at exactly 100 ms. An array indexed that
+  way cannot answer "what fraction of operations were faster than N" for any N.
+
+  The histogram is now 24 exponential buckets from 25 µs plus an overflow bucket, published by
+  `metrics.LatencyBucketBounds` since counts without their intervals are not interpretable. That range is
+  set by what has to fit in it: an L1 hit is tens of microseconds and a cold multipart GET is seconds, so
+  no linear-in-milliseconds scheme resolves both ends. The three percentiles are estimated from it by
+  interpolating within the covering bucket, as Prometheus's `histogram_quantile` does, and a rank landing
+  in the overflow bucket saturates at the top bound — "at least this" rather than wrapping to a fast
+  bucket, which is the failure direction that makes a slow filesystem look fast. Per-file metrics
+  allocate no histogram and are documented as leaving the percentiles zero.
+
+  `GetOperationMetrics` also stopped handing callers the live histogram. Its comment said it returned a
+  copy to avoid races, but a struct copy copies a slice header, so the caller walked the array the
+  recorder increments — harmless while nothing read the field, and a data race now that the percentiles
+  give something a reason to.
+
 - **A read-ahead prefetch that fell behind the reader re-fetched bytes already cached.** A prefetch is
   queued and the reader does not wait for it, so under load the reader can consume the front of the very
   range predicted for it before a worker picks the request up. Those reads are then finished — removed
@@ -2746,6 +2771,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#352]: https://github.com/scttfrdmn/objectfs/issues/352
 [#399]: https://github.com/scttfrdmn/objectfs/issues/399
 [#223]: https://github.com/scttfrdmn/objectfs/issues/223
+[#222]: https://github.com/scttfrdmn/objectfs/issues/222
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378
