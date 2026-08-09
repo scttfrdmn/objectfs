@@ -263,6 +263,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is no predictive layer to ask, as on a Redis-backed cache: zeros there would claim a predictor that
   never fires, which is a different statement from having no predictor.
 
+  A ratio could also momentarily exceed 1, which is a value neither statistic can take. Both recording
+  functions published their range into a ledger and *then* took the stats lock to count it, and a range is
+  claimable the instant it is there — so under several readers against one prefetch worker, hits were
+  credited against a denominator that had not been incremented yet. CI observed `prefetch_efficiency` at
+  4, and forty local runs of the same test did not. Both now count before they publish. Neither lock can
+  be held across both halves — the ledger is written by prefetch workers while a read holds the stats
+  lock, and the reverse order exists too — so ordering the two uncontended sections is the fix, and it is
+  the right direction: the remaining window makes a ratio briefly *low* rather than impossible, and a
+  cumulative counter that has run past its bound stays wrong for the life of the mount.
+
 - **Latency percentiles were published as zeros, and the histogram they were meant to come from was a
   modulo rather than a bucketing** ([#222]). `DetailedOperationMetrics` declared `P50Latency`,
   `P95Latency` and `P99Latency` with JSON tags and never assigned any of them, so anything serializing

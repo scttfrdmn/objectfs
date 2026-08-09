@@ -667,3 +667,108 @@ func TestGetPredictiveStatsIsSafeUnderConcurrentReads(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestNoRangeIsClaimableBeforeItsDenominatorIsCounted pins the ordering in recordPrefetch and
+// recordPredictions.
+//
+// This is an ordering defect, not a data race, so -race cannot see it, and it is transient, so a check
+// after the dust settles sees nothing either — the counts agree again once the blocked increment lands.
+// The concurrency test above caught it only by luck of scheduling: it fired on CI and not in forty
+// local runs of the same test. So this one closes the window by hand rather than racing for it.
+//
+// The mechanism: hold stats.mu, then run the recording function on another goroutine. Ordered
+// correctly, it blocks in its counting section and can publish nothing, so the range never becomes
+// claimable while the lock is held — which is the property, and it is why a poll that never succeeds is
+// the passing outcome here. Ordered the other way, the range is in the ledger immediately and a read
+// arriving now would credit a hit against a denominator still sitting at zero.
+func TestNoRangeIsClaimableBeforeItsDenominatorIsCounted(t *testing.T) {
+	t.Parallel()
+
+	const (
+		block = 4096
+		key   = "ordering"
+	)
+
+	cases := []struct {
+		name string
+		// record runs the function under test, which must count before it publishes.
+		record func(pc *PredictiveCache)
+		// ledger is the one that function publishes into.
+		ledger func(pc *PredictiveCache) *rangeLedger
+		// counted reads the denominator. Called with stats.mu already held, so it reads the fields
+		// directly rather than through GetPredictiveStats, which would deadlock on the same lock.
+		counted func(pc *PredictiveCache) uint64
+		// numerator names the statistic that would run ahead, for the failure message.
+		numerator string
+	}{
+		{
+			name:      "a prefetch, against PrefetchRequests",
+			record:    func(pc *PredictiveCache) { pc.recordPrefetch(key, 0, block) },
+			ledger:    func(pc *PredictiveCache) *rangeLedger { return pc.ledger },
+			counted:   func(pc *PredictiveCache) uint64 { return pc.stats.PrefetchRequests },
+			numerator: "PrefetchHits",
+		},
+		{
+			name: "a prediction, against PredictionsTotal",
+			record: func(pc *PredictiveCache) {
+				pc.recordPredictions([]types.PrefetchCandidate{
+					{Path: key, Offset: 0, Size: block, Priority: 50},
+				})
+			},
+			ledger:    func(pc *PredictiveCache) *rangeLedger { return pc.predictions },
+			counted:   func(pc *PredictiveCache) uint64 { return pc.stats.PredictionsTotal },
+			numerator: "PredictionsCorrect",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend := &fixedBackend{payload: make([]byte, block)}
+
+			pc, err := NewPredictiveCache(statsConfig(backend))
+			if err != nil {
+				t.Fatalf("NewPredictiveCache: %v", err)
+			}
+			t.Cleanup(func() { _ = pc.Close() })
+
+			done := make(chan struct{})
+
+			pc.stats.mu.Lock()
+
+			go func() {
+				defer close(done)
+
+				tc.record(pc)
+			}()
+
+			// Long enough that a publish-first implementation has certainly reached its ledger write —
+			// there is nothing between the function's entry and that write to delay it — and short enough
+			// not to matter to a suite. A correct implementation is parked on the Lock above for all of it.
+			deadline := time.After(500 * time.Millisecond)
+			claimable := false
+
+			for !claimable {
+				select {
+				case <-deadline:
+					// Nothing was published while the counting section was blocked. That is the property.
+					goto assert
+				default:
+				}
+
+				claimable = tc.ledger(pc).claim(key, 0, block)
+			}
+
+		assert:
+			if claimable && tc.counted(pc) == 0 {
+				t.Errorf("the range was claimable while its denominator was still 0, so a read arriving "+
+					"now would increment %s against nothing; the ledger is published before the counter "+
+					"that bounds it, which is how a ratio an operator scrapes exceeds 1", tc.numerator)
+			}
+
+			pc.stats.mu.Unlock()
+			<-done
+		})
+	}
+}

@@ -1019,23 +1019,32 @@ func (rl *RateLimiter) Allow(bytes int64) bool {
 func (pc *PredictiveCache) recordPredictions(candidates []types.PrefetchCandidate) {
 	confidence := 0.0
 	for _, candidate := range candidates {
-		pc.predictions.record(candidate.Path, candidate.Offset, candidate.Size)
 		confidence += float64(candidate.Priority) / 100.0
 	}
 
-	pc.stats.mu.Lock()
-	defer pc.stats.mu.Unlock()
+	// Counted before the ranges are published, for the reason recordPrefetch's comment gives: a
+	// prediction is claimable the moment it is in the ledger, and PredictionsCorrect must not be able to
+	// run ahead of PredictionsTotal.
+	func() {
+		pc.stats.mu.Lock()
+		defer pc.stats.mu.Unlock()
 
-	n := uint64(len(candidates))
-	pc.stats.PredictionsTotal += n
+		n := uint64(len(candidates))
+		pc.stats.PredictionsTotal += n
 
-	// A running mean over every prediction ever made, kept incrementally because the individual
-	// confidences are not retained. Weighted by n so a burst of candidates does not count as one sample.
-	if total := pc.stats.PredictionsTotal; total > 0 {
-		pc.stats.AvgConfidence += (confidence - float64(n)*pc.stats.AvgConfidence) / float64(total)
+		// A running mean over every prediction ever made, kept incrementally because the individual
+		// confidences are not retained. Weighted by n so a burst of candidates does not count as one
+		// sample.
+		if total := pc.stats.PredictionsTotal; total > 0 {
+			pc.stats.AvgConfidence += (confidence - float64(n)*pc.stats.AvgConfidence) / float64(total)
+		}
+
+		pc.stats.recomputeRatiosLocked()
+	}()
+
+	for _, candidate := range candidates {
+		pc.predictions.record(candidate.Path, candidate.Offset, candidate.Size)
 	}
-
-	pc.stats.recomputeRatiosLocked()
 }
 
 // recordPrediction credits the predictor when a read lands in a range it named.
@@ -1056,15 +1065,39 @@ func (pc *PredictiveCache) recordPrediction(key string, offset, size int64) {
 }
 
 // recordPrefetch notes bytes a worker stored, so a later read can be attributed to the prefetch.
+//
+// # The denominator is counted before the range is published
+//
+// A range in a ledger is claimable the instant it is there, by any reader, on any goroutine. Recording
+// the range first — which is what this did — opens a window in which the numerator can be incremented
+// while the denominator has not been: a read claims the range, updateStats counts a PrefetchHit, and
+// PrefetchRequests is still what it was. With several readers against one prefetch worker that window
+// is not theoretical. CI caught PrefetchHits at 4 against PrefetchRequests at 1, reported as
+// "efficiency 4" by TestGetPredictiveStatsIsSafeUnderConcurrentReads, which 40 local runs of the same
+// test did not reproduce.
+//
+// Neither lock can be held across both halves. The ledger is written by prefetch workers while a read
+// holds the stats lock, and the reverse order exists too, so a function taking both would deadlock —
+// the same constraint that made takeUnclaimed a drained counter rather than a direct read. Ordering
+// the two uncontended sections is what is available, and it is sufficient: a hit can only be counted
+// after the range is published, which is after the request that published it was counted. The reverse
+// window, where the denominator leads, makes the ratio momentarily *low* rather than impossible.
+//
+// A ratio above 1 is worse than one that is briefly low. It is not a value the statistic can take, so
+// it tells an operator reading a dashboard that the instrumentation is broken — and it says so for the
+// life of the mount, because these are cumulative counters and nothing subtracts. recordPredictions
+// orders itself the same way and for the same reason.
 func (pc *PredictiveCache) recordPrefetch(key string, offset, length int64) {
+	func() {
+		pc.stats.mu.Lock()
+		defer pc.stats.mu.Unlock()
+
+		pc.stats.PrefetchRequests++
+		pc.stats.PrefetchBytes += length
+		pc.stats.recomputeRatiosLocked()
+	}()
+
 	pc.ledger.record(key, offset, length)
-
-	pc.stats.mu.Lock()
-	defer pc.stats.mu.Unlock()
-
-	pc.stats.PrefetchRequests++
-	pc.stats.PrefetchBytes += length
-	pc.stats.recomputeRatiosLocked()
 }
 
 func (pc *PredictiveCache) updateStats(event AccessEvent, latency time.Duration) {
