@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"github.com/scttfrdmn/objectfs/internal/vfs"
 	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
@@ -97,6 +99,29 @@ func TestToErrnoClassifiesEveryVocabularyItReceives(t *testing.T) {
 			err:  vfs.ErrInvalid,
 			want: syscall.EINVAL,
 			why:  "a rejected argument is the caller's to fix, not a filesystem failure",
+		},
+		{
+			name: "ErrNoSpace",
+			err:  vfs.ErrNoSpace,
+			want: syscall.ENOSPC,
+			why: "every program that writes files already handles ENOSPC; EDQUOT would suggest a per-user " +
+				"quota that does not exist and ENOMEM is not a documented write(2) error, so callers do " +
+				"not check for it",
+		},
+		{
+			name: "ErrTooLarge",
+			err:  vfs.ErrTooLarge,
+			want: syscall.E2BIG,
+			why: "setxattr(2)'s errno for a value no object could hold. It has to differ from the ENOSPC " +
+				"above: a caller that frees an attribute and retries is right for ENOSPC and loops " +
+				"forever for E2BIG",
+		},
+		{
+			name: "ErrNoXattr",
+			err:  vfs.ErrNoXattr,
+			want: syscall.Errno(fuse.ENOATTR),
+			why: "ENOATTR on darwin, ENODATA on linux — and never ENOENT, which would tell a caller " +
+				"probing for an attribute that the file itself had disappeared underneath it",
 		},
 		{
 			name: "ErrIntegrity",

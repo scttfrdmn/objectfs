@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scttfrdmn/objectfs/internal/vfs"
 	"github.com/scttfrdmn/objectfs/pkg/types"
@@ -2335,4 +2336,287 @@ func TestPrefixOperationsOnAnExactKeyTakeThatKey(t *testing.T) {
 				"file returning from the dead at the name it was moved away from, with no error anywhere")
 		}
 	})
+}
+
+// TestSetXattrMergesWithAttributesAlreadyOnTheObject is the defect [vfs.Writer.node] exists to prevent,
+// applied to extended attributes.
+//
+// setxattr on a file nobody has opened creates the node, and a node built from defaults carries mode
+// 0644 and uid 0. Flushing that would persist an attribute *and* silently chown the file to root and
+// reset its permissions — from a `setfattr`, which no user would expect to touch ownership. The same
+// applies to the file's other extended attributes: a node that did not read them first would render
+// metadata omitting them, and while a merge on the wire saves the stored ones from deletion, a
+// subsequent removal of a different attribute would resurrect anything the node never knew about.
+func TestSetXattrMergesWithAttributesAlreadyOnTheObject(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("contents"), map[string]string{
+		"objectfs-mode": "600",
+		"objectfs-uid":  "4242",
+		"objectfs-gid":  "4243",
+	})
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	if err := w.SetXattr(context.Background(), "f", "user.project", []byte("atlas")); err != nil {
+		t.Fatalf("SetXattr: %v", err)
+	}
+	if err := w.Flush("f"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	meta := backend.Meta("f")
+
+	for key, want := range map[string]string{
+		"objectfs-mode": "600",
+		"objectfs-uid":  "4242",
+		"objectfs-gid":  "4243",
+	} {
+		if got := meta[key]; got != want {
+			t.Errorf("%s is %q after a setxattr, want %q. The node was built from defaults rather than "+
+				"from the object's stored attributes, so setting an extended attribute also rewrote the "+
+				"file's mode and ownership.", key, got, want)
+		}
+	}
+
+	// And the attribute itself landed.
+	attrs := vfs.AttrFromMetadata(meta, 0, time.Unix(0, 0).UTC(), "")
+	if got, ok := attrs.Xattr("user.project"); !ok || string(got) != "atlas" {
+		t.Errorf("the attribute reads %q (present=%v) after a flush, want %q", got, ok, "atlas")
+	}
+}
+
+// TestRemoveXattrPersistsATombstoneAndKeepsTheOtherAttributes is the successful removal, end to end
+// through the write path.
+//
+// Every other test of removal at this layer covers a refusal, so the path that actually changes something
+// was reachable only through internal/fuse — and the thing worth asserting here is what reaches the
+// *object*, which is a tombstone rather than an absent key. [types.Backend.SetObjectMetadata] merges the
+// caller's metadata over what the object already carries, so a removal rendered as an omitted key would
+// change nothing on the wire while removexattr returned success, and the attribute would stay readable.
+//
+// The surviving attribute is asserted alongside it because the two failures have one cause: a removal that
+// rendered only the changed attribute would delete the others on any endpoint that replaces wholesale.
+func TestRemoveXattrPersistsATombstoneAndKeepsTheOtherAttributes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	w, backend := newWriter(t)
+	backend.Put("f", []byte("contents"))
+
+	for name, value := range map[string]string{"user.doomed": "gone", "user.kept": "stays"} {
+		if err := w.SetXattr(ctx, "f", name, []byte(value)); err != nil {
+			t.Fatalf("SetXattr %s: %v", name, err)
+		}
+	}
+	if err := w.Flush("f"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if err := w.RemoveXattr(ctx, "f", "user.doomed"); err != nil {
+		t.Fatalf("RemoveXattr: %v", err)
+	}
+	if !w.Dirty("f") {
+		t.Error("the removal left the node clean, so no flush would ever carry it to the object")
+	}
+	if err := w.Flush("f"); err != nil {
+		t.Fatalf("Flush after the removal: %v", err)
+	}
+
+	// Read the object's metadata back the way a fresh mount would.
+	attrs := vfs.AttrFromMetadata(backend.Meta("f"), 0, time.Unix(0, 0).UTC(), "")
+
+	if _, ok := attrs.Xattr("user.doomed"); ok {
+		t.Error("the removed attribute is still readable from the object's metadata. A metadata replace " +
+			"merges over what is already there, so a removal that omits the key changes nothing — and " +
+			"removexattr already reported success.")
+	}
+	if got, ok := attrs.Xattr("user.kept"); !ok || string(got) != "stays" {
+		t.Errorf("the other attribute reads %q (present=%v) after an unrelated removal, want %q",
+			got, ok, "stays")
+	}
+
+	// And the tombstone is on the object, not merely absent from the decode. Those are different: an
+	// omitted key also decodes as absent here, while leaving the old value on a real endpoint.
+	if len(attrs.Xattrs) != 2 {
+		t.Errorf("the object carries %d extended-attribute entries, want 2 (one value and one tombstone): "+
+			"%v", len(attrs.Xattrs), attrs.Xattrs)
+	}
+}
+
+// TestXattrOperationsRefuseAnEmptyKey covers the guard both write-path entry points open with.
+//
+// An empty key is not a file. It reaches [types.Backend] as a HeadObject on "", which S3 answers with a
+// 400 rather than a 404, so without this guard a caller gets a transport error where it should get
+// EINVAL — and [vfs.Writer.node] would cache a node under the empty key on the way. The other write
+// methods guard it for the same reason; these two are new and are held to it.
+func TestXattrOperationsRefuseAnEmptyKey(t *testing.T) {
+	t.Parallel()
+
+	w, _ := newWriter(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		op  string
+		run func() error
+	}{
+		{"SetXattr", func() error { return w.SetXattr(ctx, "", "user.x", []byte("v")) }},
+		{"RemoveXattr", func() error { return w.RemoveXattr(ctx, "", "user.x") }},
+	} {
+		err := tc.run()
+
+		if err == nil {
+			t.Errorf("%s accepted an empty key", tc.op)
+
+			continue
+		}
+		if !errors.Is(err, vfs.ErrInvalid) {
+			t.Errorf("%s on an empty key returned %v, which is not ErrInvalid, so the FUSE layer maps it "+
+				"to EIO rather than EINVAL", tc.op, err)
+		}
+	}
+}
+
+// TestXattrOperationsReportAFailureToReadTheObjectsAttributes is the case where the node cannot be built.
+//
+// Both operations have to read the object's current attributes before changing one, because a change is
+// merged into them — see [TestSetXattrMergesWithAttributesAlreadyOnTheObject] for what happens when it is
+// not. So a HEAD that fails for a reason other than absence has to fail the setxattr: the alternative is
+// to proceed from defaults, which persists an attribute and chowns the file to root at the same time. A
+// throttled or denied HEAD is exactly the case where that is tempting and exactly where it is worst.
+func TestXattrOperationsReportAFailureToReadTheObjectsAttributes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	denied := errors.New("AccessDenied: not authorized to perform s3:GetObject")
+
+	for _, tc := range []struct {
+		op  string
+		run func(*vfs.Writer) error
+	}{
+		{"SetXattr", func(w *vfs.Writer) error { return w.SetXattr(ctx, "f", "user.x", []byte("v")) }},
+		{"RemoveXattr", func(w *vfs.Writer) error { return w.RemoveXattr(ctx, "f", "user.x") }},
+	} {
+		w, backend := newWriter(t)
+		backend.Put("f", []byte("contents"))
+		backend.headErr = denied
+
+		err := tc.run(w)
+
+		if err == nil {
+			t.Errorf("%s reported success while the object's attributes could not be read. The node would "+
+				"be built from defaults, so the next flush would persist mode 0644 and uid 0 over whatever "+
+				"the object actually carries.", tc.op)
+
+			continue
+		}
+		if !errors.Is(err, denied) {
+			t.Errorf("%s lost the underlying cause: %v", tc.op, err)
+		}
+		if w.Dirty("f") {
+			t.Errorf("%s left the node dirty after failing, so the next flush writes a change that was "+
+				"never accepted", tc.op)
+		}
+	}
+}
+
+// TestSetXattrRefusesAValueOverTheBudgetWithoutDirtyingTheNode is the budget refusal at the layer that
+// enforces it, and the half of it that only this layer can show.
+//
+// internal/fuse asserts the errno. What matters here is that a refused set leaves nothing pending: S3
+// rejects an over-budget PUT outright rather than truncating, so a node left dirty by a refused setxattr
+// turns one failed setfattr into a flush that can never succeed — and the caller that sees that failure is
+// whatever later writes to the file, not the one that caused it.
+func TestSetXattrRefusesAValueOverTheBudgetWithoutDirtyingTheNode(t *testing.T) {
+	t.Parallel()
+
+	w, backend := newWriter(t)
+	backend.Put("f", []byte("contents"))
+
+	err := w.SetXattr(context.Background(), "f", "user.big", make([]byte, 4096))
+
+	if err == nil {
+		t.Fatal("SetXattr accepted a value larger than the whole metadata budget")
+	}
+	if !errors.Is(err, vfs.ErrTooLarge) {
+		t.Errorf("the error is not ErrTooLarge, so the FUSE layer cannot answer E2BIG: %v", err)
+	}
+	if w.Dirty("f") {
+		t.Error("the refused setxattr left the node dirty. The next flush would attempt a metadata write " +
+			"S3 rejects, so an unrelated later write to this file fails for a setfattr that already " +
+			"reported an error.")
+	}
+}
+
+// TestRemoveXattrReportsAbsenceWithoutDirtyingTheNode covers the two halves of removing something that
+// is not there.
+//
+// The errno matters at the FUSE layer, and internal/fuse covers it. What is only visible here is that a
+// refused removal leaves nothing pending: a node marked dirty for a change it did not make would issue a
+// metadata rewrite — a CopyObject on the object — on the next flush, for a `setfattr -x` that failed.
+//
+// A verifying mutation drove this test's existence: making RemoveXattr report success for a missing
+// attribute failed only in internal/fuse, and the dirty-node half failed nowhere at all.
+func TestRemoveXattrReportsAbsenceWithoutDirtyingTheNode(t *testing.T) {
+	t.Parallel()
+
+	backend := newFakeBackend()
+	backend.PutWithMeta("f", []byte("contents"), map[string]string{"objectfs-mode": "644"})
+
+	w, err := vfs.NewWriter(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	err = w.RemoveXattr(context.Background(), "f", "user.never")
+
+	if err == nil {
+		t.Fatal("removing an attribute that does not exist reported success. setfattr -x would exit 0 " +
+			"for a name the file never had, so a script checking whether an attribute was present would " +
+			"conclude it was.")
+	}
+	if !errors.Is(err, vfs.ErrNoXattr) {
+		t.Errorf("the error is not ErrNoXattr, so the FUSE layer cannot map it to the errno getfattr "+
+			"needs: %v", err)
+	}
+
+	if w.Dirty("f") {
+		t.Error("the failed removal left the node dirty, so the next flush issues a metadata rewrite — " +
+			"a CopyObject on the object — to persist a change that was refused")
+	}
+}
+
+// TestSetXattrRejectsANilValueRatherThanStoringATombstone pins the boundary between the two meanings of
+// "no value".
+//
+// A nil value is how a removal is represented in the stored form, so accepting one here would make a set
+// indistinguishable from a remove — `setfattr -n user.x` would delete the attribute it was asked to
+// create. The FUSE layer normalises a nil to an empty slice for exactly this reason; this asserts the
+// layer below refuses it, so that a future caller which forgets to normalise fails loudly instead of
+// deleting data.
+func TestSetXattrRejectsANilValueRatherThanStoringATombstone(t *testing.T) {
+	t.Parallel()
+
+	w, backend := newWriter(t)
+	backend.Put("f", []byte("contents"))
+
+	err := w.SetXattr(context.Background(), "f", "user.x", nil)
+
+	if err == nil {
+		t.Fatal("SetXattr accepted a nil value. nil is the tombstone in the stored representation, so " +
+			"this would store a removal for the attribute it was asked to set.")
+	}
+	if !errors.Is(err, vfs.ErrInvalid) {
+		t.Errorf("the error is not ErrInvalid: %v", err)
+	}
+
+	// An empty value is legal and must be accepted, or `setfattr -n user.x f` with no -v fails.
+	if err := w.SetXattr(context.Background(), "f", "user.x", []byte{}); err != nil {
+		t.Errorf("SetXattr refused an empty value: %v. That is `setfattr -n user.x f` with no -v, which "+
+			"sets an attribute whose value is zero bytes.", err)
+	}
 }

@@ -70,6 +70,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no per-key access counter is reachable from the cluster layer, and the nearest available quantity
   orders by last-announced, which under that label would be a proxy read as the real thing.
 
+- **Extended attributes** ([#167]) — `getfattr`, `setfattr`, and `setfattr -x` now work on files,
+  stored in S3 user metadata and surviving a flush. `XATTR_CREATE` and `XATTR_REPLACE` are honoured,
+  an attribute set to an empty value round-trips as empty rather than as a removal, and a directory
+  reports `ENOTSUP` rather than go-fuse's default of "no such attribute" so that a caller can tell
+  "this filesystem cannot" from "that attribute is missing".
+
+  **Names and values are encoded, not stored verbatim**, and the reasons are worth stating because
+  the naive mapping is silently lossy in three separate ways. A user-metadata key is an HTTP header
+  name: S3 lower-cases it in transit, so `user.Foo` and `user.foo` would overwrite each other, and it
+  admits only token characters where an xattr name admits any byte but NUL — so names are
+  base32-encoded, whose alphabet survives case folding. Values are binary, and a header value carries
+  neither a NUL nor a newline, so values are base64-encoded in the **URL** alphabet specifically,
+  avoiding `+` (which real S3 has been observed to read as a space in a header), `/`, and `=`. The
+  cost is 1.6 stored bytes per byte of name and a stored key that is no longer legible in the AWS
+  console; both were taken deliberately over a partial escaping scheme, whose edge cases would be the
+  entire risk on a filesystem whose first priority is integrity.
+
+  **The budget is 1758 bytes per object**, computed rather than written down: S3's 2048-byte
+  user-metadata limit less the worst-case cost of the four POSIX attribute keys and the two integrity
+  keys, each derived from its own key constant so that renaming one cannot leave the figure stale.
+  Roughly 35 attributes of the shape `user.test`=`hello` fit. The two ways to exceed it are reported
+  differently, because they call for different actions: one attribute larger than the whole budget is
+  `E2BIG` and will never fit, while a set that no longer fits alongside the others is `ENOSPC` and
+  fits again once something is removed. Both are refused at `setxattr` rather than at the next flush —
+  a `setfattr` that succeeds and breaks a later write moves the error to a caller who cannot act on it.
+
+  **`security.*` and `system.*` are refused**, and this is a security decision rather than a gap.
+  Linux reads `security.capability` on every exec and grants the capabilities it names; S3 object
+  metadata is writable by anyone holding `s3:PutObject`, so honouring that attribute would convert
+  bucket write access into file capabilities on every host that mounts the bucket — an escalation
+  ObjectFS would be creating, not inheriting. `system.posix_acl_*` is refused because storing an ACL
+  the kernel then cannot enforce is worse than not having ACLs. `user.*` and `trusted.*` are stored;
+  `trusted.*` remains root-only by the kernel's own check.
+
+  **A removal is a tombstone.** `SetObjectMetadata` is a self-copy with `MetadataDirective=REPLACE`
+  and the backend merges the object's existing metadata underneath the caller's, so that the integrity
+  keys — which only the backend has seen the bytes to compute — survive a `chmod`. Verified against a
+  real endpoint: a key omitted from the caller's map is *not* removed from the object. So a
+  `removexattr` that merely stopped rendering the key would report success while the attribute stayed
+  readable forever. The alternative is a full `PutObject` per removal, which costs a read plus a write
+  of the whole object — 20 GiB of transfer to delete a few bytes from a 10 GiB file. The tombstone
+  costs one metadata entry that lasts until the object's next content write, and it is visible in
+  `head-object` output rather than hidden. Removing an attribute that was never set writes nothing.
+
+  Object annotations were considered and not used. They are **not** unavailable — `PutObjectAnnotation`
+  and its siblings are present in the pinned SDK, and [#165]'s note that they were absent was true of
+  an older version and is now stale — and they offer far more room, 1 MiB per annotation against 2 KB
+  total here. They were rejected because support is a per-endpoint fork, and a fork would mean two
+  storage formats for one attribute set with no migration between them: annotations do not survive a
+  transition to a directory bucket, and `CopyObject`'s default annotation directive does not carry them
+  through a multipart copy. Both of those are operations ObjectFS performs *itself* to persist an
+  attribute change, so the fallback would drop attributes during ObjectFS's own writes. Lifting the
+  2 KB ceiling is therefore a deliberate, probed, migrating change, not a silent fallback.
+
 ### Fixed
 
 - **A node never recorded its own cache figures in its membership map** ([#147]). `refreshLocalStats`
@@ -3097,6 +3151,8 @@ had no message authentication, and a cluster will not start without a shared sec
 [#145]: https://github.com/scttfrdmn/objectfs/issues/145
 [#147]: https://github.com/scttfrdmn/objectfs/issues/147
 [#151]: https://github.com/scttfrdmn/objectfs/issues/151
+[#165]: https://github.com/scttfrdmn/objectfs/issues/165
+[#167]: https://github.com/scttfrdmn/objectfs/issues/167
 [#169]: https://github.com/scttfrdmn/objectfs/issues/169
 [#282]: https://github.com/scttfrdmn/objectfs/issues/282
 [#283]: https://github.com/scttfrdmn/objectfs/issues/283

@@ -362,6 +362,45 @@ func (w *Writer) SetAttr(ctx context.Context, key string, mode, uid, gid bool, f
 	return n.SetAttr(mode, uid, gid, from)
 }
 
+// SetXattr records a new value for key's extended attribute name, to be persisted at flush.
+//
+// It creates the node if there is none, which reads the object's stored attributes first — so the
+// attributes already on the object, including its other extended attributes, are the ones this change
+// is merged into. A node built from defaults would persist an xattr alongside mode 0644 and uid 0,
+// which is the defect [Writer.node] documents for content writes and which applies identically here.
+func (w *Writer) SetXattr(ctx context.Context, key, name string, value []byte) error {
+	if key == "" {
+		return fmt.Errorf("%w: empty key", ErrInvalid)
+	}
+	if value == nil {
+		// nil is the tombstone in the stored representation, so accepting it here would make a set
+		// indistinguishable from a remove. An empty attribute value is legal and is expressed as an empty
+		// non-nil slice, which is what the FUSE layer passes for `setfattr -n user.x` with no value.
+		return fmt.Errorf("%w: nil extended attribute value for %q; use RemoveXattr to remove one",
+			ErrInvalid, name)
+	}
+
+	n, err := w.node(ctx, key)
+	if err != nil {
+		return err
+	}
+	return n.SetXattr(name, value)
+}
+
+// RemoveXattr records the removal of key's extended attribute name, to be persisted at flush. It
+// returns [ErrNoXattr] when the file has no such attribute.
+func (w *Writer) RemoveXattr(ctx context.Context, key, name string) error {
+	if key == "" {
+		return fmt.Errorf("%w: empty key", ErrInvalid)
+	}
+
+	n, err := w.node(ctx, key)
+	if err != nil {
+		return err
+	}
+	return n.RemoveXattr(name)
+}
+
 // Attr returns key's current attributes, including changes not yet persisted, and whether the write
 // path holds any state for the key at all.
 //

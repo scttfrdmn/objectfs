@@ -3,6 +3,7 @@ package vfs
 import (
 	"fmt"
 	"io/fs"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -100,6 +101,16 @@ type Attr struct {
 	// v0.10.0 wrote this on every upload and never once read it back. It is the only stored evidence
 	// that what came out of the object store is what went in.
 	Checksum string
+
+	// Xattrs holds the file's extended attributes, keyed by their full name as the caller gave it —
+	// "user.test", not a stored form. A nil value is a tombstone: the attribute has been removed and
+	// the removal has not yet been overwritten by a content write. See xattr.go.
+	//
+	// The map is shared by every copy of an Attr, which are passed by value throughout this package, so
+	// it must never be written in place. [Attr.WithXattr] and [Attr.WithoutXattr] copy it and are the
+	// only way to change it; read it through [Attr.Xattr] and [Attr.XattrNames], which know what a nil
+	// value means.
+	Xattrs map[string][]byte
 }
 
 // blockSize is the unit stat reports Blocks in. POSIX fixes it at 512 regardless of any real block
@@ -265,6 +276,7 @@ func AttrFromMetadataWithDefaults(
 	if v, ok := lookupMeta(meta, metaChecksum); ok {
 		a.Checksum = v
 	}
+	a.Xattrs = xattrsFromMetadata(meta)
 
 	a.Atime = a.Mtime
 	a.Ctime = a.Mtime
@@ -317,6 +329,10 @@ func MetadataWarnings(meta map[string]string) []string {
 		return err
 	})
 
+	// Extended attributes last, and every unusable one rather than the first: a caller reading this in
+	// a log is asking which of its attributes did not survive.
+	warns = append(warns, xattrMetadataWarnings(meta)...)
+
 	return warns
 }
 
@@ -327,6 +343,10 @@ func MetadataWarnings(meta map[string]string) []string {
 // are the storage layer's to write. Checksum is likewise the storage layer's, computed over the
 // bytes it uploads. Duplicating either here would create a second source of truth for a value that
 // integrity checking depends on.
+//
+// Extended attributes are included, under objectfs-xattr-… keys that cannot collide with the four
+// above; see xattr.go for the encoding and for why a removal appears here as a tombstone rather than
+// as an absent key.
 func (a Attr) Metadata() map[string]string {
 	m := map[string]string{
 		metaMode: strconv.FormatUint(uint64(a.Mode.Perm()), 8),
@@ -336,6 +356,7 @@ func (a Attr) Metadata() map[string]string {
 	if !a.Mtime.IsZero() {
 		m[metaMtime] = a.Mtime.UTC().Format(time.RFC3339Nano)
 	}
+	maps.Copy(m, a.xattrMetadata())
 	return m
 }
 

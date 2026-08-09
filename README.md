@@ -133,6 +133,7 @@ or "slow".
 | Directory listing | `opendir`, `readdir`, `ls` | Fully paginated — no entry cap |
 | Mkdir | `mkdir` | Writes a zero-byte marker object at `prefix/` |
 | chmod / chown | `chmod`, `chown` | On **files** only, stored as object metadata. Permission bits only |
+| Extended attributes | `getxattr`, `setxattr`, `listxattr`, `removexattr`, `getfattr`, `setfattr` | On **files** only, stored as object metadata. See [Extended attributes](#extended-attributes) for the size budget, the namespaces that are refused, and the per-call cost |
 | utimes (mtime) | `touch`, `utimensat` | mtime is stored; an atime-only update is accepted and not stored |
 | statfs | `df` | Reports a fixed synthetic capacity — S3 has no size to report |
 | Unlink | `unlink`, `rm` | Deletes the object. A missing file is `ENOENT`, not a silent success |
@@ -143,9 +144,8 @@ or "slow".
 
 POSIX `rename` is atomic: an observer sees the old name or the new one, never both and never
 neither. S3 offers nothing that can implement that. There is no atomic rename operation — the 2026
-`RenameObject` API is directory-bucket (S3 Express) only, and object annotations, which ObjectFS
-needs for attributes, are unsupported on directory buckets, so the two features are mutually
-exclusive. A rename is therefore a server-side copy followed by a delete, per object.
+`RenameObject` API is directory-bucket (S3 Express) only, and ObjectFS does not support directory
+buckets. A rename is therefore a server-side copy followed by a delete, per object.
 
 What that means in practice:
 
@@ -170,6 +170,46 @@ Anything that depends on rename atomicity — the write-temp-then-rename idiom u
 and lockfile schemes — is therefore not safe here between concurrent writers. Single-writer use is
 fine.
 
+#### Extended attributes
+
+`setfattr -n user.project -v atlas file` and `getfattr -n user.project file` work on files, and the
+attributes survive a remount because they are stored on the object. Four properties are worth knowing
+before you rely on them.
+
+**A file's attributes share a 2 KB budget, and the usable part is 1758 bytes.** S3 caps an object's
+total user metadata at 2 KB across all keys, and *rejects* a request that exceeds it rather than
+truncating. ObjectFS already spends part of that on mode, uid, gid, mtime, the content checksum, and
+the original size, leaving 1758 bytes for names and values together — measured from the widest form of
+those keys, not estimated, and re-derived by a test so that adding a stored attribute cannot shrink the
+budget silently. Names and values are encoded to survive an HTTP header, which costs about 60% on top
+of a name and 33% on top of a value. Exceeding the budget is `E2BIG` for a single value too large for
+any object, `ENOSPC` for a value that will not fit alongside what this file already has — the
+distinction `setxattr(2)` draws, and the one a caller retrying after freeing space depends on.
+
+**`security.*` and `system.*` are refused with `ENOTSUP`.** This is a privilege boundary rather than a
+missing feature. The Linux kernel reads `security.capability` from the filesystem on every `exec` and
+grants the file capabilities it names; the store behind an ObjectFS attribute is object metadata, which
+anyone holding `s3:PutObject` on the bucket can write with the AWS CLI without touching the mount. So
+honouring it would turn bucket write access into a route to file capabilities on every host that mounts
+the bucket. `system.posix_acl_access` is refused for the milder version of the same problem: nothing in
+this filesystem enforces an ACL, and one that `getfacl` reports while no access check consults it is
+worse than a `setfacl` that fails. `user.*`, `trusted.*`, and macOS's `com.apple.*` are stored.
+
+**Every `setfattr` is one `CopyObject` on the file.** `setxattr(2)` takes a path, not a descriptor, so
+there is no `close` that could batch the change — it is made durable before the call returns, exactly
+as `chmod` and `touch` are. Setting ten attributes on a file is ten metadata rewrites. That is the
+honest cost of the operation; the alternative would be reporting success for a change S3 later refused,
+with no caller left to tell.
+
+**A removed attribute leaves a marker in the object's metadata.** A metadata replace merges over an
+object's existing metadata rather than replacing it, so omitting a key cannot delete it. `removexattr`
+therefore writes a tombstone: `getfattr` correctly stops showing the attribute, and `head-object` still
+shows a key holding the marker. Deleting one attribute from a 10 GiB file would otherwise cost a full
+rewrite of the object.
+
+Directories have no extended attributes: `setfattr` on one is `ENOTSUP`, and a listing is empty. See
+[Not implemented](#not-implemented).
+
 ### Errors by design
 
 These fail, and the failure is the correct answer rather than a missing feature.
@@ -188,7 +228,8 @@ These fail, and the failure is the correct answer rather than a missing feature.
 |---|---|---|
 | `chmod` / `chown` on a **directory** | **`ENOTSUP`** — the marker object could carry the metadata, but `Getattr` does not read it back, so accepting the call would report a mode the next `stat` contradicts | [#165](https://github.com/scttfrdmn/objectfs/issues/165) |
 | Symlinks (`symlink`, `readlink`) | **`ENOTSUP`** | No `NodeSymlinker`/`NodeReadlinker` |
-| Extended attributes (`getxattr`, `setxattr`, `listxattr`) | **`ENODATA`** on Linux / **`ENOATTR`** on macOS for get and remove; `listxattr` returns an empty list | go-fuse's defaults. An empty list is the accurate answer — there are no xattrs — but note that `setxattr` reports "no such attribute" rather than "unsupported" |
+| Extended attributes on a **directory** | `setxattr` is **`ENOTSUP`**; `getxattr` and `removexattr` report the attribute missing (**`ENODATA`** on Linux, **`ENOATTR`** on macOS); `listxattr` succeeds with an empty list. A directory that exists only because objects share a prefix has no object to hold an attribute, so accepting the call would store it for some directories and discard it for others. The empty listing keeps `cp -a`, `rsync -X`, and `ls -@` from erroring per directory | [#167](https://github.com/scttfrdmn/objectfs/issues/167) |
+| `security.*` and `system.*` extended attributes | **`ENOTSUP`** — refused deliberately, on files as well as directories. Object metadata is writable by anyone with bucket write access, so an attribute the kernel acts on cannot be stored here. See [Extended attributes](#extended-attributes) | |
 | `mknod` (devices, FIFOs, sockets) | **`ENOTSUP`** | |
 | `fallocate` | **`ENOTSUP`** | |
 | Locking (`flock`, POSIX record locks) | not forwarded to ObjectFS at all | The mount does not set go-fuse's `EnableLocks`, so the kernel never asks the filesystem to arbitrate a lock; it falls back to tracking locks locally on the mounting host. A lock therefore does not fail — it just means nothing to any other host, and no cross-node coordination exists that could make it mean anything |
