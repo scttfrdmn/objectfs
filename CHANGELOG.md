@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Releases now attach the `.deb` and `.rpm` packages** ([#138]), plus
+  `internal/config/release_packages_test.go` to keep them attached.
+
+  They were built and never shipped. `nfpm.yaml` has worked for several releases, and `ci.yml`'s
+  `packaging` job builds both formats on every PR, installs the deb, runs the postinstall scriptlet and
+  loads the installed modulefile under Lmod — while `release.yml` contained **zero** references to
+  `package-linux`, `nfpm`, `.deb` or `.rpm`. Every published release is exactly ten assets, five
+  tarballs and five checksums:
+
+  ```console
+  $ gh release view v0.13.0 --json assets --jq '[.assets[].name] | length'
+  10
+  ```
+
+  Same for v0.12.0 and v0.11.0. A package CI proves installable and no user can obtain is
+  `scripts/preremove.sh` before [#207]: working code with nothing invoking it. The structural cause is
+  the one [#198] had — `make package-linux` was exercised only by a job that cannot publish anything, so
+  nothing compared what CI builds against what a release attaches, and the two drifted in the direction
+  that is invisible from a green tree.
+
+  A `package-linux` job now builds both formats for amd64 and arm64, and `publish` waits on it. The
+  waiting matters more than it looks: without it a packaging failure publishes the release anyway,
+  missing the packages, and a release page that looks finished is harder to notice than one that failed.
+  The job also **reads the version back out of a built package** with `dpkg-deb --field`, which closes
+  the gap `nfpm.yaml`'s own comment names — the tag was checked against the version constant and the
+  constant against `nfpm.yaml`, and nothing checked either against what nfpm actually wrote. That is not
+  cosmetic: `apt-get install --only-upgrade` and `dnf update` decide whether to act by comparing
+  versions, so a package declaring a version it does not contain is an upgrade that silently does not
+  happen.
+
+  The read-back's first draft was wrong, and running `make package-linux` rather than reasoning about
+  the filename is what caught it. nfpm writes the release suffix into **both** the name and the field —
+  `objectfs_0.13.0-1_amd64.deb`, `Version: 0.13.0-1`, because `nfpm.yaml` pins `release: '1'` — so the
+  version without the `-1` would have failed the first release it was added to protect.
+
+  The gate couples the two workflows the way `release_platforms_test.go` does for [#198]: a package
+  format `ci.yml` builds is one `release.yml` ships. Two of its checks initially **survived mutation**,
+  and the reason is one this project has now hit three times: a `strings.Contains` over a whole file is
+  satisfied by prose *about* the thing. Deleting the `run: make package-linux` step still passed,
+  because the comment above the job explains what that target builds; removing the `.deb` and `.rpm`
+  upload paths still passed, because a comment and the summary step both name them. Full-line comments
+  are now stripped and the upload assertion is scoped to one named step, after which all eight mutations
+  are caught — including a deb-only deletion hiding behind the rpm and a renamed step, which the
+  helpers `t.Fatalf` on rather than passing for the wrong reason.
+
+  This is part (a) of [#138]. Two parts are deliberately not here: an `install.sh` that fetches a
+  checksum-verified release artifact, and the apt/yum repository setup the issue also specifies. The
+  latter has no host — `objectfs.io` and `packages.objectfs.io` are both registrar parking pages that do
+  not complete a TLS handshake — so it needs a hosting decision rather than code.
+
 - **`docs/admin-guide/operations.md` and `docs/admin-guide/troubleshooting.md`** ([#148]), the day-two
   half of the admin guide, plus `internal/config/docs_admin_guide_test.go` to keep them true.
 
@@ -3355,6 +3405,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#132]: https://github.com/scttfrdmn/objectfs/issues/132
 [#133]: https://github.com/scttfrdmn/objectfs/issues/133
 [#129]: https://github.com/scttfrdmn/objectfs/issues/129
+[#138]: https://github.com/scttfrdmn/objectfs/issues/138
 [#139]: https://github.com/scttfrdmn/objectfs/issues/139
 [#140]: https://github.com/scttfrdmn/objectfs/issues/140
 [#141]: https://github.com/scttfrdmn/objectfs/issues/141
