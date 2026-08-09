@@ -231,6 +231,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The predictive cache's statistics were computed on every read of every mount and discarded at
+  unmount** ([#223]). `GetPredictiveStats` existed and nothing could reach it: the mount holds its
+  `PredictiveCache` as an opaque `types.Cache` — six methods about bytes, with `GetLevelStats` returning a
+  `types.CacheStats` — so there was no accessor at any layer above it. `MultiLevelCache` now has
+  `GetPredictiveCache` and `PredictiveStats`, the names `docs/features/read-ahead.md` had already
+  described, and the mount publishes them to `/metrics` as `objectfs_predictive_cache`, one series per
+  statistic under a `statistic` label. Both SDKs see them: `sdks/testdata/metrics-scrape.txt` carries the
+  family, so a renamed statistic fails the Python and TypeScript suites in the same commit.
+
+  The accessor alone would have been half the fix, because **14 of the 17 fields it returned were assigned
+  nowhere**. `PredictionsTotal`, `PredictionsCorrect`, `PrefetchRequests`, `PrefetchWaste`, the two
+  eviction counters and both ratios were declared with JSON tags and never written, and `PrefetchHits`'s
+  guard was `event.Hit && event.Prefetch` where nothing in the tree ever set `Prefetch` — so it was
+  unreachable rather than merely unwritten. A zero that reads as a measurement is worse than an absent
+  one, which is the same defect as [#222] in a different subsystem, so the statistics are implemented
+  along with the way to read them. Seven fields whose inputs the cache cannot observe were removed rather
+  than left as zeros — `LatencyReduction` would need the latency of the read that *did not happen*.
+
+  Attribution rests on a new bounded range ledger, because it cannot be recovered after the fact: a cache
+  hit looks identical whether the bytes came from the application's own earlier read or from a prefetch. A
+  read is credited to a recorded range only if the range **contains** it, and the range is **consumed** on
+  the claim — a half-covered read was half-served, and a prefetch fetched its bytes once so it can be
+  right once. Both rules make the counters undercount rather than overcount, which is the direction that
+  does not flatter the prefetcher, and consuming is what keeps `prefetch_efficiency` from exceeding 1.
+  Waste is counted at eviction, since that is the moment "nothing will ever read this" becomes knowable.
+
+  Two honest zeros to expect. `prefetch_*` reads zero on a mount today while the prediction and eviction
+  statistics populate, because `initializeLevels` builds the predictive cache with no backend to fetch
+  through — the workers dequeue jobs and store nothing. And the family is **absent, not zero**, when there
+  is no predictive layer to ask, as on a Redis-backed cache: zeros there would claim a predictor that
+  never fires, which is a different statement from having no predictor.
+
 - **Latency percentiles were published as zeros, and the histogram they were meant to come from was a
   modulo rather than a bucketing** ([#222]). `DetailedOperationMetrics` declared `P50Latency`,
   `P95Latency` and `P99Latency` with JSON tags and never assigned any of them, so anything serializing

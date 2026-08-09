@@ -169,9 +169,44 @@ describe('parseScrape', () => {
       'objectfs_cache_size_bytes',
       'objectfs_active_connections',
       'objectfs_errors_total',
+      'objectfs_predictive_cache',
     ]) {
       assert.ok(found.has(name), `${name} missing from the parsed scrape`);
     }
+  });
+
+  test('predictive statistics are labelled, not named', () => {
+    // The predictive cache is one family labelled by `statistic` rather than a metric per number,
+    // so the set of statistics can grow without a metric rename -- a change every SDK and dashboard
+    // would otherwise have to follow. That only works if the parser keeps the label, so this
+    // asserts on the label rather than on the family's presence.
+    const statistics = new Map(
+      parsed.samples
+        .filter((s) => s.name === 'objectfs_predictive_cache')
+        .map((s) => [s.labels['statistic'], s.value])
+    );
+
+    for (const name of [
+      'predictions_total',
+      'predictions_correct',
+      'prediction_accuracy',
+      'avg_confidence',
+      'prefetch_requests',
+      'prefetch_hits',
+      'prefetch_bytes',
+      'prefetch_waste',
+      'prefetch_efficiency',
+      'evictions_total',
+      'evictions_intelligent',
+    ]) {
+      assert.ok(statistics.has(name), `statistic=${name} missing from the parsed scrape`);
+    }
+
+    // A ratio, derived in Go when the totals are written rather than at scrape time. 61 of 186 is
+    // deliberately not a round number: 0, 0.5 and 1 are all values a broken parser can produce by
+    // accident.
+    assert.ok(Math.abs((statistics.get('prediction_accuracy') ?? 0) - 61 / 186) < 1e-6);
+    assert.equal(statistics.get('predictions_total'), 186);
   });
 
   test('operator labels survive the parse', () => {

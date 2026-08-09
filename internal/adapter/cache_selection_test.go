@@ -153,6 +153,18 @@ func TestStartRefusesAnUnreachableRedis(t *testing.T) {
 func startAdapterWithCluster(t *testing.T, mutate func(*config.Configuration)) *Adapter {
 	t.Helper()
 
+	return startTolerantly(t, newAdapterForSubstrate(t, mutate))
+}
+
+// newAdapterForSubstrate builds an adapter against the substrate endpoint without starting it.
+//
+// Separate from startTolerantly so a test can reach the adapter between New and Start. New validates the
+// configuration, and one field cannot be given its test value before that point: monitoring.metrics.addr
+// rejects port 0 on purpose (#212 — zero used to mean "off" and defaulted back to 8080), while a test
+// wanting a port nothing can take from it needs the kernel to pick at the moment of the bind.
+func newAdapterForSubstrate(t *testing.T, mutate func(*config.Configuration)) *Adapter {
+	t.Helper()
+
 	cfg := configForSubstrate(t)
 	if mutate != nil {
 		mutate(cfg)
@@ -162,6 +174,14 @@ func startAdapterWithCluster(t *testing.T, mutate func(*config.Configuration)) *
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+
+	return a
+}
+
+// startTolerantly runs Start and registers the right cleanup for how far it got. See
+// startAdapterWithCluster for why a mount failure is tolerated and everything earlier is fatal.
+func startTolerantly(t *testing.T, a *Adapter) *Adapter {
+	t.Helper()
 
 	startErr := a.Start(context.Background())
 

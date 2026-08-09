@@ -93,6 +93,24 @@ func liveScrape(t *testing.T) string {
 	c.UpdateActiveConnections(4)
 	c.RecordError("read", errors.New("timeout while reading"))
 
+	// The predictive family, which a mount publishes from the cache's own totals (#223). Its label values
+	// are the part an SDK keys on, so they belong in the fixture: without an observation here the family
+	// is absent from the capture, and a rename of any statistic would break both SDKs' extractors with
+	// nothing failing first. 61 correct of 186 is deliberately not a round ratio, for the reason above.
+	c.UpdatePredictiveCache(map[string]float64{
+		"predictions_total":     186,
+		"predictions_correct":   61,
+		"prediction_accuracy":   61.0 / 186.0,
+		"avg_confidence":        0.42,
+		"prefetch_requests":     96,
+		"prefetch_hits":         31,
+		"prefetch_bytes":        96 * 4096,
+		"prefetch_waste":        12,
+		"prefetch_efficiency":   31.0 / 96.0,
+		"evictions_total":       40,
+		"evictions_intelligent": 24,
+	})
+
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

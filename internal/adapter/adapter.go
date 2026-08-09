@@ -157,6 +157,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 
+	a.exportPredictiveStats()
+
 	// 4. Initialize the write path.
 	//
 	// vfs.Writer tracks dirty byte ranges per path and flushes by read-modify-write: fetch the parts
@@ -549,6 +551,73 @@ func (a *Adapter) startMetrics(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// exportPredictiveStats publishes the predictive cache's statistics to the metrics surface on every
+// collector tick, and does nothing when there is no predictive layer to ask.
+//
+// This is the caller [cache.MultiLevelCache.GetPredictiveCache] was missing. The statistics were computed
+// on every read and thrown away at unmount, because nothing above the cache could reach them: types.Cache
+// is six methods about bytes (#223). An accessor with no caller would have been half the fix — a second
+// path nothing exercises — so the accessor and its consumer land together, and the consumer is the
+// metrics surface because that is where an operator can actually see the numbers.
+//
+// Registered as a periodic callback rather than pushed at the moment of the operation: these are totals
+// the cache holds, so the only way to publish them is to ask on a schedule. The callback re-reads the
+// cache each tick rather than closing over a PredictiveStats value, since a snapshot taken here would be
+// the mount's opening zeros forever.
+//
+// The type assertion is the honest form of "when there is a predictive layer". NewFromConfig returns the
+// Redis-backed distributed cache when cluster.redis is on, which has no predictive layer and no way to
+// grow one; and the multi-level cache only wraps L1 when prefetch is enabled. Both are ordinary
+// configurations, so neither is an error — the metric family is simply absent, which is distinguishable
+// from present-and-zero by a scrape.
+//
+// Note what these numbers will and will not show on a mount today: prediction and eviction counters
+// populate, and the prefetch counters read zero, because initializeLevels passes no Backend to the
+// predictive config, so its workers dequeue jobs and fetch nothing. That is honest signal rather than a
+// hidden failure — prefetch_requests staying at 0 while predictions_total climbs is exactly what "the
+// prefetcher has no backend" looks like — and it is the argument for exporting these at all: the gap was
+// invisible for as long as nothing could read them.
+func (a *Adapter) exportPredictiveStats() {
+	if a.metrics == nil {
+		return
+	}
+
+	mlc, ok := a.cache.(*cache.MultiLevelCache)
+	if !ok {
+		return
+	}
+
+	publish := func() {
+		stats, ok := mlc.PredictiveStats()
+		if !ok {
+			return
+		}
+
+		// Keys become the `statistic` label, so they are a contract two SDKs read through
+		// sdks/testdata/metrics-scrape.txt. They mirror the struct's JSON tags rather than inventing a
+		// second vocabulary for the same numbers.
+		a.metrics.UpdatePredictiveCache(map[string]float64{
+			"predictions_total":     float64(stats.PredictionsTotal),
+			"predictions_correct":   float64(stats.PredictionsCorrect),
+			"prediction_accuracy":   stats.PredictionAccuracy,
+			"avg_confidence":        stats.AvgConfidence,
+			"prefetch_requests":     float64(stats.PrefetchRequests),
+			"prefetch_hits":         float64(stats.PrefetchHits),
+			"prefetch_bytes":        float64(stats.PrefetchBytes),
+			"prefetch_waste":        float64(stats.PrefetchWaste),
+			"prefetch_efficiency":   stats.PrefetchEfficiency,
+			"evictions_total":       float64(stats.EvictionsTotal),
+			"evictions_intelligent": float64(stats.EvictionsIntelligent),
+		})
+	}
+
+	// Once now, and on every tick after. Without the first call the family is absent from a scrape until
+	// the update interval elapses — thirty seconds by default — and an absent family and a disabled
+	// predictive layer look the same to whoever is looking.
+	publish()
+	a.metrics.OnPeriodicUpdate(publish)
 }
 
 // buildS3Config translates the loaded configuration into the backend's configuration.
