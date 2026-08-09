@@ -597,13 +597,20 @@ writes, which fail closed rather than degrading, and MinIO is a measured row in
 LocalStack is not. A green Compose run means the mesh forms — not that behavior is correct on AWS,
 which is what the integration suite is for.
 
-### Distributed mode
+### Administration
 
-[docs/admin-guide/distributed.md](docs/admin-guide/distributed.md) is the operator's guide: every
-`cluster:` key with its default, how to size a cache per node, growing and shrinking a cluster, and
-what clustering deliberately does not do. Read the limitations section first if you are deciding
-whether to deploy it — `internal/distributed` is experimental, and the parts an earlier design named
-that do not exist are listed there rather than described.
+Three guides for running this rather than building it:
+
+- [Operations](docs/admin-guide/operations.md) — upgrades (single-node and rolling), capacity changes,
+  rotating the cluster secret, and what to alert on.
+- [Troubleshooting](docs/admin-guide/troubleshooting.md) — a decision tree for mount failures, low
+  cache hit rates, gossip that never forms, and unexpected S3 costs. Every branch ends at a command.
+- [Distributed mode](docs/admin-guide/distributed.md) — the cluster configuration reference, cache
+  sizing, and what clustering deliberately does not do.
+
+Read the limitations section of the distributed guide first if you are deciding whether to deploy
+clustering at all — `internal/distributed` is experimental, and the parts an earlier design named that
+do not exist are listed there rather than described.
 
 The failure mode to know about before anything else: a misconfigured cluster does not fail. Each node
 comes up as a cluster of one, mounts, serves reads, and reports healthy while receiving no cache
