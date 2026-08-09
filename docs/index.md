@@ -68,7 +68,8 @@ which names them rather than leaving them mixed in with the list above.
 
 ### 🔧 Operations
 
-- **Systemd integration**: service templates under `deployments/`
+- **Systemd integration**: one templated unit, `configs/systemd/objectfs@.service` — `systemctl start
+  objectfs@research-data` reads `/etc/objectfs/research-data.yaml`, which must set `mount.uri`
 - **Health monitoring**: `/health` on `monitoring.health_checks.addr`, plus internal component checks
 - **Metrics export**: Prometheus-compatible `/metrics` on `monitoring.metrics.addr`
 - **Structured logging**: JSON logs with configurable levels
