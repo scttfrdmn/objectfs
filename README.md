@@ -327,13 +327,27 @@ worth filing.
 Linux, or macOS with [macFUSE](https://macfuse.io) installed.
 
 ```bash
+# Download the release binary for this platform, verify its SHA-256, install to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh | bash
+
+# or from source
 git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs
-make build          # produces ./objectfs
+make build          # produces ./bin/objectfs
 
 # or
 go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 ```
+
+The install script always verifies the checksum and has no flag to skip it. `--prefix` chooses where
+to install and `--version` pins a release; `--dry-run` prints what it would fetch. It refuses before
+downloading anything if the machine lacks a tool it needs, naming all of them at once — worth knowing
+because two of the three container images this is tested against are missing something
+(`ubuntu:24.04` ships neither `curl` nor `wget`, `opensuse/leap:15.6` ships neither `tar` nor `gzip`).
+
+Debian and RPM packages are attached to each release alongside the tarballs. There is no apt or yum
+repository yet, so install the downloaded file directly: `apt install ./objectfs_*.deb` or
+`dnf install ./objectfs-*.rpm`.
 
 ### HPC sites: environment modules
 

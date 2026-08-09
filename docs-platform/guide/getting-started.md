@@ -24,9 +24,29 @@ Before you begin, ensure you have:
 
 ## Installation
 
-Build from source, or install with `go install`. Release binaries are attached to the
-[GitHub releases page](https://github.com/scttfrdmn/objectfs/releases); that is the only prebuilt
-artifact, and the release workflow builds no packages.
+The install script is the shortest path. It downloads the release binary for this platform, verifies
+its SHA-256 against the checksum published beside it, and installs it under `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh | bash
+```
+
+`--prefix` installs elsewhere and `--version` pins a release. The checksum is always verified and
+there is no flag to skip it — note what that does and does not establish: the `.sha256` travels the
+same channel as the tarball, so a mismatch means a corrupted or tampered download, not that the
+release itself is authentic. That is a signature's job, and this project does not sign releases yet.
+
+The default prefix is `~/.local` rather than `/usr/local` deliberately. Many of this project's users
+are on a shared login node with no root, and an installer whose default needs `sudo` teaches people
+to run the whole thing under `sudo` — which then writes a root-owned binary and root-owned cache
+directories into a home directory their own jobs use.
+
+Debian and RPM packages are attached to each release from v0.14.0 onward, alongside the binary
+tarballs, on the [releases page](https://github.com/scttfrdmn/objectfs/releases). There is no apt or
+yum repository to add — `dnf install ./objectfs-*.rpm` and `apt install ./objectfs_*.deb` against a
+downloaded file are what works today.
+
+Or build from source:
 
 ```bash
 git clone https://github.com/scttfrdmn/objectfs.git
