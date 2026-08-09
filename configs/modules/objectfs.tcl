@@ -140,9 +140,22 @@ foreach ofsCandidate [list [file join $ofsPrefix bin] /usr/bin /usr/local/bin] {
 # where no binary was installed reports success and defers the failure to a batch job, where the
 # module system looks correct and ObjectFS looks broken.
 #
-# `break` inside a modulefile aborts the evaluation: measured under Modules 5.6.1, modulecmd.tcl
-# exits 1, prints "ERROR: Module evaluation aborted", and emits none of this file's environment
-# changes — so a refused load cannot half-apply, matching LmodError in objectfs.lua.
+# `break` inside a modulefile aborts the evaluation: it prints "ERROR: Module evaluation aborted",
+# emits none of this file's environment changes — so a refused load cannot half-apply, matching
+# LmodError in objectfs.lua — and emits `test 0 = 1;`, which fails when the caller evals it.
+#
+# The eval is the part that matters, and modulecmd.tcl's own exit status is not. Measured across two
+# releases: Modules 5.6.1 exits 1 on this path, and Modules 5.4.0 exits 0 — for identical output.
+# `module` is a shell function whose body is an eval of this output, so `module load objectfs || exit
+# 1` branches on `test 0 = 1;` under both and an operator sees a failure either way. A test asserting
+# on the exit status instead passes under one release and fails under the other against this same
+# correct file, which is what happened: green locally against Modules 5.6.1, red on CI against the
+# Modules 5.4.0 that Ubuntu 24.04 ships.
+#
+# Every version number above names the tool it belongs to, which
+# TestModulefilesDoNotHardcodeAVersion requires: a bare dotted number is indistinguishable from an
+# ObjectFS version, and that test exists to keep an ObjectFS version out of these files. Mind the
+# line wrapping when editing — a number that ends up on the line after the word "Modules" is bare.
 if { $ofsBinDir eq "" } {
     puts stderr "objectfs: no objectfs binary found. Looked in: [join $ofsTried {, }]"
     puts stderr "The prefix $ofsPrefix came from $ofsPrefixSource."

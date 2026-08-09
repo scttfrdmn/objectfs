@@ -253,15 +253,28 @@ func TestModulefilesDoNotHardcodeAVersion(t *testing.T) {
 	// blast radius, and the two files are short enough that writing <version> instead costs nothing.
 	semverish := regexp.MustCompile(`\b[vV]?\d+\.\d+\.\d+\b`)
 
+	// A version attributed to the module system it describes. These files carry measured-against
+	// notes — the refusal comment in objectfs.tcl reports that Modules 5.6.1 exits 1 where Modules
+	// 5.4.0 exits 0 for identical output — and those are a *tool's* version, not ObjectFS's.
+	//
+	// Attribution is required rather than allowlisting the releases by number, which is what this
+	// test did first and what made it fail against a correct file: it exempted the exact strings
+	// "Lmod 9.3" and "Modules 5.6.1", so the first comment to measure a second Modules release
+	// tripped it. An allowlist has to be edited every time a behavior is verified somewhere new,
+	// and the edit is indistinguishable from suppressing a real finding.
+	toolVersion := regexp.MustCompile(`\b(?:Lmod|Modules)\s+[vV]?\d+(?:\.\d+)+`)
+
 	for _, file := range []string{lmodModuleFile, tclModuleFile} {
 		for i, line := range strings.Split(readModulefile(t, file), "\n") {
-			// Two exemptions, both about a *tool's* version rather than ObjectFS's: the modulefile
-			// magic cookie `#%Module1.0`, which is a format version and is required verbatim, and a
-			// measured-against note naming the Lmod or Modules release the behavior was verified on.
-			if strings.Contains(line, "#%Module") ||
-				strings.Contains(line, "Lmod 9.3") || strings.Contains(line, "Modules 5.6.1") {
+			// The modulefile magic cookie `#%Module1.0` is a format version, required verbatim.
+			if strings.Contains(line, "#%Module") {
 				continue
 			}
+
+			// Attributed tool versions are removed from the line rather than skipping the line
+			// wholesale, so a comment that names both — "under Modules 5.6.1, objectfs/0.13.0
+			// resolves" — still fails on the ObjectFS literal.
+			line = toolVersion.ReplaceAllString(line, "")
 
 			if match := semverish.FindString(line); match != "" {
 				t.Errorf("%s:%d writes the version literal %q:\n    %s\nThe authority is the "+
@@ -707,12 +720,37 @@ func TestModulefilesRefuseToLoadWithoutABinaryUnderRealModuleSystems(t *testing.
 				"HOME=" + prefix,
 			}
 
-			out, err := cmd.Output()
-			if err == nil {
-				t.Errorf("`%s bash load objectfs` succeeded with no binary installed.\nEmitted:\n%s\n"+
-					"Locating the binary is a correctness property, so a load that cannot find one "+
-					"has to fail with a reason rather than adding a directory to PATH and letting "+
-					"the failure surface inside a batch job.", system.name, out)
+			// The interpreter's own exit status is deliberately NOT the assertion, and that took a CI
+			// failure to establish. TCL Modules 5.6.1 (homebrew) exits 1 on an aborted load and
+			// 5.4.0 (Ubuntu 24.04, which is what the runner has) exits **0** for the same refusal —
+			// so this test passed locally and failed on CI against a modulefile that was correct.
+			//
+			// What both versions do, and what Lmod does, is emit a shell command that fails when the
+			// caller evals it: TCL writes `test 0 = 1;` and Lmod writes `false`. That is the actual
+			// contract, because `module` is a shell function whose whole body is an eval of this
+			// output — an operator's `module load objectfs || exit 1` branches on the eval, never on
+			// modulecmd's status. So the eval is what gets run here.
+			out, _ := cmd.Output()
+
+			// bash, not sh: both systems emit bash-flavored output when asked for it above, and the
+			// modulefile is loaded through the `module` bash function on any real site.
+			//
+			//nolint:gosec // G204 is the point of the test, not a flaw in it: running the emitted
+			// shell code is exactly what the `module` function does, so evaluating it is the only way
+			// to assert the refusal reaches the caller. The input is this repository's own modulefile
+			// under a temporary MODULEPATH, not anything a user supplies.
+			eval := exec.CommandContext(t.Context(), "bash", "-c", string(out))
+			eval.Env = []string{"PATH=/usr/bin:/bin"}
+
+			if err := eval.Run(); err == nil {
+				t.Errorf("eval of `%s bash load objectfs` succeeded with no binary installed.\n"+
+					"Emitted:\n%s\nLocating the binary is a correctness property, so a load that "+
+					"cannot find one has to fail with a reason rather than adding a directory to PATH "+
+					"and letting the failure surface inside a batch job. The refusal has to reach the "+
+					"caller through the emitted shell code — `test 0 = 1;` from TCL, `false` from "+
+					"Lmod — because that is all the `module` shell function evaluates. Note that "+
+					"modulecmd.tcl's own exit status is not this, and cannot be: 5.4.0 exits 0 for a "+
+					"refused load and 5.6.1 exits 1.", system.name, out)
 			}
 
 			// The load must emit nothing, not merely exit non-zero. A refusal that has already
