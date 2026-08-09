@@ -102,6 +102,120 @@ func (fs *FileSystem) announceCached(ctx context.Context, path string, off int64
 	}
 }
 
+// maxPeerWarmBytes bounds how much one cache miss will read ahead on a peer's evidence.
+//
+// Warming reads bytes no application has asked for, so the bound is on wasted egress: at worst a miss
+// transfers this much and the reader stops at the byte it wanted. Four megabytes is two orders of
+// magnitude above the kernel's 128 KiB read, so a peer's claim is worth acting on rather than rounding to
+// nothing, and small enough that a traversal that turns out to touch one block of each of a thousand
+// objects wastes gigabytes rather than terabytes.
+//
+// It is deliberately not [ReadAheadConfig.WindowSize]. That window is a prediction from *this* reader's
+// last few offsets and is floored at one read; this is a claim by another node that it holds a range, which
+// is both stronger evidence and evidence about a different thing — what the cluster reads, not what this
+// process is about to. Tying them would mean a deployment tuning sequential read-ahead silently retuning
+// how much it fetches on a peer's word.
+const maxPeerWarmBytes = 4 << 20
+
+// warmFromPeers reads ahead on the strength of a peer holding more of path than this read asked for.
+//
+// # What a peer's claim is evidence of, and what it is not
+//
+// It is not a source of bytes. A peer cannot serve them: an operation response travels the gossip
+// datagram, which carries 5802 bytes of object at the default limit, so a 128 KiB read is 21× over and
+// fails as a 30-second timeout on the requesting host (#399). Every byte here comes from S3, which is
+// #142's rescope and the reason it is buildable on this transport.
+//
+// What the claim *is* evidence of is that the key is hot in this cluster — the one thing a cold node cannot
+// learn on its own, and the thing worth acting on. So a miss on a key some peer already caches reads
+// further than the application asked for, up to the end of the range the peer claims and no further than
+// [maxPeerWarmBytes].
+//
+// # Why the ETag decides whether to act at all
+//
+// A holder's range describes the version it cached. If that is not the version this node is reading, the
+// range says nothing about the object in hand — the object may have been rewritten to a different length
+// entirely — and warming on it would fetch bytes chosen by a claim about something else. So a version
+// mismatch, or no known version on either side, skips warming rather than guessing. That is the same
+// fail-closed rule [FileSystem.announceCached] applies in the other direction, and it costs exactly the
+// read the application asked for, which is what it would have paid with no cluster at all.
+//
+// The comparison is against the metadata cache's ETag, with the caveat recorded on announceCached: it is
+// the version this node last stat'ed, not provably the version these bytes came from. A stale value here
+// costs a warm skipped or a warm of a range that has moved, both of which are bytes and never correctness
+// — the cache stores what S3 returns for the range requested, whatever the announcement claimed.
+//
+// # Why this is queued rather than fetched
+//
+// Through the prefetch queue, so warming inherits the whole of what [ReadAheadManager.performPrefetch]
+// already does: clamping to EOF, skipping what is cached, trimming past reads already in flight, and
+// fetching through [FileSystem.fetch] so a covering request is shared rather than duplicated. A goroutine
+// per warm would have none of that and no bound on how many run at once. The queue send is
+// non-blocking — a full queue drops the warm, which is the correct answer for speculative work.
+func (fs *FileSystem) warmFromPeers(ctx context.Context, path string, off, length int64) {
+	// Nothing to warm into, so nothing to ask about. Checked before the query rather than left to
+	// [ReadAheadManager.warm]'s own guard: reaching that guard costs a gossip round trip per cache miss
+	// whose answer is then discarded.
+	if fs.coordinator == nil || !fs.readAhead.warmingEnabled() {
+		return
+	}
+
+	holders, err := fs.coordinator.QueryKeyOwnership(ctx, path)
+	if err != nil {
+		// Debug: this is an optimization, and the read it belongs to has already succeeded.
+		slog.Debug("could not ask peers which of them hold a key this node just missed",
+			"path", path, "error", err)
+
+		return
+	}
+
+	if len(holders) == 0 {
+		return
+	}
+
+	// The version this node is reading. No version means nothing to compare a claim against.
+	info := fs.getCachedInfo(path)
+	if info == nil || info.ETag == "" {
+		slog.Debug("not warming from peers: no version is known for the object", "path", path)
+
+		return
+	}
+
+	end := off + length
+
+	// The furthest any holder of *this version* claims to reach. Holders come back freshest first, and all
+	// of them are considered rather than only the first: they are claims about ranges, so the one that
+	// reaches furthest is the most informative, and it is not necessarily the most recent.
+	var want int64
+	for _, holder := range holders {
+		if holder.ETag != info.ETag {
+			continue
+		}
+
+		// A Length of 0 means the full object from Offset, per [types.KeyAnnouncement]. Size is the whole
+		// object's, so that is where such a range ends.
+		holderEnd := holder.Offset + holder.Length
+		if holder.Length <= 0 {
+			holderEnd = info.Size
+		}
+
+		if holderEnd > want {
+			want = holderEnd
+		}
+	}
+
+	if want <= end {
+		// No holder of this version reaches past what was just read, so there is nothing to warm. This is
+		// the ordinary case for a peer that read the same range, and it is why warming cannot loop: the
+		// bytes a warm fetches are cached, so the next miss is further along or does not happen.
+		return
+	}
+
+	length = min(want-end, maxPeerWarmBytes)
+
+	fs.readAhead.warm(path, end, length)
+}
+
 // invalidateCluster tells peers to evict path, because the version named by etag replaced what they
 // hold. An empty etag means this caller cannot name a version, which [types.DistributedCoordinator]
 // documents as legal and applies on every receipt rather than once.

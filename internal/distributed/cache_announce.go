@@ -115,6 +115,110 @@ func (c *Coordinator) recordAnnouncement(ann types.KeyAnnouncement) {
 	c.announcements[ann.Key] = append(holders, heldKey{ann: ann, recordedAt: now})
 }
 
+// recordSelfHolding remembers that this node announced ann, so it can tell a joining peer about it.
+//
+// One entry per key, replacing any earlier one, for the same reason [Coordinator.recordAnnouncement]
+// replaces rather than appends: a node announcing a key twice has not come to hold two versions of it,
+// and offering a joiner an ETag this node has already replaced sends it to fetch bytes that are gone.
+//
+// Bounded by the same maxAnnouncedKeys as the peer map, and evicted the same way — oldest first, since a
+// claim this node made long ago is the one its own cache is likeliest to have evicted since.
+func (c *Coordinator) recordSelfHolding(ann types.KeyAnnouncement) {
+	if ann.Key == "" || ann.ETag == "" {
+		return
+	}
+
+	now := time.Now()
+
+	c.announcementsMu.Lock()
+	defer c.announcementsMu.Unlock()
+
+	if c.selfAnnounced == nil {
+		c.selfAnnounced = make(map[string]heldKey)
+	}
+
+	// Bounded only when this is a new key: a replacement cannot grow the map, so charging it an eviction
+	// would drop live holdings for no gain. Same shape as recordAnnouncement's bound, deliberately.
+	if _, exists := c.selfAnnounced[ann.Key]; !exists && len(c.selfAnnounced) >= maxAnnouncedKeys {
+		c.evictSelfHoldingsLocked(now)
+	}
+
+	c.selfAnnounced[ann.Key] = heldKey{ann: ann, recordedAt: now}
+}
+
+// evictSelfHoldingsLocked makes room in selfAnnounced. c.announcementsMu must be held.
+//
+// Expired first, then oldest, mirroring [Coordinator.evictAnnouncementsLocked]. Dropping an entry costs a
+// joiner one key it will not be told about, so it reads from S3 — slower, never wrong.
+func (c *Coordinator) evictSelfHoldingsLocked(now time.Time) {
+	ttl := c.announcementTTL()
+
+	for key, held := range c.selfAnnounced {
+		if now.Sub(held.recordedAt) > ttl {
+			delete(c.selfAnnounced, key)
+		}
+	}
+
+	if len(c.selfAnnounced) < maxAnnouncedKeys {
+		return
+	}
+
+	type keyAge struct {
+		key      string
+		recorded time.Time
+	}
+
+	ages := make([]keyAge, 0, len(c.selfAnnounced))
+	for key, held := range c.selfAnnounced {
+		ages = append(ages, keyAge{key: key, recorded: held.recordedAt})
+	}
+
+	sort.Slice(ages, func(i, j int) bool { return ages[i].recorded.Before(ages[j].recorded) })
+
+	// A tenth, so overflow is amortized rather than paid on every subsequent insert.
+	for _, entry := range ages[:max(1, len(ages)/10)] {
+		delete(c.selfAnnounced, entry.key)
+	}
+}
+
+// recentHoldings reports what this node has announced holding, freshest first, expired claims excluded.
+//
+// This is what a node sends a joiner (#143), and freshest-first is what makes a truncated answer the
+// useful half rather than an arbitrary one: the warmup message is bounded by the datagram size, not by a
+// count, so the caller sends a prefix of this and drops the tail. Sorting by when this node cached the
+// bytes puts the keys most likely still hot at the front of that prefix.
+//
+// limit is a ceiling on the slice length, applied after sorting; a non-positive limit means no ceiling.
+// It is a guard against building a 65536-entry slice to hand to a caller that can send thirty of them,
+// and it is emphatically not the bound on the message — see [GossipProtocol.marshalWarmupChunk], which
+// measures sealed bytes. A count cannot bound a byte limit.
+func (c *Coordinator) recentHoldings(limit int) []types.KeyAnnouncement {
+	ttl := c.announcementTTL()
+	now := time.Now()
+
+	c.announcementsMu.RLock()
+	live := make([]heldKey, 0, len(c.selfAnnounced))
+	for _, held := range c.selfAnnounced {
+		if now.Sub(held.recordedAt) <= ttl {
+			live = append(live, held)
+		}
+	}
+	c.announcementsMu.RUnlock()
+
+	sort.Slice(live, func(i, j int) bool { return live[i].recordedAt.After(live[j].recordedAt) })
+
+	if limit > 0 && len(live) > limit {
+		live = live[:limit]
+	}
+
+	out := make([]types.KeyAnnouncement, 0, len(live))
+	for _, held := range live {
+		out = append(out, held.ann)
+	}
+
+	return out
+}
+
 // evictAnnouncementsLocked makes room in the announcements map. c.announcementsMu must be held.
 //
 // Expired entries first, since dropping those costs nothing at all — they would be filtered out of
@@ -253,6 +357,13 @@ func (c *Coordinator) AnnounceKey(_ context.Context, ann types.KeyAnnouncement) 
 		return fmt.Errorf("marshaling the announcement for %q: %w", ann.Key, err)
 	}
 
+	// Recorded in selfAnnounced — not in announcements, per the paragraph above — before the send rather
+	// than after it. What this remembers is what this node *holds*, and the cache Put that prompted the
+	// call has already happened; whether the datagram reaches a peer says nothing about that. Recording
+	// only on a successful send would leave a node whose gossip is briefly unreachable unable to warm a
+	// joiner about bytes it demonstrably has.
+	c.recordSelfHolding(ann)
+
 	// Wrapped so the key is in the message. broadcastMessage names the message *type*, which is all it
 	// knows, and "cannot broadcast cache_announce" in a log tells an operator debugging cold reads nothing
 	// about which object went unannounced. The %w keeps [types.ErrNotSupported] reachable through both
@@ -337,12 +448,22 @@ func (c *Coordinator) cleanupAnnouncements(ctx context.Context) {
 }
 
 // sweepExpiredAnnouncements drops every claim past its TTL, and every key left with none.
+//
+// Both maps, and the second one is the half that would leak unnoticed: nothing reads selfAnnounced except
+// [Coordinator.recentHoldings], which filters expired entries itself and so would keep working while the
+// map grew for the life of the mount.
 func (c *Coordinator) sweepExpiredAnnouncements() {
 	ttl := c.announcementTTL()
 	now := time.Now()
 
 	c.announcementsMu.Lock()
 	defer c.announcementsMu.Unlock()
+
+	for key, held := range c.selfAnnounced {
+		if now.Sub(held.recordedAt) > ttl {
+			delete(c.selfAnnounced, key)
+		}
+	}
 
 	for key, holders := range c.announcements {
 		live := holders[:0]

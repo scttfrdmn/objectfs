@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A cache miss now reads further when a peer holds more of the object** ([#142]). A read that misses
+  asks the cluster who holds the key and, if some peer holds a range reaching past what was just read,
+  reads ahead to the end of that range — capped at 4 MiB per miss. The bytes come from **S3, not from the
+  peer**: a gossip datagram carries 5802 bytes of object at the default limit, so a 128 KiB read is 21×
+  over and fails as a 30-second timeout on the requesting host ([#399]). What a peer's claim is evidence
+  of is that the key is hot in this cluster, which is the one thing a cold node cannot learn on its own,
+  and it is worth acting on even when the bytes still cost an S3 read.
+
+  A claim is acted on **only at the version this node is reading**. A holder's range describes the object
+  it cached; against a different version the object may have a different length entirely, so warming on it
+  would fetch bytes chosen by a claim about something else. A version mismatch — or no known version on
+  either side — warms nothing, which costs exactly the read the application asked for. Every claim at the
+  matching version is considered and the furthest-reaching one wins, since holders arrive freshest-first
+  and freshest is not furthest.
+
+  Warming goes through the existing read-ahead queue, so it inherits clamping to EOF, skipping what is
+  already cached, standing off reads in flight, and sharing a fetch with a covering request. It does not
+  touch the read pattern: another node's reads must not decide whether this reader looks sequential. It
+  is triggered by the application's read alone and never by a warm's own fetch, so a warm cannot feed
+  itself and walk the whole object. **`cache.read_ahead.enabled: false` suppresses it entirely**, and
+  suppresses the ownership query too rather than asking and discarding the answer — an operator who
+  turned read-ahead off has said not to read bytes nobody asked for.
+
+- **A joining node is told which keys are hot** ([#143]). A node answering a join follows the membership
+  sync with a `cache_warmup` message listing what it holds, freshest first, and the joiner records those
+  as ownership claims — so it starts knowing where the cluster's working set lives instead of discovering
+  it one miss at a time. Metadata only, like [#140]: the bytes are still fetched from S3 when a read wants
+  them.
+
+  The message is bounded by **measured sealed bytes, not by an entry count**, reusing the mechanism the
+  membership sync already uses. The specification's "max 256 entries" would not have worked: at 52-character
+  keys, 256 announcements seal to 65631 bytes against the default 8192-byte limit, 8× over, so every warmup
+  datagram would be refused at the socket and a joining node would warm nothing at all. 31 fit at that key
+  length — and 31 is not a constant to hardcode either, since it moves with key length, which is why the
+  chunk is grown one entry at a time and sealed to check. A join sends at most four datagrams, ~124 keys at
+  that density, and logs what it held back; the rest reaches the joiner through ordinary announcements.
+
+  A batch is recorded through the same path as a single announcement, so the self-claim refusal, the
+  per-node replacement, the map bound, the local timestamp and the empty-ETag refusal all apply to it
+  unchanged — batching is not a way around any of them. Each entry is credited to the peer the datagram
+  came from rather than to the node named inside it, so one member cannot populate a joiner's whole
+  ownership map with fabricated holders.
+
 - **A write on one node now evicts what its peers have cached** ([#141]). [#140] gave the cluster the
   vocabulary; this is the read and write paths using it. A read that misses and fetches from S3 announces
   the range it cached, so a peer that wants those bytes can weigh asking against reading S3 itself. A

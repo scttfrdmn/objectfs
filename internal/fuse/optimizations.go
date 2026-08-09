@@ -243,6 +243,40 @@ func (ram *ReadAheadManager) consumedThrough(path string) int64 {
 	return pattern.predictedNext
 }
 
+// warm queues a fetch of [offset, offset+size) on evidence from outside this reader's own pattern — a
+// peer holding more of the object than this node just read (#142). See [FileSystem.warmFromPeers].
+//
+// It goes through the same queue and the same workers as a predicted prefetch, which is the point: those
+// workers already clamp to EOF, skip what is cached, trim past reads in flight, and fetch through the
+// shared path. What it deliberately does *not* do is touch the read pattern. The pattern models this
+// process's sequential behavior, and folding a cluster-derived range into it would let another node's
+// reads decide whether this reader looks sequential.
+//
+// A nil manager and a disabled config are tolerated, as in [ReadAheadManager.OnRead], so the call site
+// needs no guard. Disabled means disabled: an operator who turned read-ahead off has said not to read
+// bytes nobody asked for, and a peer's claim is not an exception to that.
+func (ram *ReadAheadManager) warm(path string, offset, size int64) {
+	if !ram.warmingEnabled() || size <= 0 {
+		return
+	}
+
+	ram.schedulePrefetch(path, offset, size)
+}
+
+// warmingEnabled reports whether a call to [ReadAheadManager.warm] could queue anything.
+//
+// It exists so [FileSystem.warmFromPeers] can answer that question *before* it asks peers who holds a
+// key, rather than after. The guard in warm is the one that keeps the promise; this one keeps a mount
+// with read-ahead off from paying a gossip round trip per cache miss to reach it — which on a
+// read-heavy workload is one broadcast per miss whose answer is discarded, the sort of cost that
+// presents as unexplained cluster traffic rather than as a wrong result.
+//
+// Both checks are kept deliberately. Collapsing them into this one would leave warm callable with
+// read-ahead disabled, and warm is the guarantee an operator's setting rests on.
+func (ram *ReadAheadManager) warmingEnabled() bool {
+	return ram != nil && ram.config.Enabled
+}
+
 // schedulePrefetch schedules a prefetch operation
 func (ram *ReadAheadManager) schedulePrefetch(path string, offset, size int64) {
 	select {
