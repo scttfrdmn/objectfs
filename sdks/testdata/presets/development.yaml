@@ -1,0 +1,52 @@
+global:
+  log_level: DEBUG
+  log_file: ''
+storage:
+  s3:
+    region: us-east-1
+    endpoint: ''
+    profile: ''
+    use_acceleration: false
+    force_path_style: false
+    max_retries: 3
+    cost_optimization:
+      small_objects_on_standard: false
+performance:
+  cache_size: 1GB
+  max_concurrency: 50
+  multilevel_caching: true
+  predictive_caching: false
+  ml_model_path: ''
+  write_buffer_size: 4MB
+cluster:
+  enabled: false
+  node_id: ''
+  listen_addr: 0.0.0.0:8080
+  advertise_addr: 127.0.0.1:8080
+  seed_nodes: []
+  replication_factor: 3
+security:
+  enabled: false
+  auth_method: none
+  tls_enabled: false
+  tls_cert_path: ''
+  tls_key_path: ''
+monitoring:
+  enabled: false
+  metrics:
+    enabled: true
+    addr: 127.0.0.1:8080
+    prometheus: true
+  health_checks:
+    enabled: true
+    addr: 127.0.0.1:8081
+    interval: 30s
+    timeout: 5s
+  opentelemetry:
+    enabled: false
+    endpoint: localhost:4317
+    service_name: objectfs
+fuse:
+  direct_io: false
+  keep_cache: false
+  sync_read: false

@@ -15,23 +15,34 @@ from .exceptions import ConfigurationError
 
 @dataclass
 class GlobalConfig:
-    """Global configuration settings."""
+    """Global configuration settings.
+
+    Two keys, matching ``internal/config.GlobalConfig`` exactly. ``pid_file`` and ``daemon`` were
+    here and are gone (#385): the Go schema has never had either, and neither describes anything
+    ObjectFS does. It does not fork -- it serves the mount in the process that started it until that
+    process is signalled -- so there is no background mode for ``daemon: true`` to select and no
+    forked child for ``pid_file`` to record. Run it under a systemd unit with ``Type=simple``; the
+    unit file is ``configs/systemd/objectfs@.service``.
+    """
     log_level: str = "INFO"
     log_file: str = ""
-    pid_file: str = ""
-    daemon: bool = False
 
 
 @dataclass
 class S3Config:
-    """S3 storage configuration."""
+    """S3 storage configuration.
+
+    ``timeout`` is gone (#385). It was an ``int`` of unstated unit sitting in the ``storage.s3``
+    block, and the Go schema has no such key: the request timeouts are
+    ``network.timeouts.connect``/``read``/``write``, as durations, one level up from storage. A single
+    number here could not have said which of the three it meant.
+    """
     region: str = "us-east-1"
     endpoint: str = ""
     profile: str = ""
     use_acceleration: bool = False
     force_path_style: bool = False
     max_retries: int = 3
-    timeout: int = 30
 
     # Cost optimization. One key, matching the Go schema exactly, because ``to_yaml``
     # writes this dict straight into a document the Go loader decodes strictly: a key
@@ -62,17 +73,25 @@ class StorageConfig:
 
 @dataclass
 class PerformanceConfig:
-    """Performance and caching configuration."""
+    """Performance and caching configuration.
+
+    ``read_ahead_size`` and ``max_write_buffer`` are gone (#385). Neither is in the Go schema, and
+    each had a real setting beside it under a different name: read-ahead is the
+    ``performance.read_ahead`` block and its size is ``window_size`` -- the flat key was removed from
+    the Go side in v0.11.0 for the same reason it is removed here, that a document naming two
+    read-ahead sizes has neither of them take effect (#176) -- and the write-buffer ceiling is
+    ``write_buffer.max_memory``, a section this dataclass does not model.
+
+    ``connection_pool_size`` is deliberately not added to fill the gap. It is validated ``> 0`` by the
+    Go loader, so a default here would have to agree with a default there, and the SDK's job is to
+    emit a document the loader accepts rather than to restate every key it defines.
+    """
     cache_size: str = "4GB"
     max_concurrency: int = 200
     multilevel_caching: bool = True
     predictive_caching: bool = False
     ml_model_path: str = ""
-
-    # I/O optimization
-    read_ahead_size: str = "4MB"
     write_buffer_size: str = "4MB"
-    max_write_buffer: str = "64MB"
 
     def validate(self):
         """Validate performance configuration."""
@@ -91,11 +110,14 @@ class ClusterConfig:
     key -- which is the intended outcome: what replaced it is a per-write precondition evaluated by
     S3, not a per-mount level, and no key here can express that.
 
-    The three timeouts below are a separate, older problem and are left as they are: the Go
-    ``cluster`` schema has never had ``election_timeout``, ``heartbeat_interval`` or
-    ``join_timeout`` -- those live on the disjoint ``internal/distributed.ClusterConfig`` (#139) --
-    so ``to_yaml`` emits a cluster block the loader refuses on the first of them. Verified against
-    the loader rather than inferred. Fixing that is not #284's to do; it is filed as #385.
+    ``election_timeout``, ``heartbeat_interval`` and ``join_timeout`` are gone as of #385. They were
+    the older half of the same problem: the Go ``cluster`` schema has never had any of them. Fields by
+    those names exist on ``internal/distributed.ClusterConfig``, which is a *disjoint* type -- same
+    name, different package, no conversion between the two (#139) -- so this dataclass was written
+    against one struct while ``to_yaml`` targets the other. Grepped for a consumer of the three across
+    ``sdks/``: there was none, including ``join_timeout``, which #385 singled out as needing a
+    decision. They are not added to the Go schema instead, because the distributed timeouts reach
+    ``NewClusterManager`` by another path and two places to set one value is worse than one.
     """
     enabled: bool = False
     node_id: str = ""
@@ -103,11 +125,6 @@ class ClusterConfig:
     advertise_addr: str = "127.0.0.1:8080"
     seed_nodes: List[str] = field(default_factory=list)
     replication_factor: int = 3
-
-    # Timeouts
-    election_timeout: str = "5s"
-    heartbeat_interval: str = "1s"
-    join_timeout: str = "30s"
 
     def validate(self):
         """Validate cluster configuration."""
@@ -117,13 +134,18 @@ class ClusterConfig:
 
 @dataclass
 class SecurityConfig:
-    """Security configuration."""
+    """Security configuration.
+
+    ``tls_ca_path`` is gone (#385). The Go schema's ``security`` block has ``tls_cert_path`` and
+    ``tls_key_path`` and no CA path; what it has instead is a ``security.tls`` block with
+    ``verify_certificates`` and ``min_version``, which this dataclass does not model. A CA bundle the
+    loader would reject is worse than no key at all -- it reads as configured trust.
+    """
     enabled: bool = False
     auth_method: str = "none"
     tls_enabled: bool = False
     tls_cert_path: str = ""
     tls_key_path: str = ""
-    tls_ca_path: str = ""
 
     def validate(self):
         """Validate security configuration."""
@@ -151,6 +173,12 @@ class MonitoringConfig:
     Both endpoints below are unauthenticated -- ``/metrics`` reports per-operation counts and
     timings, ``/health`` reports component names and error strings -- which is why the defaults
     are loopback. Publishing them further is a choice you write down.
+
+    The OpenTelemetry block's ``headers`` key is gone as of #385. ``internal/config.OpenTelemetryConfig``
+    has ``enabled``, ``endpoint`` and ``service_name`` and nothing else, so a document carrying
+    per-export headers -- the place an OTLP bearer token would go -- failed the mount naming the key.
+    An unloadable place to put a credential is the worst of the three options; emitting no key at all
+    at least does not suggest the token was sent.
     """
     enabled: bool = False
 
@@ -172,19 +200,27 @@ class MonitoringConfig:
         "enabled": False,
         "endpoint": "localhost:4317",
         "service_name": "objectfs",
-        "headers": {}
     })
 
 
 @dataclass
 class FUSEConfig:
-    """FUSE filesystem configuration."""
-    allow_other: bool = False
-    allow_root: bool = False
-    default_permissions: bool = False
-    uid: int = -1
-    gid: int = -1
-    umask: int = 0o022
+    """FUSE filesystem configuration.
+
+    Every key this class had was rejected by the loader, and none of them has been kept (#385). It
+    declared ``allow_other``, ``allow_root``, ``default_permissions``, ``uid``, ``gid`` and ``umask``;
+    ``internal/config.FUSEConfig`` has ``direct_io``, ``keep_cache`` and ``sync_read``, which is a
+    disjoint set. That is not an accident of naming. The Go block is three keys rather than nine
+    because it admits only settings with a demonstrated effect on the kernel's behavior, and
+    ``allow_other``, ``uid`` and ``gid`` are three of the ones ``cmd/objectfs/doc.go`` records as *not
+    settable*: the fields exist, and nothing on the adapter's mount path populates them.
+
+    So the six removed keys were doubly inert -- discarded by the loader, and with nothing to reach
+    even if they had loaded. The three below are the ones that take effect.
+    """
+    direct_io: bool = False
+    keep_cache: bool = False
+    sync_read: bool = False
 
 
 @dataclass

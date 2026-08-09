@@ -375,6 +375,16 @@ jobs:
       # `pytest tests/` rather than the one metrics file, so tests/test_storage.py,
       # tests/test_config.py and tests/test_client.py are covered by this step as they land —
       # including the assertion that download_object leaves an existing local file intact.
+      #
+      # tests/test_config.py carries a second cross-language contract in the other direction, and
+      # this step is the half that enforces it. sdks/testdata/presets/*.yaml is what
+      # Configuration.to_yaml() emits, committed, and internal/config's
+      # TestSDKPresetsLoadUnderTheGoLoader puts every one through the Go loader. Because that Go test
+      # reads committed files, it would stay green on stale ones — so the Python test compares rather
+      # than writes, and a config.py change that is not regenerated fails here. Without both halves
+      # the gate asserts against whatever was committed last, which is the shape of the defect it
+      # exists to catch (#385): to_yaml emitted sixteen keys the Go schema does not define, and
+      # save_to_file wrote a document the daemon refused at startup.
       - name: Python SDK tests
         working-directory: sdks/python
         run: |
