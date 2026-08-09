@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Data that arrived compressed is no longer compressed again** ([#184]). With compression enabled, a
+  write above `min_size` whose leading bytes name a compressed format — gzip, zstd, bzip2, lz4, xz, zip,
+  PNG, JPEG, GIF, WebP, MP4, Matroska, Ogg, MP3, PDF — is stored as-is and the codec is never entered.
+  These are the formats a research bucket is mostly made of, and a BAM counts: BGZF is gzip per block, so
+  its first bytes are gzip's.
+
+  Measured on an Apple M4 Max at zstd level 3, six runs per case compared with `benchstat`: an 8 MiB zstd
+  frame goes from **1.85 ms and 33 MiB of allocation** to **3 ns and none**, 1 MiB from 237 µs to 3 ns,
+  64 KiB from 7.4 µs to 3 ns. Data the skip does not apply to is unchanged — 1 MiB of compressible text is
+  91.5 µs against 90.4 µs, which is the row that says the check pays for itself, since a gate that taxes
+  the compressible path is not a win. Reproduce with `BenchmarkCompressAlreadyCompressed`,
+  `BenchmarkCompressCompressibleText` and `BenchmarkGateVersusAnalyze` in `internal/compression`.
+
+  The gate is a magic-byte comparison at 17 ns, not the full analyzer. `Analyze` also runs a Shannon
+  entropy pass over its 4 KiB sample, which costs 3.8 µs and was **+53% on a 64 KiB text write** for a
+  figure the decision does not use — so the write path calls a new `AlreadyCompressed`, and both it and
+  `Analyze` classify through the same `classifyByMagic`, leaving one authority on what "already
+  compressed" means. The check sits after the `min_size` floor, so an object below the floor is not
+  sampled, and after the enabled check, so a mount with compression off samples nothing at all.
+
+  Not done, deliberately: nothing is skipped on **entropy**. High entropy is evidence that compression
+  will not help, not proof, and no threshold for it has been measured here — declining to compress on a
+  guess is worse than spending the pass. Formats whose compression is internal to the container (CRAM,
+  Parquet, ORC, HDF5, Zarr) are also not skipped, since the container's magic bytes say nothing about its
+  contents; `docs/features/compression.md` now sorts the formats into the two lists explicitly, and
+  `TestAlreadyCompressedMatchesTheDocumentedFormatLists` fails if that page and the table disagree.
+
 - **A mount now publishes what it is spending at AWS** ([#226]). `objectfs_s3_cost` is a new gauge family
   carrying billable request counts by pricing group, bytes retrieved, three dollar figures, and — beside
   each — the rate it was computed at, labelled with the region the rates were resolved for and the storage
@@ -2960,6 +2987,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#226]: https://github.com/scttfrdmn/objectfs/issues/226
 [#220]: https://github.com/scttfrdmn/objectfs/issues/220
 [#209]: https://github.com/scttfrdmn/objectfs/issues/209
+[#184]: https://github.com/scttfrdmn/objectfs/issues/184
 [#204]: https://github.com/scttfrdmn/objectfs/issues/204
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390

@@ -60,11 +60,7 @@ func Analyze(data []byte) Analysis {
 		return Analysis{ContentClass: ContentClassUnknown}
 	}
 
-	sample := data
-	if len(sample) > analysisSampleSize {
-		sample = sample[:analysisSampleSize]
-	}
-
+	sample := sampleOf(data)
 	class := classifyByMagic(sample)
 	entropy := shannonEntropy(sample)
 
@@ -91,6 +87,43 @@ func Analyze(data []byte) Analysis {
 		CompressScore: score,
 		SampleSize:    len(sample),
 	}
+}
+
+// sampleOf returns the leading analysisSampleSize bytes of data, or all of it when shorter.
+func sampleOf(data []byte) []byte {
+	if len(data) > analysisSampleSize {
+		return data[:analysisSampleSize]
+	}
+
+	return data
+}
+
+// AlreadyCompressed reports whether data's leading bytes identify a format that is compressed at the
+// byte level, so re-compressing it would spend a full codec pass to produce something no smaller.
+//
+// This is the write path's gate ([#184]), and it is deliberately *not* [Analyze]: Analyze also runs a
+// Shannon entropy pass over the sample, and on this machine that pass is 2.1µs of Analyze's 3.7µs
+// while the magic-byte comparison it needs is 16ns. Paying 2.1µs per object for a number the decision
+// discards is measurable on a 64 KiB write — 6.7µs of codec time — which is the size where transparent
+// compression is most often used.
+//
+// Both routes classify through classifyByMagic, so there is still one authority on what
+// "already compressed" means. That is the property worth protecting: a private magic-byte table in the
+// write path could be made to disagree with the one [RuleSelector] consults, which is the same class of
+// defect as a second list of supported algorithms.
+//
+// Entropy is deliberately not consulted here even as a secondary gate. High entropy is evidence that
+// compression will not help, but it is not proof — and unlike a magic byte it has no threshold this
+// repository has measured, so a gate built on it would decline to compress data on a guess. That is the
+// step-2 question in #184 and wants its own measurement.
+//
+// [#184]: https://github.com/scttfrdmn/objectfs/issues/184
+func AlreadyCompressed(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+
+	return classifyByMagic(sampleOf(data)) == ContentClassCompressed
 }
 
 // classifyByMagic detects content class from leading magic bytes.
