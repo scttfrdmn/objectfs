@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/install.sh`** ([#138]), which downloads the release binary for the running platform,
+  verifies its SHA-256 against the checksum published beside it, and installs it — plus a CI job that
+  runs it in three distributions and `internal/config/install_script_test.go` for the rows CI cannot
+  reach.
+
+  This is deliberately **not** the script #138 specifies. That one detects the package manager and adds
+  a repository at `packages.objectfs.io`, a host that does not exist: both `objectfs.io` and
+  `packages.objectfs.io` resolve to registrar parking IPs and neither completes a TLS handshake. A
+  script written to that spec could not be run, could not be tested, and would fail at its first
+  `curl` with a TLS error naming a domain the reader has no way to interpret. What GitHub already
+  hosts is a tarball per platform with a checksum beside it, which needs no hosting decision, so that
+  is what this installs.
+
+  **The checksum is verified and there is no flag to skip it.** The reason to publish a checksum is
+  that the download path is not trusted, and an installer treating verification as skippable has spent
+  the cost without buying the property. What it establishes is stated rather than implied: the
+  `.sha256` travels the same channel as the tarball, so this detects corruption and a mangling mirror,
+  not a compromise of the release host. That is a signature's job.
+
+  The default prefix is `~/.local`, not `/usr/local`, reversing the usual convention on purpose. This
+  project's users are frequently on a shared login node with no root, and an installer whose default
+  needs `sudo` teaches them to run the whole thing under `sudo` — which writes a root-owned binary and
+  root-owned cache directories into a home their own jobs use.
+
+  **`shellcheck` passed on this script from the first draft and the local run succeeded, and it still
+  failed on two of the three images #138 names** — both times with an error naming the wrong cause,
+  which is the expensive failure direction, because it sends the reader to check the release, the
+  network and the file and never mentions the missing package:
+
+  - `ubuntu:24.04` ships neither `curl` nor `wget`. The download helper handled that correctly, but
+    the release-resolution path called `wget` unconditionally when `curl` was absent, so the user was
+    told *"could not reach the GitHub API to find the latest release. Pass `--version` to skip this
+    step"* — advice that cannot work on a machine with no downloader at all.
+  - `opensuse/leap:15.6` ships neither `tar` nor `gzip`. The script downloaded the archive, verified
+    its checksum, and then reported *"a tar that cannot read the archive rather than a corrupt file"* —
+    a confident claim about the file when `tar` was not installed. Installing only `tar` moved the same
+    misattribution one layer down: `tar -xzf` shells out to `gzip` and reports the child's exit status
+    as its own, producing `tar: Child returned status 2`.
+
+  Both are now one preflight check that runs before anything touches the network, reports **every**
+  missing tool at once — openSUSE would otherwise need three attempts to learn what it needs — and
+  names the package to install. It runs ahead of `--dry-run` too, since a dry run's job is to report
+  whether this would work.
+
+  The gate covers what the container job cannot. That job runs on x86_64, so it exercises exactly one
+  row of the platform mapping: a mapping wrong for arm64, armv7 or darwin passes all three images. So
+  `TestInstallScriptNamesEveryPublishedAsset` couples the script's `uname` translation to
+  `release.yml`'s build matrix in both directions — a published platform the script cannot name is a
+  404 through the documented install path, and a name the script invents is the same 404 from the other
+  side. **One mutation is recorded as unverified locally rather than claimed as caught**: reversing the
+  x86_64 mapping was expected to fail the container run and did not, because podman on an Apple
+  Silicon host runs an arm64 binary inside an emulated amd64 container through binfmt, so the
+  wrong-architecture binary executed and printed its version. On a real x86_64 runner the script's
+  final `--version` check catches it; the static assertion is what makes that independent of the host.
+
+  Ten mutations were run and one initially survived, which is the one worth recording: moving
+  `preflight` to sit immediately above the download still passed, because it was still *before the
+  download* — but by then the script has already queried the GitHub API, which on a machine with no
+  downloader is precisely the failure preflight exists to pre-empt. The check is now anchored to the
+  API call rather than the download, and both orderings are asserted.
+
 - **Releases now attach the `.deb` and `.rpm` packages** ([#138]), plus
   `internal/config/release_packages_test.go` to keep them attached.
 

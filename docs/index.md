@@ -213,11 +213,16 @@ make build          # produces ./objectfs
 go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 ```
 
-There is no Homebrew tap and no `.deb`/`.rpm` package. This section listed all three, plus a
-`get.objectfs.io` install script; none of those channels exists, and the release workflow does not
-build them. Release binaries are attached to the
-[GitHub releases page](https://github.com/scttfrdmn/objectfs/releases) — that is the only prebuilt
-artifact.
+There is no Homebrew tap and no package repository to add. This section once listed both, plus a
+`get.objectfs.io` install script; none of those exist. What does exist is attached to each
+[release](https://github.com/scttfrdmn/objectfs/releases): a binary tarball per platform with a
+SHA-256 beside it, and — from v0.14.0 — a `.deb` and an `.rpm`. Install a package from the downloaded
+file (`apt install ./objectfs_*.deb`, `dnf install ./objectfs-*.rpm`), since there is no apt or yum
+repository behind it.
+
+`scripts/install.sh` in this repository is the shortest path for the tarball. It resolves the
+platform, verifies the checksum, and installs under `~/.local/bin`; the checksum is always verified
+and there is no flag to skip it.
 
 ### Basic Usage
 

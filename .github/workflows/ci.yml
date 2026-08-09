@@ -1106,3 +1106,144 @@ jobs:
             "failure, not a pass."
           exit 1
         fi
+
+  # ---------------------------------------------------------------------------------------------
+  # install-script — scripts/install.sh in the distributions it claims to support.
+  #
+  # This is part (b) of #138, and the job exists because the two defects it caught cannot be caught
+  # any other way. `shellcheck` passes on this script and always did; the local run on macOS
+  # succeeded; and the script still failed on two of the three images #138 names, both times with an
+  # error naming the wrong cause:
+  #
+  #   - ubuntu:24.04 has neither curl nor wget, and the script reported "could not reach the GitHub
+  #     API to find the latest release. Pass --version to skip this step" — advice that cannot work.
+  #   - opensuse/leap:15.6 has neither tar nor gzip, and the script downloaded the archive,
+  #     verified its checksum, and then reported "a tar that cannot read the archive rather than a
+  #     corrupt file". Installing only tar moved the same misattribution one layer down, because
+  #     `tar -xzf` shells out to gzip and reports the child's failure as its own.
+  #
+  # A wrong cause is the expensive failure direction: it sends the reader to check the release, the
+  # network and the file, and never mentions the missing package. So both success and refusal are
+  # asserted below — a job that only checked the refusal would pass against a script that can no
+  # longer install anything.
+  #
+  # Two things this deliberately does not do. It does not use LocalStack, which #138 specifies:
+  # nothing here touches S3, since the script downloads a GitHub release asset and runs `objectfs
+  # --version`, and adding a mock S3 endpoint to a job that makes no S3 request is machinery with
+  # nothing behind it. And it does not test the PR's own code — the installer fetches a *published
+  # release*, so what runs here is the last release's binary. That is the right subject: the thing
+  # under test is the install path, and pointing it at an artifact built in this workflow would test
+  # a URL no user will ever fetch.
+  #
+  # The images are #138's three, and the versions are pinned rather than floating. An image that
+  # gains curl in a later build would silently stop exercising the wget path, which is the branch
+  # that resolves the latest release through the API on a machine without curl.
+  # ---------------------------------------------------------------------------------------------
+  install-script:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # ubuntu:24.04 ships neither downloader, so this row is the wget path *and* the refusal.
+        - image: ubuntu:24.04
+          missing: curl or wget
+          install: apt-get update -qq && apt-get install -y -qq wget
+        # rockylinux:9 has curl, sha256sum, tar and gzip already, so it is the row where the script
+        # works with nothing installed — the only row that would catch a preflight check that has
+        # become wrong about what it needs.
+        - image: rockylinux:9
+          missing: ''
+          install: ''
+        - image: opensuse/leap:15.6
+          missing: tar
+          install: zypper -q -n install tar gzip
+    steps:
+    - uses: actions/checkout@v7
+
+    # Not `container:` on the job, because the checkout has to happen on the runner and the script
+    # has to run inside each image — a job-level container would put the checkout inside it too and
+    # need git installed in all three.
+    - name: The script refuses, or installs, and says which
+      env:
+        IMAGE: ${{ matrix.image }}
+        MISSING: ${{ matrix.missing }}
+        INSTALL: ${{ matrix.install }}
+      run: |
+        set -euo pipefail
+
+        # A bare image that is missing a requirement must refuse *before downloading*, and must name
+        # the thing that is missing. This is the assertion the two defects above would have failed.
+        if [ -n "$MISSING" ]; then
+          out=$(docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
+            bash -c '/install.sh --prefix /opt/ofs 2>&1; echo "EXIT=$?"' || true)
+          echo "$out"
+
+          if ! grep -q "EXIT=1" <<<"$out"; then
+            echo "::error::$IMAGE is missing $MISSING and install.sh did not exit 1. A script that" \
+              "proceeds without $MISSING fails later, blaming something else."
+            exit 1
+          fi
+
+          if ! grep -q "$MISSING" <<<"$out"; then
+            echo "::error::install.sh refused on $IMAGE without naming '$MISSING'. An error that" \
+              "does not name the missing tool sends the reader to check the release, the network" \
+              "and the file — none of which is the problem."
+            exit 1
+          fi
+
+          # And nothing may be left behind by a refusal.
+          if docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
+            bash -c '/install.sh --prefix /opt/ofs >/dev/null 2>&1 || true; test -e /opt/ofs/bin/objectfs'; then
+            echo "::error::install.sh refused on $IMAGE but left a binary at /opt/ofs/bin/objectfs."
+            exit 1
+          fi
+        fi
+
+        # Then it has to actually work. Installing the missing package first where there is one;
+        # rockylinux:9 installs nothing, which is what makes it the row that catches a preflight
+        # demanding something the script does not need.
+        prep=""
+        [ -n "$INSTALL" ] && prep="$INSTALL >/dev/null 2>&1;"
+
+        out=$(docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
+          bash -c "$prep /install.sh --prefix /opt/ofs 2>&1; echo \"EXIT=\$?\"; /opt/ofs/bin/objectfs --version")
+        echo "$out"
+
+        grep -q "EXIT=0" <<<"$out" || {
+          echo "::error::install.sh did not succeed on $IMAGE."; exit 1; }
+
+        grep -q "checksum verified" <<<"$out" || {
+          echo "::error::install.sh installed on $IMAGE without reporting a verified checksum." \
+            "The checksum is not optional and there is no flag to skip it, so its absence from the" \
+            "output means the verification step was bypassed."
+          exit 1; }
+
+        grep -qE "^objectfs version [0-9]+\.[0-9]+\.[0-9]+" <<<"$out" || {
+          echo "::error::the installed binary on $IMAGE did not print a version. An installer that" \
+            "succeeds and leaves a binary that cannot run has produced the same outcome as one" \
+            "that failed, minus the explanation."
+          exit 1; }
+
+    # Twice, same result. #138 asks for idempotency and the interesting half is not "it does not
+    # crash" — it is that the second run leaves the identical binary, which is what makes re-running
+    # the documented one-liner safe on a machine that already has objectfs.
+    - name: Running it twice leaves the same binary
+      env:
+        IMAGE: ${{ matrix.image }}
+        INSTALL: ${{ matrix.install }}
+      run: |
+        set -euo pipefail
+
+        prep=""
+        [ -n "$INSTALL" ] && prep="$INSTALL >/dev/null 2>&1;"
+
+        out=$(docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
+          bash -c "$prep \
+            /install.sh --prefix /opt/ofs >/dev/null 2>&1; a=\$(sha256sum /opt/ofs/bin/objectfs | cut -d' ' -f1); \
+            /install.sh --prefix /opt/ofs >/dev/null 2>&1; b=\$(sha256sum /opt/ofs/bin/objectfs | cut -d' ' -f1); \
+            echo \"a=\$a b=\$b\"; [ \"\$a\" = \"\$b\" ] && echo SAME || echo DIFFERENT")
+        echo "$out"
+
+        grep -q SAME <<<"$out" || {
+          echo "::error::two runs of install.sh on $IMAGE left different binaries."; exit 1; }
