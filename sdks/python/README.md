@@ -170,6 +170,13 @@ async def cluster_example():
         await client.mount('s3://my-bucket', '/mnt/objectfs')
 ```
 
+"This is what the daemon reads" is checked rather than asserted, as of #385. Every preset's
+`to_yaml()` output is committed under `sdks/testdata/presets/` and put through the Go loader by
+`internal/config`'s `TestSDKPresetsLoadUnderTheGoLoader`. It had to be: the sentence above was false
+for every configuration this SDK could produce — `to_yaml` emitted sixteen keys the Go schema does not
+define, and the loader decodes strictly, so `save_to_file` wrote a document the daemon refused at
+startup. Changing a key here now fails a test in the other language.
+
 ObjectFS's own distributed layer is experimental; see the top-level README before depending on it.
 
 ### Cache Operations

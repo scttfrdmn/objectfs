@@ -61,6 +61,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Python SDK wrote configuration files the daemon refused to start on — every one of them.**
+  `Configuration.to_yaml()` emitted **sixteen** keys `internal/config` does not define, across seven
+  sections, and `LoadFromFile` decodes strictly, so `save_to_file` produced a document that failed at
+  startup naming the first key it hit. This affected the default `Configuration()` and all five presets,
+  which means the SDK's documented path — build a config, save it, mount with it — could not work at
+  all. Removed rather than added to the Go schema, because in each case the setting either had a real
+  home under another name or had nothing to reach:
+
+  - `global.pid_file`, `global.daemon` — ObjectFS does not fork, so there is no background mode to
+    select and no forked child's pid to record.
+  - `storage.s3.timeout` — an `int` of unstated unit; the real settings are
+    `network.timeouts.connect`/`read`/`write`, as durations.
+  - `performance.read_ahead_size`, `performance.max_write_buffer` — the first was removed from the Go
+    side in v0.11.0 for naming a second read-ahead size beside `performance.read_ahead.window_size`
+    ([#176]); the second is `write_buffer.max_memory`.
+  - `cluster.election_timeout`, `cluster.heartbeat_interval`, `cluster.join_timeout` — these exist on
+    `internal/distributed.ClusterConfig`, a *disjoint* type from `internal/config.ClusterConfig` with no
+    conversion between them ([#139]). Nothing in `sdks/` consumed any of the three.
+  - `security.tls_ca_path` — no CA path in the schema's `security` block; trust configuration is the
+    `security.tls` block.
+  - `monitoring.opentelemetry.headers` — where an OTLP bearer token would go, in a document the loader
+    rejected. An unloadable place to put a credential is worse than no key.
+  - the entire `fuse` block — `allow_other`, `allow_root`, `default_permissions`, `uid`, `gid`, `umask`,
+    replaced by the three keys the Go schema has: `direct_io`, `keep_cache`, `sync_read`. The removed
+    six were doubly inert: discarded by the loader, and three of them are ones `cmd/objectfs/doc.go`
+    already records as *not settable* because nothing on the adapter's mount path reads them.
+
+  [#385] named three of the sixteen, and the other thirteen were found by the test that closes it —
+  which is the argument for its shape. Each preset's `to_yaml()` output is committed under
+  `sdks/testdata/presets/`, and `internal/config`'s `TestSDKPresetsLoadUnderTheGoLoader` globs that
+  directory and runs every file through `LoadFromFile` and `Validate`. It asserts the *property* — the
+  Go loader accepts what the SDK writes — rather than comparing emitted keys against a list, because a
+  list is a second copy of the schema and would have had to be right about all sixteen. The Python half
+  compares rather than writes (`OBJECTFS_UPDATE_FIXTURES=1` to regenerate), because a Go test reading
+  committed files would otherwise stay green on stale ones. Verified by mutation in both directions:
+  reintroducing one key fails the Python comparison on all six documents, and regenerating with it
+  fails the Go loader gate naming the key and line.
+
 - **A compatibility probe reported a finding by failing the run.** `conditional_compat_test.go`
   called `t.Errorf` when an endpoint accepted `If-None-Match: *` over an existing key and replaced its
   contents, which contradicts the suite's own contract: record what an endpoint does and fail only on
