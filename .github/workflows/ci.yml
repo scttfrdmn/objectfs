@@ -909,6 +909,13 @@ jobs:
   # both: a site runs one or the other, never both, and the two disagree on PATH semantics.
   # ---------------------------------------------------------------------------------------------
   modulefiles:
+    # Named explicitly, because the default name interpolates every matrix value and these legs carry
+    # an absolute interpreter path — the checks appeared as `modulefiles (lmod, lmod,
+    # /usr/share/lmod/lmod/libexec/lmod)`. Both legs are required contexts in main's branch
+    # protection, and a required context is matched by exact string: the day a distro moves
+    # modulecmd.tcl, the renamed check would never report and every PR would block on a context that
+    # can no longer arrive. The system is the part of the identity that is stable.
+    name: modulefiles (${{ matrix.system }})
     runs-on: ubuntu-latest
     strategy:
       # Both legs run to completion. A failure under Lmod says nothing about TCL and the reviewer
