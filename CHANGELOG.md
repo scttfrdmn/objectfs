@@ -133,6 +133,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A read-ahead prefetch that fell behind the reader re-fetched bytes already cached.** A prefetch is
+  queued and the reader does not wait for it, so under load the reader can consume the front of the very
+  range predicted for it before a worker picks the request up. Those reads are then finished — removed
+  from the in-flight set that the existing trim consults — and the prefetch's full range is not a cache
+  hit either, because its tail was never cached and a partial hit is a miss. Neither guard saw them, and
+  the prefetch re-read the overlap: measured on CI, a 16 KiB file read in 1 KiB steps transferred 18432
+  bytes, the last GET re-reading 2048 bytes two earlier reads had already fetched. The prefetch now
+  advances past what the reader has consumed, and trims rather than skipping — dropping it outright also
+  stops the byte count exceeding the file, by turning read-ahead off.
+
 - **A remote operation whose response was too large for a gossip datagram presented as a 30-second
   timeout instead of a size error** ([#399]). Gossip is UDP, `NodeResult.Data` is a `[]byte` that
   `encoding/json` base64-encodes, and the envelope and MAC are on top, so at the default 8192-byte

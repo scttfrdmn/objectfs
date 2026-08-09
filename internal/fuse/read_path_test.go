@@ -431,6 +431,99 @@ func TestConcurrentIdenticalReadsShareOneGET(t *testing.T) {
 	}
 }
 
+// TestPrefetchSkipsRangeTheReaderHasAlreadyRead is the queued-prefetch-falls-behind case, made
+// deterministic.
+//
+// TestPrefetchStopsAtEndOfFile below asserts the same property end to end, and that is exactly why this
+// test exists: there, whether the duplication happens depends on who wins a race between a prefetch
+// worker and the application's next read(2). It passed 28 consecutive local runs and failed on CI, where
+// the queue falls behind — 18432 bytes for a 16384-byte file, the last GET re-reading 2048 bytes two
+// earlier reads had already fetched.
+//
+// So this one removes the race rather than trying to win it. No workers drain the queue, the reads run
+// to completion first, and performPrefetch is then called directly with the request the detector queued
+// several reads ago. That is the state CI produced: the reads are *finished*, so they are absent from
+// the in-flight set that finish removed them from, and the prefetch's full range is not a cache hit
+// because its tail was never cached.
+func TestPrefetchSkipsRangeTheReaderHasAlreadyRead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		step = 1024
+		size = 16 * step
+	)
+
+	f := newReadPathFixture(t)
+	f.srv.SeedRandom("behind.dat", size)
+
+	// ConcurrentReads: 0 is what makes this deterministic — schedulePrefetch fills the queue and nothing
+	// drains it, so every prefetch below happens when and only when this test says so.
+	f.stopReadAhead()
+	f.fs.readAhead = NewReadAheadManager(t.Context(), f.fs, &ReadAheadConfig{
+		Enabled:         true,
+		WindowSize:      64 * 1024,
+		MinSequential:   3,
+		ConcurrentReads: 0,
+		TTL:             time.Minute,
+	})
+
+	fh := f.open(t, "behind.dat")
+
+	// Five reads, the shape CI reported: the detector predicts 3072 on its third read, and by the time a
+	// worker would run, the reader has consumed through 5120.
+	for off := int64(0); off < 5*step; off += step {
+		f.read(t, fh, off, step)
+	}
+
+	before := f.srv.BytesRead("behind.dat")
+	if before != 5*step {
+		t.Fatalf("the reads themselves transferred %d bytes for %d bytes of file read; this test needs "+
+			"them to fetch each byte once or it is not measuring the prefetch", before, 5*step)
+	}
+
+	// The request the detector queued at the third read, run now that the reader is two reads past it.
+	f.fs.readAhead.performPrefetch(t.Context(), &PrefetchRequest{
+		path:   "behind.dat",
+		offset: 3 * step,
+		size:   64 * 1024,
+	})
+
+	gets := f.srv.GETs("behind.dat")
+	ranges := make([]string, 0, len(gets))
+	for _, req := range gets {
+		ranges = append(ranges, req.Range)
+	}
+
+	// One assertion in two directions, because the two failures are opposite and a message written for
+	// one of them lies about the other.
+	//
+	// Over the file size is the defect itself: the front of the prefetch was fetched twice. Under it is
+	// the fix's own failure mode — a prefetch that skips the range instead of advancing past it also
+	// stops the byte count from exceeding the file, by fetching nothing at all, and would pass an
+	// assertion written only against the excess.
+	switch got := f.srv.BytesRead("behind.dat"); {
+	case got > size:
+		t.Errorf("a prefetch queued at offset %d and run after the reader had consumed through %d "+
+			"transferred %d bytes in total for a %d-byte file, %d too many. It re-fetched the bytes "+
+			"between those two offsets: the reads that cached them have finished, so they are gone from "+
+			"the in-flight set that finish removed them from, and the prefetch's whole range is not a "+
+			"cache hit because its tail was never cached. Ranges: %v",
+			3*step, 5*step, got, size, got-size, ranges)
+
+	case got == before:
+		t.Errorf("the prefetch transferred nothing, leaving the total at %d for a %d-byte file. A "+
+			"prefetch whose front the reader has passed must advance past it and fetch the rest, not "+
+			"give up the tail: dropping it keeps the byte count from exceeding the file by turning "+
+			"read-ahead off, which is the one other way to pass the check above. Ranges: %v",
+			got, size, ranges)
+
+	case got != size:
+		t.Errorf("the prefetch stopped short: %d bytes transferred in total for a %d-byte file, %d "+
+			"short of the tail from offset %d that the reader has not reached. Ranges: %v",
+			got, size, size-got, 5*step, ranges)
+	}
+}
+
 // TestPrefetchStopsAtEndOfFile is the tail of a traversal: the 416 past EOF, and the tail fetched twice.
 //
 // A sequential reader's predicted next offset runs past EOF by construction — the last read of a
