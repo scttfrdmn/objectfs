@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Peers now learn which keys are cached elsewhere in the cluster** ([#140]). `AnnounceKey` and
+  `QueryKeyOwnership` were stubs returning `ErrNotSupported`; both are real. A node broadcasts a
+  `cache_announce` gossip message naming the key, its ETag, its size and the byte range it holds;
+  receivers record the claim against the peer that sent it, expire it after `cluster.announcement_ttl`
+  (default five minutes), and answer a local lookup with the holders freshest-first. It is metadata
+  only — no object bytes cross gossip, because a datagram cannot carry a 128 KiB read ([#399]) — so what
+  this buys is knowing *which* keys are worth warming, and the bytes still come from S3.
+
+  Three details are worth an operator's attention because each departs from what a reader might assume.
+  A node does **not** record its own announcements: the query exists to answer a miss on this node's own
+  cache, so a self-entry would be a holder guaranteed not to hold, returned in place of a peer that
+  might. Expiry uses the moment *this* node received the claim, never the sender's `cached_at`, whose own
+  contract forbids comparison against a local deadline — otherwise a peer whose clock runs an hour behind
+  would have every announcement expire on arrival, and one running fast would sort itself to the front of
+  every key in the cluster. And the announcement is credited to the peer the message came from rather
+  than to the node named in the payload, so a member cannot send the cluster to fetch bytes some third
+  node never cached.
+
+  An announcement missing its ETag is refused rather than sent, and refused with the field named. This is
+  the integrity boundary: an invalidation with no version is still safe, since "evict whatever you hold"
+  cannot serve wrong bytes, while a peer that fetches bytes it cannot place against an object version
+  hands them to a reading process as file content. Announcing with gossip not running returns
+  `ErrNotSupported` rather than nil — a caller told nil believes the cluster knows something it was never
+  sent, which is precisely the defect [#284] deleted a `CacheReplicator` for. `announced_keys` is now in
+  the coordinator's statistics, counting keys *retained*, so the gap between it and what a query returns
+  is how far behind the expiry sweep is running.
+
 - **`cluster.enabled: true` now actually starts cluster coordination** ([#139]). Every part of
   `internal/distributed` was built, tested and reachable by nothing: no code path anywhere constructed
   a `ClusterManager`, so a two-node deployment whose configuration said it was clustered got no

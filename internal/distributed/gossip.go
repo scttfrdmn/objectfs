@@ -131,6 +131,15 @@ const (
 	// MessageTypeCacheInvalidate requests that peers evict a key from their
 	// local cache.  The payload is a CacheInvalidateMessage.
 	MessageTypeCacheInvalidate MessageType = "cache_invalidate"
+
+	// MessageTypeCacheAnnounce tells peers the sender holds a version of a key in its local cache, so a
+	// peer weighing a read can learn the key is hot in this cluster (#140). The payload is a
+	// [types.KeyAnnouncement].
+	//
+	// It carries no object bytes and is not a request for any: see
+	// [GossipProtocol.handleCacheAnnounce]. Metadata over gossip, bytes from S3 — a datagram cannot hold
+	// a 128 KiB read, which is what makes that split a constraint rather than a preference (#399).
+	MessageTypeCacheAnnounce MessageType = "cache_announce"
 )
 
 // ErrMessageOversize means a sealed datagram exceeded MaxGossipPacket and was refused before it
@@ -551,9 +560,11 @@ func (gp *GossipProtocol) handleIncomingMessage(ctx context.Context, data []byte
 			gp.cluster.coordinator.handleNetworkOperationResp(msg)
 		}
 
-	// Cache invalidation
+	// Cache coordination
 	case MessageTypeCacheInvalidate:
 		gp.handleCacheInvalidate(msg)
+	case MessageTypeCacheAnnounce:
+		gp.handleCacheAnnounce(msg)
 	}
 }
 
