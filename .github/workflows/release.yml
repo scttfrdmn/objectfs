@@ -151,6 +151,105 @@ jobs:
         if-no-files-found: error
         retention-days: 7
 
+  # The .deb and the .rpm, attached to the release.
+  #
+  # These have been buildable for as long as nfpm.yaml has existed, and ci.yml's `packaging` job builds
+  # both and installs the deb on every PR — but this workflow had no reference to `package-linux`,
+  # `nfpm`, `.deb` or `.rpm`, so every published release was five tar.gz binaries and their checksums
+  # and nothing else. A package that CI proves installable and that no user can obtain is the same
+  # defect as scripts/preremove.sh before #207: working code with nothing invoking it.
+  #
+  # This is the half of #138 that needs no hosting decision. That issue asks for apt and yum repository
+  # setup scripts pointing at `packages.objectfs.io`, which does not exist — it and `objectfs.io` both
+  # resolve to registrar parking IPs that do not complete a TLS handshake. `dpkg -i` and `rpm -i`
+  # against a downloaded asset need no repository at all, and they are what an operator can actually do
+  # today.
+  #
+  # A separate job rather than a step in `build`: package building is amd64+arm64 in one invocation, so
+  # it does not fit a five-cell matrix that includes armv7 and two darwin targets, and nfpm has no
+  # darwin output. Its own job also means a packaging failure names itself in the checks list instead of
+  # appearing as a mysterious failure of `build (linux-amd64)`.
+  #
+  # No armv7 package. `make package-linux` builds amd64 and arm64, matching nfpm.yaml's OBJECTFS_ARCH
+  # contract; the armv7 tar.gz still ships, so that platform is not losing its artifact. Adding a third
+  # architecture is a change to the Makefile loop and to packaging_test.go's expectations, not to this
+  # job.
+  package-linux:
+    name: Build Linux Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+    # The same three assertions ci.yml's packaging job opens with, for the same reason: nfpm.yaml's
+    # destinations, scripts/postinstall.sh's paths and the version constant have to agree, and a
+    # release is the worst place to find out they do not.
+    - name: nfpm.yaml agrees with the scripts, the Makefile and the version constant
+      run: go test ./internal/config/ -run 'TestPackag|TestPostinstall|TestPreremove|TestMakefile'
+
+    - name: Build the deb and the rpm
+      run: make package-linux
+
+    # The version inside the package, read back from the package. Nothing else in this repository does
+    # this, and nfpm.yaml's own comment names the gap: "nothing reads a package's version back to
+    # compare it, so `objectfs version` inside objectfs_0.12.0_amd64.deb would say 0.13.0 and no gate
+    # anywhere would notice". The tag is already checked against the constant in `build`; this checks
+    # the constant against what nfpm actually wrote, which is the one link in that chain that was
+    # unverified.
+    - name: The packages carry the tag's version, and there are four of them
+      run: |
+        TAG=${GITHUB_REF#refs/tags/v}
+
+        # The filename carries the release suffix too: nfpm writes objectfs_0.13.0-1_amd64.deb, not
+        # objectfs_0.13.0_amd64.deb. Verified against a local `make package-linux` rather than guessed —
+        # the first version of this step spelled it without the -1 and would have failed the release it
+        # was added to protect.
+        for arch in amd64 arm64; do
+          deb="dist/objectfs_${TAG}-1_${arch}.deb"
+          test -f "$deb" || { echo "::error::expected $deb, and it is not there"; ls -l dist; exit 1; }
+
+          got=$(dpkg-deb --field "$deb" Version)
+          # nfpm writes the deb version as <version>-<release>, and nfpm.yaml pins release to 1.
+          [ "$got" = "$TAG-1" ] || {
+            echo "::error::$deb declares version $got, and this tag is $TAG"
+            exit 1
+          }
+        done
+
+        # rpm names its architectures differently: x86_64 and aarch64, not amd64 and arm64. Globbed
+        # rather than spelled out, because that mapping is nfpm's and not a contract this job should
+        # restate — but the count is asserted, so a silently missing rpm still fails.
+        rpms=$(ls dist/*.rpm | wc -l)
+        [ "$rpms" -eq 2 ] || { echo "::error::expected 2 rpms, found $rpms"; ls -l dist; exit 1; }
+
+        # A checksum per package, matching what `build` does for the tarballs, so a download can be
+        # verified without trusting the transport.
+        cd dist
+        for pkg in *.deb *.rpm; do
+          sha256sum "$pkg" > "$pkg.sha256"
+        done
+
+        ls -l
+
+    - name: Upload the packages
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-packages
+        path: |
+          dist/*.deb
+          dist/*.rpm
+          dist/*.sha256
+        if-no-files-found: error
+        retention-days: 7
+
   # Build and push Docker images.
   #
   # Independent of `build`: an image failure should not withhold the binaries, and vice versa. Both
@@ -295,7 +394,10 @@ jobs:
   publish:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build, docker-build-push, security-scan]
+    # package-linux gates publishing too. A release that attaches the tarballs and silently omits the
+    # packages is worse than one that fails: the page looks complete, and the omission is only visible
+    # to someone who knew to expect a .deb.
+    needs: [build, package-linux, docker-build-push, security-scan]
     permissions:
       contents: write
     steps:
@@ -417,7 +519,7 @@ jobs:
           echo ""
           echo "### Assets"
           echo ""
-          for f in dist/*.tar.gz; do
+          for f in dist/*.tar.gz dist/*.deb dist/*.rpm; do
             echo "- \`$(basename "$f")\`"
           done
           echo ""
