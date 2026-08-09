@@ -1,6 +1,7 @@
 package distributed
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1544,4 +1545,154 @@ func TestClusterManager_CacheInvalidation_TwoNodes(t *testing.T) {
 	}
 
 	waitForDeletion(t, mc2, "foo")
+}
+
+// ── Oversize response tests (#399) ────────────────────────────────────────────
+
+// blobBackend returns a fixed object, so a remote get can be made to produce a response that cannot
+// fit in a gossip datagram.
+//
+// The bytes are built once at construction rather than held as a size and expanded per call: the
+// caller is the gossip receive goroutine, so a field this test writes after starting the cluster
+// would be read from there under -race.
+type blobBackend struct {
+	mockBackend
+	blob []byte
+}
+
+func newBlobBackend(size int) *blobBackend {
+	return &blobBackend{blob: bytes.Repeat([]byte("x"), size)}
+}
+
+func (b *blobBackend) GetObject(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return b.blob, nil
+}
+
+// TestCoordinator_RemoteGet_ReportsAnOversizeResponseRatherThanTimingOut is #399.
+//
+// The bytes genuinely cannot cross this transport: gossip is UDP, a []byte is base64-encoded by
+// encoding/json, and the envelope and MAC are on top, so at the default 8192-byte MaxGossipPacket a
+// response tops out at 5802 bytes of object. That limit is not the defect and is not what this
+// asserts.
+//
+// The defect was how it presented. The responder logged the size error at Warn and returned, having
+// sent nothing, so the requester learned only that nothing arrived — reported as "operation timed out
+// waiting for remote response" after its full timeout, on a different host, at a level most
+// deployments do not collect. An operator debugging that looks at the network, the peer's health and
+// the timeout value, and the one thing that is actually wrong is not among them.
+//
+// Asserting on the *content* of the error is what makes this fail against the old code rather than
+// merely take longer: the pre-fix path does produce a failure eventually, so a test that only checked
+// !Success passes both ways.
+func TestCoordinator_RemoteGet_ReportsAnOversizeResponseRatherThanTimingOut(t *testing.T) {
+	t.Parallel()
+
+	cm1, cm2 := startGossipPair(t, "oversize-requester", "oversize-responder")
+	registerPeer(t, cm2, cm1)
+
+	// Comfortably over the 5802-byte ceiling, and a plausible size rather than a pathological one: this
+	// is a quarter of one 128 KiB kernel read.
+	cm2.SetBackend(newBlobBackend(32 * 1024))
+
+	// Long enough that the old behavior is distinguishable from a slow reply, short enough that this
+	// test does not sit for 30 seconds when it regresses.
+	op := &DistributedOperation{
+		Type:        OpTypeGet,
+		Key:         "big-object",
+		TargetNodes: []string{"oversize-responder"},
+		Timeout:     5 * time.Second,
+	}
+
+	result, err := cm1.coordinator.ExecuteOperation(t.Context(), op)
+	if err == nil {
+		t.Fatal("a remote get of 32 KiB reported success; the response cannot fit a gossip datagram")
+	}
+	if result.Success {
+		t.Error("result.Success is true for an operation whose response was never delivered")
+	}
+
+	// The size, the limit, and the setting that governs it — so the message names the cause and the
+	// knob, rather than sending an operator to the network.
+	for _, want := range []string{"max_gossip_packet", "big-object", "32768"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q, so it does not explain what happened: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a size failure is still presented as a timeout, which is the defect #399 reported: %v", err)
+	}
+}
+
+// TestClusterManager_SetBackend_IsSafeWhileAPeerOperationRuns guards the data race found while
+// writing the test above, which is in production code rather than in a test.
+//
+// [ClusterManager.SetBackend] assigned cm.coordinator.backend while holding the *cluster's* mutex,
+// and [Coordinator.executeLocally] read the field under no lock at all — from the gossip receive
+// goroutine, which is where a peer's operation is executed. Two different locks and one unsynchronized
+// read on an interface value.
+//
+// It stayed latent because every existing test injects its backend *before* Start, so the goroutine
+// that reads the field does not exist yet when it is written. That ordering is not something a caller
+// can be required to observe: a mount can enable clustering and swap a backend afterwards, and #139
+// makes an injection concurrent with peer traffic the ordinary case rather than a contrived one.
+//
+// -race is the assertion. There is nothing to check about the result — the point is that the detector
+// finds no write/read pair on the field.
+func TestClusterManager_SetBackend_IsSafeWhileAPeerOperationRuns(t *testing.T) {
+	t.Parallel()
+
+	cm1, cm2 := startGossipPair(t, "swap-requester", "swap-responder")
+	registerPeer(t, cm2, cm1)
+	cm2.SetBackend(&mockBackend{})
+
+	var wg sync.WaitGroup
+
+	// Swapping repeatedly, because the race needs the write to land inside the window in which the
+	// receive goroutine is reading. One swap would usually miss it.
+	wg.Go(func() {
+		for range 50 {
+			cm2.SetBackend(&mockBackend{})
+		}
+	})
+
+	wg.Go(func() {
+		for range 50 {
+			//nolint:errcheck // The outcome is irrelevant; this exists to drive the concurrent read.
+			_, _ = cm1.coordinator.ExecuteOperation(t.Context(), &DistributedOperation{
+				Type:        OpTypeGet,
+				Key:         "swapped-key",
+				TargetNodes: []string{"swap-responder"},
+				Timeout:     time.Second,
+			})
+		}
+	})
+
+	wg.Wait()
+}
+
+// registerPeer makes to aware of from, in both the cluster node map and the gossip memberlist, so a
+// message sent to it can be answered.
+//
+// startGossipPair deliberately registers in one direction only, which is all a broadcast needs. A
+// request/response exchange needs the reverse as well: the responder looks its requester up in its
+// own node map to find an address to reply to, and without this entry it abandons the response for
+// an unrelated reason — "sender not found" — which would make this test pass for the wrong cause.
+func registerPeer(t *testing.T, to, from *ClusterManager) {
+	t.Helper()
+
+	id := from.GetNodeID()
+	addr := from.gossip.LocalAddr()
+	if addr == "" {
+		t.Fatalf("%s has no local gossip address; it is not started", id)
+	}
+
+	to.UpdateNodeInfo(id, &NodeInfo{
+		ID: id, Address: addr, Status: NodeStatusAlive, Metadata: map[string]string{},
+	})
+	to.gossip.mu.Lock()
+	to.gossip.memberlist[id] = &GossipNode{
+		Info:  &NodeInfo{ID: id, Address: addr},
+		State: StateAlive,
+	}
+	to.gossip.mu.Unlock()
 }
