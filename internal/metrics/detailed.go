@@ -44,23 +44,33 @@ const (
 
 // DetailedOperationMetrics tracks metrics for a specific operation
 type DetailedOperationMetrics struct {
-	Count             int64         `json:"count"`
-	TotalLatency      time.Duration `json:"total_latency"`
-	MinLatency        time.Duration `json:"min_latency"`
-	MaxLatency        time.Duration `json:"max_latency"`
-	AverageLatency    time.Duration `json:"average_latency"`
-	P50Latency        time.Duration `json:"p50_latency"`
-	P95Latency        time.Duration `json:"p95_latency"`
-	P99Latency        time.Duration `json:"p99_latency"`
-	ErrorCount        int64         `json:"error_count"`
-	BytesProcessed    int64         `json:"bytes_processed"`
-	CacheHits         int64         `json:"cache_hits"`
-	CacheMisses       int64         `json:"cache_misses"`
-	CacheHitRate      float64       `json:"cache_hit_rate"`
-	AvgBytesPerOp     float64       `json:"avg_bytes_per_op"`
-	ThroughputMBps    float64       `json:"throughput_mbps"`
-	LastOperationTime time.Time     `json:"last_operation_time"`
-	LatencyHistogram  []int64       `json:"-"` // Histogram buckets for percentile calculation
+	Count          int64         `json:"count"`
+	TotalLatency   time.Duration `json:"total_latency"`
+	MinLatency     time.Duration `json:"min_latency"`
+	MaxLatency     time.Duration `json:"max_latency"`
+	AverageLatency time.Duration `json:"average_latency"`
+
+	// The three percentiles are estimated from LatencyHistogram, so each is accurate only to the width
+	// of the bucket it lands in — see LatencyBucketBounds. They are populated by RecordOperation on the
+	// aggregate per-operation metrics only; the per-file copies in FileOperationMetrics.Operations
+	// allocate no histogram and leave these zero, which is why GetTopFiles does not carry them.
+	P50Latency time.Duration `json:"p50_latency"`
+	P95Latency time.Duration `json:"p95_latency"`
+	P99Latency time.Duration `json:"p99_latency"`
+
+	ErrorCount        int64     `json:"error_count"`
+	BytesProcessed    int64     `json:"bytes_processed"`
+	CacheHits         int64     `json:"cache_hits"`
+	CacheMisses       int64     `json:"cache_misses"`
+	CacheHitRate      float64   `json:"cache_hit_rate"`
+	AvgBytesPerOp     float64   `json:"avg_bytes_per_op"`
+	ThroughputMBps    float64   `json:"throughput_mbps"`
+	LastOperationTime time.Time `json:"last_operation_time"`
+
+	// LatencyHistogram counts operations per latency bucket, with the bucket boundaries returned by
+	// LatencyBucketBounds and one final overflow bucket. Not serialized: counts without their intervals
+	// are not interpretable, and the intervals are constants a Go caller can read directly.
+	LatencyHistogram []int64 `json:"-"`
 }
 
 // FileOperationMetrics tracks metrics for a specific file
@@ -179,7 +189,7 @@ func (dpm *DetailedPerformanceMetrics) RecordOperation(
 	if dpm.OperationMetrics[opType] == nil {
 		dpm.OperationMetrics[opType] = &DetailedOperationMetrics{
 			MinLatency:       latency,
-			LatencyHistogram: make([]int64, 100), // 100 buckets for percentile calculation
+			LatencyHistogram: newLatencyHistogram(),
 		}
 	}
 
@@ -200,9 +210,9 @@ func (dpm *DetailedPerformanceMetrics) RecordOperation(
 	// Update average latency
 	om.AverageLatency = time.Duration(int64(om.TotalLatency) / om.Count)
 
-	// Update histogram for percentile calculation
-	bucketIndex := int(latency.Milliseconds()) % len(om.LatencyHistogram)
-	om.LatencyHistogram[bucketIndex]++
+	// Bucket the latency, then re-estimate the percentiles from the whole histogram.
+	om.LatencyHistogram[latencyBucket(latency)]++
+	updatePercentiles(om)
 
 	// Update cache metrics
 	if cacheSource == CacheSourceL1 || cacheSource == CacheSourceL2 || cacheSource == CacheSourceReadAhead {
@@ -344,8 +354,15 @@ func (dpm *DetailedPerformanceMetrics) GetOperationMetrics(opType OperationType)
 	defer dpm.mu.RUnlock()
 
 	if om, exists := dpm.OperationMetrics[opType]; exists {
-		// Return a copy to avoid race conditions
+		// Return a copy to avoid race conditions.
+		//
+		// The struct copy alone did not achieve that. It copies LatencyHistogram's slice *header*, so the
+		// caller walked the same backing array that the next RecordOperation increments — a data race the
+		// -race detector reports, on the one field of this struct that is not a scalar. Whether it was
+		// reachable before depended on nothing reading the field; the percentiles are computed from it now,
+		// so a caller has a reason to.
 		omCopy := *om
+		omCopy.LatencyHistogram = append([]int64(nil), om.LatencyHistogram...)
 		return &omCopy
 	}
 	return nil

@@ -286,24 +286,27 @@ cache-source breakdown, network utilization, and per-operation cost. NewDetailed
 has no caller outside this package's own tests, so nothing a mount does reaches any of it. It is
 here because it may be wired up, not because it runs.
 
-Two things in it do not work as their field names suggest, and are stated here rather than left for
-whoever wires it up to discover. Both are tracked in issue 222:
+Its latency percentiles are estimates, which is worth knowing before reading them as measurements.
+P50Latency, P95Latency and P99Latency are computed from LatencyHistogram by interpolating within the
+bucket that covers the requested rank, as Prometheus's histogram_quantile does, so each is accurate
+only to the width of that bucket — LatencyBucketBounds says what the widths are. A rank landing in the
+overflow bucket saturates at the top bound, since there is nothing above it to interpolate toward.
+The per-file copies in FileOperationMetrics.Operations allocate no histogram and leave all three at
+zero; the aggregate OperationMetrics is the only place percentiles are populated.
 
-  - DetailedOperationMetrics.P50Latency, P95Latency, and P99Latency are declared and never assigned.
-    They are always zero. Anything serializing this struct — the JSON tags are p50_latency and
-    friends — publishes zeros as percentiles, which reads as a fast filesystem rather than as an
-    unimplemented field.
-  - LatencyHistogram is indexed by int(latency.Milliseconds()) % 100, so 1 ms and 101 ms and 201 ms
-    all land in bucket 1. It is a modulo, not a bucketing, and the percentiles above could not be
-    computed from it even if something tried.
+Both of those were defects until issue 222. The fields were declared and never assigned, so anything
+serializing the struct published zeros as percentiles — which reads as a filesystem with no tail
+latency rather than as an unimplemented field — and LatencyHistogram was indexed by
+int(latency.Milliseconds()) % 100, a modulo rather than a bucketing, so 1 ms and 101 ms and 201 ms
+shared a bucket and no percentile could have been computed from it. latency.go holds the replacement
+and latency_test.go asserts the two collisions the modulo produced.
 
 A 618-line docs/performance-metrics.md described this subsystem, with a zero-argument constructor,
 a NewDetailedPerformanceMetricsWithOptions that never existed, three getters that do not exist,
 OpMkdir/OpRmdir/OpStatfs against the real OpMkDir/OpRmDir/OpStatFS, a CacheSourceNone that is not
-declared, a four-argument RecordNetworkOperation, and the percentile and bucketing behavior above
-described as working. It was deleted rather than corrected: nine defects in one document about one
-file is what a description maintained separately from the thing it describes converges to. This
-section is short so that it can stay true.
+declared, and a four-argument RecordNetworkOperation. It was deleted rather than corrected: nine
+defects in one document about one file is what a description maintained separately from the thing it
+describes converges to. This section is short so that it can stay true.
 
 # See Also
 
