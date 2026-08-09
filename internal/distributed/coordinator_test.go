@@ -1594,7 +1594,7 @@ func TestCoordinator_RemoteGet_ReportsAnOversizeResponseRatherThanTimingOut(t *t
 	// is a quarter of one 128 KiB kernel read.
 	cm2.SetBackend(newBlobBackend(32 * 1024))
 
-	// Long enough that the old behaviour is distinguishable from a slow reply, short enough that this
+	// Long enough that the old behavior is distinguishable from a slow reply, short enough that this
 	// test does not sit for 30 seconds when it regresses.
 	op := &DistributedOperation{
 		Type:        OpTypeGet,
@@ -1649,17 +1649,13 @@ func TestClusterManager_SetBackend_IsSafeWhileAPeerOperationRuns(t *testing.T) {
 
 	// Swapping repeatedly, because the race needs the write to land inside the window in which the
 	// receive goroutine is reading. One swap would usually miss it.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 50 {
 			cm2.SetBackend(&mockBackend{})
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 50 {
 			//nolint:errcheck // The outcome is irrelevant; this exists to drive the concurrent read.
 			_, _ = cm1.coordinator.ExecuteOperation(t.Context(), &DistributedOperation{
@@ -1669,7 +1665,7 @@ func TestClusterManager_SetBackend_IsSafeWhileAPeerOperationRuns(t *testing.T) {
 				Timeout:     time.Second,
 			})
 		}
-	}()
+	})
 
 	wg.Wait()
 }
