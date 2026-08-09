@@ -99,6 +99,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reintroducing one key fails the Python comparison on all six documents, and regenerating with it
   fails the Go loader gate naming the key and line.
 
+- **`--config ./objectfs..staging.yaml` failed with "path contains directory traversal."**
+  `ValidatePath` tested `strings.Contains(cleanPath, "..")` *after* `filepath.Clean`, which conflates
+  "contains two dots in a row" with "escapes the working directory." Clean has already resolved every
+  resolvable `..` by then, so a surviving one can only be leading — but `Contains` also matches an
+  adjacent pair *inside* a component, and those are ordinary names. A config file with a dotted
+  environment suffix, a log file named `run..1.log`, a directory `v1..2/` were all refused, with an
+  error naming a cause that was not the reason. The check is now a leading-`..` test, so `..foo` and
+  `...` are not caught either — they are names too ([#384]).
+
+  The table-driven test's only "dots in filename" case was `config/app.config.yaml`, whose dots are
+  not adjacent, so it passed under the broken check and the correct one alike — a case that cannot
+  tell the fix from the defect. Thirteen cases now cover both directions, and mutation-checking
+  confirms they are independent: reverting to `Contains` fails six subtests, all false positives;
+  deleting the check entirely fails six *different* subtests, all real traversal. A new
+  `FuzzValidatePath` states the property instead of a case list — it walks the cleaned path's
+  components tracking depth and asks whether resolving it leaves the starting directory — and finds
+  the original defect in under a second. It also caught the same `Contains` mistake in the first draft
+  of its own oracle, on `/..0`.
+
+  The doc comment now says what the function refuses, which was the issue's second question and is
+  narrower than the name suggests. Clean treats the root as its own parent, so `/../etc/passwd` and
+  `/var/../etc/passwd` both become `/etc/passwd`: an absolute path never reaches the traversal check
+  with a `..` in it. With `allowAbsolute: true` — which all three callers pass, for an operator's own
+  config, discount-file, and log paths — the only thing refused beyond an empty string is a *relative*
+  path that climbs out. That is a typo check, not a security boundary, and it is written down in those
+  words with test cases pinning Clean's behavior so the claim fails rather than quietly rots.
+  `SecureJoin` got a note for a related reason: it *joins* an absolute element rather than refusing it
+  (`SecureJoin("/var/cache", "/etc/passwd")` → `/var/cache/etc/passwd`), which is `filepath.Join`'s
+  documented behavior and still contained — the surprise is in the return value, not the safety.
+
 - **A compatibility probe reported a finding by failing the run.** `conditional_compat_test.go`
   called `t.Errorf` when an endpoint accepted `If-None-Match: *` over an existing key and replaced its
   contents, which contradicts the suite's own contract: record what an endpoint does and fail only on
@@ -2479,6 +2509,7 @@ had no message authentication, and a cluster will not start without a shared sec
 [#283]: https://github.com/scttfrdmn/objectfs/issues/283
 [#284]: https://github.com/scttfrdmn/objectfs/issues/284
 [#385]: https://github.com/scttfrdmn/objectfs/issues/385
+[#384]: https://github.com/scttfrdmn/objectfs/issues/384
 [#285]: https://github.com/scttfrdmn/objectfs/issues/285
 [#390]: https://github.com/scttfrdmn/objectfs/issues/390
 [#378]: https://github.com/scttfrdmn/objectfs/issues/378

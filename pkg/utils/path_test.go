@@ -69,6 +69,107 @@ func TestValidatePath(t *testing.T) {
 			allowAbsolute: false,
 			wantErr:       false,
 		},
+
+		// The #384 cases. Every one of these is an ordinary filename that happens to contain an
+		// adjacent pair of dots, and every one was rejected as "directory traversal" before the fix.
+		//
+		// The case above — "config/app.config.yaml" — is why that went unnoticed for as long as it did:
+		// it was the table's only "dots in filename" entry and its dots are not adjacent, so it passed
+		// under the broken check and under the correct one alike. A regression case has to be able to
+		// tell the two apart.
+		{
+			name:          "adjacent dots inside a filename are not traversal",
+			path:          "a..b.log",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "adjacent dots with no extension are not traversal",
+			path:          "my..file",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "adjacent dots in a directory component are not traversal",
+			path:          "v1..2/x",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "the concrete case from the issue",
+			path:          "./objectfs..staging.yaml",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "leading dots that are not a pair",
+			path:          "..foo/bar",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "three dots is a legal directory name",
+			path:          ".../x",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+
+		// The other direction: traversal that must still be refused, including the two forms Clean
+		// produces that a naive prefix check would miss. Without these the fix could have been "delete
+		// the check", which passes every false-positive case above.
+		{
+			name:          "traversal that Clean reduces to exactly ..",
+			path:          "a/../..",
+			allowAbsolute: true,
+			wantErr:       true,
+			errContains:   "directory traversal",
+		},
+		{
+			name:          "traversal surviving Clean as a leading ..",
+			path:          "sub/../../x",
+			allowAbsolute: true,
+			wantErr:       true,
+			errContains:   "directory traversal",
+		},
+		{
+			name:          "traversal through a current-directory reference",
+			path:          "./x/../../y",
+			allowAbsolute: true,
+			wantErr:       true,
+			errContains:   "directory traversal",
+		},
+		{
+			name:          "relative traversal is refused even when absolute paths are allowed",
+			path:          "../../../etc/passwd",
+			allowAbsolute: true,
+			wantErr:       true,
+			errContains:   "directory traversal",
+		},
+
+		// Absolute paths with .. in them, asserted so the doc comment's claim is checked rather than
+		// stated. Clean treats the root as its own parent, so it resolves these to /etc/passwd and no
+		// ".." reaches the traversal check — they are accepted under allowAbsolute, as any other
+		// absolute path is. That is the honest boundary of this function, and if Clean's behavior ever
+		// changed these would fail rather than the comment quietly becoming wrong.
+		{
+			name:          "absolute path whose traversal Clean resolves away",
+			path:          "/var/../etc/passwd",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "absolute path climbing above the root",
+			path:          "/../etc/passwd",
+			allowAbsolute: true,
+			wantErr:       false,
+		},
+		{
+			name:          "the same absolute path is refused for being absolute, not for traversal",
+			path:          "/../etc/passwd",
+			allowAbsolute: false,
+			wantErr:       true,
+			errContains:   "absolute paths not allowed",
+		},
 	}
 
 	for _, tt := range tests {
