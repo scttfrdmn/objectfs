@@ -697,26 +697,45 @@ func TestSetxattrHonorsCreateAndReplaceFlags(t *testing.T) {
 // compared the same wrapped number — so it reads a truncated attribute and cannot tell. MaxUint32 is not
 // mistakable for a real attribute size, so the caller's own allocation fails instead.
 //
-// The 1<<32 case is skipped on a 32-bit platform, where an int cannot hold it and the conversion is not
-// lossy in the first place; the guard is a compile-time-safe comparison rather than a build tag.
+// The over-MaxUint32 cases are computed rather than written as literals, and that is not a style choice:
+// `math.MaxUint32` and `math.MaxUint32 + 1` are untyped constants that do not fit an int on a 32-bit
+// platform, so a table naming them fails to *compile* for linux/386 and linux/arm. The first version of
+// this test did exactly that, and so did the function it covers — both passed everything on a 64-bit host
+// and broke two cross-builds. `maxUint32AsInt` is -1 where an int cannot hold the value, which drops those
+// rows on the platforms where the conversion is not lossy to begin with.
 func TestXattrSizeSaturatesRatherThanWrapping(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
+	type sizeCase struct {
 		name string
 		n    int
 		want uint32
-	}{
+	}
+
+	cases := []sizeCase{
 		{"zero", 0, 0},
 		{"an ordinary attribute", 11, 11},
-		{"the largest value that fits", math.MaxUint32, math.MaxUint32},
-		{"one past it", math.MaxUint32 + 1, math.MaxUint32},
 		{"negative, which no length is but the type allows", -1, math.MaxUint32},
-	} {
-		if tc.n > 0 && uint64(tc.n) > uint64(math.MaxInt) {
-			continue // unrepresentable as an int on this platform
-		}
+	}
 
+	// Appended only where an int can hold the value. Building the rows conditionally rather than filtering
+	// them afterwards: a filter has to recognize the 32-bit rows by their *value*, and on that platform the
+	// arithmetic that produces them collapses onto values the other rows already use, so the filter would
+	// let a row through paired with the wrong expectation.
+	//
+	// The bound goes through a uint64 *variable* rather than `int(uint64(math.MaxUint32))`, which is still a
+	// constant expression and so still fails to compile on a 32-bit platform even inside a branch that can
+	// never be taken there — constant conversions are checked before any branch is considered.
+	var maxUint32 uint64 = math.MaxUint32
+	if maxUint32 <= uint64(math.MaxInt) {
+		maxUint32AsInt := int(maxUint32)
+		cases = append(cases,
+			sizeCase{"the largest value that fits", maxUint32AsInt, math.MaxUint32},
+			sizeCase{"one past it", maxUint32AsInt + 1, math.MaxUint32},
+		)
+	}
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

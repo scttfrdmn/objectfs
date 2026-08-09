@@ -130,8 +130,14 @@ func refuseXattrNamespace(name string) bool {
 // value is a caller that sizes a short buffer, gets no ERANGE because the filesystem also compared the
 // wrapped number, and reads a truncated attribute as if it were whole — silent data loss on a read path.
 // MaxUint32 cannot be mistaken for a real attribute size and fails the caller's own allocation instead.
+//
+// The comparison widens to uint64 rather than testing `n > math.MaxUint32` directly. On a 32-bit build an
+// int *is* 32 bits, so that constant does not fit one and the package fails to compile — which is how the
+// first version of this function broke the linux/386 and linux/arm cross-builds while passing every test
+// on a 64-bit host. Widening is correct on both: where int is 32 bits the branch is simply never taken,
+// and where it is 64 bits it is the real bound.
 func xattrSize(n int) uint32 {
-	if n < 0 || n > math.MaxUint32 {
+	if n < 0 || uint64(n) > math.MaxUint32 {
 		return math.MaxUint32
 	}
 
