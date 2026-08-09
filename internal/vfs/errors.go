@@ -56,6 +56,24 @@ var (
 	// could have absorbed is worse than the unbounded growth it replaced.
 	ErrNoSpace = errors.New("vfs: no space in write buffer")
 
+	// ErrTooLarge reports that a single value is larger than this filesystem can store, whatever else
+	// is or is not already stored alongside it.
+	//
+	// Distinct from ErrNoSpace, and the distinction is the caller's to act on. "This attribute cannot
+	// fit on any object" tells a program to store less; "there is no room left on this file" tells it
+	// to remove something first. setxattr(2) has separate errnos for the two — E2BIG and ENOSPC — so
+	// collapsing them here would discard information the syscall interface is able to carry.
+	ErrTooLarge = errors.New("vfs: value too large")
+
+	// ErrNoXattr reports that a file has no extended attribute by that name.
+	//
+	// It must never be reported as ErrNotFound. Both would be an errno a caller sees from getxattr, but
+	// ENOENT means the *file* does not exist, and tools branch on that: `getfattr` reports a missing
+	// file rather than a missing attribute, and a caller probing for an attribute before creating one
+	// could conclude the path is gone. This is the same class of misclassification as ErrNotFound's own
+	// warning, at one level down.
+	ErrNoXattr = errors.New("vfs: no such extended attribute")
+
 	// ErrIntegrity reports that stored data could not be verified against its recorded checksum,
 	// or that its storage encoding is not one this build can decode.
 	//

@@ -349,7 +349,7 @@ func TestAttrFromMetadata(t *testing.T) {
 			want.Atime = want.Mtime
 			want.Ctime = want.Mtime
 
-			if got != want {
+			if !attrEqual(got, want) {
 				t.Fatalf("AttrFromMetadata =\n  %+v\nwant\n  %+v", got, want)
 			}
 			if err := got.Validate(); err != nil {

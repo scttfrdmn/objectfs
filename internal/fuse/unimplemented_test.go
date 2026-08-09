@@ -14,15 +14,20 @@ package fuse
 // so it has left the table below, which is the other half of the same discipline: a row asserting an
 // operation fails is as wrong as a row asserting the wrong errno once the operation works.
 //
+// The four extended-attribute operations have left it for the same reason — see xattr.go and
+// xattr_test.go. Their row is the clearest case there has been for keeping the two halves in step: three
+// of the four answers a *directory* now gives are byte-identical to the defaults they replaced, so the
+// table would have kept passing while being wrong about files.
+//
 // Two things make this worth a test rather than a comment:
 //
 //   - The defaults differ per operation and are not guessable. Symlink, Link, Mknod, and Fallocate
-//     default to ENOTSUP; Getxattr and Removexattr default to ENOATTR (which *is* ENODATA on Linux);
-//     Listxattr defaults to OK with an empty list; and Unlink and Rmdir default to **success**, which is
-//     why those two were implemented to refuse before they were implemented to work.
-//   - They are a dependency's choices, so a go-fuse upgrade can change them. A bump that turned
-//     Listxattr's empty-OK into ENOTSUP would change what every `ls -@` and `rsync -X` sees, and would
-//     be invisible without this.
+//     default to ENOTSUP; Getxattr, Setxattr, and Removexattr default to ENOATTR (which *is* ENODATA on
+//     Linux); Listxattr defaults to OK with an empty list; and Unlink and Rmdir default to **success**,
+//     which is why those two were implemented to refuse before they were implemented to work.
+//   - They are a dependency's choices, so a go-fuse upgrade can change them. A bump that changed the
+//     default for an operation still in the table below would change what a user sees, and would be
+//     invisible without this.
 //
 // The bridge is driven directly rather than through a kernel mount: fs.NewNodeFS returns the
 // fuse.RawFileSystem the kernel talks to, so calling its methods runs the same dispatch — including the
@@ -103,26 +108,6 @@ func TestUnimplementedOperationsReturnTheDocumentedErrno(t *testing.T) {
 			why: "a device or FIFO has no object representation, so cp -a of one must fail rather than " +
 				"quietly create a regular file",
 		},
-		{
-			name: "setxattr",
-			call: func(raw fuse.RawFileSystem) fuse.Status {
-				in := &fuse.SetXAttrIn{InHeader: rootHeader()}
-				return raw.SetXAttr(nil, in, "user.test", []byte("value"))
-			},
-			want: errXattrMissing,
-			why: "note this is 'no such attribute' rather than 'unsupported', which is a strange answer " +
-				"for a *set*. It is go-fuse's default, and the README states it rather than implying " +
-				"ObjectFS chose it",
-		},
-		{
-			name: "removexattr",
-			call: func(raw fuse.RawFileSystem) fuse.Status {
-				h := rootHeader()
-				return raw.RemoveXAttr(nil, &h, "user.test")
-			},
-			want: errXattrMissing,
-			why:  "removing an attribute that cannot exist reports absence, which is at least accurate",
-		},
 	}
 
 	for _, tt := range tests {
@@ -176,14 +161,19 @@ func TestRenameIsDispatchedRatherThanDefaulted(t *testing.T) {
 	}
 }
 
-// TestGetxattrReportsAbsenceAndListxattrReportsEmpty covers the two xattr reads, whose signatures return
-// a size alongside the status and so do not fit the table above.
+// TestDirectoryXattrsThroughTheBridge pins what the four operations answer for a directory, driven the
+// way the kernel drives them.
 //
-// These two disagree with each other in go-fuse, and the disagreement is the point: a query for one
-// attribute reports the attribute missing, while a request to list them all succeeds with a count of
-// zero. Both are defensible, and a caller sees very different things — `getfattr -n` errors while
-// `ls -@` prints nothing and exits 0.
-func TestGetxattrReportsAbsenceAndListxattrReportsEmpty(t *testing.T) {
+// A directory is a key prefix rather than an object, so it has nowhere to hold an attribute — xattr.go
+// gives the reasoning and xattr_test.go covers the node methods. What this adds is the same four answers
+// through the bridge, where the request carries the buffer sizes and the reply carries a size alongside
+// the status, which the node signatures do not show.
+//
+// Three of these four answers are numerically identical to the go-fuse defaults they replaced, so passing
+// here does not by itself prove dispatch. That is what
+// [TestXattrOperationsAreDispatchedRatherThanDefaulted] is for: it uses a read-only mount, where EROFS is
+// an answer only ObjectFS can give. Both are needed, and neither would have caught the other's failure.
+func TestDirectoryXattrsThroughTheBridge(t *testing.T) {
 	t.Parallel()
 
 	t.Run("getxattr reports the attribute missing", func(t *testing.T) {
@@ -196,7 +186,7 @@ func TestGetxattrReportsAbsenceAndListxattrReportsEmpty(t *testing.T) {
 
 		if syscall.Errno(status) != errXattrMissing {
 			t.Errorf("getxattr returned %s, want %s. getfattr renders this to the user, and 'no such "+
-				"attribute' is the accurate answer for a filesystem that stores none.",
+				"attribute' is the accurate answer for a directory that stores none.",
 				errnoName(syscall.Errno(status)), errnoName(errXattrMissing))
 		}
 		if size != 0 {
@@ -214,13 +204,48 @@ func TestGetxattrReportsAbsenceAndListxattrReportsEmpty(t *testing.T) {
 		size, status := raw.ListXAttr(nil, &h, make([]byte, 128))
 
 		if status != fuse.OK {
-			t.Errorf("listxattr returned %s, want OK. An empty list is the truthful answer — there are "+
-				"no extended attributes — and failing instead would make `ls -@`, `cp -a`, and "+
-				"`rsync -X` report an error per file for something with nowhere to go.",
+			t.Errorf("listxattr returned %s, want OK. An empty list is the truthful answer — the "+
+				"directory has no extended attributes — and failing instead would make `ls -@`, `cp -a`, "+
+				"and `rsync -X` report an error per directory they walk.",
 				errnoName(syscall.Errno(status)))
 		}
 		if size != 0 {
-			t.Errorf("listxattr reported %d bytes of names for a filesystem that stores no attributes", size)
+			t.Errorf("listxattr reported %d bytes of names for a directory that stores no attributes", size)
+		}
+	})
+
+	t.Run("setxattr refuses rather than reporting absence", func(t *testing.T) {
+		t.Parallel()
+
+		raw := rootBridge(t)
+		in := &fuse.SetXAttrIn{InHeader: rootHeader()}
+
+		got := syscall.Errno(raw.SetXAttr(nil, in, "user.test", []byte("value")))
+
+		if got == errXattrMissing {
+			t.Fatalf("setxattr on a directory returned %s, which is go-fuse's default for an absent "+
+				"NodeSetxattrer. It is also a strange answer for a *set*: 'no such attribute' says "+
+				"nothing about a request to create one.", errnoName(got))
+		}
+		if got != syscall.ENOTSUP {
+			t.Errorf("setxattr on a directory returned %s, want ENOTSUP — the honest answer for an "+
+				"operation this filesystem cannot perform on a key prefix. Reporting success and storing "+
+				"nothing would be the worse failure.", errnoName(got))
+		}
+	})
+
+	t.Run("removexattr reports absence", func(t *testing.T) {
+		t.Parallel()
+
+		raw := rootBridge(t)
+		h := rootHeader()
+
+		got := syscall.Errno(raw.RemoveXAttr(nil, &h, "user.test"))
+
+		if got != errXattrMissing {
+			t.Errorf("removexattr on a directory returned %s, want %s. Unlike the set above, this is "+
+				"answering accurately about something that has no attributes rather than refusing "+
+				"something it might one day do.", errnoName(got), errnoName(errXattrMissing))
 		}
 	})
 }

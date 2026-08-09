@@ -8,6 +8,8 @@ import (
 	iofs "io/fs"
 	"syscall"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"github.com/scttfrdmn/objectfs/internal/vfs"
 	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
@@ -68,7 +70,25 @@ func toErrno(err error) syscall.Errno {
 		// exhaust. It is the errno every program that writes files already handles, and the honest one:
 		// the filesystem cannot accept more data right now. EDQUOT would suggest a per-user quota that
 		// does not exist, and ENOMEM is not a documented write(2) error, so callers do not check it.
+		//
+		// For extended attributes it means the same thing one level down: this file's metadata budget is
+		// full. setxattr(2) documents ENOSPC for exactly that, so a caller reading it as "remove an
+		// attribute and retry" is reading it correctly.
 		return syscall.ENOSPC
+	case errors.Is(err, vfs.ErrTooLarge):
+		// E2BIG, which setxattr(2) documents as "the value is too large for this filesystem". It has to
+		// be distinguishable from ENOSPC above: E2BIG says no object could hold this value, ENOSPC says
+		// this one has no room left. A caller retrying after freeing space is right in the second case
+		// and loops forever in the first.
+		return syscall.E2BIG
+	case errors.Is(err, vfs.ErrNoXattr):
+		// The errno for an attribute that is not there, which is ENOATTR on darwin and ENODATA on linux
+		// — go-fuse's fuse.ENOATTR is the platform's spelling, and taking it from there is what keeps
+		// this one line right on both instead of needing a build-tagged pair.
+		//
+		// Never ENOENT. Both reach getfattr, but ENOENT means the file is gone, and a caller that probes
+		// for an attribute before creating one would conclude the path had disappeared underneath it.
+		return syscall.Errno(fuse.ENOATTR)
 	}
 
 	// Coded backend failures. This runs before ErrBackend because ErrBackend wraps these.

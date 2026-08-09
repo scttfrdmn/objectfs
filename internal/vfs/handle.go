@@ -165,6 +165,44 @@ func (n *Node) SetAttr(mode, uid, gid bool, from Attr) error {
 	return nil
 }
 
+// SetXattr sets the extended attribute name to value and marks the node's attributes for write-back.
+//
+// It goes through [Attr.WithXattr], so the budget is enforced here and a refusal leaves the node
+// untouched — a rejected setxattr must not leave the file dirty with a change it cannot persist.
+func (n *Node) SetXattr(name string, value []byte) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	next, err := n.attr.WithXattr(name, value)
+	if err != nil {
+		return fmt.Errorf("setxattr %q on %q: %w", name, n.Path, err)
+	}
+
+	n.attr = next
+	n.dirtyAttr = true
+	n.generation++
+	return nil
+}
+
+// RemoveXattr removes the extended attribute name, reporting [ErrNoXattr] when the file has none.
+//
+// Nothing is marked dirty when the attribute was absent. A removexattr that fails must not cost a
+// metadata rewrite, and must not leave the node needing a flush that would write nothing.
+func (n *Node) RemoveXattr(name string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	next, existed := n.attr.WithoutXattr(name)
+	if !existed {
+		return fmt.Errorf("removexattr %q on %q: %w", name, n.Path, ErrNoXattr)
+	}
+
+	n.attr = next
+	n.dirtyAttr = true
+	n.generation++
+	return nil
+}
+
 // Dirty reports whether the node has anything that must reach the object store: content, a
 // truncation, or an attribute change.
 //
