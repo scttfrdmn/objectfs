@@ -127,7 +127,7 @@ jobs:
     # v4's breaking changes are in the analysis actions (`init`/`analyze`) and the Node runtime;
     # `upload-sarif`'s inputs are unchanged, and all three call sites here ran green under v4.
     - name: Upload Gosec SARIF file
-      uses: github/codeql-action/upload-sarif@v4.37.4
+      uses: github/codeql-action/upload-sarif@v4.37.6
       if: always()
       with:
         sarif_file: gosec.sarif
@@ -157,7 +157,7 @@ jobs:
 
     - name: Upload Trivy repo scan results
       if: always()
-      uses: github/codeql-action/upload-sarif@v4.37.4
+      uses: github/codeql-action/upload-sarif@v4.37.6
       with:
         sarif_file: trivy-repo.sarif
 
