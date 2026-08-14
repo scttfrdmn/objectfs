@@ -310,6 +310,44 @@ func TestRPMPackagesAreSigned(t *testing.T) {
 			"correctly, and the failure appears only at `dnf install`")
 	}
 
+	// A step that both sets the signing variables and runs `make package-linux` must `export` them.
+	//
+	// This is the mistake CI made on the first run of this job, and it is worth a gate because nothing
+	// about it looks wrong: a `$GITHUB_ENV` write is the idiomatic way to pass a value between steps, and
+	// it takes effect in *subsequent* steps only. ci.yml wrote the variables to $GITHUB_ENV and then ran
+	// make in the same step, so nfpm saw neither, skipped signing without an error — an unset key_file is
+	// not a failure to nfpm — and produced four packages, one of them an unsigned rpm.
+	//
+	// release.yml does not have the problem, because there the build is a separate step and $GITHUB_ENV
+	// is the right mechanism. So the property is conditional: only a step that does both needs the
+	// export.
+	for name, workflow := range map[string]string{
+		"ci.yml":      ci,
+		"release.yml": release,
+	} {
+		for _, step := range stepsRunning(workflow, "make", "package-linux") {
+			// Both variables, not just the file. nfpm needs each of them and ignores the signature block
+			// if either is unset, so a check naming one passes on a step that exports one — which the
+			// first version of this did.
+			for _, v := range []string{"OBJECTFS_SIGNING_KEY_FILE", "OBJECTFS_SIGNING_KEY_ID"} {
+				if !strings.Contains(step, v) {
+					// A step that builds without touching the signing variables inherits them from an
+					// earlier step, which is correct and is what release.yml does.
+					continue
+				}
+
+				if !strings.Contains(step, "export "+v) {
+					t.Errorf("a step in .github/workflows/%s sets %s and runs `make package-linux` in "+
+						"the same shell without exporting it. A $GITHUB_ENV write applies to later steps "+
+						"only, so make would run with the variable unset — and nfpm treats an unset "+
+						"key_file or key_id as \"do not sign\" rather than as an error, so the build "+
+						"succeeds and writes an unsigned rpm. That is this job's own subject matter, and "+
+						"it happened", name, v)
+				}
+			}
+		}
+	}
+
 	// The images, named. Each row catches something the others do not: ubuntu is the apt path,
 	// rockylinux is dnf, and opensuse/leap is the row that catches /etc/zypp/repos.d.
 	for _, image := range []string{"ubuntu:24.04", "rockylinux:9", "opensuse/leap:15.6"} {
@@ -320,6 +358,38 @@ func TestRPMPackagesAreSigned(t *testing.T) {
 				"while succeeding", image)
 		}
 	}
+}
+
+// stepsRunning returns the bodies of every step whose shell runs cmd with arg.
+//
+// Steps rather than the whole file, because the property being checked is about what shares one shell:
+// a variable set in one step and used in another is a different situation from both in the same step,
+// and only the second needs an `export`.
+func stepsRunning(workflow, cmd, arg string) []string {
+	var (
+		steps   []string
+		current []string
+	)
+
+	flush := func() {
+		if len(current) > 0 && hasCommandLine(strings.Join(current, "\n"), cmd, arg) {
+			steps = append(steps, strings.Join(current, "\n"))
+		}
+
+		current = nil
+	}
+
+	for line := range strings.SplitSeq(workflow, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "- name: ") {
+			flush()
+		}
+
+		current = append(current, line)
+	}
+
+	flush()
+
+	return steps
 }
 
 // guardExits reports whether the shell block opened by guard reaches `exit 1` before its `fi`.

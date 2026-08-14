@@ -1317,12 +1317,25 @@ jobs:
         gpg --batch --armor --export-secret-keys "$FPR" > "$GNUPGHOME/secret.asc"
         gpg --batch --armor --export "$FPR" > "$RUNNER_TEMP/objectfs.asc"
 
+        # Exported into *this* shell, and separately written to $GITHUB_ENV for the steps after it.
+        # Both, because they do different things, and confusing the two is what failed here first: a
+        # $GITHUB_ENV write takes effect in *subsequent* steps only, so `make package-linux` three lines
+        # below ran with neither variable set. nfpm does not treat an unset key_file as an error — it
+        # skips signing and writes an unsigned package — so the build succeeded, printed four "created
+        # package" lines, and produced exactly the unsigned rpm this job exists to catch.
+        #
+        # It was caught, which is why this is a comment rather than a defect:
+        # `dist/objectfs-0.13.0-1.aarch64.rpm: digests OK`. Note which half of the check below did the
+        # work — the exit status was 0, as it is for every unsigned package.
+        export OBJECTFS_SIGNING_KEY_FILE="$GNUPGHOME/secret.asc"
+        # 16 hex digits, not the fingerprint. See nfpm.yaml.
+        export OBJECTFS_SIGNING_KEY_ID="${FPR: -16}"
+
         {
           echo "GNUPGHOME=$GNUPGHOME"
           echo "CI_KEY_FPR=$FPR"
-          echo "OBJECTFS_SIGNING_KEY_FILE=$GNUPGHOME/secret.asc"
-          # 16 hex digits, not the fingerprint. See nfpm.yaml.
-          echo "OBJECTFS_SIGNING_KEY_ID=${FPR: -16}"
+          echo "OBJECTFS_SIGNING_KEY_FILE=$OBJECTFS_SIGNING_KEY_FILE"
+          echo "OBJECTFS_SIGNING_KEY_ID=$OBJECTFS_SIGNING_KEY_ID"
         } >> "$GITHUB_ENV"
 
         make package-linux
