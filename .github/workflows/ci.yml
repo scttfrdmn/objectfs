@@ -1392,8 +1392,31 @@ jobs:
         j = s.index('debs="$(find packages')
         s = s[:i] + 'kept=1\ndropped=" v0.0.0-harness"\n' + s[j:]
         s = s.replace('sudo apt-get', 'true # already installed: apt-get')
-        open('repo-step.sh', 'w').write('set -euo pipefail\n' + s + '\n')
-        print(f'extracted {len(body)} lines from pages.yml')
+
+        # The step's `env:` block, carried across with the shell rather than left behind. This is a
+        # gap the first version of this extractor had and the extraction hid: it took the `run:`
+        # body and none of the YAML around it, so REPO_KEEP -- set to a plain literal in `env:` and
+        # read by the step's summary -- was unbound, and `set -u` killed the script on its last line
+        # after both repositories had built and both signatures had verified.
+        #
+        # Only plain literals. The `${{ secrets.* }}` and `${{ github.token }}` entries are supplied
+        # by this job explicitly below, with values a CI harness can have; substituting a template
+        # expression here would write the literal text `${{ secrets.GPG_SIGNING_KEY }}` into a shell
+        # variable, which is worse than leaving it unset because nothing would then fail.
+        env = []
+        for l in src[start:run]:
+            m = re.match(r"^ {8}([A-Z_][A-Z0-9_]*): +(.+)$", l)
+            if m and '${{' not in m.group(2):
+                env.append(f'export {m.group(1)}={m.group(2)}')
+        # A match count of zero means the indent or the quoting moved and this loop found nothing,
+        # which is the same outcome as not having it and is invisible here — the failure would land
+        # 160 lines later as an unbound variable naming the symptom.
+        if not env:
+            raise SystemExit('carried no literal env vars out of pages.yml: the `env:` block moved '
+                             'or changed shape, and the extracted step reads REPO_KEEP under `set -u`')
+        open('repo-step.sh', 'w').write(
+            'set -euo pipefail\n' + '\n'.join(env) + '\n' + s + '\n')
+        print(f'extracted {len(body)} lines and {len(env)} literal env var(s) from pages.yml')
         PY
 
         # The signing key the step expects, in the form it expects: the armored secret key in an
@@ -1401,8 +1424,28 @@ jobs:
         GPG_SIGNING_KEY="$(cat "$GNUPGHOME/secret.asc")"
         export GPG_SIGNING_KEY
         export GPG_PASSPHRASE=""
+
         # The step writes to GITHUB_STEP_SUMMARY, which exists; and it re-derives GNUPGHOME itself.
         unset GNUPGHOME
+
+        # Every env var the extracted script still *reads* must now be set, one way or the other: the
+        # plain literals by the extractor above, the `${{ }}` ones by this shell. Checked rather than
+        # assumed, because a name added to pages.yml's `env:` and not mirrored here is unbound under
+        # `set -u` — which is how this job failed the first time, on the script's last line, after
+        # both repositories had built and both signatures had verified.
+        #
+        # "Still reads" is the qualifier that matters. GH_TOKEN is in that `env:` block and is only
+        # used by the `gh release download` loop the substitution removes, so requiring it would fail
+        # this job over a variable nothing in the harness can reach.
+        # `printenv` rather than a shell-variable test, and that is the stricter of the two: the script
+        # runs as a subprocess, so only *exported* variables reach it. A plain assignment in this shell
+        # would satisfy `[ -n "${!v+x}" ]` and still leave the child unbound.
+        while read -r v; do
+          grep -q '\$'"{\?$v" repo-step.sh || continue
+          printenv "$v" > /dev/null || grep -q "^export $v=" repo-step.sh \
+            || { echo "::error::repo-step.sh reads $v and nothing exports it"; exit 1; }
+        done < <(sed -n "/Build the apt and yum repositories/,/run: |/p" .github/workflows/pages.yml \
+          | sed -n 's/^ \{8\}\([A-Z_][A-Z0-9_]*\):.*/\1/p')
 
         bash repo-step.sh
 
