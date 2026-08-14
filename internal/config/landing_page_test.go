@@ -33,6 +33,12 @@ import (
 // point somewhere the site does not answer.
 const docsPath = "docs/"
 
+// landingPageURL is the site root, which is where the docs tree has to link back to.
+//
+// Trailing slash included, because that is what `extra.homepage` is compared against verbatim and a
+// value differing only in the slash would fail the check while working perfectly in a browser.
+const landingPageURL = "https://objectfs.io/"
+
 // landingPage reads web/index.html.
 func landingPage(t *testing.T) string {
 	t.Helper()
@@ -333,6 +339,52 @@ func TestLandingPageLinksToTheDocs(t *testing.T) {
 		t.Error("web/index.html points \"Documentation\" at GitHub while objectfs.io/docs/ serves the " +
 			"MkDocs site. Two documentation destinations with no rule for which is current is the " +
 			"arrangement that let four non-existent install channels survive in docs-platform/")
+	}
+}
+
+// TestTheDocsLinkBackToTheLandingPage is the other direction of the same missing edge.
+//
+// The landing page not linking `/docs/` was one half; the docs tree linking nothing back was the other,
+// and it shipped in the same deploy. Every page mkdocs built pointed inward — its own nav, its own
+// anchors — so a reader arriving from a search result was inside a documentation subdirectory with no
+// exit to the project's front page. Material's header logo and title link to the docs index by default,
+// which is a link to where you already are.
+//
+// `extra.homepage` is what makes them point at the site root instead. It is asserted here because a key
+// removed from `extra:` breaks nothing that any other check can see: `mkdocs build --strict` succeeds
+// without it, the built site is complete, every internal link resolves, and the only difference is that
+// one edge out of the tree is gone again. Which is precisely the shape of failure this whole file
+// exists for — an absent link is not a broken link.
+func TestTheDocsLinkBackToTheLandingPage(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "mkdocs.yml")
+
+	//nolint:gosec // A path built from the repository root, in a test.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("could not read %s: %v", path, err)
+	}
+
+	config := withoutComments(string(b))
+
+	// The apex, not `/docs/`: pointing homepage at the docs index is what Material already does, so it
+	// would restore the defect exactly — and `strings.Contains` cannot tell the two apart, because
+	// `homepage: https://objectfs.io/docs/` *contains* `homepage: https://objectfs.io/`. Written that
+	// way first and caught by mutation, which is the whole argument for running the mutation: the
+	// comment claiming the trap was covered was sitting directly above the code that did not cover it.
+	//
+	// So the value must end where the line does. `(?m)` makes `$` a line boundary, and `\s*` absorbs the
+	// trailing whitespace a YAML file may carry without changing the value.
+	const want = "homepage: " + landingPageURL
+
+	exact := regexp.MustCompile(`(?m)^\s*homepage:\s*` + regexp.QuoteMeta(landingPageURL) + `\s*$`)
+
+	if !exact.MatchString(config) {
+		t.Errorf("mkdocs.yml does not set %q under extra:. Without it the site's header logo and title "+
+			"link to the docs index — a link to the page the reader is already on — and nothing anywhere "+
+			"in the published tree points back at %s. `mkdocs build --strict` passes either way and every "+
+			"internal link still resolves, so no other check can tell the difference", want, landingPageURL)
 	}
 }
 

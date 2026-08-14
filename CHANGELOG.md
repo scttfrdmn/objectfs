@@ -59,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   points at it, and a link checker over the built site would have reported zero broken links: the
   failure was an *absent* link, which is invisible to every check that starts from the links present.
 
+  The same edge was missing in the other direction and is fixed with it. Every page mkdocs built linked
+  only inward — its own nav, its own anchors — because Material points the header logo and title at the
+  docs index, which is a link to the page the reader is already on. So a reader arriving from a search
+  result was inside a documentation subdirectory with no exit to the project's front page.
+  `extra.homepage` now names the apex, and that is gated too, because removing the key breaks nothing
+  any other check can see: `mkdocs build --strict` still succeeds, the tree is still complete, every
+  internal link still resolves, and the only difference is that the one edge out is gone. The check
+  matches the whole line rather than a substring — a first version used `strings.Contains`, which
+  `homepage: https://objectfs.io/docs/` satisfies while restoring the defect precisely, and the comment
+  claiming that trap was covered sat directly above the code that did not cover it. Mutation is what
+  found that; the three mutants now fail.
+
   **Only the apex is served, and resolution is not evidence of that.** Porkbun answers a wildcard, so
   every name under `objectfs.io` resolves to the same record — `get.`, `packages.`, `docs.`,
   `community.` and any typo all look configured from every angle except loading them. None completes a
