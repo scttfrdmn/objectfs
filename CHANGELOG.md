@@ -32,7 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different numbers), no subdomain other than the apex may be linked, every local reference must
   resolve inside `web/` — which is all the deploy copies — and `web/CNAME` must name the domain,
   since a deploy without that file silently clears the custom domain and takes the site down with no
-  commit that looks responsible. All six mutations of those properties fail the intended test.
+  commit that looks responsible. All eight mutations of those properties fail the intended test.
+
+  One gate exists because the first deploy shipped the defect it now catches: `pages.yml` built the
+  MkDocs tree, `mkdocs.yml` declared its URL, every page under `/docs/` returned 200 — and **the
+  landing page linked none of it**, sending a reader to GitHub's rendered README from both its nav and
+  its footer. Nothing else could have noticed. The asset check skips `docs/` because no such directory
+  exists in `web/`, the workflow asserts `_site/docs/index.html` exists rather than that anything
+  points at it, and a link checker over the built site would have reported zero broken links: the
+  failure was an *absent* link, which is invisible to every check that starts from the links present.
 
   **Only the apex is served, and resolution is not evidence of that.** Porkbun answers a wildcard, so
   every name under `objectfs.io` resolves to the same record — `get.`, `packages.`, `docs.`,

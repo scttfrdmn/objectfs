@@ -28,6 +28,11 @@ import (
 // reason the page deliberately says nothing about throughput: a claim with nothing to agree with
 // cannot be gated, so the page does not make it.
 
+// docsPath is where the deploy puts the MkDocs tree, relative to the landing page. mkdocs.yml's
+// site_url declares the same location; the two have to agree or the canonical links and the sitemap
+// point somewhere the site does not answer.
+const docsPath = "docs/"
+
 // landingPage reads web/index.html.
 func landingPage(t *testing.T) string {
 	t.Helper()
@@ -217,6 +222,13 @@ func TestLandingPageIsDeployedWithItsAssets(t *testing.T) {
 			continue
 		}
 
+		// docs/ is the one local path with nothing behind it in this directory: the workflow builds
+		// the MkDocs tree into _site/docs after copying web/, so it exists on the published site and
+		// not in the repository. TestLandingPageLinksToTheDocs is what holds up that end.
+		if target == docsPath {
+			continue
+		}
+
 		checked++
 
 		if _, err := os.Stat(filepath.Join(root, "web", strings.TrimPrefix(target, "/"))); err != nil {
@@ -277,6 +289,73 @@ func TestPagesWorkflowBuildsDocsStrictly(t *testing.T) {
 		t.Error(".github/workflows/pages.yml does not check that a CNAME reaches the artifact. A " +
 			"deploy without it clears the custom domain on the repository")
 	}
+}
+
+// TestLandingPageLinksToTheDocs asserts the published docs are reachable from the page.
+//
+// This is a defect the first deploy actually shipped. `pages.yml` builds the MkDocs tree into
+// `_site/docs`, `mkdocs.yml`'s site_url declares `https://objectfs.io/docs/`, every page under it
+// returned 200 — and the landing page linked none of it. Its nav and its footer both sent a reader to
+// `github.com/scttfrdmn/objectfs#readme` instead, so the documentation site this workflow exists to
+// publish had no entry point but a typed URL.
+//
+// Nothing else could have caught it. The asset test skips `docs/` because there is no such directory
+// in `web/`, the workflow asserts `_site/docs/index.html` exists rather than that anything points at
+// it, and a link check over the built site would have found no broken link — the failure is an absent
+// link, which is invisible to every check that starts from the links that are present.
+//
+// Both surfaces are asserted, because they failed together and for the same reason: the page was
+// written before the docs had a home, and its GitHub links were correct at the time.
+func TestLandingPageLinksToTheDocs(t *testing.T) {
+	t.Parallel()
+
+	page := landingPage(t)
+
+	for _, surface := range []struct{ name, attr string }{
+		{"nav", `class="nav-links"`},
+		{"footer", `class="footer-links"`},
+	} {
+		links := sectionOfClosing(t, page, surface.attr, "</nav>")
+
+		if !strings.Contains(links, `href="`+docsPath+`"`) {
+			t.Errorf("web/index.html's %s does not link %q. pages.yml publishes the MkDocs tree there "+
+				"and mkdocs.yml's site_url declares it, so the docs are served — the first deploy served "+
+				"every page under /docs/ with nothing on the landing page pointing at any of them",
+				surface.name, docsPath)
+		}
+	}
+
+	// The docs are published from this repository now, so a reader sent to GitHub's rendered README for
+	// "Documentation" is being sent to the older of two copies. Deep links into the repository are
+	// fine — SECURITY.md, LICENSE, the supported-operations table — but not as the documentation link.
+	readme := regexp.MustCompile(`<a href="[^"]*github\.com[^"]*"[^>]*>\s*Documentation\s*</a>`)
+	if readme.MatchString(page) {
+		t.Error("web/index.html points \"Documentation\" at GitHub while objectfs.io/docs/ serves the " +
+			"MkDocs site. Two documentation destinations with no rule for which is current is the " +
+			"arrangement that let four non-existent install channels survive in docs-platform/")
+	}
+}
+
+// sectionOfClosing returns the markup from an element carrying attr to the next closing tag.
+//
+// sectionOf below assumes </section>; the nav and footer link lists are a <div> and a <nav>. Same
+// reasoning as there: anchoring on the attribute means a reordered page fails to find its window
+// rather than silently searching a different one.
+func sectionOfClosing(t *testing.T, page, attr, closing string) string {
+	t.Helper()
+
+	start := strings.Index(page, attr)
+	if start < 0 {
+		t.Fatalf("web/index.html has no element with %s. It was renamed, and a search within a window "+
+			"that does not exist would pass for the wrong reason", attr)
+	}
+
+	end := strings.Index(page[start:], closing)
+	if end < 0 {
+		t.Fatalf("web/index.html has no %s after %s", closing, attr)
+	}
+
+	return page[start : start+end]
 }
 
 // sectionOf returns the markup from an element carrying attr to the next </section>.
