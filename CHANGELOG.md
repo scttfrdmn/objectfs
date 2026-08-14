@@ -126,6 +126,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the repository's copy is correct, every check is green, and the served one is stale. All six
   mutations of these properties fail the intended check with the intended message.
 
+  The five documented one-liners now name the apex, changed only after the deployed site was measured
+  answering: HTTP 200, `content-type: application/x-sh`, byte-identical to `scripts/install.sh`, and
+  the piped command resolving v0.13.0 for the running platform end to end. The order matters — a
+  documented URL that 404s is the defect this replaces, so pointing the docs at it before it answered
+  would have been the same mistake with a different host.
+
+  Finding five surfaces rather than two is why that check walks the tree instead of reading a list.
+  Its first version named `README.md` and `web/index.html`, passed, and missed `docs/index.md`,
+  `docs-platform/index.md` and `docs-platform/guide/getting-started.md` — all three documenting the
+  same command. An enumerated list can only check the surfaces whoever wrote it already knew about,
+  which is the same blindness as a link checker that starts from the links that exist.
+
 - **`scripts/install.sh`** ([#138]), which downloads the release binary for the running platform,
   verifies its SHA-256 against the checksum published beside it, and installs it — plus a CI job that
   runs it in three distributions and `internal/config/install_script_test.go` for the rows CI cannot
