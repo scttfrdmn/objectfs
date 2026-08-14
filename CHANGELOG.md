@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A new gosec finding now blocks a merge** (#415). It did not before, and the reason is worth
+  stating precisely because everything about it looked correct: `Security Scan` runs
+  `gosec -no-fail`, so the job passed on any number of findings, and the check that *did* go red was
+  `gosec` — the code-scanning check derived from the SARIF upload, a different check with a different
+  name. That one reports on pull requests and not on `push: main`, so it could never join the required
+  contexts: a required check that does not always report blocks every PR forever. The upshot was that
+  #414 added a `uint64 → int64` conversion, gosec reported "1 new alert", and the PR stayed mergeable.
+  It was caught by someone reading the checks by hand.
+
+  `-no-fail` stays, because the upload needs the complete report — including the three `sdks/c`
+  findings the SARIF format fix back-fills a path onto, which reach no other tool. The gate is instead
+  a new final step running `.github/scripts/gosec-gate.sh`, which diffs the report against
+  `.github/gosec-baseline.txt`. `Security Scan` is a job name, so it reports on every trigger, which
+  is what lets it be required.
+
+  The baseline is the twelve pre-existing G115 integer conversions across eight files, keyed by
+  `(rule, file, count)` — not by line number, which moves whenever anything above it moves. A
+  severity threshold was not an option: all twelve are `error` level, identical to what a new finding
+  would report, so there is nothing to threshold on. The ratchet is exact in both directions, so
+  *fixing* one of these also fails until its line goes with it; a slot kept after its finding was
+  fixed is permanent headroom for the next conversion in that file.
+
 - **`toolchain` bumped to go1.26.6**, clearing seven standard-library advisories `govulncheck` began
   reporting the moment that patch release shipped: quadratic complexity in `net/url`'s `resolvePath`,
   JavaScript regexp context tracking in `html/template`, a post-handshake message limit in
