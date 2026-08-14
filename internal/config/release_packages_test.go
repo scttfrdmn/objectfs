@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -49,8 +50,14 @@ func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	// The build has to happen, as an executable line. Checked by the Makefile target rather than by a job
 	// name, because the target is the contract: TestMakefileBuildsPackages already asserts what it
 	// produces, so a release that invokes it inherits that.
-	if !strings.Contains(effective, "run: make package-linux") {
-		t.Error("release.yml has no `run: make package-linux` step, so no published release carries a " +
+	//
+	// `run: make package-linux` was the literal, and it broke when the step gained a second line — the
+	// signing key's gpg.conf has to be written before make runs, so the one-line `run:` became a block.
+	// The property held throughout; the spelling did not. What matters is that the target is invoked as a
+	// command, so a line whose first field is `make` and which names the target is what is checked, with
+	// comments already stripped above.
+	if !hasCommandLine(effective, "make", "package-linux") {
+		t.Error("release.yml never runs `make package-linux`, so no published release carries a " +
 			".deb or an .rpm. Both are built and installed by ci.yml's packaging job on every PR, which " +
 			"means the formats are proven and unobtainable at the same time — the #207 shape of defect: " +
 			"working code with nothing invoking it")
@@ -119,6 +126,28 @@ func TestReleaseChecksThePackageVersionAgainstTheTag(t *testing.T) {
 			"objectfs_0.13.0-1_amd64.deb, Version 0.13.0-1. A comparison against a bare version fails " +
 			"every release")
 	}
+}
+
+// hasCommandLine reports whether any line runs cmd with arg among its words.
+//
+// Written for `make package-linux`, where the step may be a one-line `run:` or a block scalar with the
+// invocation somewhere inside it, and both are correct. A leading `run: ` is stripped so the one-line
+// form is recognized as the command it is.
+func hasCommandLine(doc, cmd, arg string) bool {
+	for line := range strings.SplitSeq(doc, "\n") {
+		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "run: ")
+
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 || fields[0] != cmd {
+			continue
+		}
+
+		if slices.Contains(fields[1:], arg) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // withoutComments drops full-line YAML comments.

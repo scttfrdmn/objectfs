@@ -345,9 +345,37 @@ downloading anything if the machine lacks a tool it needs, naming all of them at
 because two of the three container images this is tested against are missing something
 (`ubuntu:24.04` ships neither `curl` nor `wget`, `opensuse/leap:15.6` ships neither `tar` nor `gzip`).
 
-Debian and RPM packages are attached to each release alongside the tarballs. There is no apt or yum
-repository yet, so install the downloaded file directly: `apt install ./objectfs_*.deb` or
-`dnf install ./objectfs-*.rpm`.
+### Debian, Ubuntu, RHEL, Fedora, openSUSE: the package repositories
+
+Adding the repository is what makes `apt upgrade` reach ObjectFS. Each script downloads the signing
+key, prints its fingerprint, configures verification, and does nothing else:
+
+```bash
+# Debian, Ubuntu
+curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
+sudo apt update && sudo apt install objectfs
+
+# RHEL, Fedora, Rocky, openSUSE
+curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
+sudo dnf install objectfs        # or: sudo zypper install objectfs
+```
+
+The repository indexes are signed and both scripts require a valid signature — there is no flag to
+turn that off. Verify the fingerprint the script prints against the one published at
+[objectfs.io/docs/](https://objectfs.io/docs/#the-signing-key) before trusting it, and pass
+`--dry-run` first if you would rather read what the script would do than take its word for it
+(`--dry-run` needs no root).
+
+**The two scripts do not offer the same guarantee, and the difference is apt's rather than ours.** The
+Debian script installs the key with `Signed-By:`, which authorises it for this repository *only*. rpm
+has no per-repository keyring: `rpm --import` makes the key a valid package signer system-wide, for
+every repository the machine reads. `setup-repo-rhel.sh` says so before it imports anything. That is
+the deal every third-party rpm repository offers, and it is worth knowing you are taking it.
+
+The repositories carry the newest **five** releases. Every release's `.deb` and `.rpm` stay attached
+to the [release](https://github.com/scttfrdmn/objectfs/releases) permanently, so an older version is
+still installable from the downloaded file: `apt install ./objectfs_*.deb`, `dnf install
+./objectfs-*.rpm`.
 
 ### HPC sites: environment modules
 

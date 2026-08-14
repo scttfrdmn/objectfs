@@ -1,7 +1,7 @@
 name: Pages
 
-# Publishes objectfs.io: the landing page in web/ at the root, the MkDocs tree at /docs/, and
-# scripts/install.sh at /install.sh.
+# Publishes objectfs.io: the landing page in web/ at the root, the MkDocs tree at /docs/,
+# scripts/install.sh at /install.sh, and the apt and yum repositories at /apt/ and /yum/.
 #
 # Pages was off on this repository for its whole history, which is why release.yml's `update-docs`
 # job — `actions/deploy-pages` against a generated site — could only ever have failed. It is on now
@@ -26,6 +26,22 @@ name: Pages
 #     `scripts/install.sh`, so a committed duplicate under web/ would be the copy users run and the
 #     copy nothing tests. `cmp` below asserts the two agree byte for byte.
 #
+#   - **the package repositories are generated here, from release assets.** #138's other half. The
+#     packages are attached to releases, not committed, so there is nothing in the tree to publish and
+#     the metadata cannot be committed either — an index is only correct for the exact set of files
+#     beside it, and a committed one would be stale the moment a release is cut. So `gh release
+#     download` fetches the packages at build time and reprepro and createrepo_c index them here.
+#     Only the latest REPO_KEEP releases are carried, and what is dropped is logged: Pages has a 1 GB
+#     limit and a release is ~33 MB of packages, so an unbounded repository reaches it in about 30
+#     releases and then fails as a deploy error naming a size, not a repository problem.
+#
+#     Signing fails closed. If the key is absent — a fork, or a secret that has expired — no
+#     repository is published at all, rather than an unsigned one. setup-repo-rhel.sh writes
+#     `repo_gpgcheck=1` and setup-repo-debian.sh writes a `Signed-By:` keyring, so an unsigned
+#     repository would not install from anyway; it would fail at `apt update` on the user's machine
+#     instead of here. The rest of the site still publishes, because the docs going down with a
+#     signing-key problem is its own outage.
+#
 #   - **docs-platform/ is not published.** ci.yml already gates `vitepress build` on it, and there
 #     is one documentation site here, not two. Publishing both would mean two pages answering the
 #     same question with no rule for which is current — and the getting-started page there is the
@@ -45,6 +61,12 @@ on:
     # and the drift is invisible: the repository's copy is right, the one users pipe into bash is
     # not, and nothing compares them.
     - scripts/install.sh
+    # And the same for the two repository setup scripts, served at objectfs.io/setup-repo-*.sh. These
+    # have a sharper version of install.sh's drift problem: a stale installer installs an old binary,
+    # while a stale setup script installs an old *key* — and that key stays trusted on the machine
+    # afterwards, which is the one kind of staleness a later correct run does not undo.
+    - scripts/setup-repo-debian.sh
+    - scripts/setup-repo-rhel.sh
   workflow_dispatch:
 
 permissions:
@@ -81,21 +103,285 @@ jobs:
         # than committed under web/: two copies of an installer is the failure this is avoiding, not
         # a convenience. A gate in internal/config asserts this step exists, because the way this
         # breaks is silently — the site keeps serving the last copy and nothing compares them.
-        cp scripts/install.sh _site/install.sh
-        chmod 0644 _site/install.sh
+        # The same treatment for the two repository setup scripts, and for the same reason: README.md,
+        # docs/index.md, web/index.html and both docs-platform pages document
+        # `curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash`, and that address answers
+        # only because of this loop. A documented one-liner that 404s is how #138's install.sh spent a
+        # year, and these two are piped into `sudo bash`, so a 404 is the *good* failure.
+        for script in install.sh setup-repo-debian.sh setup-repo-rhel.sh; do
+          cp "scripts/$script" "_site/$script"
+          chmod 0644 "_site/$script"
+          # Byte-identical, not merely present. A `cp` that silently copied the wrong path, or a
+          # future step that rewrites a served copy, produces a script that differs from the reviewed
+          # one — the worst version of this feature, since the reviewed copy is the one every gate in
+          # internal/config checks. Worse for the setup scripts than for the installer: a stale
+          # installer installs an old binary, a stale setup script installs an old signing key, and
+          # the key stays trusted afterwards.
+          cmp "scripts/$script" "_site/$script" \
+            || { echo "::error::_site/$script differs from scripts/$script"; exit 1; }
+        done
 
         test -f _site/index.html   || { echo "::error::no landing page at the site root"; exit 1; }
         test -f _site/docs/index.html || { echo "::error::no docs index under /docs/"; exit 1; }
-        # Byte-identical, not merely present. A `cp` that silently copied the wrong path, or a future
-        # step that rewrites the served copy, produces an installer that differs from the reviewed
-        # one — which is the worst version of this feature, since the reviewed copy is the one every
-        # gate in internal/config checks.
-        cmp scripts/install.sh _site/install.sh \
-          || { echo "::error::_site/install.sh differs from scripts/install.sh"; exit 1; }
         # Without this file a deploy clears the custom domain configured on the repository, and
         # objectfs.io stops answering with no commit that looks responsible.
         grep -qx 'objectfs.io' _site/CNAME \
           || { echo "::error::_site/CNAME does not name objectfs.io; a deploy would drop the custom domain"; exit 1; }
+
+    # The apt and yum repositories, from the packages attached to the last REPO_KEEP releases.
+    #
+    # Everything about this step's failure behaviour is deliberate, and in two different directions:
+    #
+    #   - **No key, no repository, and the site still deploys.** The first thing the script does is
+    #     check for the secret and `exit 0` when it is absent, which is the case on every fork. An
+    #     unsigned repository is not a lesser version of this feature; both setup scripts require
+    #     signatures, so an unsigned repository fails on the user's machine at `apt update` instead of
+    #     here. That is the correctness-capability rule from CLAUDE.md applied to a deploy: fail
+    #     closed, with the reason visible to an operator, rather than degrade to something that looks
+    #     like it worked.
+    #
+    #     The check is in the script and not in an `if:` on purpose. `secrets` cannot be read from a
+    #     step-level `if:` at all, and the obvious workaround — an `env:` entry tested as
+    #     `env.GPG_SIGNING_KEY != ''` — evaluates the context *before* the step's own env block is in
+    #     scope, so it is always empty and the step is skipped forever. A guard that can only ever
+    #     answer "no key" is worse than no guard: it produces exactly the docs-only deploy this
+    #     paragraph claims to be choosing deliberately, on the repository that does have the key.
+    #
+    #   - **A key present but broken fails the job.** Once the secret exists, a signing failure is a
+    #     misconfiguration to fix, not a condition to route around. The distinction matters because
+    #     `|| true` here would turn an expired subkey into a silently docs-only deploy, and the first
+    #     report would come from a user whose `apt update` had started failing.
+    #
+    # No release with packages is not a failure either. `package-linux` landed in release.yml after
+    # v0.13.0 was tagged, so every existing release is five tarballs and no packages, and v0.14.0 is
+    # the first with anything to index. Until then this step publishes an empty-but-valid repository:
+    # reprepro and createrepo_c both produce signed metadata for zero packages, `apt update` succeeds
+    # against it, and `apt install objectfs` reports no candidate. That is the honest state of a
+    # repository with no packages, and it means the setup scripts can be tested end to end now.
+    - name: Build the apt and yum repositories
+      env:
+        GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        GH_TOKEN: ${{ github.token }}
+        # How many releases of packages the repositories carry.
+        #
+        # Pages has a hard 1 GB site limit and a release is ~33 MB of packages (measured: four packages,
+        # 34,719,615 bytes, for 0.13.0). Unbounded, this reaches the limit at about release 30 and then
+        # fails as an artifact-too-large error, which names a size and not a cause. Five keeps the
+        # repository around 165 MB, well clear, and covers every version anyone should be pinning.
+        #
+        # What falls off the end is logged below, because a retention bound that truncates silently
+        # reads as "we publish every release" right up until someone's pin stops resolving.
+        REPO_KEEP: '5'
+      run: |
+        set -euo pipefail
+
+        # Fail closed, and say so where an operator will see it. See the paragraph above for why this
+        # is a shell check rather than a step-level `if:`.
+        if [ -z "${GPG_SIGNING_KEY:-}" ]; then
+          echo "::notice::GPG_SIGNING_KEY is not set, so no package repository is published. The" \
+            "docs and the installer still deploy. Both setup scripts require a signature, so an" \
+            "unsigned repository would fail at the user's apt update rather than here."
+          echo "- **Package repositories:** not published (no signing key)" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        # dpkg-dev supplies dpkg-scanpackages; apt-utils supplies apt-ftparchive. Both are usually
+        # already on the runner image, which is exactly why they are installed explicitly: a step that
+        # depends on what an image happens to ship stops working when the image changes, and the error
+        # is a command-not-found in the middle of signing rather than at the top.
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev apt-utils createrepo-c
+
+        # The key. A signing subkey, ASCII-armored; the master key is offline and never reaches CI, so
+        # a compromise of this secret cannot be used to certify a new key as ours.
+        export GNUPGHOME
+        GNUPGHOME="$(mktemp -d)"
+        chmod 700 "$GNUPGHOME"
+        printf '%s' "$GPG_SIGNING_KEY" | gpg --batch --quiet --import
+
+        # The signing identity, read out of the imported key rather than written here. A literal
+        # fingerprint or email in this file would be a second place a key rotation has to be remembered,
+        # and the kind that fails at deploy time with "no secret key" months after the rotation.
+        KEY_FPR="$(gpg --batch --with-colons --list-secret-keys \
+          | awk -F: '$1 == "fpr" { print $10; exit }')"
+        [ -n "$KEY_FPR" ] || { echo "::error::GPG_SIGNING_KEY imported no secret key"; exit 1; }
+        echo "signing with $KEY_FPR"
+
+        # The armored public key, at the address both setup scripts fetch. Served from the same site as
+        # the repository it signs, which is worth being clear about: this is not an independent trust
+        # root, and whoever controls the site controls both. What it does protect against is everything
+        # between the site and the user — a proxy, a mirror, a compromised CDN edge — and it is why the
+        # scripts print the fingerprint and point at the docs for out-of-band verification.
+        gpg --batch --armor --export "$KEY_FPR" > _site/objectfs.asc
+        test -s _site/objectfs.asc || { echo "::error::exported an empty public key"; exit 1; }
+
+        # gpg needs the passphrase non-interactively for every signature reprepro and createrepo_c ask
+        # for. --pinentry-mode loopback plus a passphrase file, and the file is inside GNUPGHOME, which
+        # is a mktemp -d on the runner and discarded with it.
+        if [ -n "${GPG_PASSPHRASE:-}" ]; then
+          printf '%s' "$GPG_PASSPHRASE" > "$GNUPGHOME/pass"
+          chmod 600 "$GNUPGHOME/pass"
+          GPG_OPTS="--batch --yes --pinentry-mode loopback --passphrase-file $GNUPGHOME/pass"
+        else
+          GPG_OPTS="--batch --yes"
+        fi
+
+        # The releases to carry: newest first, packages only, bounded.
+        #
+        # `--exclude-drafts` because a draft's assets are not public, and no --exclude-pre-releases:
+        # someone testing a release candidate needs it in the repository, and both setup scripts point
+        # at one suite. `|| true` on the download, because a release with no packages is the normal
+        # case today rather than an error.
+        mkdir -p packages
+        ALL="$(gh release list --limit 100 --exclude-drafts --json tagName \
+          --jq '.[].tagName' || true)"
+
+        kept=0
+        dropped=''
+        for tag in $ALL; do
+          if [ "$kept" -ge "$REPO_KEEP" ]; then
+            dropped="$dropped $tag"
+            continue
+          fi
+          kept=$((kept + 1))
+          gh release download "$tag" --dir packages --pattern '*.deb' --pattern '*.rpm' \
+            --skip-existing 2>/dev/null || true
+        done
+
+        # What was dropped, named. The whole point of logging it: a user who pinned an old version and
+        # finds it gone needs the bound to have been visible somewhere, and a step summary on the deploy
+        # that removed it is that somewhere.
+        if [ -n "$dropped" ]; then
+          echo "::notice::repository retention is $REPO_KEEP releases; these are published as release" \
+            "assets but are NOT in the apt/yum repositories:$dropped"
+        fi
+
+        debs="$(find packages -name '*.deb' | wc -l)"
+        rpms="$(find packages -name '*.rpm' | wc -l)"
+        echo "indexing $debs deb(s) and $rpms rpm(s) from the newest $kept release(s)"
+
+        # --- apt ---------------------------------------------------------------------------------
+        #
+        # dpkg-scanpackages and apt-ftparchive, not reprepro, and the reason is the retention bound
+        # above. reprepro keeps one version of a package per suite: `includedeb` of an older .deb after a
+        # newer one fails with "already registered with a newer version", and of a newer one *deletes*
+        # the older from the pool. So indexing five releases through reprepro yields a repository
+        # holding one — silently, if the loop swallows the errors, which is how a retention bound of
+        # five would have shipped as a retention bound of one. dpkg-scanpackages just indexes the files
+        # in a directory, with no version policy and no database, which is what a flat repository of
+        # release assets needs.
+        #
+        # One suite, `stable`, one component, `main`. Not a suite per Debian codename: there is one
+        # build per architecture here and it runs on any glibc-based derivative, so per-codename suites
+        # would promise builds that do not exist. setup-repo-debian.sh writes the same `stable main`,
+        # and internal/config gates the two files against each other.
+        mkdir -p _site/apt/pool/main _site/apt/dists/stable/main/binary-amd64 \
+          _site/apt/dists/stable/main/binary-arm64
+
+        if [ "$debs" -gt 0 ]; then
+          find packages -name '*.deb' -exec cp {} _site/apt/pool/main/ \;
+        fi
+
+        # Per-architecture Packages indexes, with paths relative to the repository root — apt resolves
+        # a pool Filename against baseurl, so scanning from anywhere else produces an index whose paths
+        # 404 on the client while every file is present on the server.
+        #
+        # An empty pool is not an error. dpkg-scanpackages writes an empty index and warns; `apt update`
+        # succeeds against it and `apt install objectfs` reports no candidate, which is the truthful
+        # answer before v0.14.0 attaches the first packages — and it means both setup scripts are
+        # testable end to end now rather than after the first packaged release.
+        for arch in amd64 arm64; do
+          ( cd _site/apt && dpkg-scanpackages --arch "$arch" pool/main /dev/null 2>/dev/null \
+            > "dists/stable/main/binary-$arch/Packages" ) || true
+          gzip -9kf "_site/apt/dists/stable/main/binary-$arch/Packages"
+        done
+
+        # The Release file, then its two signatures. apt accepts either; both are written because
+        # Signed-By verifies whichever it fetches, and older apt prefers Release + Release.gpg.
+        ( cd _site/apt/dists/stable && apt-ftparchive \
+          -o APT::FTPArchive::Release::Origin=ObjectFS \
+          -o APT::FTPArchive::Release::Label=ObjectFS \
+          -o APT::FTPArchive::Release::Suite=stable \
+          -o APT::FTPArchive::Release::Codename=stable \
+          -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+          -o APT::FTPArchive::Release::Components=main \
+          -o APT::FTPArchive::Release::Description="ObjectFS - FUSE filesystem for AWS S3" \
+          release . > Release )
+
+        test -s _site/apt/dists/stable/Release \
+          || { echo "::error::apt-ftparchive produced no Release file"; exit 1; }
+
+        # shellcheck disable=SC2086 # GPG_OPTS is a deliberately word-split option list.
+        gpg $GPG_OPTS --clearsign --local-user "$KEY_FPR" \
+          --output _site/apt/dists/stable/InRelease _site/apt/dists/stable/Release
+        # shellcheck disable=SC2086 # As above.
+        gpg $GPG_OPTS --detach-sign --armor --local-user "$KEY_FPR" \
+          --output _site/apt/dists/stable/Release.gpg _site/apt/dists/stable/Release
+
+        # InRelease is the inline-signed form apt prefers and the one Signed-By verifies. Its absence
+        # means the signature did not happen, which apt reports on the user's machine as an unsigned
+        # repository — the exact silent degradation the fail-closed rule above exists to prevent.
+        test -s _site/apt/dists/stable/InRelease \
+          || { echo "::error::the apt Release file is not signed (no InRelease)"; exit 1; }
+        gpg --batch --verify _site/apt/dists/stable/InRelease > /dev/null \
+          || { echo "::error::InRelease does not verify against the signing key"; exit 1; }
+
+        # --- yum ---------------------------------------------------------------------------------
+        #
+        # One flat repository, both architectures together. rpm metadata records each package's own
+        # architecture, so dnf on aarch64 ignores the x86_64 entries; a directory per basearch would
+        # need $basearch in the baseurl and a second copy of the metadata for no gain at this size.
+        mkdir -p _site/yum
+        if [ "$rpms" -gt 0 ]; then
+          find packages -name '*.rpm' -exec cp {} _site/yum/ \;
+        fi
+        createrepo_c --quiet _site/yum
+
+        # repomd.xml.asc is what setup-repo-rhel.sh's repo_gpgcheck=1 verifies. A detached signature
+        # over the index, which is the file that decides which package is newest and what its checksum
+        # is — package signatures alone leave that unprotected.
+        # shellcheck disable=SC2086 # GPG_OPTS is a deliberately word-split option list.
+        gpg $GPG_OPTS --detach-sign --armor --local-user "$KEY_FPR" \
+          --output _site/yum/repodata/repomd.xml.asc _site/yum/repodata/repomd.xml
+        test -s _site/yum/repodata/repomd.xml.asc \
+          || { echo "::error::repomd.xml was not signed, and setup-repo-rhel.sh sets repo_gpgcheck=1"; exit 1; }
+
+        # Verified here, against the exported public key, rather than trusted because gpg exited 0. The
+        # signature a user's dnf checks is the one this asserts.
+        gpg --batch --verify _site/yum/repodata/repomd.xml.asc _site/yum/repodata/repomd.xml \
+          || { echo "::error::repomd.xml.asc does not verify against the signing key"; exit 1; }
+
+        {
+          echo "### Package repositories"
+          echo ""
+          echo "- apt: \`$debs\` package(s), suite \`stable\`, signed by \`$KEY_FPR\`"
+          echo "- yum: \`$rpms\` package(s), \`repomd.xml.asc\` verified"
+          echo "- retention: newest \`$REPO_KEEP\` release(s); carried \`$kept\`"
+          [ -n "$dropped" ] && echo "- not in the repositories:$dropped"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        du -sh _site/apt _site/yum
+
+    # The 1 GB Pages limit, checked here rather than discovered by the deploy.
+    #
+    # A site over the limit fails in actions/deploy-pages with a size error, after the build has
+    # succeeded — and the reader's first guess is the docs build, not the repository that has been
+    # quietly accumulating 33 MB per release. REPO_KEEP is what keeps this from happening; this step is
+    # what makes the bound's failure legible if it is ever raised too far.
+    - name: The site fits inside the Pages limit
+      run: |
+        set -euo pipefail
+        bytes=$(du -sb _site | cut -f1)
+        limit=$((900 * 1024 * 1024))   # 900 MB, under Pages' 1 GB, so this fires before the deploy does
+        echo "site is $((bytes / 1048576)) MB"
+        if [ "$bytes" -gt "$limit" ]; then
+          echo "::error::_site is $((bytes / 1048576)) MB, over the $((limit / 1048576)) MB budget." \
+            "The package repositories grow ~33 MB per release — lower REPO_KEEP in the repository" \
+            "step, or move package hosting off Pages."
+          du -sh _site/* | sort -h
+          exit 1
+        fi
 
     - uses: actions/configure-pages@v6
 

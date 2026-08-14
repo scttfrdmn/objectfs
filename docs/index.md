@@ -217,16 +217,73 @@ make build          # produces ./bin/objectfs
 go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 ```
 
-There is no Homebrew tap and no package repository to add. This section once listed both, plus an
-install script at `get.objectfs.io`; that domain has never served anything, and the script above is
-fetched from the repository instead. `objectfs.io` itself now serves the landing page and this
-documentation at [objectfs.io/docs/](https://objectfs.io/docs/) — nothing is published under any
-other subdomain, which matters because Porkbun answers a wildcard, so every name under the domain
-resolves whether or not anything is behind it. What else exists is attached to each
-[release](https://github.com/scttfrdmn/objectfs/releases): a binary tarball per platform with a
-SHA-256 beside it, and — from v0.14.0 — a `.deb` and an `.rpm`. Install a package from the downloaded
-file (`apt install ./objectfs_*.deb`, `dnf install ./objectfs-*.rpm`), since there is no apt or yum
-repository behind it.
+There is no Homebrew tap. This section once listed one, plus an install script at `get.objectfs.io`;
+that domain has never served anything, and the script above is fetched from the repository instead.
+`objectfs.io` serves the landing page, this documentation at
+[objectfs.io/docs/](https://objectfs.io/docs/), the installer, and the two package repositories —
+nothing is published under any other subdomain, which matters because Porkbun answers a wildcard, so
+every name under the domain resolves whether or not anything is behind it.
+
+#### The package repositories
+
+```bash
+# Debian, Ubuntu
+curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
+sudo apt update && sudo apt install objectfs
+
+# RHEL, Fedora, Rocky, openSUSE
+curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
+sudo dnf install objectfs        # or: sudo zypper install objectfs
+```
+
+Each script downloads the signing key, prints its fingerprint, writes one repository entry with
+signature verification on, and does nothing else. Both fail closed: an index that does not verify
+against the key is refused, and there is no option to proceed anyway. `--dry-run` reports what would
+be written without root and without downloading anything.
+
+Two things differ between them and neither is a choice these scripts make:
+
+- **apt scopes the key; rpm cannot.** `setup-repo-debian.sh` installs the key to
+  `/usr/share/keyrings/objectfs-archive-keyring.gpg` and names it in `Signed-By:`, so it authorises
+  this repository and no other. `rpm --import` adds the key to the single system-wide keyring, where
+  it is a valid signer for every package rpm installs from anywhere. `gpgkey=` in a `.repo` file does
+  not change that — there is no per-repository keyring in rpm. `setup-repo-rhel.sh` prints this before
+  importing, because it is a decision worth making deliberately.
+- **The rpm script writes to whichever directory the local tool reads.** zypper reads
+  `/etc/zypp/repos.d` and does not read `/etc/yum.repos.d`, so a yum-only script succeeds on openSUSE
+  and configures nothing — every step reporting success while `zypper install objectfs` cannot find
+  the package.
+
+The repositories carry the newest **five** releases, which is a size bound rather than a policy about
+what is supported: GitHub Pages caps a site at 1 GB and one release is about 33 MB of packages. Every
+release's `.deb` and `.rpm` remain attached to the
+[release](https://github.com/scttfrdmn/objectfs/releases) permanently, so an older version installs
+from the downloaded file — `apt install ./objectfs_*.deb`, `dnf install ./objectfs-*.rpm`.
+
+#### The signing key
+
+Both setup scripts print the fingerprint of the key they downloaded and tell you to compare it against
+this page. That comparison is the only part of the chain a script cannot do for you: a script that
+fetched the key *and* the fingerprint it checks against, over the same channel, from the same host, has
+verified that the host agrees with itself.
+
+<!-- The fingerprint of the published signing key. This is the value the setup scripts print. -->
+
+```text
+Key fingerprint: published with the first signed release
+Key ID:          the last 16 hex digits of the above
+```
+
+The key is a signing subkey; the master key is offline and never reaches CI. The subkey expires two
+years from issue and will be rotated before then. A rotation changes the value above, and both scripts
+report a key change loudly rather than replacing one silently — if a script says the key on disk
+differs from the key it just downloaded and you were not expecting a rotation, stop and check here.
+
+`repo_gpgcheck=1` and `gpgcheck=1` are both set on the rpm side, and they check different things:
+`gpgcheck` verifies each package's own embedded signature, `repo_gpgcheck` verifies the repository
+metadata against its detached signature. Neither implies the other, and only the first is a default
+anywhere. On the apt side one signature covers both, because `InRelease` carries the checksums of the
+`Packages` indexes and those carry the checksum of every `.deb`.
 
 The checksum is always verified and there is no flag to skip it. Note what that establishes: the
 `.sha256` travels the same channel as the tarball, so a mismatch means a corrupted or tampered

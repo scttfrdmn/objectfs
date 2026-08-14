@@ -277,11 +277,26 @@ curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/ins
           </div>
 
           <div id="tab-package" class="tab-content" role="tabpanel" aria-labelledby="btn-package">
-<pre><code># Packages are attached to each release from v0.14.0 onward.
-# There is no apt or yum repository to add — install the downloaded file.
+<pre><code># Debian, Ubuntu — adds the signed repository, then installs
+curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
+sudo apt update &amp;&amp; sudo apt install objectfs
 
+# RHEL, Fedora, Rocky, openSUSE
+curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
+sudo dnf install objectfs         # or: sudo zypper install objectfs
+
+# Or install a downloaded package directly, for any release
 apt install ./objectfs_*.deb      # Debian, Ubuntu
 dnf install ./objectfs-*.rpm      # RHEL, Fedora, openSUSE</code></pre>
+            <p class="install-note">
+              Each script prints the signing key's fingerprint — verify it against the value
+              published in the <a href="/docs/#the-signing-key">documentation</a>. Both require a
+              valid signature on the repository index and have no flag to skip it. The Debian
+              script scopes the key to this repository with <code>Signed-By:</code>; rpm has no
+              per-repository keyring, so there the key becomes a system-wide package signer, which
+              <code>setup-repo-rhel.sh</code> states before importing it. The repositories carry the
+              newest five releases; every release's packages stay attached to the release itself.
+            </p>
           </div>
 
           <div id="tab-source" class="tab-content" role="tabpanel" aria-labelledby="btn-source">
