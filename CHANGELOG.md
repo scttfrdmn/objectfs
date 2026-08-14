@@ -106,6 +106,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, and two sites answering the same question with no rule for which is current is how the
   install-channel fabrications survived.
 
+- **`curl -fsSL https://objectfs.io/install.sh | bash` is a real address** ([#138]). It is the
+  one-liner that issue's acceptance criteria named, and for the issue's whole life it answered with a
+  404: first because `objectfs.io` served nothing, then, once Pages was on, because `pages.yml`
+  published `web/` and the MkDocs tree and no installer. `README.md` and the landing page pointed at
+  `raw.githubusercontent.com` instead — which works, and is not a URL anyone types from memory.
+
+  Served by copying `scripts/install.sh` to the site root at build time, **not** by committing a
+  second copy under `web/`. That distinction is the whole risk in this change and is why it is gated
+  rather than reviewed: every existing check in `internal/config` reads `scripts/install.sh` — the
+  platform mapping against `release.yml`'s matrix, the checksum refusals, the preflight ordering, the
+  landing page's flags — so a served copy that differs from it means the file users pipe into `bash`
+  is the file nothing tests. The workflow therefore `cmp`s the two, `internal/config/served_install_script_test.go`
+  asserts both the copy and the comparison, and a third check refuses a committed duplicate at
+  `web/install.sh`, `docs/install.sh` or `web/scripts/install.sh`.
+
+  `scripts/install.sh` also joins the workflow's `paths:` filter, which it was not in. Without that
+  the site keeps serving whichever copy was current at the last docs change, and nothing is visible:
+  the repository's copy is correct, every check is green, and the served one is stale. All six
+  mutations of these properties fail the intended check with the intended message.
+
 - **`scripts/install.sh`** ([#138]), which downloads the release binary for the running platform,
   verifies its SHA-256 against the checksum published beside it, and installs it — plus a CI job that
   runs it in three distributions and `internal/config/install_script_test.go` for the rows CI cannot
