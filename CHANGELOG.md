@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **objectfs.io is served**, by a new `pages.yml` workflow that publishes a landing page from `web/`
+  at the root and the MkDocs tree beneath it at `/docs/`. GitHub Pages was off on this repository for
+  its whole history — which is why `release.yml`'s deleted `update-docs` job could only ever have
+  failed — and the Porkbun records now point the apex at GitHub's Pages addresses.
+
+  The page states the project's actual contract, including the part that is a list of refusals: no
+  atomic rename, no cross-host locking, no concurrent-writer safety, no checksum on a partial read,
+  no Windows. That is not modesty. A reader who learns from the front page that SQLite and
+  Git-inside-the-mount do not work across hosts has been told the thing that would otherwise cost
+  them a corrupted repository, and every documentation tree here has a history of the opposite:
+  `docs-platform/guide/getting-started.md` opened with `curl -sSL https://get.objectfs.io | sh` — a
+  getting-started guide whose first command is a domain that has never served anything — and listed
+  an apt repository, a Homebrew tap and an AUR package beside it, none of which existed. `docs/index.md`
+  published five throughput figures, of which zero were measured. **The site quotes no throughput
+  number for that reason**; `benchmarks/` exists, and until it runs against a named bucket and object
+  size the honest answer is silence.
+
+  So the page is gated rather than trusted, by `internal/config/landing_page_test.go`: the flags in
+  its install commands must be flags `scripts/install.sh` parses, no release version may appear
+  outside a code block (the `version` constant is the only authority, after five files claimed five
+  different numbers), no subdomain other than the apex may be linked, every local reference must
+  resolve inside `web/` — which is all the deploy copies — and `web/CNAME` must name the domain,
+  since a deploy without that file silently clears the custom domain and takes the site down with no
+  commit that looks responsible. All six mutations of those properties fail the intended test.
+
+  **Only the apex is served, and resolution is not evidence of that.** Porkbun answers a wildcard, so
+  every name under `objectfs.io` resolves to the same record — `get.`, `packages.`, `docs.`,
+  `community.` and any typo all look configured from every angle except loading them. None completes a
+  TLS handshake. This is why the domain check is a test and not a glance at `dig`.
+
+  `mkdocs build` runs with `--strict`, which took fixing eight warnings it had been emitting into a
+  site nobody built: seven links from inside `docs/` up to the repository-root `README.md` and
+  `SECURITY.md`, correct on GitHub and dead in any built site, two of them also pointing at
+  `#supported-operations` where the heading is `## Supported filesystem operations` — so those two were
+  broken on GitHub as well. `docs-platform/` is deliberately **not** published: `ci.yml` already gates
+  it, and two sites answering the same question with no rule for which is current is how the
+  install-channel fabrications survived.
+
 - **`scripts/install.sh`** ([#138]), which downloads the release binary for the running platform,
   verifies its SHA-256 against the checksum published beside it, and installs it — plus a CI job that
   runs it in three distributions and `internal/config/install_script_test.go` for the rows CI cannot

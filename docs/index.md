@@ -205,24 +205,33 @@ graph TB
 Linux, or macOS with [macFUSE](https://macfuse.io) installed. Windows is not supported.
 
 ```bash
+# The install script: resolves the platform, verifies the published SHA-256, installs to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh | bash
+
+# or from source
 git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs
-make build          # produces ./objectfs
+make build          # produces ./bin/objectfs
 
 # or
 go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 ```
 
-There is no Homebrew tap and no package repository to add. This section once listed both, plus a
-`get.objectfs.io` install script; none of those exist. What does exist is attached to each
+There is no Homebrew tap and no package repository to add. This section once listed both, plus an
+install script at `get.objectfs.io`; that domain has never served anything, and the script above is
+fetched from the repository instead. `objectfs.io` itself now serves the landing page and this
+documentation at [objectfs.io/docs/](https://objectfs.io/docs/) — nothing is published under any
+other subdomain, which matters because Porkbun answers a wildcard, so every name under the domain
+resolves whether or not anything is behind it. What else exists is attached to each
 [release](https://github.com/scttfrdmn/objectfs/releases): a binary tarball per platform with a
 SHA-256 beside it, and — from v0.14.0 — a `.deb` and an `.rpm`. Install a package from the downloaded
 file (`apt install ./objectfs_*.deb`, `dnf install ./objectfs-*.rpm`), since there is no apt or yum
 repository behind it.
 
-`scripts/install.sh` in this repository is the shortest path for the tarball. It resolves the
-platform, verifies the checksum, and installs under `~/.local/bin`; the checksum is always verified
-and there is no flag to skip it.
+The checksum is always verified and there is no flag to skip it. Note what that establishes: the
+`.sha256` travels the same channel as the tarball, so a mismatch means a corrupted or tampered
+download, not that the release is authentic. That is a signature's job, and this project does not sign
+releases yet.
 
 ### Basic Usage
 
