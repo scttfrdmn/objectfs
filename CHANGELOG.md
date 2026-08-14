@@ -507,6 +507,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`AccelerationStats` reported a state it had just changed.** Reading the acceleration gate is what
+  *advances* it — `circuit.CircuitBreaker.GetState` performs the open→half-open transition when the
+  backoff has expired, and that transition calls `EnableAcceleration` through `OnStateChange`. Because
+  Go evaluates struct literal fields in source order, `Active` was sampled before that read, so one call
+  could return `active 0` beside `gate_state HALF_OPEN`: a mount described as still in fallback by the
+  same call that had, a line later, taken it out of fallback. On the metrics surface that is a scrape
+  interval of a gauge contradicting the state next to it, on the one family whose entire purpose is to
+  answer whether this mount is accelerating.
+
+  The gate is now read before `Active`, which cannot tear in the opposite direction — `Active` only goes
+  false through `DisableAcceleration`, which runs on a failed request and never on a read of the state,
+  so the worst case becomes "acceleration was withdrawn just after this sample", which is a true
+  statement about a point-in-time gauge rather than a false one.
+
+  This surfaced as a CI failure in `TestTheAccelerateEndpointComesBackWithinTheBackoff`, and the test
+  had a matching defect: it polled `Active` and then asserted the gate was `CLOSED` with a non-zero
+  request count. `Active` goes true on the transition that *opens the probe slot*, before any probe has
+  run, so at that instant both assertions are false by construction. It passed locally only because the
+  stale `Active` bought the loop one extra iteration in which the probe went out — a test kept green by
+  the bug it was sitting next to. It now polls the terminal state, the gate closing, and checks `Active`
+  agrees. Both fixes are mutation-verified, and there is a new regression test asserting the two fields
+  agree *within a single call* rather than asserting a particular value, since `HALF_OPEN` and `CLOSED`
+  both mean acceleration is in effect.
+
 - **A node never recorded its own cache figures in its membership map** ([#147]). `refreshLocalStats`
   reached only the struct the gossip alive-message is built from, so a node published its cache size
   and hit rate to every peer and never stored them for itself. Every node showed each peer's cache in
