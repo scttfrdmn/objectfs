@@ -1755,13 +1755,34 @@ func (b *Backend) GetMetrics() BackendMetrics {
 // twenty-odd fields on four unrelated subjects and a time.Duration that a gauge cannot take; handing
 // that to internal/adapter would put the choice of what to export, and the unit conversions, in the
 // caller.
+//
+// # Read the gate before Active, not after
+//
+// The order of these two reads is load-bearing, which is not obvious and was wrong. Reading the gate is
+// what *advances* it — see accelerationGate.state — and the open→half-open transition calls
+// ClientManager.EnableAcceleration through OnStateChange. So a call that reads Active first and the gate
+// second reports Active from before a transition its own second read performed: `active 0` alongside
+// `gate_state HALF_OPEN`, describing a mount that is in fact accelerating again. One scrape interval of
+// a gauge that contradicts the state beside it, on the one family whose entire purpose is to say whether
+// this mount is accelerating.
+//
+// Reading the gate first cannot produce the opposite tear. Active only goes false through
+// DisableAcceleration, which runs on an acceleration error from a request — never from a read of the
+// state — so the worst case here is Active newer than GateState by whatever a concurrent request did in
+// between, and "acceleration was disabled a moment after this state was sampled" is a true statement
+// about a point-in-time gauge. The reverse was a false one.
 func (b *Backend) AccelerationStats() AccelerationStats {
 	m := b.metricsCollector.GetMetrics()
+
+	// Not inlined into the struct literal: Go evaluates those fields in source order, so their order
+	// would be the fix, and a later reader tidying the fields into declaration order would silently
+	// reintroduce the tear.
+	gateState := b.accelerationGate.state()
 
 	return AccelerationStats{
 		Configured:  b.config.UseAccelerate,
 		Active:      b.clientManager.IsAccelerationActive(),
-		GateState:   b.accelerationGate.state(),
+		GateState:   gateState,
 		Requests:    m.AcceleratedRequests,
 		Bytes:       m.AcceleratedBytes,
 		Fallbacks:   m.FallbackEvents,
