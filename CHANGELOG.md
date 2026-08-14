@@ -48,6 +48,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Signed apt and yum repositories at `objectfs.io/apt` and `objectfs.io/yum`** (#138, part (c)), so
+  `apt install objectfs` and `dnf install objectfs` work and, more to the point, so `apt upgrade`
+  reaches ObjectFS. Two one-liners add them — `curl -fsSL https://objectfs.io/setup-repo-debian.sh |
+  sudo bash` and the `-rhel` equivalent — and `pages.yml` builds both repositories from the release
+  assets on every deploy. GitHub Pages hosts them: at ~33 MB of packages per release against a 1 GB
+  site cap, a five-release retention bound is ~165 MB, and the alternative was an S3 bucket with a
+  bill and an access policy for something the project already publishes for free.
+
+  **The two scripts do not offer the same guarantee, and the asymmetry is apt's and rpm's rather than
+  this project's.** `setup-repo-debian.sh` writes a deb822 entry with `Signed-By:`, which authorises
+  the key for this repository and no other; a key in `/etc/apt/trusted.gpg.d` — where `apt-key add`,
+  which #138's text specifies, would put it — is a valid signer for every repository the machine
+  reads, Debian's own `openssh-server` included. rpm has no equivalent: `rpm --import` adds the key to
+  a single system-wide keyring, `gpgkey=` in a `.repo` file does not create a per-repository one, and
+  so trusting this repository on a RHEL-family machine means trusting the key for everything.
+  `setup-repo-rhel.sh` prints that before importing anything rather than papering over it.
+
+  Both fail closed. An index that does not verify is refused and there is no flag to proceed anyway;
+  `repo_gpgcheck=1` is set alongside `gpgcheck=1` on the rpm side, which is the setting that is off by
+  default everywhere and therefore the one worth turning on deliberately. When no signing key is
+  available at deploy time, **no repository is published** rather than an unsigned one — an unsigned
+  repository would fail at a user's `apt update` instead of in CI.
+
+  Four defects were found by installing from a real repository in a container, and none of them was
+  reachable any other way:
+
+  - **nfpm builds unsigned rpms.** The repository was signed and the packages were not, so the first
+    run on `rockylinux:9` downloaded the package and failed with `Error: GPG check FAILED`. Worth
+    being precise about why the deb had no such problem, because it is the reason only the rpm needs a
+    signature block: apt's `InRelease` signature covers the `Packages` indexes, which carry each
+    `.deb`'s checksum, so one signature at the top transitively covers the packages. rpm has no such
+    chain — each package stands alone, and an unsigned one is unsigned however well signed the
+    metadata around it is. `nfpm.yaml` now carries an `rpm.signature` block (on the top-level `rpm:`
+    section, not under `overrides.rpm:`, which nfpm rejects outright), and `release.yml` fails the
+    release if the signing key is absent rather than shipping unsigned packages that outlive the run.
+  - **`rpm -K` exits 0 for an unsigned package.** Unsigned prints `digests OK` and returns 0; signed
+    prints `digests signatures OK` and also returns 0. Measured, not assumed. A check on the exit
+    status alone passes for every unsigned package ever built while reporting that it verified a
+    signature, so the assertion matches the text.
+  - **`zypper` does not read `/etc/yum.repos.d`.** It reads `/etc/zypp/repos.d`, so a yum-only script
+    succeeds on openSUSE and configures nothing: every step reports success, the `.repo` file looks
+    correct, and `zypper install objectfs` cannot find the package. `opensuse/leap:15.6` is in the
+    matrix for exactly this.
+  - **`reprepro` keeps one version per suite.** Indexing five releases with it would have silently
+    published one — a retention bound of five shipping as a bound of one. `dpkg-scanpackages` plus
+    `apt-ftparchive` have no version policy and no database.
+
+  Five documented one-liners were a 404 until the deploy served the scripts they name, which is the
+  same defect `install.sh` spent a year in and worse, since these are piped into `sudo bash`. Both are
+  now copied and byte-compared at deploy time and listed in the workflow's paths filter — a stale
+  installer installs an old binary, while a stale setup script installs an old signing *key*, and that
+  key stays trusted on the machine after a later correct run.
+
+  Gated by `internal/config/served_repositories_test.go`, and verified by mutation rather than by
+  reading: 25 mutations of the workflows, the scripts and `nfpm.yaml` each fail the intended test.
+  Two of them found real weaknesses in the gates themselves — an `exit 1` assertion satisfied by an
+  unrelated `exit 1` elsewhere in the same step, and two existing gates that matched one literal shell
+  spelling and broke when a step became a loop over three files while the property it checked still
+  held. `ci.yml` gains a `repo-install` job that builds the repositories using `pages.yml`'s own
+  extracted steps — so the two copies cannot drift — and installs from them on `ubuntu:24.04`,
+  `rockylinux:9` and `opensuse/leap:15.6`, asserting a tampered index is refused on each. Every
+  refusal assertion has an untampered control run before it, because the first two versions reported a
+  pass for a check that had not run: `apt` reused cached lists and re-verified nothing, and `dnf`
+  prints `Importing GPG key ...` on a perfectly good refresh, which the first grep accepted as
+  evidence of a rejection.
+
+  Two further defects came out of running that job rather than reading it, and both are the same
+  shape — a mechanism that applies somewhere other than where it appears to. `$GITHUB_ENV` takes
+  effect in *subsequent* steps, so the step that wrote the signing variables there and then ran `make
+  package-linux` ran it with both unset; nfpm treats an unset `key_file` as "do not sign" rather than
+  as an error, so the build succeeded and produced an unsigned rpm — this job's own subject matter.
+  And the extractor that lifts `pages.yml`'s repository step took the `run:` body without the `env:`
+  block around it, leaving `REPO_KEEP` unbound under `set -u`; it now carries every plain literal from
+  that block and fails if it carries none, and the step checks that everything the extracted script
+  reads is exported before running it. Both are gated, the second by a check against the environment
+  the script will actually run in rather than against its text.
+
+  A third was caused by documenting the second: workflow expressions are interpolated inside what a
+  shell would read as a comment, because the substitution happens before any shell exists, so a
+  comment naming `secrets.*` failed the whole file at parse time. That failure has no local symptom —
+  `check-yaml` and `shellcheck` both pass — and almost no remote one, since no job starts and the run
+  reports only "likely failed because of a workflow file issue". `TestWorkflowExpressionsAreValid` now
+  requires that anything in braces, anywhere in any workflow, looks like an expression.
+
 - **objectfs.io is served**, by a new `pages.yml` workflow that publishes a landing page from `web/`
   at the root and the MkDocs tree beneath it at `/docs/`. GitHub Pages was off on this repository for
   its whole history — which is why `release.yml`'s deleted `update-docs` job could only ever have

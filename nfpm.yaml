@@ -201,3 +201,43 @@ contents:
 scripts:
   postinstall: ./scripts/postinstall.sh
   preremove: ./scripts/preremove.sh
+
+# The rpm signature, and this exists because a container found its absence.
+#
+# `repo_gpgcheck=1` and `gpgcheck=1` in setup-repo-rhel.sh's stanza check two different things, and only
+# the first is about the repository. repo_gpgcheck verifies repomd.xml against repomd.xml.asc, which
+# pages.yml signs; gpgcheck verifies *each package's own embedded signature*, which nothing was
+# producing. So the first end-to-end run on rockylinux:9 got as far as downloading the package and then
+# failed with "Package objectfs-0.13.0-1.x86_64.rpm is not signed / Error: GPG check FAILED".
+#
+# Worth being precise about why apt did not have this problem, because it is the reason the deb needs no
+# equivalent: apt's signature covers InRelease, InRelease carries the checksums of the Packages indexes,
+# and Packages carries the checksum of every .deb — so one signature at the top transitively covers the
+# packages. rpm has no such chain. Each package stands alone, and an unsigned one is unsigned no matter
+# how well signed the metadata around it is.
+#
+# The passphrase comes from the environment, unset in a normal `make package-linux`. nfpm skips signing
+# entirely when key_file names nothing readable, so a local build stays unsigned and a release build
+# signs — which is why release.yml writes the key to this path before calling make. An unsigned *release*
+# is not possible to ship silently: ci.yml's repo-install job installs with gpgcheck=1 on, and that is
+# the check that would have caught this in the first place had it existed.
+# `rpm:` at the top level, not `overrides.rpm:`. nfpm's overrides block accepts an `Overridables` — the
+# per-format fields like contents, depends and scripts — and `signature` is not one of them: it lives on
+# the format-specific `rpm:` section. Written the other way, nfpm refuses the whole config with "field
+# signature not found in type nfpm.Overridables", which at least fails loudly.
+rpm:
+  signature:
+    key_file: ${OBJECTFS_SIGNING_KEY_FILE}
+    # The signing subkey, as a **16-hex-digit long key ID** — the last 16 characters of the fingerprint,
+    # not the fingerprint and not the 8-character short ID. Both wrong forms were tried against nfpm
+    # 2.44 rather than reasoned about, and they fail differently:
+    #
+    #   40-char fingerprint: "is not a valid key id: strconv.ParseUint ... value out of range"
+    #   8-char short ID:     "signing error: openpgp: invalid argument: no valid signing keys"
+    #
+    # The second is the dangerous one to guess at: it names no key ID at all and reads like a problem
+    # with the key file. `${FPR: -16}` is what release.yml passes.
+    #
+    # nfpm selects this key out of the key file, so the file may hold the whole secret keyring; what gets
+    # used is this key and not whichever one happens to be first.
+    key_id: ${OBJECTFS_SIGNING_KEY_ID}

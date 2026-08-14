@@ -57,6 +57,11 @@ Get ObjectFS running in minutes:
 # the domain other than the apex is served, wildcard DNS regardless.
 curl -fsSL https://objectfs.io/install.sh | bash
 
+# or from the signed package repository, which is what makes `apt upgrade` reach ObjectFS.
+# The script prints the key's fingerprint; verify it against objectfs.io/docs/#the-signing-key.
+curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash   # or setup-repo-rhel.sh
+sudo apt update && sudo apt install objectfs
+
 # or from source
 git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs && make build

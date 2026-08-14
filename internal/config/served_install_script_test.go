@@ -53,20 +53,22 @@ func TestPagesWorkflowServesTheInstallScript(t *testing.T) {
 
 	workflow := withoutComments(pagesWorkflow(t))
 
-	if !strings.Contains(workflow, "cp scripts/install.sh _site/install.sh") {
-		t.Error(".github/workflows/pages.yml does not copy scripts/install.sh to the site root. " +
-			"`curl -fsSL https://objectfs.io/install.sh | bash` is #138's acceptance criterion and the " +
-			"address 404s without this step — which is a worse outcome than the raw.githubusercontent.com " +
-			"URL it replaced, because a documented one-liner that 404s reads as a broken project")
-	}
-
-	// The byte comparison, not just the copy. A `cp` from the wrong path succeeds, and a site serving
-	// some other file called install.sh is the failure this whole file is about.
-	if !strings.Contains(workflow, "cmp scripts/install.sh _site/install.sh") {
-		t.Error(".github/workflows/pages.yml copies the installer without comparing it to " +
-			"scripts/install.sh. Presence is not the property that matters: every gate in this package " +
-			"checks scripts/install.sh, so a served copy that differs means the file users run is the " +
-			"one nothing tests")
+	// The copy and the byte comparison, matched as the pair of properties rather than as two literal
+	// command lines. They were literals — `cp scripts/install.sh _site/install.sh` and the matching
+	// `cmp` — until the workflow grew two more served scripts and did the copying in a loop over all
+	// three. Both properties still held and both assertions failed, which is the right failure to have
+	// but the wrong reason: a gate spelling out one of several correct shell spellings tests the
+	// spelling. What has to be true is that the installer is copied from scripts/ into the site root
+	// and compared byte for byte, however the step is written.
+	//
+	// A `cp` from the wrong path succeeds, and a site serving some other file called install.sh is the
+	// failure this whole file is about — so the comparison is not optional decoration on the copy.
+	if !copiesAndComparesFromScripts(workflow, "install.sh") {
+		t.Error(".github/workflows/pages.yml does not copy scripts/install.sh to the site root and " +
+			"compare it byte for byte. `curl -fsSL https://objectfs.io/install.sh | bash` is #138's " +
+			"acceptance criterion and the address 404s without the copy; without the `cmp`, a copy from " +
+			"the wrong path succeeds and the site serves an installer that differs from the reviewed " +
+			"one — which every gate in this package checks and no user would then be running")
 	}
 
 	// And the trigger. Without scripts/install.sh in the paths filter the site keeps serving whatever
@@ -84,6 +86,85 @@ func TestPagesWorkflowServesTheInstallScript(t *testing.T) {
 			"behind the repository until some unrelated docs change happens to trigger a build, and " +
 			"every check is green the whole time")
 	}
+}
+
+// copiesAndComparesFromScripts reports whether a workflow copies scripts/<name> into the site root and
+// compares the two, in either the per-file or the loop-over-names form.
+//
+// Two spellings are accepted, because both are correct and the workflow has now used each:
+//
+//	cp scripts/install.sh _site/install.sh   ... cmp scripts/install.sh _site/install.sh
+//	for script in install.sh ...; do cp "scripts/$script" "_site/$script" ... cmp ... done
+//
+// The loop form is recognized by the name appearing in the loop's word list *and* the loop body doing a
+// `cp`-and-`cmp` between scripts/ and _site/. That is deliberately not a shell parse: what it has to
+// distinguish is a served file from an unserved one, and both forms name the file either way.
+func copiesAndComparesFromScripts(workflow, name string) bool {
+	// The explicit form first.
+	if strings.Contains(workflow, "cp scripts/"+name+" _site/"+name) &&
+		strings.Contains(workflow, "cmp scripts/"+name+" _site/"+name) {
+		return true
+	}
+
+	// The loop form. The variable name is not assumed; what is required is a `for` line that lists this
+	// file, and a body that copies and compares scripts/<var> against _site/<var>.
+	var (
+		inLoop bool
+		listed bool
+		copied bool
+		cmped  bool
+	)
+
+	for line := range strings.SplitSeq(workflow, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, " in ") {
+			inLoop = true
+			// Each word with `;` trimmed, because the last item of the list carries the `; do` that ends
+			// the line: `for script in install.sh setup-repo-debian.sh setup-repo-rhel.sh; do`. Without
+			// this the final entry never matches, which is a check that silently only ever covers the
+			// items that happen not to be last.
+			listed = false
+
+			for field := range strings.FieldsSeq(trimmed) {
+				if strings.TrimRight(field, ";") == name {
+					listed = true
+
+					break
+				}
+			}
+
+			copied, cmped = false, false
+
+			continue
+		}
+
+		if !inLoop {
+			continue
+		}
+
+		if trimmed == "done" {
+			inLoop = false
+
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "cp ") && strings.Contains(trimmed, `"scripts/$`) &&
+			strings.Contains(trimmed, `"_site/$`) {
+			copied = true
+		}
+
+		if strings.HasPrefix(trimmed, "cmp ") && strings.Contains(trimmed, `"scripts/$`) &&
+			strings.Contains(trimmed, `"_site/$`) {
+			cmped = true
+		}
+
+		if listed && copied && cmped {
+			return true
+		}
+	}
+
+	return false
 }
 
 // hasSequenceEntry reports whether any line of a YAML document is exactly `- value`, at any indent.

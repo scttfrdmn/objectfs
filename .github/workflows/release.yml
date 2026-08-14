@@ -199,8 +199,119 @@ jobs:
     - name: nfpm.yaml agrees with the scripts, the Makefile and the version constant
       run: go test ./internal/config/ -run 'TestPackag|TestPostinstall|TestPreremove|TestMakefile'
 
+    # The rpm signature, and it is required here rather than optional.
+    #
+    # setup-repo-rhel.sh writes `gpgcheck=1`, which verifies each package's own embedded signature —
+    # separate from `repo_gpgcheck=1`, which verifies the repository index. An unsigned rpm in a signed
+    # repository installs from nowhere: dnf downloads it and stops with "Package objectfs-0.13.0-1.x86_64
+    # .rpm is not signed / Error: GPG check FAILED". That is measured, not predicted; it is what the
+    # first end-to-end run on rockylinux:9 did before nfpm.yaml grew a signature block.
+    #
+    # No equivalent for the deb, and that asymmetry is real rather than an omission: apt's InRelease
+    # signature covers the Packages indexes, which carry each .deb's checksum, so one signature at the
+    # top transitively covers the packages. rpm has no such chain — each package stands alone.
+    #
+    # Refuses rather than building unsigned when the secret is missing. A release is the one place where
+    # "no key, so skip signing" is the wrong call: the packages would publish, install cleanly from a
+    # downloaded file, and fail only for the users who added the repository. pages.yml skips its
+    # repository for a missing key because a docs deploy should not fail on it; a release has no such
+    # excuse, and the two behaviours differ on purpose.
+    - name: Import the package signing key
+      env:
+        GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${GPG_SIGNING_KEY:-}" ]; then
+          echo "::error::GPG_SIGNING_KEY is not set, so the rpm would be unsigned." \
+            "setup-repo-rhel.sh sets gpgcheck=1, so an unsigned rpm fails at 'dnf install' for every" \
+            "user who added the repository, while installing fine from a downloaded file — which is" \
+            "the failure mode most likely to ship unnoticed. Set the secret, or remove the rpm from" \
+            "this release deliberately."
+          exit 1
+        fi
+
+        # A dedicated keyring under the runner's workspace, discarded with the runner. The key is a
+        # signing subkey; the master key is offline and never reaches CI, so this secret cannot certify
+        # a new key as ours.
+        export GNUPGHOME="$RUNNER_TEMP/gnupg"
+        mkdir -p "$GNUPGHOME"
+        chmod 700 "$GNUPGHOME"
+        printf '%s' "$GPG_SIGNING_KEY" | gpg --batch --quiet --import
+
+        FPR="$(gpg --batch --with-colons --list-secret-keys \
+          | awk -F: '$1 == "fpr" { print $10; exit }')"
+        [ -n "$FPR" ] || { echo "::error::GPG_SIGNING_KEY imported no secret key"; exit 1; }
+
+        # nfpm needs the secret key as a file and the key as a 16-hex-digit long key ID. Not the
+        # fingerprint: nfpm parses key_id as a uint64 and a 40-character value overflows it, with an
+        # error that names strconv rather than the format expected. See nfpm.yaml's comment.
+        gpg --batch --armor --export-secret-keys "$FPR" > "$GNUPGHOME/signing-key.asc"
+
+        {
+          echo "GNUPGHOME=$GNUPGHOME"
+          echo "OBJECTFS_SIGNING_KEY_FILE=$GNUPGHOME/signing-key.asc"
+          echo "OBJECTFS_SIGNING_KEY_ID=${FPR: -16}"
+        } >> "$GITHUB_ENV"
+
+        echo "signing rpms with ${FPR: -16}"
+
     - name: Build the deb and the rpm
-      run: make package-linux
+      env:
+        # nfpm invokes gpg for the rpm signature and cannot answer a prompt, so the passphrase comes
+        # from gpg's configuration. Written here rather than in the import step because $GNUPGHOME only
+        # becomes an environment variable for *subsequent* steps.
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "${GPG_PASSPHRASE:-}" ]; then
+          printf '%s' "$GPG_PASSPHRASE" > "$GNUPGHOME/pass"
+          chmod 600 "$GNUPGHOME/pass"
+          {
+            echo "pinentry-mode loopback"
+            echo "passphrase-file $GNUPGHOME/pass"
+          } > "$GNUPGHOME/gpg.conf"
+        fi
+
+        make package-linux
+
+    # Every rpm carries a verifiable signature, checked with rpm's own verifier against the public half
+    # of the key that signed it.
+    #
+    # Not "nfpm exited 0". nfpm signs only when key_file names a readable file, and silently produces an
+    # unsigned package otherwise — that is the correct behaviour for a local `make package-linux` and the
+    # exact reason a release cannot infer signing from a zero exit status. `rpm -K` is the check a user's
+    # dnf performs, so it is the check that belongs here.
+    - name: Every rpm is signed, and the signature verifies
+      run: |
+        set -euo pipefail
+
+        # rpm is on ubuntu-latest as a client; it needs no rpm-based distribution to verify a signature.
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq rpm
+
+        keyring="$RUNNER_TEMP/rpmdb"
+        gpg --batch --armor --export "${OBJECTFS_SIGNING_KEY_ID}" > "$RUNNER_TEMP/pub.asc"
+        rpm --dbpath "$keyring" --initdb
+        rpm --dbpath "$keyring" --import "$RUNNER_TEMP/pub.asc"
+
+        for pkg in dist/*.rpm; do
+          out="$(rpm --dbpath "$keyring" -K "$pkg")" || {
+            echo "::error::$pkg has no valid signature: $out"
+            echo "setup-repo-rhel.sh sets gpgcheck=1, so dnf would refuse this package with" \
+              "'Package is not signed / Error: GPG check FAILED' after downloading it."
+            exit 1
+          }
+
+          # "digests signatures OK" is the signed answer; "digests OK" alone means the digests were
+          # checked and there was no signature to check. Both exit 0, which is why the *text* is what
+          # this asserts — a status check here would pass on every unsigned package.
+          case "$out" in
+            *"signatures OK"*) echo "ok: $out" ;;
+            *) echo "::error::$pkg verified digests but carries no signature: $out"; exit 1 ;;
+          esac
+        done
 
     # The version inside the package, read back from the package. Nothing else in this repository does
     # this, and nfpm.yaml's own comment names the gap: "nothing reads a package's version back to

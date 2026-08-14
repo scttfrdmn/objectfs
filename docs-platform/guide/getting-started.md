@@ -42,9 +42,26 @@ to run the whole thing under `sudo` — which then writes a root-owned binary an
 directories into a home directory their own jobs use.
 
 Debian and RPM packages are attached to each release from v0.14.0 onward, alongside the binary
-tarballs, on the [releases page](https://github.com/scttfrdmn/objectfs/releases). There is no apt or
-yum repository to add — `dnf install ./objectfs-*.rpm` and `apt install ./objectfs_*.deb` against a
-downloaded file are what works today.
+tarballs, on the [releases page](https://github.com/scttfrdmn/objectfs/releases). There are also
+signed apt and yum repositories, which is what makes `apt upgrade` reach ObjectFS:
+
+```bash
+# Debian, Ubuntu
+curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
+sudo apt update && sudo apt install objectfs
+
+# RHEL, Fedora, Rocky, openSUSE
+curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
+sudo dnf install objectfs        # or: sudo zypper install objectfs
+```
+
+Both scripts print the signing key's fingerprint and require a valid signature on the repository
+index; verify the fingerprint against the one published at
+[objectfs.io/docs/](https://objectfs.io/docs/#the-signing-key). The Debian script scopes the key to
+this repository with `Signed-By:`; rpm has no per-repository keyring, so on a RHEL-family machine the
+key becomes a trusted package signer system-wide, and `setup-repo-rhel.sh` says so before importing
+it. The repositories carry the newest five releases; older ones install from the downloaded file with
+`dnf install ./objectfs-*.rpm` or `apt install ./objectfs_*.deb`.
 
 Or build from source:
 
