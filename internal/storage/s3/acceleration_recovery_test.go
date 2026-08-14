@@ -141,6 +141,14 @@ func TestSubsequentReadsSkipTheWithdrawnEndpoint(t *testing.T) {
 //
 // Verified by mutation: freezing circuit.Config.Timeout at an hour instead of the configured retry
 // leaves this test failing at the poll and the rest of the file green.
+//
+// The recovery is complete when the *gate closes*, and polling Active instead is what made this test
+// fail in CI. Active goes true on the open→half-open transition, which opens the probe slot — the probe
+// itself has not run yet, so a mount observed at that instant has GateState HALF_OPEN and Requests 0,
+// which is exactly what the two assertions below reject. It passed locally only because
+// AccelerationStats read Active before the gate and so reported the pre-transition value, costing the
+// loop one extra iteration in which the probe actually went out. Fixing that read order (backend.go)
+// removed the accidental delay and exposed the predicate; a slow runner would have found it either way.
 func TestTheAccelerateEndpointComesBackWithinTheBackoff(t *testing.T) {
 	t.Parallel()
 
@@ -167,13 +175,23 @@ func TestTheAccelerateEndpointComesBackWithinTheBackoff(t *testing.T) {
 			"recovery")
 	}
 
-	// Reads until acceleration is in effect again. Each read is a request that would have gone to the
-	// accelerate endpoint had the gate permitted it, which is how a mount actually recovers.
+	// Reads until the gate has closed again. Each read is a request that would have gone to the
+	// accelerate endpoint had the gate permitted it, which is how a mount actually recovers: the backoff
+	// expires, the gate goes half-open, the next read is the probe, and the probe closing the gate is
+	// what ends the rationing. Polling the terminal state rather than the intermediate one is also why
+	// this loop needs no settling sleep after it.
 	deadline := time.Now().Add(10 * time.Second)
-	for !backend.AccelerationStats().Active {
+
+	var stats s3.AccelerationStats
+	for {
+		stats = backend.AccelerationStats()
+		if stats.GateState == circuit.StateClosed {
+			break
+		}
+
 		if time.Now().After(deadline) {
-			t.Fatalf("acceleration is still withdrawn 10s after a %v backoff, over repeated reads; the "+
-				"fallback is one-way for the life of the mount, which is #204", retry)
+			t.Fatalf("the gate is still %v 10s after a %v backoff, over repeated reads; the fallback is "+
+				"one-way for the life of the mount, which is #204", stats.GateState, retry)
 		}
 
 		if _, err := backend.GetObject(ctx, "recovered.bin", 0, -1); err != nil {
@@ -183,14 +201,64 @@ func TestTheAccelerateEndpointComesBackWithinTheBackoff(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	stats := backend.AccelerationStats()
-	if stats.GateState != circuit.StateClosed {
-		t.Errorf("the gate is %v after a successful probe, want CLOSED: a gate left half-open rations "+
-			"acceleration to one request per backoff period", stats.GateState)
+	if !stats.Active {
+		t.Error("the gate closed but Active is false, so the accessor an operator reads still reports a " +
+			"mount in fallback after it has recovered")
 	}
 	if stats.Requests == 0 {
 		t.Error("Requests is zero after recovery, so no request has been recorded against the accelerate " +
 			"endpoint and the recovery is not visible as traffic")
+	}
+}
+
+// TestAccelerationStatsDoesNotReportAStateItJustChanged is the regression test for the torn snapshot.
+//
+// Reading the gate is what advances it, and the transition it performs re-enables acceleration through
+// OnStateChange. A single call that sampled Active first therefore reported `Active=false` beside
+// `GateState=HALF_OPEN` — a mount described as not accelerating by the same call that had, three lines
+// later, made it accelerate. An operator's scrape landing in that window sees `active 0` next to a gate
+// that says otherwise, on the one metric family whose whole job is to answer that question.
+//
+// The assertion is agreement *within one call*, not a value, which is what makes it a snapshot test:
+// HALF_OPEN and CLOSED both mean acceleration is in effect, so either is a pass as long as Active says
+// so too. Verified by mutation — moving the gate read back below Active in the struct literal fails
+// here.
+func TestAccelerationStatsDoesNotReportAStateItJustChanged(t *testing.T) {
+	t.Parallel()
+
+	const retry = 25 * time.Millisecond
+
+	ts := testaws.Start(t)
+	backend := ts.Backend(func(cfg *s3.Config) {
+		cfg.AccelerationRetry = retry
+	})
+	s3.RouteAccelerationThroughTheTestEndpoint(backend)
+
+	ctx := context.Background()
+
+	ts.PutObject("torn.bin", []byte("payload"))
+	ts.InjectFault(accelerationFault("GET", 1))
+
+	if _, err := backend.GetObject(ctx, "torn.bin", 0, -1); err != nil {
+		t.Fatalf("the read that triggers the fallback failed: %v", err)
+	}
+
+	// Past the backoff with no request in between, so the very next stats call is the one that performs
+	// the open→half-open transition. That call is the subject: no other read has advanced the gate, so
+	// whatever it reports, it reports about a transition it caused itself.
+	time.Sleep(2 * retry)
+
+	stats := backend.AccelerationStats()
+
+	if stats.GateState == circuit.StateOpen {
+		t.Fatalf("the gate is still OPEN %v after a %v backoff, so this call did not perform the "+
+			"transition and cannot observe whether it reported it consistently", 2*retry, retry)
+	}
+	if !stats.Active {
+		t.Errorf("AccelerationStats reports Active=false with GateState=%v in the same call: the gate is "+
+			"letting requests through and acceleration is enabled, but the field an operator reads says "+
+			"the mount is still in fallback. The read of Active happened before the gate read that "+
+			"re-enabled it", stats.GateState)
 	}
 }
 
