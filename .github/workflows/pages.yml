@@ -1,6 +1,7 @@
 name: Pages
 
-# Publishes objectfs.io: the landing page in web/ at the root, and the MkDocs tree at /docs/.
+# Publishes objectfs.io: the landing page in web/ at the root, the MkDocs tree at /docs/, and
+# scripts/install.sh at /install.sh.
 #
 # Pages was off on this repository for its whole history, which is why release.yml's `update-docs`
 # job — `actions/deploy-pages` against a generated site — could only ever have failed. It is on now
@@ -18,6 +19,13 @@ name: Pages
 #     survived — the same lesson as the docs-site job in ci.yml. Strict is the setting that keeps
 #     the next one from surviving.
 #
+#   - **install.sh is copied, not committed under web/.** The one-liner in #138's acceptance criteria
+#     names `https://objectfs.io/install.sh`, and until this workflow that address answered with a
+#     404 while README.md and the landing page both sent readers to raw.githubusercontent.com. The
+#     fix is to serve the file, not to keep a second copy of it: every gate in internal/config checks
+#     `scripts/install.sh`, so a committed duplicate under web/ would be the copy users run and the
+#     copy nothing tests. `cmp` below asserts the two agree byte for byte.
+#
 #   - **docs-platform/ is not published.** ci.yml already gates `vitepress build` on it, and there
 #     is one documentation site here, not two. Publishing both would mean two pages answering the
 #     same question with no rule for which is current — and the getting-started page there is the
@@ -28,10 +36,15 @@ on:
   push:
     branches: [main]
     paths:
-      - 'web/**'
-      - 'docs/**'
-      - 'mkdocs.yml'
-      - '.github/workflows/pages.yml'
+    - web/**
+    - docs/**
+    - mkdocs.yml
+    - .github/workflows/pages.yml
+    # scripts/install.sh is served at objectfs.io/install.sh, so a change to it has to redeploy.
+    # Without this line the site keeps serving whatever copy was current at the last docs change,
+    # and the drift is invisible: the repository's copy is right, the one users pipe into bash is
+    # not, and nothing compares them.
+    - scripts/install.sh
   workflow_dispatch:
 
 permissions:
@@ -63,8 +76,22 @@ jobs:
         mkdir -p _site
         cp -R web/. _site/
         mkdocs build --strict --site-dir _site/docs
+        # The installer, at the root, so `curl -fsSL https://objectfs.io/install.sh | bash` is a real
+        # address rather than the aspiration #138 filed. Copied from scripts/ at build time rather
+        # than committed under web/: two copies of an installer is the failure this is avoiding, not
+        # a convenience. A gate in internal/config asserts this step exists, because the way this
+        # breaks is silently — the site keeps serving the last copy and nothing compares them.
+        cp scripts/install.sh _site/install.sh
+        chmod 0644 _site/install.sh
+
         test -f _site/index.html   || { echo "::error::no landing page at the site root"; exit 1; }
         test -f _site/docs/index.html || { echo "::error::no docs index under /docs/"; exit 1; }
+        # Byte-identical, not merely present. A `cp` that silently copied the wrong path, or a future
+        # step that rewrites the served copy, produces an installer that differs from the reviewed
+        # one — which is the worst version of this feature, since the reviewed copy is the one every
+        # gate in internal/config checks.
+        cmp scripts/install.sh _site/install.sh \
+          || { echo "::error::_site/install.sh differs from scripts/install.sh"; exit 1; }
         # Without this file a deploy clears the custom domain configured on the repository, and
         # objectfs.io stops answering with no commit that looks responsible.
         grep -qx 'objectfs.io' _site/CNAME \
