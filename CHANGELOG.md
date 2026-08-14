@@ -114,6 +114,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints `Importing GPG key ...` on a perfectly good refresh, which the first grep accepted as
   evidence of a rejection.
 
+  Two further defects came out of running that job rather than reading it, and both are the same
+  shape — a mechanism that applies somewhere other than where it appears to. `$GITHUB_ENV` takes
+  effect in *subsequent* steps, so the step that wrote the signing variables there and then ran `make
+  package-linux` ran it with both unset; nfpm treats an unset `key_file` as "do not sign" rather than
+  as an error, so the build succeeded and produced an unsigned rpm — this job's own subject matter.
+  And the extractor that lifts `pages.yml`'s repository step took the `run:` body without the `env:`
+  block around it, leaving `REPO_KEEP` unbound under `set -u`; it now carries every plain literal from
+  that block and fails if it carries none, and the step checks that everything the extracted script
+  reads is exported before running it. Both are gated, the second by a check against the environment
+  the script will actually run in rather than against its text.
+
+  A third was caused by documenting the second: workflow expressions are interpolated inside what a
+  shell would read as a comment, because the substitution happens before any shell exists, so a
+  comment naming `secrets.*` failed the whole file at parse time. That failure has no local symptom —
+  `check-yaml` and `shellcheck` both pass — and almost no remote one, since no job starts and the run
+  reports only "likely failed because of a workflow file issue". `TestWorkflowExpressionsAreValid` now
+  requires that anything in braces, anywhere in any workflow, looks like an expression.
+
 - **objectfs.io is served**, by a new `pages.yml` workflow that publishes a landing page from `web/`
   at the root and the MkDocs tree beneath it at `/docs/`. GitHub Pages was off on this repository for
   its whole history — which is why `release.yml`'s deleted `update-docs` job could only ever have
