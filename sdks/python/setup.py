@@ -92,7 +92,18 @@ setup(
     project_urls={
         'Bug Reports': 'https://github.com/scttfrdmn/objectfs/issues',
         'Source': 'https://github.com/scttfrdmn/objectfs',
-        'Documentation': 'https://docs.objectfs.io/python',
+        # This said `https://docs.objectfs.io/python`, which has never served anything and now cannot:
+        # Porkbun answers a wildcard for objectfs.io, so the subdomain resolves like every other name
+        # under the domain and completes no TLS handshake. The documentation is published at
+        # objectfs.io/docs/, and there is no /python page in that tree, so this points at the SDK's own
+        # README — the file `long_description` above is already built from, and the only Python
+        # documentation that exists.
+        #
+        # `docs.` is not a name to reinstate later without checking. Five subdomains of objectfs.io
+        # appear across this repository's history and exactly one, the apex, has ever answered;
+        # `get.objectfs.io` was the first command in the getting-started guide for a year on the
+        # strength of resolving.
+        'Documentation': 'https://github.com/scttfrdmn/objectfs/blob/main/sdks/python/README.md',
     },
     keywords='filesystem, object-storage, s3, fuse, distributed, cache, performance',
     zip_safe=False,

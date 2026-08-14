@@ -1206,8 +1206,14 @@ jobs:
         prep=""
         [ -n "$INSTALL" ] && prep="$INSTALL >/dev/null 2>&1;"
 
+        # `|| true` for the same reason the refusal branch above has it, and its absence here cost a
+        # diagnosis. When the install failed, `--version` exited 127, `set -e` killed the step at the
+        # assignment, and `echo "$out"` never ran — so the log held bash's "No such file or directory"
+        # and not one of the three messages below, all of which were unreachable on exactly the runs
+        # they were written for. A job whose assertions can only be read when they pass is reporting
+        # the same non-answer this job exists to reject.
         out=$(docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
-          bash -c "$prep /install.sh --prefix /opt/ofs 2>&1; echo \"EXIT=\$?\"; /opt/ofs/bin/objectfs --version")
+          bash -c "$prep /install.sh --prefix /opt/ofs 2>&1; echo \"EXIT=\$?\"; /opt/ofs/bin/objectfs --version" || true)
         echo "$out"
 
         grep -q "EXIT=0" <<<"$out" || {

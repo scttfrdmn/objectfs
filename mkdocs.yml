@@ -119,6 +119,15 @@ markdown_extensions:
   - pymdownx.tilde
 
 extra:
+  # The header logo and title link here instead of to docs/index.md, which is what makes the site
+  # navigable in the direction it otherwise was not. This tree is published at objectfs.io/docs/, and
+  # every page it built linked *inward* — its own nav, its own anchors — with nothing anywhere pointing
+  # back to the site it is a subdirectory of. A reader who arrived from a search result was in a
+  # documentation tree with no exit to the project's front page, which is the same missing-edge defect
+  # as the landing page not linking to /docs/, seen from the other side. Both are invisible to a link
+  # checker, since a traversal only ever reports the links that exist.
+  homepage: https://objectfs.io/
+
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/scttfrdmn/objectfs

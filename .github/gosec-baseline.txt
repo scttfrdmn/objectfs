@@ -1,0 +1,38 @@
+# The gosec findings that already exist, so that a new one can be told apart from them.
+#
+# Read by .github/scripts/gosec-gate.sh, which is the step that makes `Security Scan` fail. Before
+# that step existed, gosec ran with `-no-fail` and the job passed on any number of findings; the only
+# thing that went red was the code-scanning check derived from the SARIF upload, which is a different
+# check with a different name and does not report on `push: main` at all. So #414 added a G115
+# integer conversion, gosec reported "1 new alert", and the PR stayed mergeable — the finding was
+# caught by someone reading the checks by hand.
+#
+# One line per (rule, file, count). Not per line number: a line number moves whenever anything above
+# it moves, so a line-keyed baseline goes stale on unrelated edits and the failure it reports is
+# always about the wrong thing. Keyed this way, an unrelated refactor inside one of these files is
+# silent and a *second* conversion added to it is not.
+#
+# The ratchet is exact in both directions. Fixing one of these fails the gate too, with a message
+# naming the new count — a baseline that keeps a slot after the finding in it was fixed hands that
+# file permanent headroom, which is the same hole as a coverage floor that only ever moves down.
+#
+# Every path here must exist; internal/config/gosec_gate_test.go checks that, so an entry left behind
+# by a deleted or renamed file cannot sit here granting slack to nothing.
+#
+# All twelve are G115, integer conversion overflow, and all are `error` level — which is why this is a
+# baseline and not a severity threshold. There is no level to gate on that separates them from a new
+# finding, because gosec reports every G115 identically.
+#
+# sdks/c/main.go's three arrive with no path of their own: gosec analyses the cgo-generated
+# intermediate and emits an empty artifactLocation, which the "Fix Gosec SARIF format" step in
+# security.yml back-fills. See the long comment there for why that back-fill is sound. The gate reads
+# the SARIF *after* that step, so these are keyed by the real path like everything else.
+
+G115 internal/archive/index.go 1
+G115 internal/cache/predictive.go 1
+G115 internal/difftest/program.go 1
+G115 internal/health/remediation.go 2
+G115 internal/storage/s3/backend.go 1
+G115 internal/storage/s3/multipart_upload.go 2
+G115 pkg/recovery/connection.go 1
+G115 sdks/c/main.go 3

@@ -3,10 +3,13 @@
 #
 # This is part (b) of #138, and it is deliberately not the script that issue specifies. #138's
 # install.sh detects the package manager and adds an apt or yum repository at
-# packages.objectfs.io — a host that does not exist. Both objectfs.io and packages.objectfs.io
-# resolve to registrar parking IPs and neither completes a TLS handshake, so a script written to
-# that spec could not be tested, could not be run, and would fail at its first curl with a TLS
-# error naming a domain the reader has no way to interpret.
+# packages.objectfs.io — a host that does not exist. A script written to that spec could not be
+# tested, could not be run, and would fail at its first curl with a TLS error naming a domain the
+# reader has no way to interpret.
+#
+# objectfs.io itself now serves the landing page and the documentation at /docs/, but that changes
+# nothing here: Porkbun answers a wildcard, so packages.objectfs.io resolves exactly like every other
+# name under the domain and still completes no TLS handshake. Resolution was never the evidence.
 #
 # What GitHub already hosts is a tarball per platform and a SHA-256 beside it. That needs no
 # hosting decision, so it is what this installs. When a package repository exists, this script

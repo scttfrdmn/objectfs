@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A new gosec finding now blocks a merge** (#415). It did not before, and the reason is worth
+  stating precisely because everything about it looked correct: `Security Scan` runs
+  `gosec -no-fail`, so the job passed on any number of findings, and the check that *did* go red was
+  `gosec` — the code-scanning check derived from the SARIF upload, a different check with a different
+  name. That one reports on pull requests and not on `push: main`, so it could never join the required
+  contexts: a required check that does not always report blocks every PR forever. The upshot was that
+  #414 added a `uint64 → int64` conversion, gosec reported "1 new alert", and the PR stayed mergeable.
+  It was caught by someone reading the checks by hand.
+
+  `-no-fail` stays, because the upload needs the complete report — including the three `sdks/c`
+  findings the SARIF format fix back-fills a path onto, which reach no other tool. The gate is instead
+  a new final step running `.github/scripts/gosec-gate.sh`, which diffs the report against
+  `.github/gosec-baseline.txt`. `Security Scan` is a job name, so it reports on every trigger, which
+  is what lets it be required.
+
+  The baseline is the twelve pre-existing G115 integer conversions across eight files, keyed by
+  `(rule, file, count)` — not by line number, which moves whenever anything above it moves. A
+  severity threshold was not an option: all twelve are `error` level, identical to what a new finding
+  would report, so there is nothing to threshold on. The ratchet is exact in both directions, so
+  *fixing* one of these also fails until its line goes with it; a slot kept after its finding was
+  fixed is permanent headroom for the next conversion in that file.
+
 - **`toolchain` bumped to go1.26.6**, clearing seven standard-library advisories `govulncheck` began
   reporting the moment that patch release shipped: quadratic complexity in `net/url`'s `resolvePath`,
   JavaScript regexp context tracking in `html/template`, a post-handshake message limit in
@@ -49,7 +71,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different numbers), no subdomain other than the apex may be linked, every local reference must
   resolve inside `web/` — which is all the deploy copies — and `web/CNAME` must name the domain,
   since a deploy without that file silently clears the custom domain and takes the site down with no
-  commit that looks responsible. All six mutations of those properties fail the intended test.
+  commit that looks responsible. All eight mutations of those properties fail the intended test.
+
+  One gate exists because the first deploy shipped the defect it now catches: `pages.yml` built the
+  MkDocs tree, `mkdocs.yml` declared its URL, every page under `/docs/` returned 200 — and **the
+  landing page linked none of it**, sending a reader to GitHub's rendered README from both its nav and
+  its footer. Nothing else could have noticed. The asset check skips `docs/` because no such directory
+  exists in `web/`, the workflow asserts `_site/docs/index.html` exists rather than that anything
+  points at it, and a link checker over the built site would have reported zero broken links: the
+  failure was an *absent* link, which is invisible to every check that starts from the links present.
+
+  The same edge was missing in the other direction and is fixed with it. Every page mkdocs built linked
+  only inward — its own nav, its own anchors — because Material points the header logo and title at the
+  docs index, which is a link to the page the reader is already on. So a reader arriving from a search
+  result was inside a documentation subdirectory with no exit to the project's front page.
+  `extra.homepage` now names the apex, and that is gated too, because removing the key breaks nothing
+  any other check can see: `mkdocs build --strict` still succeeds, the tree is still complete, every
+  internal link still resolves, and the only difference is that the one edge out is gone. The check
+  matches the whole line rather than a substring — a first version used `strings.Contains`, which
+  `homepage: https://objectfs.io/docs/` satisfies while restoring the defect precisely, and the comment
+  claiming that trap was covered sat directly above the code that did not cover it. Mutation is what
+  found that; the three mutants now fail.
 
   **Only the apex is served, and resolution is not evidence of that.** Porkbun answers a wildcard, so
   every name under `objectfs.io` resolves to the same record — `get.`, `packages.`, `docs.`,
@@ -506,6 +548,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproduce, since it usually contains a letter.
 
 ### Fixed
+
+- **The Python SDK's published `Documentation` link pointed at a domain that has never served
+  anything.** `sdks/python/setup.py` named `https://docs.objectfs.io/python`, one of five
+  `objectfs.io` subdomains in this repository's history, of which exactly one — the apex — has ever
+  answered. They all *resolve*, because Porkbun serves a wildcard, which is why resolution was never
+  evidence and is how `get.objectfs.io` came to be the first command in the getting-started guide for a
+  year.
+
+  A manifest URL is the worst place for that failure, worse than a page: `project_urls` becomes the
+  Documentation link on the PyPI project page, so a reader who clicks it has left the repository and
+  nothing they see afterwards can tell them the destination was not real. It now points at
+  `sdks/python/README.md`, which is the only Python documentation that exists — and which a test can
+  check resolves, unlike a docs-site URL, so swapping a dead domain for a fresh 404 fails too.
+
+  Gated by `TestSDKManifestsNameNoUnservedDomain` over all three published manifests — Python,
+  JavaScript, Java — which is the check `web/index.html` already had and the shipped package metadata
+  did not.
+
+- **`AccelerationStats` reported a state it had just changed.** Reading the acceleration gate is what
+  *advances* it — `circuit.CircuitBreaker.GetState` performs the open→half-open transition when the
+  backoff has expired, and that transition calls `EnableAcceleration` through `OnStateChange`. Because
+  Go evaluates struct literal fields in source order, `Active` was sampled before that read, so one call
+  could return `active 0` beside `gate_state HALF_OPEN`: a mount described as still in fallback by the
+  same call that had, a line later, taken it out of fallback. On the metrics surface that is a scrape
+  interval of a gauge contradicting the state next to it, on the one family whose entire purpose is to
+  answer whether this mount is accelerating.
+
+  The gate is now read before `Active`, which cannot tear in the opposite direction — `Active` only goes
+  false through `DisableAcceleration`, which runs on a failed request and never on a read of the state,
+  so the worst case becomes "acceleration was withdrawn just after this sample", which is a true
+  statement about a point-in-time gauge rather than a false one.
+
+  This surfaced as a CI failure in `TestTheAccelerateEndpointComesBackWithinTheBackoff`, and the test
+  had a matching defect: it polled `Active` and then asserted the gate was `CLOSED` with a non-zero
+  request count. `Active` goes true on the transition that *opens the probe slot*, before any probe has
+  run, so at that instant both assertions are false by construction. It passed locally only because the
+  stale `Active` bought the loop one extra iteration in which the probe went out — a test kept green by
+  the bug it was sitting next to. It now polls the terminal state, the gate closing, and checks `Active`
+  agrees. Both fixes are mutation-verified, and there is a new regression test asserting the two fields
+  agree *within a single call* rather than asserting a particular value, since `HALF_OPEN` and `CLOSED`
+  both mean acceleration is in effect.
 
 - **A node never recorded its own cache figures in its membership map** ([#147]). `refreshLocalStats`
   reached only the struct the gossip alive-message is built from, so a node published its cache size
