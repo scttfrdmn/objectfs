@@ -549,6 +549,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Python SDK's published `Documentation` link pointed at a domain that has never served
+  anything.** `sdks/python/setup.py` named `https://docs.objectfs.io/python`, one of five
+  `objectfs.io` subdomains in this repository's history, of which exactly one — the apex — has ever
+  answered. They all *resolve*, because Porkbun serves a wildcard, which is why resolution was never
+  evidence and is how `get.objectfs.io` came to be the first command in the getting-started guide for a
+  year.
+
+  A manifest URL is the worst place for that failure, worse than a page: `project_urls` becomes the
+  Documentation link on the PyPI project page, so a reader who clicks it has left the repository and
+  nothing they see afterwards can tell them the destination was not real. It now points at
+  `sdks/python/README.md`, which is the only Python documentation that exists — and which a test can
+  check resolves, unlike a docs-site URL, so swapping a dead domain for a fresh 404 fails too.
+
+  Gated by `TestSDKManifestsNameNoUnservedDomain` over all three published manifests — Python,
+  JavaScript, Java — which is the check `web/index.html` already had and the shipped package metadata
+  did not.
+
 - **`AccelerationStats` reported a state it had just changed.** Reading the acceleration gate is what
   *advances* it — `circuit.CircuitBreaker.GetState` performs the open→half-open transition when the
   backoff has expired, and that transition calls `EnableAcceleration` through `OnStateChange`. Because
