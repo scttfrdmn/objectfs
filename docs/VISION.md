@@ -5,7 +5,7 @@
 **ObjectFS presents S3-compatible object storage behind a high-performance POSIX interface, optimized for research computing and data-intensive applications.**
 
 This is a vision document: it describes what ObjectFS is *for*, not what it currently does. Where the
-two differ, the [README's supported-operations table](../README.md#supported-operations) is the
+two differ, the [README's supported-operations table](https://github.com/scttfrdmn/objectfs/blob/main/README.md#supported-filesystem-operations) is the
 authority — and it is the authority for the count as well as the list. "POSIX-compliant" appeared
 three times below and is gone from all three, but the sentence that replaced it went on to state a
 fraction of the VFS surface as a number, which went stale the moment `unlink`, `rmdir`, and `rename`
@@ -133,7 +133,7 @@ holds no certification under any of the three, adds no authorization layer of it
 audit log. The heading says these are aspirations, and that is a real defence — but a procurement
 reviewer scanning bullets does not read headings, and the same claim was removed from the
 documentation platform's landing page in v0.10.1 for that reason. What ObjectFS can honestly say
-about controls is in [SECURITY.md](../SECURITY.md): the trust boundary is the mounting host, access
+about controls is in [SECURITY.md](https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md): the trust boundary is the mounting host, access
 control is IAM's, and server-side encryption is SSE-S3 or SSE-KMS.
 
 **Target**: 100+ research institutions deploying ObjectFS

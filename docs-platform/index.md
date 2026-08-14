@@ -51,14 +51,20 @@ features:
 Get ObjectFS running in minutes:
 
 ```bash
-# Build from source. There is no install script: get.objectfs.io is not a domain
-# this project serves, and no release workflow publishes a binary yet.
+# Install the release binary, verifying its published SHA-256, into ~/.local/bin.
+# get.objectfs.io has never served anything and this is not it — the script is
+# fetched from the repository. objectfs.io serves the landing page and the docs
+# at /docs/; no other name under the domain is served, wildcard DNS regardless.
+curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh | bash
+
+# or from source
 git clone https://github.com/scttfrdmn/objectfs.git
 cd objectfs && make build
 
 # Mount your first filesystem: two positional arguments, no subcommand.
 # It runs in the foreground, so background it or use a second shell.
-./objectfs s3://my-bucket /mnt/data &
+# From a source build the binary is ./bin/objectfs, not ./objectfs.
+objectfs s3://my-bucket /mnt/data &
 
 # Use it like any local directory — within the limits of the
 # supported-operations table in the README

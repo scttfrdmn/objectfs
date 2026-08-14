@@ -26,14 +26,14 @@ It is **not POSIX-compliant**, and the gap is structural rather than incidental.
 hard links, no partial object write, and no atomicity across objects, so a subset of the POSIX
 surface cannot be implemented on top of it honestly at all. Where that is the case ObjectFS returns
 an error rather than pretending — the
-[supported-operations table](../../README.md#supported-filesystem-operations) is the contract, and it
+[supported-operations table](https://github.com/scttfrdmn/objectfs/blob/main/README.md#supported-filesystem-operations) is the contract, and it
 is derived from the code.
 
 ### Design goals, in priority order
 
 1. **Integrity** — either do the right thing or fail loudly. Every object ObjectFS writes records a
    SHA-256 that the read path verifies; `close(2)` returns the PUT's error rather than logging it.
-   See [Data integrity](../../README.md#data-integrity).
+   See [Data integrity](https://github.com/scttfrdmn/objectfs/blob/main/README.md#data-integrity).
 2. **Performance** — a close second, and the reason for the range-aware cache, the concurrent range
    GETs, and the multipart upload path.
 3. **Cost transparency** — storage stays as ordinary S3 objects at S3 pricing, with no provisioned
@@ -157,7 +157,7 @@ interface that applications interact with.
   WinFsp binding. The `cgofuse` build tag that once claimed it never compiled and has been removed
 
 **Supported operations:** the authoritative list is the
-[supported-operations table in the README](../../README.md#supported-filesystem-operations), derived
+[supported-operations table in the README](https://github.com/scttfrdmn/objectfs/blob/main/README.md#supported-filesystem-operations), derived
 from the methods that exist in `internal/fuse` and `internal/vfs`.
 
 Summarised: read, write at any offset, truncate, flush/fsync, stat, create, mkdir, paginated readdir,
@@ -529,7 +529,7 @@ A table here previously compared ObjectFS's throughput and latency against FSx, 
 and EFS, and claimed POSIX compliance for all four. The ObjectFS column was unmeasured, the
 competitors' columns were not sourced, and the POSIX row was wrong for the one entry it could be
 checked against — see the [supported-operations
-table](../../README.md#supported-filesystem-operations). It has been removed rather than corrected,
+table](https://github.com/scttfrdmn/objectfs/blob/main/README.md#supported-filesystem-operations). It has been removed rather than corrected,
 because a benchmark of four systems is a piece of work, not a paragraph.
 
 The one comparison that holds without measurement is the cost model, and it is a difference in kind

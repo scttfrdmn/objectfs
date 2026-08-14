@@ -33,12 +33,15 @@ env:
 #     green check said a release had reached Homebrew, APT, and RPM. When any of those is real it needs
 #     a job that actually pushes to a tap or a repository; until then, no job is more honest than one
 #     that reports success for work it does not do.
-#   - `update-docs` deployed a generated site to GitHub Pages. **Pages is not enabled on this
-#     repository** (`has_pages: false`), so `actions/deploy-pages` could only ever fail — and its
-#     generator wrote `README.md`/`CHANGELOG.md` while the index it wrote alongside them linked
-#     `README.html`/`CHANGELOG.html`, i.e. every link on the page was broken by construction. There is
-#     an `mkdocs.yml` in the repo; publishing docs means using it, from its own workflow, after Pages
-#     is turned on.
+#   - `update-docs` deployed a generated site to GitHub Pages. Pages was **not** enabled on this
+#     repository for the whole time that job existed (`has_pages: false`), so `actions/deploy-pages`
+#     could only ever fail — and its generator wrote `README.md`/`CHANGELOG.md` while the index it
+#     wrote alongside them linked `README.html`/`CHANGELOG.html`, i.e. every link on the page was
+#     broken by construction. Pages is on now and `pages.yml` publishes `objectfs.io` from
+#     `mkdocs.yml` plus `web/`, which is the shape the last sentence of this note asked for: its own
+#     workflow, triggered by the content it publishes rather than by a tag. Docs that only update on
+#     a release are stale for the length of a release cycle, and a docs fix would have to wait for
+#     one.
 #   - `notify` posted to Slack behind `if: env.SLACK_WEBHOOK_URL != ''` and then wrote a summary
 #     asserting five tasks complete — including "Performed security scans" and "Updated documentation"
 #     — as unconditional text, regardless of what ran. `publish` now summarizes what it actually
@@ -160,10 +163,11 @@ jobs:
   # defect as scripts/preremove.sh before #207: working code with nothing invoking it.
   #
   # This is the half of #138 that needs no hosting decision. That issue asks for apt and yum repository
-  # setup scripts pointing at `packages.objectfs.io`, which does not exist — it and `objectfs.io` both
-  # resolve to registrar parking IPs that do not complete a TLS handshake. `dpkg -i` and `rpm -i`
-  # against a downloaded asset need no repository at all, and they are what an operator can actually do
-  # today.
+  # setup scripts pointing at `packages.objectfs.io`, which does not exist: Porkbun answers a wildcard,
+  # so that name resolves exactly like every other name under the domain and completes no TLS
+  # handshake. (`objectfs.io` itself is now served — `pages.yml` publishes it — but only the apex is,
+  # and the wildcard is why resolution is not the way to tell.) `dpkg -i` and `rpm -i` against a
+  # downloaded asset need no repository at all, and they are what an operator can actually do today.
   #
   # A separate job rather than a step in `build`: package building is amd64+arm64 in one invocation, so
   # it does not fit a five-cell matrix that includes armv7 and two darwin targets, and nfpm has no

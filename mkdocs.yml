@@ -1,9 +1,9 @@
 site_name: ObjectFS Documentation
-# No site is published. objectfs.io is a parked registrar page, there is no Pages deploy workflow
-# for either documentation tree, and this value only affects canonical links and the sitemap in a
-# built site — so it named a domain this project does not serve. Pointed at the repository, which
-# is where the documentation actually is. Change it when a site is deployed, not before.
-site_url: https://github.com/scttfrdmn/objectfs
+# This is served at objectfs.io/docs/ by .github/workflows/pages.yml, which publishes web/ as the
+# landing page and this tree beneath /docs/. The value affects canonical links and the sitemap, so
+# it must match where the site actually answers — it pointed at the repository for as long as
+# nothing deployed, which was the honest answer then and is the wrong one now.
+site_url: https://objectfs.io/docs/
 site_description: High-performance FUSE filesystem for S3-compatible object storage
 site_author: ObjectFS Team
 
@@ -13,9 +13,15 @@ edit_uri: edit/main/docs/
 
 copyright: Copyright &copy; 2025-2026 ObjectFS
 
-# Custom domain configuration for GitHub Pages
 docs_dir: docs
 site_dir: site
+
+# README.md is build instructions addressed to a contributor reading the repository, not a page.
+# mkdocs would otherwise serve it at /README/ as a page about itself, and warns that it conflicts
+# with index.md — which `--strict` turns into a failed build. Excluding it states the intent that
+# docsExemptFromNav in internal/config/docs_links_test.go already records.
+exclude_docs: |
+  README.md
 
 theme:
   name: material

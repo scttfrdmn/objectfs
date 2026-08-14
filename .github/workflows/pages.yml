@@ -1,0 +1,91 @@
+name: Pages
+
+# Publishes objectfs.io: the landing page in web/ at the root, and the MkDocs tree at /docs/.
+#
+# Pages was off on this repository for its whole history, which is why release.yml's `update-docs`
+# job — `actions/deploy-pages` against a generated site — could only ever have failed. It is on now
+# (`build_type: workflow`), objectfs.io's Porkbun records point at GitHub's Pages IPs, and the
+# custom domain is set on the repository. web/CNAME carries it into the artifact so a deploy cannot
+# silently reset it, which is what happens when the file is absent.
+#
+# Two deliberate choices:
+#
+#   - **`mkdocs build --strict`.** Non-strict, this build emitted 8 warnings and produced a site
+#     anyway: seven links from inside docs/ up to the repo-root README.md and SECURITY.md, correct
+#     on GitHub and dead in any built site, plus an index conflict. Two of the seven also used
+#     `#supported-operations` where the heading is `## Supported filesystem operations`, so they
+#     were broken on GitHub too. Nothing had ever built this tree, which is exactly why they
+#     survived — the same lesson as the docs-site job in ci.yml. Strict is the setting that keeps
+#     the next one from surviving.
+#
+#   - **docs-platform/ is not published.** ci.yml already gates `vitepress build` on it, and there
+#     is one documentation site here, not two. Publishing both would mean two pages answering the
+#     same question with no rule for which is current — and the getting-started page there is the
+#     one that accumulated four install channels that did not exist. It stays a gated tree read on
+#     GitHub until someone decides it replaces the MkDocs site rather than shadowing it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.13'
+
+    - name: Install MkDocs
+      run: pip install mkdocs-material mkdocs-minify-plugin mike
+
+    # web/ is the landing page and owns the root, including CNAME. The docs tree goes beneath it at
+    # /docs/, which is the site_url mkdocs.yml declares — a mismatch there produces canonical links
+    # and a sitemap pointing somewhere the site does not answer.
+    - name: Assemble the site
+      run: |
+        mkdir -p _site
+        cp -R web/. _site/
+        mkdocs build --strict --site-dir _site/docs
+        test -f _site/index.html   || { echo "::error::no landing page at the site root"; exit 1; }
+        test -f _site/docs/index.html || { echo "::error::no docs index under /docs/"; exit 1; }
+        # Without this file a deploy clears the custom domain configured on the repository, and
+        # objectfs.io stops answering with no commit that looks responsible.
+        grep -qx 'objectfs.io' _site/CNAME \
+          || { echo "::error::_site/CNAME does not name objectfs.io; a deploy would drop the custom domain"; exit 1; }
+
+    - uses: actions/configure-pages@v6
+
+    - uses: actions/upload-pages-artifact@v5
+      with:
+        path: _site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - id: deployment
+      uses: actions/deploy-pages@v5

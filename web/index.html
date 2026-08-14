@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ObjectFS — Mount an S3 bucket as a filesystem</title>
+  <meta name="description" content="A FUSE filesystem presenting a POSIX interface over AWS S3, for research computing. Every object carries a SHA-256; close(2) returns the error. Not POSIX-compliant, and it says which parts it does not implement.">
+  <meta property="og:title" content="ObjectFS — Mount an S3 bucket as a filesystem">
+  <meta property="og:description" content="A FUSE filesystem over AWS S3 for research computing. Integrity first: every object carries a SHA-256, and close(2) returns the error.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://objectfs.io/">
+  <script>(function(){var t=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}());</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400;1,700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+</head>
+<body>
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <nav class="nav" role="navigation" aria-label="Main navigation">
+    <div class="nav-container">
+      <a href="/" class="nav-brand" aria-label="ObjectFS home">
+        <svg class="nav-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <defs>
+            <linearGradient id="m" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#fb923c"/>
+              <stop offset="100%" stop-color="#c2410c"/>
+            </linearGradient>
+          </defs>
+          <path d="M4 9.5 16 3.5l12 6v13L16 28.5 4 22.5z" fill="none" stroke="url(#m)" stroke-width="2.2" stroke-linejoin="round"/>
+          <path d="M4 9.5 16 15.5l12-6M16 15.5v13" fill="none" stroke="url(#m)" stroke-width="2.2" stroke-linejoin="round" opacity="0.55"/>
+        </svg>
+        <span class="nav-wordmark">object<span class="accent">fs</span></span>
+      </a>
+      <button class="hamburger" id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="nav-links" id="nav-links">
+        <a href="#what">What it does</a>
+        <a href="#limits">What it doesn't</a>
+        <a href="#install">Install</a>
+        <a href="#integrity">Integrity</a>
+        <a href="https://github.com/scttfrdmn/objectfs" target="_blank" rel="noopener" aria-label="GitHub (opens in new tab)">GitHub</a>
+        <button class="btn-theme" id="theme-toggle" aria-label="Toggle colour theme">🌙</button>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main-content">
+
+    <!-- ── Hero ── -->
+    <div class="hero">
+      <span class="hero-eyebrow">Open Source · Apache 2.0</span>
+      <h1>Mount an S3 bucket.<br>Get a filesystem that <span class="accent">tells you the truth</span>.</h1>
+      <p class="hero-sub">
+        ObjectFS presents a POSIX interface over AWS S3 for research computing. Every object it writes
+        carries a SHA-256. A failed upload fails <code>close(2)</code>. The operations it cannot
+        implement return an error instead of pretending.
+      </p>
+      <div class="hero-props">
+        <span>SHA-256 on every write</span>
+        <span>Errors reach close(2)</span>
+        <span>Read-modify-write flush</span>
+        <span>Multi-tier cache</span>
+        <span>Linux &amp; macOS</span>
+      </div>
+      <div class="hero-buttons">
+        <a href="#install" class="btn btn-primary">Install</a>
+        <a href="https://github.com/scttfrdmn/objectfs#supported-filesystem-operations" target="_blank" rel="noopener" class="btn btn-secondary">Read the contract</a>
+      </div>
+      <p class="hero-trust">Runs with your AWS credentials · Not a POSIX-compliant filesystem, deliberately</p>
+
+      <div class="terminal" role="img" aria-label="Terminal session mounting a bucket and writing a file">
+        <div class="terminal-bar" aria-hidden="true">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">two positional arguments — bucket URI, mount point</span>
+        </div>
+        <div class="terminal-body">
+<pre><span class="t-prompt">$</span> <span class="t-cmd">objectfs</span> <span class="t-flag">--cache-size</span> <span class="t-cmd">8GB</span> <span class="t-cmd">s3://lab-genomics /mnt/data</span>
+<span class="t-out">mounted s3://lab-genomics at /mnt/data</span>
+
+<span class="t-comment"># ordinary tools, no SDK</span>
+<span class="t-prompt">$</span> <span class="t-cmd">cp results.bam /mnt/data/run-42/</span>
+<span class="t-prompt">$</span> <span class="t-cmd">samtools view /mnt/data/run-42/results.bam | head</span>
+
+<span class="t-comment"># a failed PUT fails the syscall — it is not logged and swallowed</span>
+<span class="t-prompt">$</span> <span class="t-cmd">cp big.tar /mnt/readonly-bucket/</span>
+<span class="t-out">cp: closing '/mnt/readonly-bucket/big.tar': </span><span class="t-warn">Permission denied</span>
+<span class="t-prompt">$</span> <span class="t-cmd">echo $?</span>
+<span class="t-out">1</span>   <span class="t-comment">← the exit status you would get from a local disk</span></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── What it does ── -->
+    <section id="what">
+      <div class="container">
+        <div class="section-header">
+          <h2>What is on the mount path</h2>
+          <p>Everything below is reachable from a running mount. Capabilities that have code but no
+             path from a mount are listed separately in the docs rather than mixed in here.</p>
+        </div>
+
+        <div class="card-grid">
+
+          <div class="card card-amber">
+            <span class="card-tag">Integrity</span>
+            <h3>Verified reads</h3>
+            <p>Every object ObjectFS writes records a SHA-256 of its uncompressed content. A read that
+               returns a complete object verifies that hash and refuses a mismatch.</p>
+            <ul>
+              <li>Catches truncation, bit-rot, a lost <code>Content-Encoding</code></li>
+              <li>Refused with an integrity error, not returned with exit 0</li>
+              <li>Partial reads of large objects are <em>not</em> verified — see below</li>
+            </ul>
+          </div>
+
+          <div class="card card-blue">
+            <span class="card-tag">Write path</span>
+            <h3>Real read-modify-write</h3>
+            <p>Writing at an offset buffers dirty byte ranges, fetches the ranges of the stored object
+               it needs, splices, and PUTs the result — it does not replace the object with the
+               fragment you wrote.</p>
+            <ul>
+              <li>Write at any offset; truncate and extend both work</li>
+              <li><code>close</code>/<code>fsync</code> are synchronous and return errors</li>
+              <li>Growing a file leaves a hole that reads as zeros</li>
+            </ul>
+          </div>
+
+          <div class="card card-green">
+            <span class="card-tag">Performance</span>
+            <h3>Caching and read-ahead</h3>
+            <p>An LRU tier, an optional persistent tier on local disk, and a prefetcher that runs
+               ahead of a sequential reader. A read served from cache makes no S3 request.</p>
+            <ul>
+              <li>Large reads fanned out as concurrent ranged GETs</li>
+              <li>Read-ahead tuned by <code>performance.read_ahead</code></li>
+              <li>Multipart uploads for large files</li>
+            </ul>
+          </div>
+
+          <div class="card card-purple">
+            <span class="card-tag">AWS first</span>
+            <h3>S3 capabilities, probed</h3>
+            <p>AWS S3 is the target, not a lowest common denominator. Capabilities are established by
+               probing the endpoint — never a config flag or a URL heuristic.</p>
+            <ul>
+              <li>Transfer Acceleration falls back silently when absent</li>
+              <li>Conditional writes fail closed rather than drop a precondition</li>
+              <li>MinIO, Ceph RGW and RustFS are best-effort, and say so</li>
+            </ul>
+          </div>
+
+          <div class="card card-teal">
+            <span class="card-tag">Operations</span>
+            <h3>Observable while it runs</h3>
+            <p>A Prometheus <code>/metrics</code> endpoint and a <code>/health</code> endpoint, both
+               served by the mount process, both defaulting to loopback because neither is
+               authenticated.</p>
+            <ul>
+              <li>Billable S3 request counts and dollar figures, counted in the SDK response path</li>
+              <li>One templated systemd unit, <code>objectfs@.service</code></li>
+              <li>Strict config decoding — a typo'd key fails at startup, by name</li>
+            </ul>
+          </div>
+
+          <div class="card card-rose">
+            <span class="card-tag">Storage</span>
+            <h3>Encryption and compression</h3>
+            <p>Server-side encryption on every object, SSE-S3 or SSE-KMS. Transparent compression is
+               available and off by default.</p>
+            <ul>
+              <li>ZSTD, LZ4 and gzip, opt-in per mount</li>
+              <li>Off by default: a compressed object is no longer readable by <code>aws s3 cp</code></li>
+              <li>Storage class per mount via <code>storage_tier</code></li>
+            </ul>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ── What it doesn't do ── -->
+    <section id="limits">
+      <div class="container">
+        <div class="section-header">
+          <h2>What it does not do</h2>
+          <p>S3 is not a disk, and the gap cannot be closed by wishing. These fail, and the failure is
+             the correct answer rather than a missing feature.</p>
+        </div>
+
+        <div class="limits">
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>Atomic rename</div>
+            <div class="limits-why">A rename is a server-side copy then a delete, per object — S3 has no
+              atomic rename to use. A concurrent reader can briefly see both names, and an interruption
+              leaves the data at the old name, the new one, or both, never at neither.
+              <code>RENAME_NOREPLACE</code> and <code>RENAME_EXCHANGE</code> are refused with
+              <code>EINVAL</code> rather than approximated.</div>
+          </div>
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>Cross-host locking</div>
+            <div class="limits-why">Locks are never forwarded to the filesystem, so they are tracked on
+              the mounting host and mean nothing to any other mount of the same bucket. This is why
+              <strong>SQLite and Git-inside-the-mount do not work</strong> across hosts: two nodes will
+              both believe they hold the same exclusive lock, and nothing will say otherwise.</div>
+          </div>
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>Concurrent-writer safety</div>
+            <div class="limits-why">Two nodes writing the same object produce one winner and no error.
+              Nothing detects the conflict today.</div>
+          </div>
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>Hard links, symlinks, devices</div>
+            <div class="limits-why"><code>link</code> has no meaning when a key names exactly one
+              object — it will never be supported. <code>symlink</code>, <code>mknod</code> and
+              <code>fallocate</code> return <code>ENOTSUP</code>.</div>
+          </div>
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>setuid, setgid, sticky bits</div>
+            <div class="limits-why">Access here is decided by the AWS credentials the process holds, not
+              by a mode bit. A stored setuid bit would promise an escalation that cannot happen. For the
+              same reason <code>security.*</code> and <code>system.*</code> xattrs are refused: object
+              metadata is writable by anyone with bucket write access, so an attribute the kernel acts
+              on must not be stored there.</div>
+          </div>
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>Checksums on partial reads</div>
+            <div class="limits-why">The recorded hash covers the whole object, so verifying a 4 KiB read
+              of a 10 GiB object would mean transferring 10 GiB. Objects ObjectFS did not write carry no
+              checksum at all and read unverified — refusing them would make it unable to mount the
+              buckets it exists for.</div>
+          </div>
+          <div class="limits-row">
+            <div class="limits-what"><span class="marker">✕</span>Windows</div>
+            <div class="limits-why">Every file in <code>internal/fuse</code> is
+              <code>//go:build linux || darwin</code>. macOS needs macFUSE.</div>
+          </div>
+        </div>
+
+        <p class="install-note" style="text-align:center; max-width:640px; margin-left:auto; margin-right:auto;">
+          The <a href="https://github.com/scttfrdmn/objectfs#supported-filesystem-operations" target="_blank" rel="noopener">supported-operations
+          table</a> is the contract — derived from the methods that exist, not from intent. Read it
+          before pointing a workload at a mount.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Install ── -->
+    <section id="install">
+      <div class="container">
+        <div class="section-header">
+          <h2>Install</h2>
+          <p>The install script resolves your platform, verifies the SHA-256 published beside the
+             binary, and installs under <code>~/.local/bin</code>.</p>
+        </div>
+
+        <div class="install">
+          <div class="install-tabs" role="tablist" aria-label="Installation method">
+            <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-script" id="btn-script" onclick="showTab('script', event)">Script</button>
+            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-package" id="btn-package" onclick="showTab('package', event)">deb / rpm</button>
+            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-source" id="btn-source" onclick="showTab('source', event)">From source</button>
+          </div>
+
+          <div id="tab-script" class="tab-content active" role="tabpanel" aria-labelledby="btn-script">
+<pre><code>curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh | bash
+
+# elsewhere, or pinned to a release
+curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh \
+  | bash -s -- --prefix /usr/local --version v0.13.0</code></pre>
+          </div>
+
+          <div id="tab-package" class="tab-content" role="tabpanel" aria-labelledby="btn-package">
+<pre><code># Packages are attached to each release from v0.14.0 onward.
+# There is no apt or yum repository to add — install the downloaded file.
+
+apt install ./objectfs_*.deb      # Debian, Ubuntu
+dnf install ./objectfs-*.rpm      # RHEL, Fedora, openSUSE</code></pre>
+          </div>
+
+          <div id="tab-source" class="tab-content" role="tabpanel" aria-labelledby="btn-source">
+<pre><code>git clone https://github.com/scttfrdmn/objectfs.git
+cd objectfs
+make build          # produces ./bin/objectfs
+
+# or, without a checkout
+go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
+
+# macOS needs macFUSE first
+brew install --cask macfuse</code></pre>
+          </div>
+
+          <p class="install-note">
+            The default prefix is <code>~/.local</code> rather than <code>/usr/local</code>
+            deliberately: many of this project's users are on a shared login node with no root, and an
+            installer whose default needs <code>sudo</code> teaches people to run the whole thing under
+            <code>sudo</code> — which writes a root-owned binary and root-owned cache directories into a
+            home their own jobs use.
+          </p>
+          <p class="install-note">
+            <strong>The checksum is always verified and there is no flag to skip it.</strong> Note what
+            that does and does not establish: the <code>.sha256</code> travels the same channel as the
+            tarball, so a mismatch means a corrupted or tampered download — not that the release itself
+            is authentic. That is a signature's job, and this project does not sign releases yet.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Principles ── -->
+    <section id="integrity">
+      <div class="container">
+        <div class="section-header">
+          <h2>How this project decides</h2>
+          <p>Integrity first, performance a close second. When the two conflict, the order is not
+             negotiable.</p>
+        </div>
+
+        <div class="principles-grid">
+          <div class="principle">
+            <h3>An error must reach the caller</h3>
+            <p>A failed PUT fails <code>close(2)</code>. <code>rm</code> on a missing file is
+              <code>ENOENT</code>, not a silent success. go-fuse defaults an unimplemented
+              <code>Unlink</code> to <em>success</em>, which once let <code>rm</code> exit 0 while the
+              object survived — the kind of defect that only surfaces as lost data months later.</p>
+          </div>
+          <div class="principle">
+            <h3>Capabilities are probed, never asked</h3>
+            <p>A store that accepts a header and ignores it looks identical to one that honours it, from
+              every angle except the outcome. So there is no config flag or endpoint heuristic for a
+              backend capability. If a probe cannot get an answer, the capability is absent.</p>
+          </div>
+          <div class="principle">
+            <h3>Performance degrades, correctness refuses</h3>
+            <p>Transfer Acceleration falling back to a plain endpoint is a correct outcome — slower.
+              A dropped write precondition is not: it tells every contender it won. Correctness
+              capabilities fail closed with an operator-facing reason.</p>
+          </div>
+          <div class="principle">
+            <h3>No unmeasured numbers</h3>
+            <p>This site quotes no throughput figures because no benchmark in the repository produced
+              any. A table of five once sat in the docs — 800–1200 MB/s, a 4.6× BBR improvement — and
+              not one was measured. <code>benchmarks/</code> exists; until it is run against a named
+              bucket and object size, the honest answer is silence.</p>
+          </div>
+          <div class="principle">
+            <h3>Tests go through the real seam</h3>
+            <p>A mock on the far side of a seam agrees with its caller by construction, which is how
+              32,680 lines of tests missed roughly 45 defects. The suite now runs the real S3 backend
+              against an in-process endpoint over real HTTP, plus a differential oracle that replays an
+              operation sequence against the local filesystem and demands they agree.</p>
+          </div>
+          <div class="principle">
+            <h3>Documentation is checked, not written</h3>
+            <p>Tests assert that documented config keys exist in the schema, that documented Go symbols
+              exist, and that the docs navigation matches the files on disk. Prose has no way to be told
+              it has gone stale, so the parts that matter are gates instead.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <div>
+        <div class="footer-brand">object<span class="accent">fs</span></div>
+        <div class="footer-tagline">A POSIX interface over AWS S3, for research computing.</div>
+      </div>
+      <nav class="footer-links" aria-label="Footer navigation">
+        <a href="https://github.com/scttfrdmn/objectfs" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/scttfrdmn/objectfs/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/scttfrdmn/objectfs#readme" target="_blank" rel="noopener">Documentation</a>
+        <a href="https://github.com/scttfrdmn/objectfs/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="https://github.com/scttfrdmn/objectfs/discussions" target="_blank" rel="noopener">Discussions</a>
+        <a href="https://github.com/scttfrdmn/objectfs/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a>
+      </nav>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2025-2026 Scott Friedman. Made with care</span>
+      <span><a href="https://github.com/scttfrdmn/objectfs/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0</a></span>
+    </div>
+  </footer>
+
+  <script>
+  // Theme
+  function toggleTheme() {
+    document.documentElement.classList.add('theme-transitioning');
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+    document.getElementById('theme-toggle').textContent = next === 'dark' ? '🌙' : '☀️';
+    setTimeout(() => document.documentElement.classList.remove('theme-transitioning'), 300);
+  }
+  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+  (function() {
+    const t = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
+    document.getElementById('theme-toggle').textContent = t === 'dark' ? '🌙' : '☀️';
+  })();
+
+  // Tabs
+  function showTab(id, e) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
+    document.getElementById('tab-' + id).classList.add('active');
+    e.currentTarget.classList.add('active');
+    e.currentTarget.setAttribute('aria-selected', 'true');
+  }
+
+  // Hamburger
+  const hamburger = document.getElementById('hamburger-btn');
+  const navLinks = document.getElementById('nav-links');
+  hamburger.addEventListener('click', () => {
+    const open = navLinks.classList.toggle('open');
+    hamburger.setAttribute('aria-expanded', open);
+  });
+  </script>
+</body>
+</html>
