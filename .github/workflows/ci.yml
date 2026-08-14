@@ -1399,14 +1399,21 @@ jobs:
         # read by the step's summary -- was unbound, and `set -u` killed the script on its last line
         # after both repositories had built and both signatures had verified.
         #
-        # Only plain literals. The `${{ secrets.* }}` and `${{ github.token }}` entries are supplied
-        # by this job explicitly below, with values a CI harness can have; substituting a template
-        # expression here would write the literal text `${{ secrets.GPG_SIGNING_KEY }}` into a shell
-        # variable, which is worse than leaving it unset because nothing would then fail.
+        # Only plain literals: the secrets.* and github.token entries are supplied by this job
+        # explicitly below, with values a CI harness can have. Substituting a template expression
+        # here would write its literal text into a shell variable, which is worse than leaving it
+        # unset because then nothing would fail.
+        #
+        # The marker is built from its two halves rather than written out, and so is every mention of
+        # it in the comments here. Actions interpolates expressions inside a `run:` block before any
+        # shell sees it, so a literal one in a comment is still evaluated -- and `secrets.*` is not a
+        # valid expression, which fails the whole workflow file at parse time. No job starts, so the
+        # run reports "likely failed because of a workflow file issue" and nothing else.
+        marker = '$' + '{' + '{'
         env = []
         for l in src[start:run]:
             m = re.match(r"^ {8}([A-Z_][A-Z0-9_]*): +(.+)$", l)
-            if m and '${{' not in m.group(2):
+            if m and marker not in m.group(2):
                 env.append(f'export {m.group(1)}={m.group(2)}')
         # A match count of zero means the indent or the quoting moved and this loop found nothing,
         # which is the same outcome as not having it and is invisible here — the failure would land
@@ -1429,7 +1436,7 @@ jobs:
         unset GNUPGHOME
 
         # Every env var the extracted script still *reads* must now be set, one way or the other: the
-        # plain literals by the extractor above, the `${{ }}` ones by this shell. Checked rather than
+        # plain literals by the extractor above, the templated ones by this shell. Checked rather than
         # assumed, because a name added to pages.yml's `env:` and not mirrored here is unbound under
         # `set -u` — which is how this job failed the first time, on the script's last line, after
         # both repositories had built and both signatures had verified.
