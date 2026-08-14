@@ -42,7 +42,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/scttfrdmn/cargoship v0.23.0
-	github.com/scttfrdmn/substrate v0.93.0
+	github.com/scttfrdmn/substrate v0.97.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
