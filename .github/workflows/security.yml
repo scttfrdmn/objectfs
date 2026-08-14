@@ -202,3 +202,24 @@ jobs:
       run: |
         go install github.com/google/go-licenses@latest
         go-licenses check ./cmd/objectfs
+
+    # This is what makes a gosec finding block a merge, and it is a step in this job rather than
+    # gosec's own exit status for two reasons.
+    #
+    # `-no-fail` has to stay. The SARIF upload needs the complete report, including the three sdks/c
+    # findings the format-fix step back-fills a path onto, and dropping the flag would end the job
+    # before either step ran.
+    #
+    # And the job name is the point. The check that used to go red on a gosec finding was `gosec`, the
+    # code-scanning check derived from the upload — a different check from this job, and one that
+    # appears on pull requests and not on `push: main`, measured across four commits. A required
+    # context that does not always report blocks every PR forever (#413), so it could never be
+    # required. `Security Scan` reports on every trigger this workflow has, which is what lets it join
+    # the required list.
+    #
+    # Last in the job, and `if: always()`, so a new integer conversion does not also cost the run its
+    # govulncheck result, its Trivy upload or its license check. Three findings reported together are
+    # one round of work; the same three discovered one per push are three.
+    - name: Gate on new gosec findings
+      if: always()
+      run: .github/scripts/gosec-gate.sh gosec.sarif .github/gosec-baseline.txt
