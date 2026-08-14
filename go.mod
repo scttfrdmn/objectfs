@@ -25,7 +25,7 @@ go 1.26.0
 // The consequence to remember: under `GOTOOLCHAIN=local` there is no longer a safety net. If this
 // line names a version setup-go cannot install, the build fails outright rather than quietly
 // switching to something that works.
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0

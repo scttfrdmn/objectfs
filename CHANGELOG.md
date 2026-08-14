@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`toolchain` bumped to go1.26.6**, clearing seven standard-library advisories `govulncheck` began
+  reporting the moment that patch release shipped: quadratic complexity in `net/url`'s `resolvePath`,
+  JavaScript regexp context tracking in `html/template`, a post-handshake message limit in
+  `crypto/tls`, `ReadHeaderTimeout` on the unencrypted HTTP/2 check in `net/http`, recursion depth
+  guards in `encoding/xml` and `encoding/asn1`, and Punycode label rejection in `golang.org/x/net/idna`.
+  All seven were reachable from this code — the xml one through `CopyObject`, the asn1 one through the
+  predictive cache's `Close`, the idna one through `testaws` and the S3 client — and none was a defect
+  in it.
+
+  This is the procedure the comment above the directive already describes, and it is worth noting what
+  the failure looked like: `Security Scan` went from green to red on **every** branch with no commit
+  touching Go code, because the advisory database learned about a fix before this repository did. A
+  security gate that turns red on its own is working. `govulncheck ./...` reports no vulnerabilities on
+  1.26.6.
+
 ### Added
 
 - **objectfs.io is served**, by a new `pages.yml` workflow that publishes a landing page from `web/`
