@@ -49,7 +49,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different numbers), no subdomain other than the apex may be linked, every local reference must
   resolve inside `web/` — which is all the deploy copies — and `web/CNAME` must name the domain,
   since a deploy without that file silently clears the custom domain and takes the site down with no
-  commit that looks responsible. All six mutations of those properties fail the intended test.
+  commit that looks responsible. All eight mutations of those properties fail the intended test.
+
+  One gate exists because the first deploy shipped the defect it now catches: `pages.yml` built the
+  MkDocs tree, `mkdocs.yml` declared its URL, every page under `/docs/` returned 200 — and **the
+  landing page linked none of it**, sending a reader to GitHub's rendered README from both its nav and
+  its footer. Nothing else could have noticed. The asset check skips `docs/` because no such directory
+  exists in `web/`, the workflow asserts `_site/docs/index.html` exists rather than that anything
+  points at it, and a link checker over the built site would have reported zero broken links: the
+  failure was an *absent* link, which is invisible to every check that starts from the links present.
+
+  The same edge was missing in the other direction and is fixed with it. Every page mkdocs built linked
+  only inward — its own nav, its own anchors — because Material points the header logo and title at the
+  docs index, which is a link to the page the reader is already on. So a reader arriving from a search
+  result was inside a documentation subdirectory with no exit to the project's front page.
+  `extra.homepage` now names the apex, and that is gated too, because removing the key breaks nothing
+  any other check can see: `mkdocs build --strict` still succeeds, the tree is still complete, every
+  internal link still resolves, and the only difference is that the one edge out is gone. The check
+  matches the whole line rather than a substring — a first version used `strings.Contains`, which
+  `homepage: https://objectfs.io/docs/` satisfies while restoring the defect precisely, and the comment
+  claiming that trap was covered sat directly above the code that did not cover it. Mutation is what
+  found that; the three mutants now fail.
 
   **Only the apex is served, and resolution is not evidence of that.** Porkbun answers a wildcard, so
   every name under `objectfs.io` resolves to the same record — `get.`, `packages.`, `docs.`,
