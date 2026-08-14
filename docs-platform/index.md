@@ -52,10 +52,10 @@ Get ObjectFS running in minutes:
 
 ```bash
 # Install the release binary, verifying its published SHA-256, into ~/.local/bin.
-# get.objectfs.io has never served anything and this is not it — the script is
-# fetched from the repository. objectfs.io serves the landing page and the docs
-# at /docs/; no other name under the domain is served, wildcard DNS regardless.
-curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh | bash
+# The apex serves the script itself, copied from scripts/install.sh at deploy time.
+# get.objectfs.io has never served anything and this is still not it: no name under
+# the domain other than the apex is served, wildcard DNS regardless.
+curl -fsSL https://objectfs.io/install.sh | bash
 
 # or from source
 git clone https://github.com/scttfrdmn/objectfs.git

@@ -140,60 +140,114 @@ func TestNoSecondCopyOfTheInstallScript(t *testing.T) {
 	}
 }
 
-// TestDocumentedInstallOneLinersNameAServedAddress couples the docs to what is actually published.
+// TestDocumentedInstallOneLinersNameAServedAddress couples every documented one-liner to what is
+// actually published.
 //
-// Two addresses are legitimate: raw.githubusercontent.com, which works today and needs no site at all,
-// and objectfs.io/install.sh, which works because of the copy step above. Anything else — the
+// Two addresses are legitimate: raw.githubusercontent.com, which works and needs no site at all, and
+// objectfs.io/install.sh, which works because of the copy step above — verified against the deployed
+// site as a 200 of the exact bytes in scripts/install.sh, not assumed. Anything else — the
 // get.objectfs.io that opened the getting-started guide for a year, or the packages.objectfs.io in
 // #138's original spec — resolves, because Porkbun answers a wildcard for the whole domain, and serves
 // nothing. That is why this is a test rather than a review habit: resolution is not evidence, and a
 // dead one-liner looks correct from every angle except running it.
+//
+// Discovered by walking the tree rather than from a list of files, and the first version of this test
+// was the list. It named README.md and web/index.html, passed, and missed three more surfaces
+// documenting the same command — docs/index.md, docs-platform/index.md and
+// docs-platform/guide/getting-started.md. An enumerated list can only ever check the surfaces whoever
+// wrote it already knew about, which is the same shape as a link checker that starts from the links
+// that exist: the sixth copy of a one-liner is invisible to it, and a sixth copy is exactly how four
+// non-existent install channels survived in getting-started.md for a year.
 func TestDocumentedInstallOneLinersNameAServedAddress(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
 
-	// The two files whose install commands a reader copies and pipes into a shell.
-	for _, rel := range []string{"README.md", filepath.Join("web", "index.html")} {
-		//nolint:gosec // A path built from the repository root, in a test.
-		b, err := os.ReadFile(filepath.Join(root, rel))
-		if err != nil {
-			t.Errorf("could not read %s: %v", rel, err)
+	// The addresses that answer. Both are checked as substrings of the fetching line, because the
+	// pinned-release example continues onto a following line and the URL is what identifies it.
+	served := []string{
+		"raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh",
+		"https://objectfs.io/install.sh",
+	}
 
-			continue
+	surfaces := 0
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 
-		found := 0
+		if d.IsDir() {
+			// .git holds every historical version of every file, and node_modules and dist are
+			// generated. A one-liner in any of them is not a surface a reader reads.
+			switch d.Name() {
+			case ".git", "node_modules", "dist", "site", ".venv":
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		// Prose and markup only. The script itself explains at length which addresses do not serve it,
+		// and this test's own error messages name the two that do — both would fail a naive scan, and
+		// neither is a command anybody copies.
+		switch filepath.Ext(path) {
+		case ".md", ".html":
+		default:
+			return nil
+		}
+
+		//nolint:gosec // A path from a WalkDir over the repository root, in a test.
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
 
 		for line := range strings.SplitSeq(string(b), "\n") {
-			if !strings.Contains(line, "install.sh") {
+			// A line that fetches the installer: names it, and names a URL. A sentence mentioning the
+			// script, or a comment about where it is not served from, is prose and not an address.
+			if !strings.Contains(line, "install.sh") || !strings.Contains(line, "http") {
 				continue
 			}
 
-			// Only lines that fetch it. A sentence mentioning the script by name, or a comment about
-			// where it is not served from, is prose and not an address anybody curls.
-			if !strings.Contains(line, "http") {
+			// CHANGELOG.md records what an address used to be, which is the one place a superseded URL
+			// is correct rather than stale — the entry explaining that the raw URL was replaced has to
+			// be able to name what replaced it and what it replaced.
+			if rel == "CHANGELOG.md" {
 				continue
 			}
 
-			found++
+			surfaces++
 
-			switch {
-			case strings.Contains(line, "raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh"):
-			case strings.Contains(line, "https://objectfs.io/install.sh"):
-			default:
-				t.Errorf("%s fetches the installer from an address that is not served:\n  %s\n"+
-					"Two work: raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh, and "+
-					"https://objectfs.io/install.sh because pages.yml copies it to the site root. Every "+
-					"other name under objectfs.io resolves and serves nothing — the wildcard is why a dead "+
-					"one cannot be told from a live one without loading it", rel, strings.TrimSpace(line))
+			if slices.ContainsFunc(served, func(s string) bool { return strings.Contains(line, s) }) {
+				continue
 			}
+
+			t.Errorf("%s fetches the installer from an address that is not served:\n  %s\n"+
+				"Two work: raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/install.sh, and "+
+				"https://objectfs.io/install.sh because pages.yml copies it to the site root. Every "+
+				"other name under objectfs.io resolves and serves nothing — the wildcard is why a dead "+
+				"one cannot be told from a live one without loading it", rel, strings.TrimSpace(line))
 		}
 
-		if found == 0 {
-			t.Errorf("%s has no line that fetches install.sh over http. Both files documented the "+
-				"one-liner when this test was written, so either the install section moved or the "+
-				"documented install path changed, and this check is now asserting nothing", rel)
-		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repository: %v", err)
+	}
+
+	// Five files documented the one-liner when this was written. A floor rather than an exact count,
+	// since a new page documenting the install is a normal thing to add — but zero, or one, means the
+	// walk stopped finding them and the check has gone quiet rather than clean.
+	if surfaces < 5 {
+		t.Fatalf("found %d lines fetching install.sh across the tree, and there were 5 when this test "+
+			"was written (README.md, web/index.html, docs/index.md, docs-platform/index.md, "+
+			"docs-platform/guide/getting-started.md). Either the install documentation moved or the "+
+			"walk has stopped matching, and a check that finds nothing passes", surfaces)
 	}
 }
