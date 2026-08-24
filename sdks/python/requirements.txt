@@ -49,7 +49,7 @@ packaging==26.3
 pluggy==1.6.0
 propcache==0.5.2
 psutil==7.2.2
-Pygments==2.20.0
+Pygments==2.21.0
 pytest==9.1.1
 PyYAML==6.0.3
 requests==2.34.2
