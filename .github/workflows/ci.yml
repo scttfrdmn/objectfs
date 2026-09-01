@@ -464,7 +464,7 @@ jobs:
       #
       # `mvn -B test` rather than `compile`: the tests use MockWebServer, so they need no network
       # beyond Maven's own dependency resolution and no credentials.
-    - uses: actions/setup-java@v5
+    - uses: actions/setup-java@v6
       with:
         distribution: temurin
         java-version: '17'
