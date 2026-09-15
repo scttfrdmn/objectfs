@@ -220,70 +220,41 @@ go install github.com/scttfrdmn/objectfs/cmd/objectfs@latest
 There is no Homebrew tap. This section once listed one, plus an install script at `get.objectfs.io`;
 that domain has never served anything, and the script above is fetched from the repository instead.
 `objectfs.io` serves the landing page, this documentation at
-[objectfs.io/docs/](https://objectfs.io/docs/), the installer, and the two package repositories —
-nothing is published under any other subdomain, which matters because Porkbun answers a wildcard, so
-every name under the domain resolves whether or not anything is behind it.
+[objectfs.io/docs/](https://objectfs.io/docs/), and the installer — nothing is published under any
+other subdomain, which matters because Porkbun answers a wildcard, so every name under the domain
+resolves whether or not anything is behind it.
 
-#### The package repositories
+#### The packages
+
+A `.deb` and a `.rpm`, for `amd64` and `arm64`, are attached to every
+[release](https://github.com/scttfrdmn/objectfs/releases) from v0.14.0 onward:
 
 ```bash
-# Debian, Ubuntu
-curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
-sudo apt update && sudo apt install objectfs
-
-# RHEL, Fedora, Rocky, openSUSE
-curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
-sudo dnf install objectfs        # or: sudo zypper install objectfs
+apt install ./objectfs_*.deb      # Debian, Ubuntu
+dnf install ./objectfs-*.rpm      # RHEL, Fedora, Rocky
+zypper install ./objectfs-*.rpm   # openSUSE
 ```
 
-Each script downloads the signing key, prints its fingerprint, writes one repository entry with
-signature verification on, and does nothing else. Both fail closed: an index that does not verify
-against the key is refused, and there is no option to proceed anyway. `--dry-run` reports what would
-be written without root and without downloading anything.
+**There is no apt or yum repository, so `apt upgrade` and `dnf upgrade` will not reach ObjectFS.**
+Upgrading means downloading the next release's package, the same way installing did.
 
-Two things differ between them and neither is a choice these scripts make:
+That is a deliberate omission rather than unfinished work, and the reason is that a package repository
+cannot be published halfway. `apt update` refuses an unsigned repository and will only accept one
+marked `[trusted=yes]`, which switches authenticity off entirely; `gpgcheck` is on by default on every
+RHEL-family machine. So an unsigned repository is not a lesser version of a signed one — it is a
+repository that nothing can install from. Publishing one means holding a signing key, keeping it out of
+reach, and rotating it on a schedule, indefinitely and for as long as anyone has it configured. A
+stale or lost key is worse than no repository, because it leaves a trusted signer on machines that
+already ran the setup. ObjectFS publishes packages and does not take that on.
 
-- **apt scopes the key; rpm cannot.** `setup-repo-debian.sh` installs the key to
-  `/usr/share/keyrings/objectfs-archive-keyring.gpg` and names it in `Signed-By:`, so it authorises
-  this repository and no other. `rpm --import` adds the key to the single system-wide keyring, where
-  it is a valid signer for every package rpm installs from anywhere. `gpgkey=` in a `.repo` file does
-  not change that — there is no per-repository keyring in rpm. `setup-repo-rhel.sh` prints this before
-  importing, because it is a decision worth making deliberately.
-- **The rpm script writes to whichever directory the local tool reads.** zypper reads
-  `/etc/zypp/repos.d` and does not read `/etc/yum.repos.d`, so a yum-only script succeeds on openSUSE
-  and configures nothing — every step reporting success while `zypper install objectfs` cannot find
-  the package.
+The build is written and stays exercised: `ci.yml`'s `repo-install` job constructs both repositories
+against a throwaway key on every pull request and installs from them in `ubuntu:24.04`,
+`rockylinux:9` and `opensuse/leap:15.6`, checking that a tampered index is refused. Publishing is one
+repository secret away, and nothing about that path has to be rewritten first.
 
-The repositories carry the newest **five** releases, which is a size bound rather than a policy about
-what is supported: GitHub Pages caps a site at 1 GB and one release is about 33 MB of packages. Every
-release's `.deb` and `.rpm` remain attached to the
-[release](https://github.com/scttfrdmn/objectfs/releases) permanently, so an older version installs
-from the downloaded file — `apt install ./objectfs_*.deb`, `dnf install ./objectfs-*.rpm`.
-
-#### The signing key
-
-Both setup scripts print the fingerprint of the key they downloaded and tell you to compare it against
-this page. That comparison is the only part of the chain a script cannot do for you: a script that
-fetched the key *and* the fingerprint it checks against, over the same channel, from the same host, has
-verified that the host agrees with itself.
-
-<!-- The fingerprint of the published signing key. This is the value the setup scripts print. -->
-
-```text
-Key fingerprint: published with the first signed release
-Key ID:          the last 16 hex digits of the above
-```
-
-The key is a signing subkey; the master key is offline and never reaches CI. The subkey expires two
-years from issue and will be rotated before then. A rotation changes the value above, and both scripts
-report a key change loudly rather than replacing one silently — if a script says the key on disk
-differs from the key it just downloaded and you were not expecting a rotation, stop and check here.
-
-`repo_gpgcheck=1` and `gpgcheck=1` are both set on the rpm side, and they check different things:
-`gpgcheck` verifies each package's own embedded signature, `repo_gpgcheck` verifies the repository
-metadata against its detached signature. Neither implies the other, and only the first is a default
-anywhere. On the apt side one signature covers both, because `InRelease` carries the checksums of the
-`Packages` indexes and those carry the checksum of every `.deb`.
+The packages are unsigned, for the same reason there is no repository, and a checksum is what stands in
+for the signature. Installing a downloaded package verifies the package's own digests; every release
+asset has a published SHA-256; `install.sh` verifies the tarball's.
 
 The checksum is always verified and there is no flag to skip it. Note what that establishes: the
 `.sha256` travels the same channel as the tarball, so a mismatch means a corrupted or tampered
