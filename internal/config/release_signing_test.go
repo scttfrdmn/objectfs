@@ -251,14 +251,18 @@ func TestCosignInstallerIsPinnedToAnExactVersion(t *testing.T) {
 
 	const action = "sigstore/cosign-installer@"
 
-	idx := strings.Index(source, action)
-	if idx < 0 {
+	_, after, found := strings.Cut(source, action)
+	if !found {
 		t.Fatal("release.yml does not use sigstore/cosign-installer, so nothing installs cosign and " +
 			"the signing step cannot run")
 	}
 
-	ref := strings.Fields(source[idx+len(action):])[0]
-	ref = strings.TrimSpace(ref)
+	fields := strings.Fields(after)
+	if len(fields) == 0 {
+		t.Fatal("release.yml uses sigstore/cosign-installer with no ref at all")
+	}
+
+	ref := fields[0]
 
 	// vN alone is the failure mode; vN.N.N or a 40-char sha is fine.
 	if regexp.MustCompile(`^v\d+$`).MatchString(ref) {
