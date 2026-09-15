@@ -224,10 +224,48 @@ fetch() {
     if command -v curl > /dev/null 2>&1; then
         curl -fsSL --retry 3 --retry-delay 1 -o "$out" "$url"
     elif command -v wget > /dev/null 2>&1; then
-        wget -q -O "$out" "$url"
+        # shellcheck disable=SC2046 # wget_retry_flags returns a word list on purpose.
+        wget -q $(wget_retry_flags) -O "$out" "$url"
     else
         die "neither curl nor wget is available, so nothing can be downloaded"
     fi
+}
+
+# wget_retry_flags prints the flags that make wget retry a transient HTTP error, or nothing.
+#
+# The two branches of fetch were not equivalent, and the difference was measured rather than
+# reasoned about: against a server returning two 503s and then a 200, `curl -fsSL --retry 3`
+# recovers and `wget -q -O` fails on the first response with exit 8. Same for 429. wget's own
+# --tries only covers network-level failures — a response that arrives and carries an error status
+# is not a failed attempt as far as wget is concerned, so --tries=20, its default, retries it zero
+# times. --retry-on-http-error is what changes that.
+#
+# This matters because release-asset downloads are unauthenticated: GitHub rate limits them by IP,
+# and a shared CI runner shares that IP. A 429 on the .sha256 request is what produced
+# "objectfs-linux-amd64.tar.gz exists for v0.13.0 but its .sha256 does not" against a release whose
+# .sha256 files were all present — the refusal was correct code reaching a wrong conclusion from a
+# fetch that gave up instantly.
+#
+# 403 is deliberately not in the list. It is an authorization answer, not a transient one, and
+# retrying it turns an immediate clear failure into a slow identical one. curl does not retry it
+# either, so both branches agree on that.
+#
+# The flag is probed rather than assumed, because an unrecognised option makes wget exit 2 without
+# downloading — which would turn a hardening change into a total failure on an old wget. It has
+# existed since wget 1.19 (2017) and every image this is tested against has it; the probe is for
+# the machine that is not one of those images.
+#
+# The match is a `case` on the help text rather than a pipe into grep, so the probe depends on no
+# external command but wget itself. That is not hypothetical tidiness: the first harness written for
+# this function ran it under a PATH holding only wget, grep was therefore missing, the probe returned
+# no flags, and the measurement reported the retry fix as not working. A probe whose failure mode is
+# "silently claim the capability is absent" should not have a dependency it does not need.
+wget_retry_flags() {
+    case "$(wget --help 2>&1)" in
+        *--retry-on-http-error*)
+            printf '%s' "--tries=4 --waitretry=1 --retry-connrefused --retry-on-http-error=429,500,502,503,504"
+            ;;
+    esac
 }
 
 # resolve_latest returns the tag of the most recent release.
@@ -255,10 +293,14 @@ resolve_latest() {
         # branch with neither installed is what produced the "could not reach the GitHub API"
         # message on a machine that had no downloader at all.
         #
-        # wget's header flag has a different shape, and the token is passed the same way.
+        # wget's header flag has a different shape, and the token is passed the same way. The retry
+        # flags are the same ones fetch uses and for the same reason — see wget_retry_flags. The curl
+        # branch above has had --retry 3 all along, so without them the two branches disagreed about
+        # how many attempts an unauthenticated, IP-rate-limited API call gets.
         local hdr=()
         [ -n "${GITHUB_TOKEN:-}" ] && hdr=(--header="Authorization: Bearer $GITHUB_TOKEN")
-        wget -q "${hdr[@]}" -O "$body" \
+        # shellcheck disable=SC2046 # wget_retry_flags returns a word list on purpose.
+        wget -q $(wget_retry_flags) "${hdr[@]}" -O "$body" \
             "https://api.github.com/repos/$REPO/releases/latest" \
             || die "could not reach the GitHub API to find the latest release. Pass --version to skip this step"
     fi
