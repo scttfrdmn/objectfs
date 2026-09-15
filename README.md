@@ -345,37 +345,29 @@ downloading anything if the machine lacks a tool it needs, naming all of them at
 because two of the three container images this is tested against are missing something
 (`ubuntu:24.04` ships neither `curl` nor `wget`, `opensuse/leap:15.6` ships neither `tar` nor `gzip`).
 
-### Debian, Ubuntu, RHEL, Fedora, openSUSE: the package repositories
+### Debian, Ubuntu, RHEL, Fedora, openSUSE: the packages
 
-Adding the repository is what makes `apt upgrade` reach ObjectFS. Each script downloads the signing
-key, prints its fingerprint, configures verification, and does nothing else:
+A `.deb` and a `.rpm` for both architectures are attached to every
+[release](https://github.com/scttfrdmn/objectfs/releases) from v0.14.0 onward. Download one and
+install it:
 
 ```bash
-# Debian, Ubuntu
-curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
-sudo apt update && sudo apt install objectfs
-
-# RHEL, Fedora, Rocky, openSUSE
-curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
-sudo dnf install objectfs        # or: sudo zypper install objectfs
+apt install ./objectfs_*.deb      # Debian, Ubuntu
+dnf install ./objectfs-*.rpm      # RHEL, Fedora, Rocky
+zypper install ./objectfs-*.rpm   # openSUSE
 ```
 
-The repository indexes are signed and both scripts require a valid signature — there is no flag to
-turn that off. Verify the fingerprint the script prints against the one published at
-[objectfs.io/docs/](https://objectfs.io/docs/#the-signing-key) before trusting it, and pass
-`--dry-run` first if you would rather read what the script would do than take its word for it
-(`--dry-run` needs no root).
+**There is no apt or yum repository, so `apt upgrade` will not reach ObjectFS** — upgrading means
+downloading the next release's package. The repository is built and tested on every pull request but
+it is not published, because publishing one means signing it: apt refuses an unsigned repository
+outright and dnf's `gpgcheck` is on by default, so a repository without a signing key is not a lesser
+version of a signed one, it is a repository nothing can install from. Rather than stand up a key and
+the rotation it commits us to, ObjectFS publishes packages and leaves the repository dormant.
 
-**The two scripts do not offer the same guarantee, and the difference is apt's rather than ours.** The
-Debian script installs the key with `Signed-By:`, which authorises it for this repository *only*. rpm
-has no per-repository keyring: `rpm --import` makes the key a valid package signer system-wide, for
-every repository the machine reads. `setup-repo-rhel.sh` says so before it imports anything. That is
-the deal every third-party rpm repository offers, and it is worth knowing you are taking it.
-
-The repositories carry the newest **five** releases. Every release's `.deb` and `.rpm` stay attached
-to the [release](https://github.com/scttfrdmn/objectfs/releases) permanently, so an older version is
-still installable from the downloaded file: `apt install ./objectfs_*.deb`, `dnf install
-./objectfs-*.rpm`.
+The packages are unsigned for the same reason, and what stands in for a signature is a checksum: each
+release asset has a published SHA-256, `install.sh` verifies the tarball's with no flag to skip it, and
+`apt install ./file.deb` and `dnf install ./file.rpm` check the package's own digests. That is a weaker
+guarantee than a signature — it establishes that the file arrived intact, not who built it.
 
 ### HPC sites: environment modules
 

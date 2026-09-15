@@ -277,25 +277,18 @@ curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/ins
           </div>
 
           <div id="tab-package" class="tab-content" role="tabpanel" aria-labelledby="btn-package">
-<pre><code># Debian, Ubuntu — adds the signed repository, then installs
-curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
-sudo apt update &amp;&amp; sudo apt install objectfs
-
-# RHEL, Fedora, Rocky, openSUSE
-curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
-sudo dnf install objectfs         # or: sudo zypper install objectfs
-
-# Or install a downloaded package directly, for any release
+<pre><code># A .deb and a .rpm are attached to every release, for amd64 and arm64
 apt install ./objectfs_*.deb      # Debian, Ubuntu
-dnf install ./objectfs-*.rpm      # RHEL, Fedora, openSUSE</code></pre>
+dnf install ./objectfs-*.rpm      # RHEL, Fedora, Rocky
+zypper install ./objectfs-*.rpm   # openSUSE</code></pre>
             <p class="install-note">
-              Each script prints the signing key's fingerprint — verify it against the value
-              published in the <a href="/docs/#the-signing-key">documentation</a>. Both require a
-              valid signature on the repository index and have no flag to skip it. The Debian
-              script scopes the key to this repository with <code>Signed-By:</code>; rpm has no
-              per-repository keyring, so there the key becomes a system-wide package signer, which
-              <code>setup-repo-rhel.sh</code> states before importing it. The repositories carry the
-              newest five releases; every release's packages stay attached to the release itself.
+              There is no apt or yum repository, so <code>apt upgrade</code> will not reach
+              ObjectFS — upgrading means downloading the next release's package. That is deliberate:
+              <code>apt update</code> refuses an unsigned repository and <code>gpgcheck</code> is on
+              by default under dnf, so publishing one means holding a signing key and rotating it
+              indefinitely, and a key gone stale is worse for the machines that trusted it than no
+              repository was. The packages are unsigned for the same reason; installing a downloaded
+              one verifies its digests, and every release asset has a published SHA-256.
             </p>
           </div>
 

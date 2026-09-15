@@ -48,13 +48,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Signed apt and yum repositories at `objectfs.io/apt` and `objectfs.io/yum`** (#138, part (c)), so
-  `apt install objectfs` and `dnf install objectfs` work and, more to the point, so `apt upgrade`
-  reaches ObjectFS. Two one-liners add them — `curl -fsSL https://objectfs.io/setup-repo-debian.sh |
-  sudo bash` and the `-rhel` equivalent — and `pages.yml` builds both repositories from the release
-  assets on every deploy. GitHub Pages hosts them: at ~33 MB of packages per release against a 1 GB
-  site cap, a five-release retention bound is ~165 MB, and the alternative was an S3 bucket with a
-  bill and an access policy for something the project already publishes for free.
+- **Signed apt and yum repositories, built and tested but deliberately not published** (#138, part
+  (c)). `pages.yml` constructs both from the release assets and signs them whenever a signing key is
+  available at deploy time, `ci.yml`'s `repo-install` job builds them against a throwaway key on every
+  pull request and installs from them in three containers, and `scripts/setup-repo-debian.sh` and
+  `scripts/setup-repo-rhel.sh` configure them with verification on. No key exists, so nothing is
+  published: `objectfs.io/apt` and `objectfs.io/yum` are unserved and no page names them.
+
+  **The decision, since the rest of this entry describes a repository nobody can add.** Publishing an
+  apt or yum repository means holding a signing key — `apt update` refuses an unsigned repository and
+  only accepts one marked `[trusted=yes]`, which turns authenticity off, and `gpgcheck` is dnf's
+  default. So an unsigned repository is not a lesser version of a signed one; it is a repository
+  nothing can install from. A key then has to be kept out of reach and rotated for as long as anyone
+  has the repository configured, and a key gone stale is worse for those machines than no repository
+  was, because it leaves a trusted signer behind. Hosting was never the obstacle — GitHub Pages holds
+  ~33 MB of packages per release against a 1 GB cap, so a five-release bound is ~165 MB — and neither
+  was the code, which is written and verified. What was not worth taking on is the key.
+
+  Packages ship attached to each release instead, and unsigned, with a published SHA-256 per asset:
+  `install.sh` verifies the tarball's with no flag to skip it, and `apt install ./file.deb` and `dnf
+  install ./file.rpm` check the package's own digests. That establishes that a file arrived intact,
+  not who built it, which is the difference between a checksum and a signature and is what an unsigned
+  release offers.
+
+  Publishing is one repository secret away. `release.yml` signs when `GPG_SIGNING_KEY` is set and
+  warns and skips when it is not; `pages.yml` publishes on the same condition. The whole path stays
+  exercised on every pull request precisely so that turning it on is a secret rather than a rewrite —
+  a dormant capability that stops being tested is one that no longer exists, and that gets discovered
+  at the moment someone tries to use it.
+
+  The rest of this entry records what was built and what building it found.
 
   **The two scripts do not offer the same guarantee, and the asymmetry is apt's and rpm's rather than
   this project's.** `setup-repo-debian.sh` writes a deb822 entry with `Signed-By:`, which authorises
@@ -81,8 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `.deb`'s checksum, so one signature at the top transitively covers the packages. rpm has no such
     chain — each package stands alone, and an unsigned one is unsigned however well signed the
     metadata around it is. `nfpm.yaml` now carries an `rpm.signature` block (on the top-level `rpm:`
-    section, not under `overrides.rpm:`, which nfpm rejects outright), and `release.yml` fails the
-    release if the signing key is absent rather than shipping unsigned packages that outlive the run.
+    section, not under `overrides.rpm:`, which nfpm rejects outright), and `release.yml` signs the rpm
+    whenever a key is available. With no key it warns and ships unsigned, and then asserts the packages
+    really are unsigned rather than skipping the check — because no-secret and
+    key-never-reached-nfpm produce identical green runs, and the second is the defect above.
   - **`rpm -K` exits 0 for an unsigned package.** Unsigned prints `digests OK` and returns 0; signed
     prints `digests signatures OK` and also returns 0. Measured, not assumed. A check on the exit
     status alone passes for every unsigned package ever built while reporting that it verified a
@@ -99,7 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same defect `install.sh` spent a year in and worse, since these are piped into `sudo bash`. Both are
   now copied and byte-compared at deploy time and listed in the workflow's paths filter — a stale
   installer installs an old binary, while a stale setup script installs an old signing *key*, and that
-  key stays trusted on the machine after a later correct run.
+  key stays trusted on the machine after a later correct run. Those same five surfaces no longer
+  document the one-liners at all, because the repository they configure is not published: the scripts
+  are still served, so the command runs, reaches a signing key that 404s, and fails there. A gate walks
+  the tree and fails on any page that names a repository address, which is a one-way gate to delete on
+  the day one is published.
 
   Gated by `internal/config/served_repositories_test.go`, and verified by mutation rather than by
   reading: 25 mutations of the workflows, the scripts and `nfpm.yaml` each fail the intended test.

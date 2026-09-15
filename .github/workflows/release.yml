@@ -199,7 +199,7 @@ jobs:
     - name: nfpm.yaml agrees with the scripts, the Makefile and the version constant
       run: go test ./internal/config/ -run 'TestPackag|TestPostinstall|TestPreremove|TestMakefile'
 
-    # The rpm signature, and it is required here rather than optional.
+    # The rpm signature, when there is a key to sign with.
     #
     # setup-repo-rhel.sh writes `gpgcheck=1`, which verifies each package's own embedded signature —
     # separate from `repo_gpgcheck=1`, which verifies the repository index. An unsigned rpm in a signed
@@ -211,11 +211,26 @@ jobs:
     # signature covers the Packages indexes, which carry each .deb's checksum, so one signature at the
     # top transitively covers the packages. rpm has no such chain — each package stands alone.
     #
-    # Refuses rather than building unsigned when the secret is missing. A release is the one place where
-    # "no key, so skip signing" is the wrong call: the packages would publish, install cleanly from a
-    # downloaded file, and fail only for the users who added the repository. pages.yml skips its
-    # repository for a missing key because a docs deploy should not fail on it; a release has no such
-    # excuse, and the two behaviours differ on purpose.
+    # Skips rather than refusing when the secret is absent, and that is a statement about what this
+    # project publishes rather than a relaxed check.
+    #
+    # This step used to `exit 1` here, on the reasoning that an unsigned rpm inside a signed repository
+    # fails at `dnf install` for every user who added that repository while installing cleanly from a
+    # downloaded file — the failure mode most likely to ship unnoticed. That reasoning is still correct
+    # and it no longer applies, because there is no such user: no signing key exists, so pages.yml
+    # publishes no repository, objectfs.io/apt and objectfs.io/yum are unserved on purpose, and no page
+    # names them. Nothing anywhere tells apt or dnf to trust an ObjectFS repository, so nothing anywhere
+    # checks an ObjectFS package signature. Refusing here would block every release to protect nobody.
+    #
+    # What establishes a package instead: the release assets carry SHA-256 sums, install.sh verifies the
+    # tarball's and has no flag to skip it, and `dnf install ./objectfs-*.rpm` checks the package's
+    # digests. That is weaker than a signature and it is what an unsigned release offers.
+    #
+    # Setting GPG_SIGNING_KEY is the whole of the way back. This step signs, the verification below turns
+    # from an assertion that the packages are unsigned into an assertion that they verify, and pages.yml
+    # starts publishing the repositories on its next deploy. None of that path was removed — it is built
+    # and exercised end to end by ci.yml's repo-install job against an ephemeral key on every PR, which
+    # is why it can sit unused without rotting.
     - name: Import the package signing key
       env:
         GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
@@ -223,12 +238,12 @@ jobs:
         set -euo pipefail
 
         if [ -z "${GPG_SIGNING_KEY:-}" ]; then
-          echo "::error::GPG_SIGNING_KEY is not set, so the rpm would be unsigned." \
-            "setup-repo-rhel.sh sets gpgcheck=1, so an unsigned rpm fails at 'dnf install' for every" \
-            "user who added the repository, while installing fine from a downloaded file — which is" \
-            "the failure mode most likely to ship unnoticed. Set the secret, or remove the rpm from" \
-            "this release deliberately."
-          exit 1
+          echo "::warning::GPG_SIGNING_KEY is not set, so the rpms in this release are unsigned." \
+            "That is the intended state while no package repository is published: nothing instructs" \
+            "apt or dnf to trust one, so nothing verifies a package signature. A downloaded package" \
+            "still has its digests checked, and the release tarballs carry SHA-256 sums. Set the" \
+            "secret to sign, and pages.yml publishes the repositories on its next deploy."
+          exit 0
         fi
 
         # A dedicated keyring under the runner's workspace, discarded with the runner. The key is a
@@ -265,7 +280,12 @@ jobs:
       run: |
         set -euo pipefail
 
-        if [ -n "${GPG_PASSPHRASE:-}" ]; then
+        # $GNUPGHOME as well as the passphrase: the import step above skips itself when there is no
+        # signing key, and it is the step that sets $GNUPGHOME. The two secrets are independent, so a
+        # passphrase set without a key would otherwise reach `"$GNUPGHOME/pass"` with the variable
+        # unbound and kill this step under `set -u` — a release failing on a directory it has no
+        # signing key to put anything in.
+        if [ -n "${GPG_PASSPHRASE:-}" ] && [ -n "${GNUPGHOME:-}" ]; then
           printf '%s' "$GPG_PASSPHRASE" > "$GNUPGHOME/pass"
           chmod 600 "$GNUPGHOME/pass"
           {
@@ -276,14 +296,21 @@ jobs:
 
         make package-linux
 
-    # Every rpm carries a verifiable signature, checked with rpm's own verifier against the public half
-    # of the key that signed it.
+    # Every rpm's signature state is the state this release intends, checked with rpm's own verifier.
     #
     # Not "nfpm exited 0". nfpm signs only when key_file names a readable file, and silently produces an
     # unsigned package otherwise — that is the correct behaviour for a local `make package-linux` and the
     # exact reason a release cannot infer signing from a zero exit status. `rpm -K` is the check a user's
     # dnf performs, so it is the check that belongs here.
-    - name: Every rpm is signed, and the signature verifies
+    #
+    # Both outcomes are asserted, and the unsigned one is asserted rather than skipped. Two situations
+    # produce an unsigned rpm and they are worlds apart: no secret, which is the current intended state,
+    # and a secret that was imported and then failed to reach nfpm — which is exactly what happened once,
+    # when a step wrote the signing variables to $GITHUB_ENV and ran make in the same shell, where a
+    # $GITHUB_ENV write does not apply. Both look identical from the outside: four packages, a green run.
+    # So the branch is chosen by whether the import step ran, and each branch then insists on the
+    # signature state its own branch implies. A skip would let the two swap places silently.
+    - name: Every rpm's signature state is the intended one
       run: |
         set -euo pipefail
 
@@ -292,24 +319,57 @@ jobs:
         sudo apt-get install -y -qq rpm
 
         keyring="$RUNNER_TEMP/rpmdb"
-        gpg --batch --armor --export "${OBJECTFS_SIGNING_KEY_ID}" > "$RUNNER_TEMP/pub.asc"
         rpm --dbpath "$keyring" --initdb
-        rpm --dbpath "$keyring" --import "$RUNNER_TEMP/pub.asc"
+
+        if [ -n "${OBJECTFS_SIGNING_KEY_ID:-}" ]; then
+          gpg --batch --armor --export "${OBJECTFS_SIGNING_KEY_ID}" > "$RUNNER_TEMP/pub.asc"
+          rpm --dbpath "$keyring" --import "$RUNNER_TEMP/pub.asc"
+        fi
 
         for pkg in dist/*.rpm; do
-          out="$(rpm --dbpath "$keyring" -K "$pkg")" || {
-            echo "::error::$pkg has no valid signature: $out"
-            echo "setup-repo-rhel.sh sets gpgcheck=1, so dnf would refuse this package with" \
-              "'Package is not signed / Error: GPG check FAILED' after downloading it."
-            exit 1
-          }
+          # The status is captured rather than allowed to end the step, so each branch below can say what
+          # went wrong in its own terms. A signature `rpm -K` cannot check — signed by a key that is not
+          # in the keyring — exits non-zero, and in the unsigned branch that means something other than
+          # this workflow signed the package: a diagnosis about gpgcheck would be the wrong one to print.
+          rc=0
+          out="$(rpm --dbpath "$keyring" -K "$pkg" 2>&1)" || rc=$?
 
           # "digests signatures OK" is the signed answer; "digests OK" alone means the digests were
           # checked and there was no signature to check. Both exit 0, which is why the *text* is what
           # this asserts — a status check here would pass on every unsigned package.
+          if [ -n "${OBJECTFS_SIGNING_KEY_ID:-}" ]; then
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::$pkg has no valid signature: $out"
+              echo "setup-repo-rhel.sh sets gpgcheck=1, so dnf would refuse this package with" \
+                "'Package is not signed / Error: GPG check FAILED' after downloading it."
+              exit 1
+            fi
+
+            case "$out" in
+              *"signatures OK"*) echo "ok: $out" ;;
+              *) echo "::error::$pkg verified digests but carries no signature: $out"; exit 1 ;;
+            esac
+
+            continue
+          fi
+
+          # No key was imported, so this package must be unsigned. A signature here — verifiable or not —
+          # means something signed it that this workflow did not choose, which is worth stopping for.
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::$pkg failed rpm -K with no signing key imported: $out"
+            echo "An unsigned package verifies its digests and exits 0 against an empty keyring, so" \
+              "this is either a corrupt package or one signed by a key this workflow did not import."
+            exit 1
+          fi
+
           case "$out" in
-            *"signatures OK"*) echo "ok: $out" ;;
-            *) echo "::error::$pkg verified digests but carries no signature: $out"; exit 1 ;;
+            *"signatures OK"*)
+              echo "::error::$pkg carries a signature and no signing key was imported: $out"
+              echo "Something outside the 'Import the package signing key' step signed this package."
+              exit 1
+              ;;
+            *"digests OK"*) echo "ok, unsigned as intended: $out" ;;
+            *) echo "::error::$pkg did not verify its digests: $out"; exit 1 ;;
           esac
         done
 

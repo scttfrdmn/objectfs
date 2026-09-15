@@ -42,26 +42,21 @@ to run the whole thing under `sudo` — which then writes a root-owned binary an
 directories into a home directory their own jobs use.
 
 Debian and RPM packages are attached to each release from v0.14.0 onward, alongside the binary
-tarballs, on the [releases page](https://github.com/scttfrdmn/objectfs/releases). There are also
-signed apt and yum repositories, which is what makes `apt upgrade` reach ObjectFS:
+tarballs, on the [releases page](https://github.com/scttfrdmn/objectfs/releases). Install a downloaded
+one directly:
 
 ```bash
-# Debian, Ubuntu
-curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash
-sudo apt update && sudo apt install objectfs
-
-# RHEL, Fedora, Rocky, openSUSE
-curl -fsSL https://objectfs.io/setup-repo-rhel.sh | sudo bash
-sudo dnf install objectfs        # or: sudo zypper install objectfs
+apt install ./objectfs_*.deb      # Debian, Ubuntu
+dnf install ./objectfs-*.rpm      # RHEL, Fedora, Rocky
+zypper install ./objectfs-*.rpm   # openSUSE
 ```
 
-Both scripts print the signing key's fingerprint and require a valid signature on the repository
-index; verify the fingerprint against the one published at
-[objectfs.io/docs/](https://objectfs.io/docs/#the-signing-key). The Debian script scopes the key to
-this repository with `Signed-By:`; rpm has no per-repository keyring, so on a RHEL-family machine the
-key becomes a trusted package signer system-wide, and `setup-repo-rhel.sh` says so before importing
-it. The repositories carry the newest five releases; older ones install from the downloaded file with
-`dnf install ./objectfs-*.rpm` or `apt install ./objectfs_*.deb`.
+There is no apt or yum repository, so `apt upgrade` does not reach ObjectFS — upgrading means
+downloading the next release's package. That is deliberate: apt refuses an unsigned repository and
+`gpgcheck` is on by default under dnf, so publishing one means holding and rotating a signing key
+indefinitely, and a key that goes stale is worse for the machines that trusted it than no repository
+was. The packages are unsigned for the same reason; installing a downloaded one verifies its digests,
+and every release asset carries a published SHA-256.
 
 Or build from source:
 

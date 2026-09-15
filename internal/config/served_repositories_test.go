@@ -7,8 +7,26 @@ import (
 	"testing"
 )
 
-// This file gates the apt and yum repositories as *published, signed addresses*: objectfs.io/apt and
-// objectfs.io/yum, both verified against the key at objectfs.io/objectfs.asc.
+// This file gates the apt and yum repositories, which are built, tested, and deliberately not
+// published.
+//
+// The decision, so that the tests below read as intentional rather than as a relaxed version of
+// something stricter: ObjectFS ships packages attached to each release and hosts no repository. apt
+// refuses an unsigned repository outright — `[trusted=yes]` is the only way to make it accept one, and
+// that turns authenticity off — and `gpgcheck` is dnf's default. So publishing means holding a signing
+// key and rotating it for as long as anyone has the repository configured, and a key that goes stale is
+// worse for those machines than no repository was, since it leaves a trusted signer behind. The
+// alternative to holding a key is Gemfury or an equivalent, which is a paid third party holding one
+// instead. Neither is worth it for this project's current audience.
+//
+// So nothing is published: `pages.yml` builds the repositories only when `GPG_SIGNING_KEY` is set,
+// that secret does not exist, and no page names objectfs.io/apt or objectfs.io/yum.
+//
+// What is still asserted here, and why it is not dead weight: the build is exercised end to end on
+// every pull request by ci.yml's repo-install job, against a key generated for that run. Publishing is
+// one repository secret away and nothing on the path has to be rewritten first, which is only true for
+// as long as the path stays checked. A dormant capability that stops being tested is a capability that
+// no longer exists, and the way that gets discovered is at the moment someone tries to turn it on.
 //
 // served_install_script_test.go is the model, and the reasoning carries over exactly: the installer's
 // failure mode was a documented address that 404s, and the repositories' failure mode is a documented
@@ -214,7 +232,7 @@ func TestPagesWorkflowBuildsThePackageRepositories(t *testing.T) {
 	}
 }
 
-// TestRPMPackagesAreSigned is the gate for the defect a container found.
+// TestTheRPMSigningPathStaysIntact is the gate for the defect a container found.
 //
 // nfpm builds unsigned rpms unless a signature block names a key, and an unsigned rpm inside a
 // perfectly signed repository fails `gpgcheck=1` — which is the default on every RHEL-family machine.
@@ -224,7 +242,11 @@ func TestPagesWorkflowBuildsThePackageRepositories(t *testing.T) {
 // Three places have to agree for this to work, and this test checks all three because any one of them
 // alone is silently insufficient: nfpm.yaml has to ask for a signature, release.yml has to provide the
 // key, and something has to verify the result.
-func TestRPMPackagesAreSigned(t *testing.T) {
+//
+// All three are checked even though releases currently ship unsigned, because "intact" is the property
+// worth keeping. See this file's header: the repository is dormant, not abandoned, and the difference
+// between the two is whether the path is still checked.
+func TestTheRPMSigningPathStaysIntact(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
@@ -270,21 +292,56 @@ func TestRPMPackagesAreSigned(t *testing.T) {
 			"reads like a broken key file")
 	}
 
-	// The release build fails closed. pages.yml skips the repositories without a key, which is right for
-	// a docs deploy; a *release* must not quietly ship unsigned packages, because those packages outlive
-	// the run that built them and are what users install.
-	// Inside the absent-key branch specifically, and that distinction is the whole value of this check.
-	// The first version asked whether the step contained `exit 1` anywhere, and it does — the
-	// imported-no-secret-key check a few lines below has one. So deleting the exit from the guard left a
-	// step that continues past a missing key and a test that still passed. Caught by deleting it.
+	// The absent-key branch skips signing and says so, rather than either failing the release or going
+	// quiet about it.
+	//
+	// This assertion was the opposite one — that the branch reaches `exit 1` — and the reasoning behind it
+	// was sound while a repository was going to be published: an unsigned rpm inside a signed repository
+	// installs cleanly from a downloaded file and fails only for users who added the repository, which is
+	// the failure mode most likely to ship unnoticed. With no repository published there is no such user,
+	// and the refusal blocked every release to protect nobody.
+	//
+	// So the property is now that the branch ends the *step* successfully and leaves a warning in the run.
+	// Both halves matter. `exit 0` rather than falling through, because the rest of the step imports a key
+	// it does not have. A warning rather than a bare skip, because unsigned-because-no-secret and
+	// unsigned-because-something-broke look identical in a green run, and the annotation is what tells
+	// the two apart at a glance six months from now.
+	//
+	// Scoped to inside the guard, and that scoping is the whole value of this check. Its first version
+	// asked whether the step contained `exit 1` anywhere, and it does — the imported-no-secret-key check
+	// below has one — so deleting the exit from the guard left a step that continued past a missing key
+	// and a test that still passed.
 	signStep := pagesStep(t, release, "Import the package signing key")
 
-	if !guardExits(signStep, `if [ -z "${GPG_SIGNING_KEY:-}" ]`) {
-		t.Error(".github/workflows/release.yml notices an absent signing key without exiting non-zero " +
-			"in that branch. Unlike pages.yml, which correctly skips publishing a repository it cannot " +
-			"sign, a release that continues without a key uploads unsigned rpms as permanent assets — " +
-			"and the first person to notice is a user whose dnf refuses them, having downloaded the " +
-			"package successfully first")
+	branch, found := guardBody(signStep, `if [ -z "${GPG_SIGNING_KEY:-}" ]`)
+	if !found {
+		t.Error(".github/workflows/release.yml's signing step has no in-shell check for an absent " +
+			"signing key. Without one the step imports a key it does not have: `gpg --import` of an " +
+			"empty string succeeds, the fingerprint lookup returns nothing, and the failure arrives " +
+			"further down as a key ID that is the empty string")
+	}
+
+	if strings.Contains(branch, "exit 1") {
+		t.Error(".github/workflows/release.yml refuses to release without a signing key. It used to, on " +
+			"the reasoning that an unsigned rpm fails at `dnf install` for anyone who added the " +
+			"repository — but no repository is published and no page names one, so there is nobody to " +
+			"protect and every release is blocked. If a repository is being published again, this " +
+			"assertion is the right one to invert back, together with the docs gate below")
+	}
+
+	if !strings.Contains(branch, "exit 0") {
+		t.Error(".github/workflows/release.yml notices an absent signing key and falls through into the " +
+			"rest of the step, which imports the key and reads a fingerprint back from it. With no key " +
+			"that yields an empty key ID, which nfpm accepts as \"do not sign\" — so the release " +
+			"succeeds, the packages are unsigned, and the only trace is a step that claims to have " +
+			"imported something")
+	}
+
+	if !strings.Contains(branch, "::warning::") {
+		t.Error(".github/workflows/release.yml skips signing without annotating the run. An unsigned " +
+			"release is the intended state today and it is also what a broken signing path produces, " +
+			"and the two are indistinguishable in a green run. The annotation is the only thing that " +
+			"says which one this was")
 	}
 
 	// And something verifies. Asserting on the *text* rather than the exit status, because `rpm -K`
@@ -297,6 +354,22 @@ func TestRPMPackagesAreSigned(t *testing.T) {
 			"The exit status cannot carry this: an unsigned package prints \"digests OK\" and exits 0, " +
 			"a signed one prints \"digests signatures OK\" and also exits 0. A check on the status " +
 			"alone passes for every unsigned package, and reports that it verified the signature")
+	}
+
+	// And it verifies the *unsigned* case too, rather than skipping when there is no key.
+	//
+	// Two things produce an unsigned rpm and they are far apart: no secret, which is today's intended
+	// state, and a secret that was imported and then failed to reach nfpm — which happened, when a step
+	// wrote the signing variables to $GITHUB_ENV and ran make in the same shell, where a $GITHUB_ENV write
+	// does not apply. From outside they are the same run: four packages, green. So the branch has to be
+	// chosen by whether a key was imported, and each branch has to insist on the state it implies. A skip
+	// lets the two swap places in silence, which is how the defect shipped the first time.
+	if !strings.Contains(release, "digests OK") {
+		t.Error(".github/workflows/release.yml verifies signed packages but skips unsigned ones instead " +
+			"of asserting they are unsigned. \"digests OK\" without \"signatures\" is the unsigned " +
+			"answer, and checking for it is what distinguishes unsigned-because-there-is-no-secret from " +
+			"unsigned-because-the-key-never-reached-nfpm. Those two look identical in a green run, and " +
+			"the second one is a real defect this repository has already shipped once")
 	}
 
 	// CI installs from the built repository with verification on, which is the check that would have
@@ -392,14 +465,20 @@ func stepsRunning(workflow, cmd, arg string) []string {
 	return steps
 }
 
-// guardExits reports whether the shell block opened by guard reaches `exit 1` before its `fi`.
+// guardBody returns the lines inside the shell block opened by guard, and whether the guard was found.
 //
-// A scoped search rather than a substring, because a step that fails closed and a step that logs and
-// carries on differ by one line inside one branch, and every other `exit 1` in the step is unaffected by
-// deleting it. Reads to the first `fi` at the guard's own indentation, which is enough for the flat
+// A scoped read rather than a substring search over the step, because what has to be distinguished is
+// one branch from the rest of the step: a step that fails closed and a step that warns and skips differ
+// by one line inside that branch, and every other `exit` in the step is unaffected by changing it. Reads
+// to the first `fi` at the guard's own indentation, which is enough for the flat
 // guard-at-the-top-of-a-step shape both workflows use, and does not try to be a shell parser.
-func guardExits(step, guard string) bool {
+//
+// This used to be guardExits, answering only "does this branch exit non-zero". Returning the branch
+// instead lets a caller ask several questions of it, which is what the absent-key branch now needs: it
+// must exit, must exit *zero*, and must annotate the run.
+func guardBody(step, guard string) (string, bool) {
 	var (
+		body    []string
 		inGuard bool
 		indent  string
 	)
@@ -417,15 +496,13 @@ func guardExits(step, guard string) bool {
 		}
 
 		if trimmed == "fi" && strings.HasPrefix(line, indent) {
-			return false
+			break
 		}
 
-		if strings.HasPrefix(trimmed, "exit ") && trimmed != "exit 0" {
-			return true
-		}
+		body = append(body, line)
 	}
 
-	return false
+	return strings.Join(body, "\n"), inGuard
 }
 
 // hasCommand reports whether any line of a shell script runs cmd as its first word.
@@ -548,6 +625,115 @@ func TestNoSecondCopyOfTheRepositorySetupScripts(t *testing.T) {
 				"A stale repository script installs a key that may have been rotated away from, and "+
 				"that key stays trusted on the machine afterwards", rel)
 		}
+	}
+}
+
+// TestTheDormantRepositoriesAreNotDocumented is the other half of the decision in this file's header.
+//
+// Not publishing the repositories is a choice; documenting them anyway is a bug, and a specific kind of
+// one. `curl -fsSL https://objectfs.io/setup-repo-debian.sh | sudo bash` still *works* — pages.yml
+// copies both scripts to the site root regardless of whether it publishes a repository — so the
+// one-liner downloads, runs, and gets as far as fetching objectfs.io/objectfs.asc, which 404s. The
+// script fails closed there and says so, which is the best available outcome and still means the
+// documented command is a command that cannot succeed. Five surfaces documented it, which is exactly the
+// number that documented the install one-liner, and drift across those five is this package's recurring
+// subject.
+//
+// This is a one-way gate on purpose. It cannot read whether the GPG_SIGNING_KEY secret exists — a test
+// has no access to that — so it pins the decision rather than deriving it. Publishing again means
+// deleting this test and restoring the documentation, in that order, and the sentence above is the note
+// to whoever does it. The alternative was a check that infers publication from something in the tree,
+// and there is nothing in the tree that knows: the deploy decides, from a secret, at deploy time.
+//
+// Walked rather than listed, for the reason TestDocumentedInstallOneLinersNameAServedAddress records: its
+// first version was a list of two files and there were five, and the three it missed were the three
+// nobody had thought of.
+func TestTheDormantRepositoriesAreNotDocumented(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+
+	// The published addresses, each of which currently 404s. The setup scripts are served and the
+	// repositories they configure are not, so a documented one-liner is worse than a plain 404: it runs.
+	unserved := []string{
+		"objectfs.io/setup-repo-debian.sh",
+		"objectfs.io/setup-repo-rhel.sh",
+		"objectfs.io/apt",
+		"objectfs.io/yum",
+	}
+
+	scanned := 0
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "dist", "site", ".venv":
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		switch filepath.Ext(path) {
+		case ".md", ".html":
+		default:
+			return nil
+		}
+
+		//nolint:gosec // A path from a WalkDir over the repository root, in a test.
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+
+		// CHANGELOG.md is the one file that has to be able to name an address it no longer recommends:
+		// the entry recording that the repositories were built and then left unpublished cannot say so
+		// without naming them. Same exemption, for the same reason, as the installer's gate makes.
+		if rel == "CHANGELOG.md" {
+			return nil
+		}
+
+		scanned++
+
+		for i, line := range strings.Split(string(b), "\n") {
+			for _, address := range unserved {
+				if !strings.Contains(line, address) {
+					continue
+				}
+
+				t.Errorf("%s:%d documents %s, which is not served:\n  %s\nThe repositories are built "+
+					"and deliberately not published — see the header of "+
+					"internal/config/served_repositories_test.go. Both setup scripts *are* served, so "+
+					"this command runs, fetches a signing key that 404s, and fails there. Packages come "+
+					"from the release page instead. If a repository is being published again, delete "+
+					"this test first", rel, i+1, address, strings.TrimSpace(line))
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repository: %v", err)
+	}
+
+	// A floor on the walk rather than on what it found, since what it should find is nothing. An absence
+	// test that visits no files passes, and would keep passing after a rename of the directory it was
+	// pointed at. 42 files when this was written, CHANGELOG.md excluded — and measured rather than
+	// estimated, because a `find` over the same extensions says 1,613 and nearly all of that is markdown
+	// under node_modules, dist and site, which the skip list above drops at any depth.
+	if scanned < 25 {
+		t.Fatalf("scanned %d markdown and HTML files, and there were 42 when this test was written. The "+
+			"walk has stopped matching, and an absence check that reads nothing reports a clean tree",
+			scanned)
 	}
 }
 
