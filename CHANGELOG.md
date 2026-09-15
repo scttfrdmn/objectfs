@@ -39,6 +39,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tag now runs the same gate a pull request runs.** It did not, and the two sets were not merely
+  unequal — they were disjoint. `ci.yml` defined sixteen jobs, `release.yml` defined five, they shared
+  not one job id, and `grep -c workflow_call .github/workflows/*.yml` returned 0 in every file. So
+  **0.14.0 was tagged and published without `test`, `lint`, `coverage`, `fuzz-smoke`, `config-examples`,
+  `docs-site`, `sdk-metrics`, `deploy-manifests`, `systemd-unit`, `packaging`, `modulefiles`, `labels`,
+  `install-script` or `repo-install` ever having run against it.** A pull request merged green and a tag
+  cut from that same commit were verified by two different things, and only the smaller one had a say
+  over what reached users.
+
+  `ci.yml` now carries a `workflow_call` trigger and `release.yml` calls it, so there is exactly one
+  definition of the gate. The direction matters: making `ci.yml` itself the reusable workflow, rather
+  than extracting its jobs into a new `gate.yml` that `ci.yml` would then call, is what keeps every
+  check name byte-identical. A `workflow_call` job reports as `<caller-job-id> / <called-job-id>`, and
+  twenty check names are pinned as literal strings in `main`'s branch protection — the extraction would
+  have renamed nineteen of them at once, leaving every pull request blocked on contexts that can no
+  longer arrive and no red check to explain why. **No branch-protection change is needed.**
+
+- **The release image is no longer pushed before the gate passes.** `docker-build-push` had no `needs:`
+  at all, so on a tag it logged in to ghcr and pushed `{{version}}`, `{{major}}.{{minor}}`, `{{major}}`
+  and `latest` in parallel with everything else — whether the tests passed, and whether the binary
+  build passed. That is the failure the release workflow's own header documents for 0.10.0's empty
+  release page, except an image, unlike a release page, cannot be un-pulled. The gate is now a
+  dependency of the graph's roots, so every job in `release.yml` is transitively gated by construction
+  rather than by whoever adds the next one remembering.
+
+- `internal/config/release_gate_test.go` pins all of it: that `ci.yml` is callable and still owns the
+  `push`/`pull_request` triggers its check names depend on, that `release.yml` calls it rather than
+  restating it, that every release job is reachable from that call, that the calling job grants the
+  union of the permissions the gate's jobs ask for — a called workflow's token can only be narrowed, so
+  a missing scope yields a token that quietly cannot do the thing — and that every one of the twenty
+  required contexts still has a job that reports under it.
+
 - The publish step now fails if any artifact is missing, if any `.sha256` sibling is missing, or if a
   sibling and `checksums.txt` disagree about a digest. Publishing two hash sources that can disagree
   would be worse than publishing one, since a user cannot tell which is lying. This also catches the

@@ -1,10 +1,83 @@
 name: CI
 
+# This file is the gate, and it is the *only* definition of the gate. A tag runs precisely what a
+# pull request runs, because `release.yml` calls this workflow rather than restating a subset of it.
+#
+# It did restate a subset, and the subset was the whole problem. Until this change, `release.yml`
+# defined five jobs of its own — build, package-linux, docker-build-push, security-scan, publish —
+# and shared not one job id with the sixteen here. `grep -c workflow_call .github/workflows/*.yml`
+# returned 0 in every file. So **v0.14.0 was tagged and published without ever running `test`,
+# `lint`, `coverage`, `fuzz-smoke`, `config-examples`, `docs-site`, `sdk-metrics`,
+# `deploy-manifests`, `systemd-unit`, `packaging`, `modulefiles`, `labels`, `install-script`, or
+# `repo-install`.** A PR merged green and a tag cut from that same commit were verified by two
+# different things, and only the smaller one had a say over what reached users. Nothing enforced
+# that the release set stay a superset of the CI set, and it was not even a subset in a useful
+# sense: it was a disjoint set with a different name.
+#
+# Four things to know before editing, because each one is a way to reintroduce the drift or to
+# break every open pull request:
+#
+#  1. **Do not extract these jobs into a separate `gate.yml`.** That is the obvious shape and it
+#     would orphan every required status check on `main`. A `workflow_call` job reports its checks
+#     as `<caller-job-id> / <called-job-id>`, not `<called-job-id>`. Twenty check names are
+#     required on `main` — `test`, `lint`, `coverage`, `config-examples`, `packaging`, the six
+#     `build-tags (...)` cells, the six `cross-build (...)` cells, the two `modulefiles (...)`
+#     cells and `Security Scan` — and every one of them is pinned as a literal string in branch
+#     protection. Moving these jobs into a file that `ci.yml` then calls would rename all
+#     nineteen of the ones defined here to `gate / test`, `gate / lint` and so on: the required
+#     names would never report again and every pull request would block forever, with no failing
+#     check to point at. Making *this* file the reusable one instead keeps every check name
+#     byte-identical on push and pull_request, because on those events this is still the top-level
+#     workflow. The renaming only happens on the tag run, where nothing is protected.
+#  2. **Everything here is in the gate, and that is a decision per job rather than a default.**
+#     Each job below was checked for whether it can run outside a pull_request context, and none
+#     of them is PR-only: there is not one `github.event.*` reference in this file. The full list
+#     of expressions is `env.GO_VERSION_FILE`, `github.base_ref || 'main'`, `github.ref`,
+#     `github.workflow`, `matrix.*` and `secrets.GITHUB_TOKEN` — all of which resolve on a tag.
+#     Two carry a caveat worth stating rather than hiding:
+#
+#       - `lint` gates on `--new-from-merge-base=origin/${{ github.base_ref || 'main' }}`.
+#         `github.base_ref` is empty outside a pull request, so on a tag the fallback makes the
+#         merge base the tag commit itself and the blocking diff is empty. The job is therefore
+#         *weaker* on a tag than on a PR — but not vacuous: `golangci-lint config verify` and the
+#         whole-repo count both still run, and the diff was already gated at the PR that
+#         introduced the code. Excluding it to avoid a weak check would be worse, because then a
+#         config that no longer parses would reach a release.
+#       - `install-script` deliberately fetches the *last published* release, not the tag being
+#         cut (see its own comment). On a tag that means it verifies the installer in this tree
+#         against the previous release's assets, which is one release behind. It is still the
+#         right job to run here: it is the check that would catch `scripts/install.sh` having been
+#         edited into something that cannot install anything, before that script is what the next
+#         release tells users to pipe into a shell.
+#
+#     `labels` is the only job that touches the API, and only for `issues: read`. If you add a job
+#     that genuinely cannot run on a tag, do not silence it with a condition on the event name —
+#     that puts the drift back inside this file where it is harder to see. Split it out as a
+#     separate job in `ci.yml`'s callers instead, and say so here.
+#  3. **`concurrency` below is keyed on `github.workflow`, which is the *caller's* name inside a
+#     called workflow.** So a tag run groups as `ci-Release-refs/tags/vX.Y.Z` and a main push as
+#     `ci-CI-refs/heads/main`. They do not collide, which is what keeps `cancel-in-progress` from
+#     killing a release run because someone pushed to main. Do not replace `github.workflow` with
+#     the literal `CI`; that is exactly the collision.
+#  4. **An Actions expression interpolates inside a YAML comment too** — a `dollar-brace-brace`
+#     sequence is evaluated wherever it appears — and an unparseable one fails the entire file
+#     before any job starts: no job, no log, and `check-yaml` passes it happily. That is not a
+#     hypothetical warning appended for completeness; the first draft of this very comment block
+#     wrote an *empty* pair of braces while explaining the rule, which is the one form guaranteed
+#     to fail, and `TestWorkflowExpressionsAreValid` is what caught it. So every brace pair in the
+#     comments above names a real context, and prose about the syntax spells the syntax out
+#     instead of demonstrating it.
+#     `TestWorkflowExpressionsAreParseable` in `internal/config/served_repositories_test.go`
+#     enforces it, and `internal/config/release_gate_test.go` enforces items 1 and 2.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  # Invoked by release.yml, so a tag runs this exact file. No inputs and no secrets: the only
+  # secret any job here reads is `secrets.GITHUB_TOKEN`, which a called workflow always has
+  # without `secrets: inherit`.
+  workflow_call:
 
 permissions:
   contents: read
