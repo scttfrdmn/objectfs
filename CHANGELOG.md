@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-15
+
+Packaging, and a release that carries its own packages.
+
+`.deb` and `.rpm` files are attached to this release alongside the binary tarballs. That is the whole
+of the packaging deliverable: there is no apt or yum repository to add, and nothing published points at
+one. The machinery to build and sign both repositories exists and is exercised against a throwaway key
+on every pull request, and it stays dormant until a signing key is configured — the `Added` entry below
+has the reasoning, which is that a repository nobody can verify is worse than no repository.
+
+The milestone this release is named for closed with its two remaining items moved out rather than
+finished: the `/sbin/mount.objectfs` fstab helper (#136) and the Rocky Linux 9 install-to-fstab CI job
+that depends on it (#149) are both in `Future Work` now. They are named here rather than left for the
+version number to imply they shipped.
+
 ### Security
 
 - **A new gosec finding now blocks a merge** (#415). It did not before, and the reason is worth
@@ -693,6 +708,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproduce, since it usually contains a letter.
 
 ### Fixed
+
+- **`install.sh` retries a transient HTTP error on the wget path**, which it previously did only on
+  the curl path. `fetch`'s two branches were not equivalent, and the difference is measured rather than
+  argued: against a server returning two 503s and then a 200, `curl -fsSL --retry 3` recovers and
+  `wget -q -O` fails on the first response with exit 8. Same for 429. wget's `--tries` covers
+  network-level failures only — a response that arrives carrying an error status is not a failed
+  attempt as far as wget is concerned, so its default of 20 tries retried a 503 exactly zero times.
+
+  The asymmetry was invisible because each container in the `install-script` matrix exercises exactly
+  one branch: RHEL-family images ship curl, `ubuntu:24.04` is given wget. It surfaced as an
+  intermittent failure on a required check, reporting `objectfs-linux-amd64.tar.gz exists for v0.13.0
+  but its .sha256 does not` against a release whose five `.sha256` files were all present at 94 bytes
+  each — correct code reaching a wrong conclusion from a fetch that gave up instantly. Release-asset
+  downloads are unauthenticated, GitHub rate limits them by IP, and a shared CI runner shares that IP,
+  so the same request from a user behind a busy NAT got the same answer.
+
+  `403` stays fatal on both paths: it is an authorization answer rather than a transient one, and
+  retrying it turns an immediate clear failure into a slow identical one. The flag is probed rather
+  than assumed, because an unrecognised option makes wget exit 2 without downloading, and the probe
+  matches with `case` rather than a pipe into `grep` so that it depends on no command but wget — the
+  first harness written for it ran under a `PATH` holding only wget, `grep` was therefore absent, the
+  probe reported the capability as missing, and the measurement showed the fix not working.
 
 - **The Python SDK's published `Documentation` link pointed at a domain that has never served
   anything.** `sdks/python/setup.py` named `https://docs.objectfs.io/python`, one of five
@@ -5969,7 +6006,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/scttfrdmn/objectfs/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/scttfrdmn/objectfs/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/scttfrdmn/objectfs/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/objectfs/compare/v0.10.3...v0.11.0
