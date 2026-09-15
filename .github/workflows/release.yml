@@ -47,10 +47,45 @@ env:
 #     — as unconditional text, regardless of what ran. `publish` now summarizes what it actually
 #     attached.
 jobs:
+  # ---------------------------------------------------------------------------------------------
+  # gate — the entire CI gate, from the one file that defines it.
+  #
+  # `ci.yml` is not copied here and its jobs are not restated here; it is *called*, so there is
+  # exactly one definition of the gate and a tag runs precisely what a pull request runs. Before
+  # this job existed, this workflow's five jobs shared not a single job id with ci.yml's sixteen,
+  # and `grep -c workflow_call .github/workflows/*.yml` returned 0 everywhere — so v0.14.0 shipped
+  # having never run `test`, `lint`, `coverage`, `fuzz-smoke`, `packaging`, `modulefiles`,
+  # `install-script`, or `labels`. The header of ci.yml carries the rest of that history and the
+  # per-job reasoning; read it before changing what is in the gate.
+  #
+  # `permissions` is the union of what ci.yml's jobs ask for, and it has to be stated here. A
+  # called workflow's token is derived from the *calling* job's grants and can only be narrowed
+  # further, never widened — so omitting `issues: read` would not fail loudly, it would hand
+  # ci.yml's `labels` job a token that cannot list labels. That job checks its own output for the
+  # skip that a token-less run produces and fails on it, which is the only reason this would be
+  # caught rather than reported green.
+  gate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      issues: read
+
   # Build release binaries. No release exists yet; artifacts are handed to `publish` below.
+  #
+  # `needs: gate` is at the *root* of this graph on purpose, on both of the two jobs that have no
+  # other dependency, so every job downstream is transitively gated by construction. The cheaper
+  # arrangement — let build and package-linux run in parallel with the gate, and hang `needs: gate`
+  # only on the two jobs with outward-facing effects (`docker-build-push` pushes to ghcr,
+  # `publish` creates the release page) — saves the gate's wall clock on a green release and is
+  # the wrong trade twice over. It makes bypassing the gate a matter of per-job discipline, so the
+  # next job added here is ungated unless whoever adds it remembers; and a release is not a
+  # latency-sensitive operation, whereas an unverified one is unrecoverable in the direction that
+  # matters. `internal/config/release_gate_test.go` asserts the reachability rather than the two
+  # literal `needs:` entries, so an arrangement that keeps the property is free to change.
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: gate
     permissions:
       contents: read
     # Linux and macOS only, because that is what builds. `internal/fuse` carries
@@ -181,6 +216,9 @@ jobs:
   package-linux:
     name: Build Linux Packages
     runs-on: ubuntu-latest
+    # See `build` above for why the gate is a dependency of the roots rather than of the jobs with
+    # outward-facing effects.
+    needs: gate
     permissions:
       contents: read
     steps:
@@ -443,8 +481,17 @@ jobs:
   #
   # Independent of `build`: an image failure should not withhold the binaries, and vice versa. Both
   # gate `publish`, so neither reaches users without the other.
+  #
+  # `needs: gate` is not a stylistic addition. This job had no `needs:` at all, and it is the one job
+  # here whose effect is visible outside the run before `publish` ever gets a say: `push: true` to
+  # ghcr, tagged `{{version}}`, `{{major}}.{{minor}}`, `{{major}}` and `latest`. So the image for a
+  # tag was published in parallel with the build, and `docker pull ghcr.io/scttfrdmn/objectfs:latest`
+  # would serve it whether or not any test had passed — indeed whether or not the binary build had
+  # passed, which is the exact failure mode the header of this file describes for v0.10.0's empty
+  # release page. An image, unlike a release page, cannot be un-pulled.
   docker-build-push:
     name: Build and Push Docker Image
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -575,7 +622,7 @@ jobs:
     # cutting the release with an exit code and no way to see what caused it.
     - name: Upload Trivy scan results
       if: always()
-      uses: github/codeql-action/upload-sarif@v4.37.8
+      uses: github/codeql-action/upload-sarif@v4.38.0
       with:
         sarif_file: trivy-binary.sarif
 
@@ -589,6 +636,26 @@ jobs:
     needs: [build, package-linux, docker-build-push, security-scan]
     permissions:
       contents: write
+      # For keyless signing, and for nothing else. `cosign sign-blob` exchanges this run's OIDC token
+      # with Sigstore's Fulcio for a short-lived certificate that names the workflow that requested
+      # it, so the signature's identity is `.../release.yml@refs/tags/vX.Y.Z` rather than a person or
+      # a key. There is **no key material and no repository secret anywhere in this path** — nothing
+      # to store, nothing to rotate, nothing to leak, and nothing whose absence silently degrades to
+      # unsigned (which is exactly what the GPG path does two jobs up: an empty `GPG_SIGNING_KEY`
+      # warns and exits 0). `id-token: write` sounds alarming and is not: it grants the ability to
+      # mint an OIDC token describing this workflow, not write access to anything.
+      id-token: write
+    env:
+      # Defined once, used twice: by `cosign verify-blob` in this job, and by the verification
+      # instructions printed into the release notes. Two literal copies of this string is the obvious
+      # way to write it and it is a trap — they drift, and the copy that drifts is the one in the
+      # notes, which nothing executes. The result would be a published release carrying a command that
+      # does not work, discovered by the first user who tried to verify rather than by CI. One
+      # definition means the run that verifies the signature is verifying against the exact string the
+      # notes tell a user to pass.
+      #
+      # `github.ref` and not `github.ref_name`: the certificate records the full `refs/tags/vX.Y.Z`.
+      COSIGN_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v7
@@ -599,6 +666,15 @@ jobs:
         pattern: release-*
         merge-multiple: true
         path: dist
+
+      # Pinned to an exact tag rather than a floating major, because **there is no floating `v4`**.
+      # sigstore/cosign-installer publishes moving `v2` and `v3` refs and then stopped: `gh api
+      # repos/sigstore/cosign-installer/git/ref/tags/v4` is a 404, while `v4.1.2` resolves. So `@v4`
+      # is not "the latest v4", it is a reference that cannot be resolved — and it would fail at the
+      # only moment this job ever runs, on a tag, after the artifacts are built and the image is
+      # already pushed. Dependabot watches `github-actions` and updates an exact tag fine.
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v4.1.2
 
     - name: Extract the release notes from CHANGELOG.md
       run: |
@@ -667,7 +743,24 @@ jobs:
           echo ""
           echo "---"
           echo ""
-          echo "Verify a download:"
+          echo "**Verify a download.** The authenticated path first, because the quick one below it is"
+          echo "only an integrity check: a per-asset \`.sha256\` is served from the same release as the"
+          echo "asset it describes, so it detects a corrupt download and proves nothing about origin."
+          echo ""
+          echo '```'
+          echo "# 1. authenticity: the checksum list is signed by this repository's release workflow,"
+          echo "#    keylessly, so there is no public key to fetch and trust out of band."
+          echo "cosign verify-blob \\"
+          echo "  --bundle checksums.txt.cosign.bundle \\"
+          echo "  --certificate-identity '$COSIGN_IDENTITY' \\"
+          echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+          echo "  checksums.txt"
+          echo ""
+          echo "# 2. integrity: your download against that now-trusted list."
+          echo "sha256sum --ignore-missing -c checksums.txt"
+          echo '```'
+          echo ""
+          echo "Without cosign, an integrity-only check (no authenticity guarantee):"
           echo ""
           echo '```'
           echo "sha256sum -c objectfs-<platform>.tar.gz.sha256"
@@ -679,6 +772,119 @@ jobs:
         } >> notes.md
 
         echo "notes: $(wc -c < notes.md) bytes"
+
+    # ---------------------------------------------------------------------------------------------
+    # checksums.txt, and a keyless signature over it.
+    #
+    # Strictly additive. Every existing asset keeps its name and every per-asset `.sha256` sibling
+    # keeps its name, its format and its content, because `scripts/install.sh` fetches
+    # `<asset>.sha256` by exact name and the installer is verified end to end against real releases,
+    # including a wget-only path. Nothing here renames or removes anything a user or the installer
+    # already depends on; two files are added.
+    #
+    # What the two files buy. Today's `.sha256` siblings are served by the same host, over the same
+    # release, as the artifact they describe — so they detect corruption in transit and prove nothing
+    # whatsoever about authenticity. Anyone who can alter an asset can alter its hash file in the same
+    # motion. `checksums.txt` collects all nine artifact digests into one document, and
+    # `checksums.txt.cosign.bundle` is a Sigstore signature over *that* document, bound to the
+    # identity of the workflow that produced it. The chain is: bundle → checksums.txt → every asset.
+    # That is the first thing in this project's release path that a forged asset cannot satisfy.
+    #
+    # Keyless, so there is no key. No `secrets.*` is read here and none needs to exist; contrast the
+    # GPG path in `package-linux`, which warns and `exit 0`s when its secret is absent and therefore
+    # ships unsigned rpms by default — a signing mechanism whose failure mode is "silently unsigned"
+    # is the one shape worse than none, because it makes the absence invisible.
+    #
+    # The two hash sources are cross-checked rather than trusted to agree. Publishing `checksums.txt`
+    # next to nine `.sha256` files invites exactly one new failure: the two disagree, and a user
+    # cannot tell which is lying. That would be *worse* than shipping neither, so the loop below
+    # recomputes and compares, and a mismatch fails the publish before any page exists. It also
+    # catches the boring version of the same problem — an artifact that arrived truncated from
+    # `download-artifact`, which today nothing would notice.
+    - name: Checksum every asset and sign the list, keylessly
+      run: |
+        set -euo pipefail
+        cd dist
+
+        # The real artifacts, not the hash files and not the signature. Sorted, so the document is
+        # reproducible rather than dependent on glob order.
+        # `sed` rather than find's `-printf`, which is a GNU extension: this shell is worth being able
+        # to run outside the runner, and a step that can only be exercised by pushing a tag is a step
+        # that gets debugged in production.
+        assets=$(find . -maxdepth 1 -type f \
+          \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) \
+          | sed 's|^\./||' | sort)
+
+        # No backticks in the message below, and that is not a style preference. The first draft wrote
+        # the offending command in backticks as prose, inside a double-quoted string — which is
+        # *command substitution*: it would have run `gh release create` for real, from inside the error
+        # path of the step meant to prevent a bad release.
+        if [ -z "$assets" ]; then
+          echo "::error::no .tar.gz, .deb or .rpm in dist/. download-artifact produced nothing to" \
+            "publish, and the gh release create below would have made an empty release page."
+          exit 1
+        fi
+
+        # 9 today: 5 tarballs, 2 debs, 2 rpms. A floor, not an equality — adding a platform should not
+        # fail here — but zero and one are both signs that the download half broke, and the count is
+        # printed so the run records what was signed.
+        count=$(printf '%s\n' "$assets" | wc -l | tr -d ' ')
+        echo "signing a checksum list over $count assets:"
+        printf '  %s\n' $assets
+
+        if [ "$count" -lt 9 ]; then
+          echo "::error::expected at least 9 assets (5 tarballs, 2 debs, 2 rpms) and found $count." \
+            "A release that omits a platform's artifact looks complete on the page; the omission is" \
+            "only visible to someone who knew to expect it."
+          exit 1
+        fi
+
+        sha256sum $assets > checksums.txt
+
+        # The two sources must agree. `sha256sum -c` reads the `<hash>  <name>` form that both this
+        # file and the per-asset siblings are written in, so each sibling is checked as-is against the
+        # bytes on disk, and then against the line this step just wrote for the same asset.
+        for asset in $assets; do
+          if [ ! -f "$asset.sha256" ]; then
+            echo "::error::$asset has no $asset.sha256 sibling. scripts/install.sh fetches that exact" \
+              "name, so publishing without it breaks the installer for this platform."
+            exit 1
+          fi
+
+          sha256sum -c "$asset.sha256"
+
+          sibling=$(awk '{print $1}' "$asset.sha256")
+          mine=$(awk -v a="$asset" '$2 == a || $2 == "*" a {print $1}' checksums.txt)
+
+          if [ "$sibling" != "$mine" ]; then
+            echo "::error::$asset.sha256 says $sibling and checksums.txt says $mine. Two hash" \
+              "sources that disagree are worse than one, because a user cannot tell which to trust."
+            exit 1
+          fi
+        done
+
+        # --yes because there is no terminal to confirm at. The bundle holds the signature, the
+        # short-lived Fulcio certificate and the Rekor transparency-log inclusion proof in one file,
+        # which is what makes `cosign verify-blob --bundle` a single offline-verifiable step for the
+        # reader; `--output-signature`/`--output-certificate` would split the same material across two
+        # assets and leave the log proof out.
+        cosign sign-blob --yes \
+          --bundle checksums.txt.cosign.bundle \
+          checksums.txt
+
+        # Verified here, in the run that produced it. An unverified signature is decoration, and the
+        # failure it guards against is real: the identity baked into the certificate comes from the
+        # OIDC token, so a change to this workflow's path or to the trigger changes what a user must
+        # pass to `--certificate-identity`. If that string is wrong, the instructions in the release
+        # notes below do not work, and nobody finds out until a user tries to verify a shipped
+        # release. `--certificate-identity` is built from the same context values the notes print.
+        cosign verify-blob \
+          --bundle checksums.txt.cosign.bundle \
+          --certificate-identity "$COSIGN_IDENTITY" \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          checksums.txt
+
+        echo "signature verifies against the identity the release notes name"
 
     - name: Create the release with its assets
       env:
@@ -711,6 +917,13 @@ jobs:
           for f in dist/*.tar.gz dist/*.deb dist/*.rpm; do
             echo "- \`$(basename "$f")\`"
           done
+          echo ""
+          echo "### Signature"
+          echo ""
+          echo "\`checksums.txt\` covers every asset above and is signed keylessly, with no key"
+          echo "material and no repository secret. Identity:"
+          echo ""
+          echo "\`$COSIGN_IDENTITY\`"
           echo ""
           echo "### Image"
           echo ""

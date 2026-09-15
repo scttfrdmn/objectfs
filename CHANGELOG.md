@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The release is now signed, keylessly, with no key material and no repository secret.** Nothing in
+  the release path was signed before. Nine assets each carried a `.sha256` sibling, and a hash file
+  served from the same release as the asset it describes detects a corrupt download and proves nothing
+  whatsoever about origin — whoever can replace an asset can replace its hash in the same motion.
+
+  `publish` now writes an aggregate `checksums.txt` covering every published artifact and signs it with
+  `cosign sign-blob --bundle`, using the run's OIDC token to obtain a short-lived Fulcio certificate.
+  Two assets are added, `checksums.txt` and `checksums.txt.cosign.bundle`, and the chain of custody is
+  bundle → `checksums.txt` → every asset. The bundle carries the signature, the certificate and the
+  Rekor transparency-log inclusion proof together, so verification is one offline command.
+
+  There is no key, so there is no secret. That matters beyond convenience: the GPG path in
+  `package-linux` warns and `exit 0`s when `GPG_SIGNING_KEY` is absent, which is why releases have been
+  shipping unsigned rpms. A signing mechanism whose failure mode is *silently unsigned* is the one
+  shape worse than none, because the absence is invisible. The keyless path has nothing that can be
+  missing.
+
+  **Strictly additive.** Every existing asset keeps its name, and every per-asset `.sha256` sibling
+  keeps its name, format and content, because `scripts/install.sh` fetches `<asset>.sha256` by exact
+  name. The release notes now lead with the authenticated command and label the per-asset check as
+  integrity-only, which is what it has always been.
+
+- The signature is verified in the run that produces it, against the same certificate identity the
+  release notes tell a user to pass — and that identity is defined once, in the job's `env:`. Two
+  literal copies is the obvious way to write it and a trap: they drift, and the one that drifts is the
+  copy in the notes, because nothing executes it. The result would be a published release carrying a
+  verification command that does not work.
+
+### Changed
+
+- **`CLAUDE.md`'s "Related Projects" section**, which was stale on three counts: it gave a local path
+  for CargoShip that does not exist, it described objectfs as using CargoShip "for S3 throughput
+  optimization" — a path deleted in v0.15.0 and, as of this entry, not even a dependency — and it did
+  not mention **lith**, the read-only FUSE-over-S3 sibling whose scope doc defines objectfs as the
+  read-write half. It now says which repositories are actually cloned locally and which have to be read
+  over the API, marks globalfs as the one downstream consumer, and records CargoShip's remaining value
+  as prior art (its format 2.1 frame index is what #185 proposes, already shipped) rather than as code.
+
 ### Removed
 
 - **The CargoShip module dependency, and the dead tier converter that was the only thing holding it
@@ -40,15 +80,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargoship/pkg/aws/config`, so that one import was the whole reason a downstream consumer of the Go
   SDK compiled an archiving library it never called.
 
-### Changed
+### Fixed
 
-- **`CLAUDE.md`'s "Related Projects" section**, which was stale on three counts: it gave a local path
-  for CargoShip that does not exist, it described objectfs as using CargoShip "for S3 throughput
-  optimization" — a path deleted in v0.15.0 and, as of this entry, not even a dependency — and it did
-  not mention **lith**, the read-only FUSE-over-S3 sibling whose scope doc defines objectfs as the
-  read-write half. It now says which repositories are actually cloned locally and which have to be read
-  over the API, marks globalfs as the one downstream consumer, and records CargoShip's remaining value
-  as prior art (its format 2.1 frame index is what #185 proposes, already shipped) rather than as code.
+- **A tag now runs the same gate a pull request runs.** It did not, and the two sets were not merely
+  unequal — they were disjoint. `ci.yml` defined sixteen jobs, `release.yml` defined five, they shared
+  not one job id, and `grep -c workflow_call .github/workflows/*.yml` returned 0 in every file. So
+  **0.14.0 was tagged and published without `test`, `lint`, `coverage`, `fuzz-smoke`, `config-examples`,
+  `docs-site`, `sdk-metrics`, `deploy-manifests`, `systemd-unit`, `packaging`, `modulefiles`, `labels`,
+  `install-script` or `repo-install` ever having run against it.** A pull request merged green and a tag
+  cut from that same commit were verified by two different things, and only the smaller one had a say
+  over what reached users.
+
+  `ci.yml` now carries a `workflow_call` trigger and `release.yml` calls it, so there is exactly one
+  definition of the gate. The direction matters: making `ci.yml` itself the reusable workflow, rather
+  than extracting its jobs into a new `gate.yml` that `ci.yml` would then call, is what keeps every
+  check name byte-identical. A `workflow_call` job reports as `<caller-job-id> / <called-job-id>`, and
+  twenty check names are pinned as literal strings in `main`'s branch protection — the extraction would
+  have renamed nineteen of them at once, leaving every pull request blocked on contexts that can no
+  longer arrive and no red check to explain why. **No branch-protection change is needed.**
+
+- **The release image is no longer pushed before the gate passes.** `docker-build-push` had no `needs:`
+  at all, so on a tag it logged in to ghcr and pushed `{{version}}`, `{{major}}.{{minor}}`, `{{major}}`
+  and `latest` in parallel with everything else — whether the tests passed, and whether the binary
+  build passed. That is the failure the release workflow's own header documents for 0.10.0's empty
+  release page, except an image, unlike a release page, cannot be un-pulled. The gate is now a
+  dependency of the graph's roots, so every job in `release.yml` is transitively gated by construction
+  rather than by whoever adds the next one remembering.
+
+- `internal/config/release_gate_test.go` pins all of it: that `ci.yml` is callable and still owns the
+  `push`/`pull_request` triggers its check names depend on, that `release.yml` calls it rather than
+  restating it, that every release job is reachable from that call, that the calling job grants the
+  union of the permissions the gate's jobs ask for — a called workflow's token can only be narrowed, so
+  a missing scope yields a token that quietly cannot do the thing — and that every one of the twenty
+  required contexts still has a job that reports under it.
+
+- The publish step now fails if any artifact is missing, if any `.sha256` sibling is missing, or if a
+  sibling and `checksums.txt` disagree about a digest. Publishing two hash sources that can disagree
+  would be worse than publishing one, since a user cannot tell which is lying. This also catches the
+  duller version of the same problem — an artifact that arrived truncated from `download-artifact`,
+  which nothing previously noticed.
 
 ## [0.14.0] - 2026-09-14
 
