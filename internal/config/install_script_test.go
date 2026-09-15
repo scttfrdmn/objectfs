@@ -209,6 +209,182 @@ func TestInstallScriptChecksItsToolsBeforeDownloading(t *testing.T) {
 	}
 }
 
+// TestInstallScriptRetriesTransientHTTPErrorsOnBothDownloaders pins the two branches of fetch to the
+// same retry behavior.
+//
+// They were not equivalent, and the asymmetry was invisible because each container in the CI matrix
+// exercises exactly one branch: RHEL-family images have curl, ubuntu:24.04 is given wget. Measured
+// against a server returning two 503s and then a 200, `curl -fsSL --retry 3` recovers and `wget -q -O`
+// fails on the first response with exit 8. Same for 429. wget's --tries covers network-level failures
+// only — a response that arrives carrying an error status is not a failed attempt to wget, so its
+// default of 20 tries retried a 503 zero times.
+//
+// That is not a theoretical gap. Release-asset downloads are unauthenticated, GitHub rate limits them
+// by IP, and a shared runner shares that IP, so the install-script job on main failed with
+// "objectfs-linux-amd64.tar.gz exists for v0.13.0 but its .sha256 does not" against a release whose
+// five .sha256 files were all present and 94 bytes each. Correct code, wrong conclusion, from a fetch
+// that gave up instantly — and the same request from a user behind a busy NAT gets the same answer.
+//
+// A one-in-ten flake on a required check is also a merge blocker, which is how this was found.
+func TestInstallScriptRetriesTransientHTTPErrorsOnBothDownloaders(t *testing.T) {
+	t.Parallel()
+
+	script := installScript(t)
+
+	// Every assertion about a call site is made against the command lines with comments removed, and
+	// that is not incidental. Two mutations survived the first version of this test for the same reason:
+	// `strings.Contains(script, "--retry 3")` is satisfied by the paragraph above that explains what
+	// `curl -fsSL --retry 3` does, and a count of "wget_retry_flags" occurrences is satisfied by the
+	// comments naming it. Deleting the retry from curl, and stripping the flags from one of the two wget
+	// call sites, both left the prose intact and the test green.
+	curlCalls := commandInvocations(script, "curl")
+	wgetCalls := commandInvocations(script, "wget")
+
+	// Floors, so a rename that finds nothing fails instead of passing vacuously. There are two of each:
+	// one in fetch, one in resolve_latest.
+	if len(curlCalls) < 2 || len(wgetCalls) < 2 {
+		t.Fatalf("found %d curl and %d wget invocations in scripts/install.sh, expected at least two of "+
+			"each (fetch and resolve_latest). A test that asserts over an empty list of call sites "+
+			"reports success having checked nothing", len(curlCalls), len(wgetCalls))
+	}
+
+	// The curl branch's retry has been there all along; it is asserted so that "make both branches
+	// agree" cannot be satisfied by deleting the retry from curl.
+	for _, call := range curlCalls {
+		if !strings.Contains(call, "--retry") {
+			t.Errorf("this curl invocation in scripts/install.sh passes no --retry:\n  %s\nBoth "+
+				"downloader branches have to survive a transient 429 or 503 from an unauthenticated, "+
+				"IP-rate-limited download; removing the retry from curl makes the branches agree in the "+
+				"wrong direction", call)
+		}
+	}
+
+	// Also read from the comment-stripped script, for the same reason: the paragraph above
+	// wget_retry_flags names the flag while explaining it.
+	code := withoutComments(script)
+
+	if !strings.Contains(code, "--retry-on-http-error") {
+		t.Fatal("scripts/install.sh does not pass --retry-on-http-error to wget. Without it wget " +
+			"retries a 503 or a 429 zero times regardless of --tries, because it does not count a " +
+			"response that arrives as a failed attempt — measured, not inferred. The curl branch retries " +
+			"three times, so the installer's reliability depended on which downloader the machine had")
+	}
+
+	// The specific statuses matter more than the flag's presence: --retry-on-http-error=500 alone would
+	// satisfy a check for the flag and still not cover the rate-limit response that caused the failure.
+	statuses := retryOnHTTPErrorValue(code)
+
+	for _, status := range []string{"429", "503"} {
+		if !strings.Contains(statuses, status) {
+			t.Errorf("scripts/install.sh retries %q and not HTTP %s. That is the status an "+
+				"unauthenticated release download gets when the source IP is rate limited, which is the "+
+				"case this exists for — a runner or a NAT shared with other traffic", statuses, status)
+		}
+	}
+
+	// 403 must stay fatal. It is an authorization answer rather than a transient one, retrying it turns
+	// an immediate clear failure into a slow identical one, and curl does not retry it either.
+	if strings.Contains(statuses, "403") {
+		t.Errorf("scripts/install.sh retries HTTP 403 (list: %q). A 403 is not transient — it is the "+
+			"answer for a private repository or a revoked token — so retrying only delays the same "+
+			"failure, and the two branches stop agreeing, since curl treats it as fatal", statuses)
+	}
+
+	// Both wget call sites, not just fetch. resolve_latest has its own, hitting the API endpoint whose
+	// rate limit is the tighter of the two, and it was the one that already had --retry on the curl side.
+	for _, call := range wgetCalls {
+		if !strings.Contains(call, "wget_retry_flags") {
+			t.Errorf("this wget invocation in scripts/install.sh does not pass the retry flags:\n  %s\n"+
+				"A call site left without them is a downloader branch that still gives up on the first "+
+				"transient error. Both sites need them: fetch downloads the asset and the checksum, and "+
+				"resolve_latest queries the API endpoint whose rate limit is the tighter of the two", call)
+		}
+	}
+
+	// The capability probe must not depend on a command outside wget. This is the mistake the first
+	// harness for this function made: it ran the probe under a PATH holding only wget, grep was absent,
+	// the probe reported the flag as unsupported, and the measurement showed the fix not working. A
+	// probe whose failure mode is "silently conclude the capability is absent" must not have an
+	// avoidable dependency, and `case` needs nothing.
+	flags := functionBody(script, "wget_retry_flags()")
+	if flags == "" {
+		t.Fatal("could not locate wget_retry_flags in scripts/install.sh. It was renamed or removed, " +
+			"and the assertions below would pass vacuously against an empty body")
+	}
+
+	// Asserted as "no pipeline" rather than as a list of command names. A name list was the first
+	// version and it was wrong in the direction that matters: `strings.Contains(body, "sed ")` is
+	// satisfied by the word "used", so the test failed against a body containing no external command at
+	// all. Matching a command name as a substring of prose is the same class of mistake as matching a
+	// comment instead of a step.
+	if strings.Contains(flags, "|") {
+		t.Error("wget_retry_flags contains a pipeline, so it invokes a command other than wget. The " +
+			"probe decides whether the retry flags are passed at all, which makes an absent helper " +
+			"indistinguishable from an old wget: it answers 'unsupported' and silently restores the " +
+			"behavior this test exists to prevent. A case statement on the help text needs no pipe")
+	}
+
+	if !strings.Contains(flags, "case ") {
+		t.Error("wget_retry_flags no longer matches with a case statement. That is the construct that " +
+			"lets the probe run without grep; if it was replaced, check what the replacement depends on " +
+			"and whether preflight establishes that dependency")
+	}
+}
+
+// commandInvocations returns the lines of the script where cmd appears in command position.
+//
+// Comments are stripped with release_packages_test.go's withoutComments, which strips full lines only.
+// It was written for YAML and the reasoning transfers unchanged — a `#` mid-line is as likely to be
+// inside a shell command here as it is inside a `run:` block there.
+//
+// Command position means the line's first word, which is what the two downloader call sites look
+// like. It deliberately does not match `command -v wget` in preflight, which asks whether the tool
+// exists rather than running it, nor `$(wget --help)` inside the capability probe — neither is a
+// download, and requiring retry flags on either would be wrong.
+func commandInvocations(script, cmd string) []string {
+	var found []string
+
+	for line := range strings.SplitSeq(withoutComments(script), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, cmd+" ") {
+			found = append(found, trimmed)
+		}
+	}
+
+	return found
+}
+
+// retryOnHTTPErrorValue returns the comma-separated status list passed to --retry-on-http-error, or "".
+func retryOnHTTPErrorValue(script string) string {
+	const flag = "--retry-on-http-error="
+
+	_, rest, found := strings.Cut(script, flag)
+	if !found {
+		return ""
+	}
+
+	if end := strings.IndexAny(rest, " \t\n\"'"); end >= 0 {
+		return rest[:end]
+	}
+
+	return rest
+}
+
+// functionBody returns the body of a shell function, between its opening brace and the closing brace
+// at column zero. Returns "" when the function is not present.
+func functionBody(script, signature string) string {
+	_, rest, found := strings.Cut(script, signature+" {")
+	if !found {
+		return ""
+	}
+
+	if body, _, ok := strings.Cut(rest, "\n}"); ok {
+		return body
+	}
+
+	return rest
+}
+
 // releaseAssetNames reads the `name:` values out of release.yml's build matrix.
 //
 // The same walk releasePlatforms does, reading a different key. Kept separate rather than
