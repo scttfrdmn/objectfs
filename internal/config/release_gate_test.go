@@ -47,7 +47,7 @@ const gateCallPath = "./.github/workflows/ci.yml"
 // no `"on"` key at all. Struct field matching resolves it; a map would not. Measured, not assumed.
 type workflowFile struct {
 	Name        string                    `yaml:"name"`
-	On          map[string]interface{}    `yaml:"on"`
+	On          map[string]any            `yaml:"on"`
 	Permissions map[string]string         `yaml:"permissions"`
 	Jobs        map[string]workflowJobDef `yaml:"jobs"`
 }
@@ -57,7 +57,7 @@ type workflowFile struct {
 type workflowJobDef struct {
 	Name        string            `yaml:"name"`
 	Uses        string            `yaml:"uses"`
-	Needs       interface{}       `yaml:"needs"`
+	Needs       any               `yaml:"needs"`
 	Permissions map[string]string `yaml:"permissions"`
 }
 
@@ -70,7 +70,7 @@ func needsOf(job workflowJobDef) []string {
 		return nil
 	case string:
 		return []string{v}
-	case []interface{}:
+	case []any:
 		out := make([]string, 0, len(v))
 
 		for _, item := range v {
