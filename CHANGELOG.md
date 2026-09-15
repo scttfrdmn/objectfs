@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The CargoShip module dependency, and the dead tier converter that was the only thing holding it
+  in.** `ConvertTierToCargoShipStorageClass` had no production caller — its only callers were the two
+  unit tests written for it — and the upload path it existed to serve was removed in v0.15.0 (#362).
+  `github.com/scttfrdmn/cargoship v0.24.2` is out of `go.mod` and `go.sum`, against a current upstream
+  of v0.31.3 that objectfs was seven minor versions behind and had no reason to follow.
+
+  The v0.15.0 entry that removed the upload path decided this function should stay, and gave two
+  reasons that are worth recording as circular rather than quietly reversing: "it has its own unit
+  tests" (the tests exist only to exercise it, so they are not independent evidence of a caller) and
+  "CargoShip's `awsconfig` types are still used for tier mapping" (they were used *only* here, by this
+  function). Neither reason survives being asked *who calls it*.
+
+  It was also actively wrong in a way that only an invoice would surface, which is the argument for
+  deleting rather than keeping it against a future caller. Two of the eight tiers had no CargoShip
+  counterpart and were silently collapsed: `GLACIER_IR` became `GLACIER`, turning an instant-retrieval
+  tier into one that takes minutes to hours, and `REDUCED_REDUNDANCY` became `STANDARD`. Same family as
+  the v0.15.0 defect where every object was stored as `INTELLIGENT_TIERING` whatever the tier said — a
+  tier defect is silent by nature, since the object is readable and nothing fails.
+
+  `ConvertTierToStorageClass`, the AWS SDK converter that production actually uses, is untouched.
+  `TestTierConversionsCoverEveryStorageClass` keeps the property that matters — every class in
+  `awsname.StorageClasses()` needs an explicit expectation, so a ninth tier fails the table rather than
+  falling through to `STANDARD` unnoticed — and now has no collapse left to justify, because every
+  entry is 1:1 with its SDK class. Verified by mutation: remapping `GLACIER_IR` to `GLACIER` and
+  deleting the `DEEP_ARCHIVE` case each fail it, and both mutations compile.
+
+  This drops CargoShip out of **globalfs**'s module graph too. `go mod why -m` there resolves through
+  `globalfs/internal/coordinator` → `objectfs/sdks/go/objectfs` → `objectfs/internal/storage/s3` →
+  `cargoship/pkg/aws/config`, so that one import was the whole reason a downstream consumer of the Go
+  SDK compiled an archiving library it never called.
+
+### Changed
+
+- **`CLAUDE.md`'s "Related Projects" section**, which was stale on three counts: it gave a local path
+  for CargoShip that does not exist, it described objectfs as using CargoShip "for S3 throughput
+  optimization" — a path deleted in v0.15.0 and, as of this entry, not even a dependency — and it did
+  not mention **lith**, the read-only FUSE-over-S3 sibling whose scope doc defines objectfs as the
+  read-write half. It now says which repositories are actually cloned locally and which have to be read
+  over the API, marks globalfs as the one downstream consumer, and records CargoShip's remaining value
+  as prior art (its format 2.1 frame index is what #185 proposes, already shipped) rather than as code.
+
 ## [0.14.0] - 2026-09-14
 
 Packaging, and a release that carries its own packages.

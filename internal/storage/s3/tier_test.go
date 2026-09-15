@@ -10,7 +10,6 @@ import (
 	"time"
 
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	awsconfig "github.com/scttfrdmn/cargoship/pkg/aws/config"
 
 	"github.com/scttfrdmn/objectfs/internal/awsname"
 	"github.com/scttfrdmn/objectfs/internal/awsrates"
@@ -453,18 +452,12 @@ func TestTierRecommendations(t *testing.T) {
 func TestStorageClassConversion(t *testing.T) {
 	t.Parallel()
 
-	// Test AWS SDK conversion
 	if ConvertTierToStorageClass(TierStandard) != s3types.StorageClassStandard {
 		t.Error("Standard tier should convert to STANDARD storage class")
 	}
 
 	if ConvertTierToStorageClass(TierStandardIA) != s3types.StorageClassStandardIa {
 		t.Error("Standard-IA tier should convert to STANDARD_IA storage class")
-	}
-
-	// Test CargoShip conversion
-	if ConvertTierToCargoShipStorageClass(TierStandard) != awsconfig.StorageClassStandard {
-		t.Error("Standard tier should convert to CargoShip STANDARD storage class")
 	}
 }
 
@@ -568,79 +561,46 @@ func TestStorageTiersCoversEveryStorageClass(t *testing.T) {
 	}
 }
 
-// TestTierConversionsCoverEveryStorageClass asserts both converters make a real decision per class.
+// TestTierConversionsCoverEveryStorageClass asserts the converter makes a real decision per class.
 //
-// Both end in `default: STANDARD`, which is the right shape for an unparseable string arriving from
+// It ends in `default: STANDARD`, which is the right shape for an unparseable string arriving from
 // outside and the wrong shape for a class this package is supposed to know: a ninth tier added to
 // awsname and StorageTiers would compile, validate, price correctly, and then be written to S3 as
 // STANDARD by the converter, with nothing anywhere reporting a problem. exhaustive cannot catch it
-// because these switch on a plain string, not a named type.
+// because this switches on a plain string, not a named type.
 //
-// The expectations are spelled out rather than derived so that the two deliberate collapses stay
-// deliberate: REDUCED_REDUNDANCY and GLACIER_IR have no CargoShip counterpart, and each is written
-// here with the reason. A new tier makes this table fail until someone chooses.
+// The expectations are spelled out rather than derived from the same switch the test checks, so a
+// new tier makes this table fail until someone chooses what it maps to.
+//
+// This table used to carry a second column for `ConvertTierToCargoShipStorageClass` and two `why`
+// strings explaining its deliberate collapses: CargoShip had no GLACIER_IR and no
+// REDUCED_REDUNDANCY, so both were written to a different class than the tier named. Every entry is
+// now 1:1 with its SDK class and there is no collapse left to justify — the converter that could
+// not express two of the eight tiers is gone, along with the module it needed.
 func TestTierConversionsCoverEveryStorageClass(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string]struct {
-		sdk       s3types.StorageClass
-		cargoship awsconfig.StorageClass
-		why       string
-	}{
-		TierStandard: {
-			sdk:       s3types.StorageClassStandard,
-			cargoship: awsconfig.StorageClassStandard,
-		},
-		TierStandardIA: {
-			sdk:       s3types.StorageClassStandardIa,
-			cargoship: awsconfig.StorageClassStandardIA,
-		},
-		TierOneZoneIA: {
-			sdk:       s3types.StorageClassOnezoneIa,
-			cargoship: awsconfig.StorageClassOneZoneIA,
-		},
-		TierGlacierIR: {
-			sdk:       s3types.StorageClassGlacierIr,
-			cargoship: awsconfig.StorageClassGlacier,
-			why: "CargoShip has no Glacier Instant Retrieval class. The collapse is a real " +
-				"downgrade — GLACIER retrieval takes minutes to hours where GLACIER_IR is " +
-				"instant — so an archive written through the CargoShip path is slower to read " +
-				"than the configured tier promises",
-		},
-		TierGlacier: {
-			sdk:       s3types.StorageClassGlacier,
-			cargoship: awsconfig.StorageClassGlacier,
-		},
-		TierDeepArchive: {
-			sdk:       s3types.StorageClassDeepArchive,
-			cargoship: awsconfig.StorageClassDeepArchive,
-		},
-		TierIntelligent: {
-			sdk:       s3types.StorageClassIntelligentTiering,
-			cargoship: awsconfig.StorageClassIntelligentTiering,
-		},
-		TierReducedRedundancy: {
-			sdk:       s3types.StorageClassReducedRedundancy,
-			cargoship: awsconfig.StorageClassStandard,
-			why: "CargoShip has no REDUCED_REDUNDANCY class. AWS deprecated it and prices it " +
-				"above STANDARD, so falling back to STANDARD is both cheaper and more durable",
-		},
+	want := map[string]s3types.StorageClass{
+		TierStandard:          s3types.StorageClassStandard,
+		TierStandardIA:        s3types.StorageClassStandardIa,
+		TierOneZoneIA:         s3types.StorageClassOnezoneIa,
+		TierGlacierIR:         s3types.StorageClassGlacierIr,
+		TierGlacier:           s3types.StorageClassGlacier,
+		TierDeepArchive:       s3types.StorageClassDeepArchive,
+		TierIntelligent:       s3types.StorageClassIntelligentTiering,
+		TierReducedRedundancy: s3types.StorageClassReducedRedundancy,
 	}
 
 	for _, class := range awsname.StorageClasses() {
-		want, ok := cases[class]
+		expected, ok := want[class]
 		if !ok {
 			t.Errorf("storage class %q has no conversion expectation here, so nothing checks that "+
 				"ConvertTierToStorageClass does anything but fall through to STANDARD", class)
 			continue
 		}
 
-		if got := ConvertTierToStorageClass(class); got != want.sdk {
-			t.Errorf("ConvertTierToStorageClass(%q) = %q, want %q. %s", class, got, want.sdk, want.why)
-		}
-		if got := ConvertTierToCargoShipStorageClass(class); got != want.cargoship {
-			t.Errorf("ConvertTierToCargoShipStorageClass(%q) = %q, want %q. %s",
-				class, got, want.cargoship, want.why)
+		if got := ConvertTierToStorageClass(class); got != expected {
+			t.Errorf("ConvertTierToStorageClass(%q) = %q, want %q", class, got, expected)
 		}
 	}
 }
