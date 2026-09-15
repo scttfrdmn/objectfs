@@ -262,6 +262,27 @@ updates:
       - '@typescript-eslint/*'
       - eslint
 
+  # TypeScript is held at 6.x, and this entry is here so the hold is deliberate and dated rather than
+  # a PR that reappears and fails every week.
+  #
+  # #488 proposed typescript 6.0.3 -> 7.0.2 and could not merge: `npm ci` fails with ERESOLVE, because
+  # @typescript-eslint 8.x does not peer-accept TypeScript 7, and the typescript-eslint group above is
+  # on 8.x. The two groups are separate on purpose — the compiler and the linter move at different
+  # rates — but they are not independent, and a major on one side is exactly where that shows.
+  #
+  # The cost of leaving it open rather than ignoring it is specific and worth stating: this directory
+  # has open-pull-requests-limit 3, and all three slots were occupied, one of them permanently by a PR
+  # that could never merge. At the limit Dependabot proposes nothing further, including a security
+  # update, so a saturated queue is indistinguishable from an up-to-date repository.
+  #
+  # Remove this when @typescript-eslint 9 is available, which supports TypeScript 7. The check is
+  # `npm ci` in sdks/javascript against the bumped manifest — not the peer range alone, since #332's
+  # lockfile requirement means the manifest and the lockfile have to agree.
+  ignore:
+  - dependency-name: typescript
+    versions:
+    - '>= 7'
+
   # Python SDK.
   #
   # Added with #343, and it needed a requirements.txt to exist first. Dependabot's `pip` ecosystem
