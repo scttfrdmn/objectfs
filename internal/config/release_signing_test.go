@@ -33,6 +33,11 @@ import (
 //   - the per-asset `.sha256` siblings survive. `scripts/install.sh` fetches them by exact name.
 //   - cosign-installer is pinned to an exact version, because its floating majors stop at v3.
 
+// signingStepName is the step that produces and verifies the signature. Named as a constant because
+// two tests scope themselves to it, and a rename that updated only one of them would silently narrow
+// the other to nothing.
+const signingStepName = "Checksum every asset and sign the list, keylessly"
+
 // signingWorkflow is the slice of workflow syntax these tests need: the per-job `permissions:` block.
 //
 // A local parse rather than a shared one, so this file stands alone against `main` and can merge in
@@ -96,11 +101,22 @@ func TestPublishCanMintAnOIDCToken(t *testing.T) {
 func TestTheSignatureIsVerifiedWhereItIsMade(t *testing.T) {
 	t.Parallel()
 
-	source := withoutComments(releaseWorkflowSource(t))
+	// Scoped to the signing step, not the whole file, and that is the difference between a test and
+	// the appearance of one. The first version searched all of release.yml, and the mutation that
+	// replaced the executed `cosign verify-blob` with `true` still passed — because the release notes
+	// *print* the same command as documentation for users, a dozen lines further down. So the check
+	// was matching prose while the verification was gone. Found by mutation, not by reading.
+	step, ok := cutStep(releaseWorkflowSource(t), signingStepName)
+	if !ok {
+		t.Fatalf("release.yml has no step named %q. If it was renamed, rename it here too; if it was "+
+			"removed, the release is unsigned again.", signingStepName)
+	}
+
+	source := withoutComments(step)
 
 	for _, want := range []string{"cosign sign-blob", "cosign verify-blob", "--bundle"} {
 		if !strings.Contains(source, want) {
-			t.Errorf("release.yml no longer runs %q.\n"+
+			t.Errorf("release.yml's signing step no longer runs %q.\n"+
 				"Signing without verifying ships a signature nobody has ever checked, and the thing "+
 				"that breaks silently is the certificate identity: it comes from the OIDC token, so "+
 				"moving or renaming this workflow changes it. If that string is wrong the release "+
@@ -167,10 +183,10 @@ func TestTheSigningPathIsKeyless(t *testing.T) {
 
 	source := releaseWorkflowSource(t)
 
-	step, ok := cutStep(source, "Checksum every asset and sign the list, keylessly")
+	step, ok := cutStep(source, signingStepName)
 	if !ok {
-		t.Fatal("release.yml has no step named \"Checksum every asset and sign the list, keylessly\". " +
-			"If it was renamed, rename it here too; if it was removed, the release is unsigned again.")
+		t.Fatalf("release.yml has no step named %q. If it was renamed, rename it here too; if it was "+
+			"removed, the release is unsigned again.", signingStepName)
 	}
 
 	if strings.Contains(step, "secrets.") {
