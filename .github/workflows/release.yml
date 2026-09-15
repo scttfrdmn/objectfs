@@ -47,10 +47,45 @@ env:
 #     — as unconditional text, regardless of what ran. `publish` now summarizes what it actually
 #     attached.
 jobs:
+  # ---------------------------------------------------------------------------------------------
+  # gate — the entire CI gate, from the one file that defines it.
+  #
+  # `ci.yml` is not copied here and its jobs are not restated here; it is *called*, so there is
+  # exactly one definition of the gate and a tag runs precisely what a pull request runs. Before
+  # this job existed, this workflow's five jobs shared not a single job id with ci.yml's sixteen,
+  # and `grep -c workflow_call .github/workflows/*.yml` returned 0 everywhere — so v0.14.0 shipped
+  # having never run `test`, `lint`, `coverage`, `fuzz-smoke`, `packaging`, `modulefiles`,
+  # `install-script`, or `labels`. The header of ci.yml carries the rest of that history and the
+  # per-job reasoning; read it before changing what is in the gate.
+  #
+  # `permissions` is the union of what ci.yml's jobs ask for, and it has to be stated here. A
+  # called workflow's token is derived from the *calling* job's grants and can only be narrowed
+  # further, never widened — so omitting `issues: read` would not fail loudly, it would hand
+  # ci.yml's `labels` job a token that cannot list labels. That job checks its own output for the
+  # skip that a token-less run produces and fails on it, which is the only reason this would be
+  # caught rather than reported green.
+  gate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      issues: read
+
   # Build release binaries. No release exists yet; artifacts are handed to `publish` below.
+  #
+  # `needs: gate` is at the *root* of this graph on purpose, on both of the two jobs that have no
+  # other dependency, so every job downstream is transitively gated by construction. The cheaper
+  # arrangement — let build and package-linux run in parallel with the gate, and hang `needs: gate`
+  # only on the two jobs with outward-facing effects (`docker-build-push` pushes to ghcr,
+  # `publish` creates the release page) — saves the gate's wall clock on a green release and is
+  # the wrong trade twice over. It makes bypassing the gate a matter of per-job discipline, so the
+  # next job added here is ungated unless whoever adds it remembers; and a release is not a
+  # latency-sensitive operation, whereas an unverified one is unrecoverable in the direction that
+  # matters. `internal/config/release_gate_test.go` asserts the reachability rather than the two
+  # literal `needs:` entries, so an arrangement that keeps the property is free to change.
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: gate
     permissions:
       contents: read
     # Linux and macOS only, because that is what builds. `internal/fuse` carries
@@ -181,6 +216,9 @@ jobs:
   package-linux:
     name: Build Linux Packages
     runs-on: ubuntu-latest
+    # See `build` above for why the gate is a dependency of the roots rather than of the jobs with
+    # outward-facing effects.
+    needs: gate
     permissions:
       contents: read
     steps:
@@ -443,8 +481,17 @@ jobs:
   #
   # Independent of `build`: an image failure should not withhold the binaries, and vice versa. Both
   # gate `publish`, so neither reaches users without the other.
+  #
+  # `needs: gate` is not a stylistic addition. This job had no `needs:` at all, and it is the one job
+  # here whose effect is visible outside the run before `publish` ever gets a say: `push: true` to
+  # ghcr, tagged `{{version}}`, `{{major}}.{{minor}}`, `{{major}}` and `latest`. So the image for a
+  # tag was published in parallel with the build, and `docker pull ghcr.io/scttfrdmn/objectfs:latest`
+  # would serve it whether or not any test had passed — indeed whether or not the binary build had
+  # passed, which is the exact failure mode the header of this file describes for v0.10.0's empty
+  # release page. An image, unlike a release page, cannot be un-pulled.
   docker-build-push:
     name: Build and Push Docker Image
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: read
