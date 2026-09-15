@@ -210,7 +210,7 @@ func TestInstallScriptChecksItsToolsBeforeDownloading(t *testing.T) {
 }
 
 // TestInstallScriptRetriesTransientHTTPErrorsOnBothDownloaders pins the two branches of fetch to the
-// same retry behaviour.
+// same retry behavior.
 //
 // They were not equivalent, and the asymmetry was invisible because each container in the CI matrix
 // exercises exactly one branch: RHEL-family images have curl, ubuntu:24.04 is given wget. Measured
@@ -321,7 +321,7 @@ func TestInstallScriptRetriesTransientHTTPErrorsOnBothDownloaders(t *testing.T) 
 		t.Error("wget_retry_flags contains a pipeline, so it invokes a command other than wget. The " +
 			"probe decides whether the retry flags are passed at all, which makes an absent helper " +
 			"indistinguishable from an old wget: it answers 'unsupported' and silently restores the " +
-			"behaviour this test exists to prevent. A case statement on the help text needs no pipe")
+			"behavior this test exists to prevent. A case statement on the help text needs no pipe")
 	}
 
 	if !strings.Contains(flags, "case ") {
@@ -358,12 +358,11 @@ func commandInvocations(script, cmd string) []string {
 func retryOnHTTPErrorValue(script string) string {
 	const flag = "--retry-on-http-error="
 
-	at := strings.Index(script, flag)
-	if at < 0 {
+	_, rest, found := strings.Cut(script, flag)
+	if !found {
 		return ""
 	}
 
-	rest := script[at+len(flag):]
 	if end := strings.IndexAny(rest, " \t\n\"'"); end >= 0 {
 		return rest[:end]
 	}
@@ -371,17 +370,16 @@ func retryOnHTTPErrorValue(script string) string {
 	return rest
 }
 
-// functionBody returns the body of a shell function, from its opening line to the closing brace at
-// column zero. Returns "" when the function is not present.
+// functionBody returns the body of a shell function, between its opening brace and the closing brace
+// at column zero. Returns "" when the function is not present.
 func functionBody(script, signature string) string {
-	at := strings.Index(script, signature+" {")
-	if at < 0 {
+	_, rest, found := strings.Cut(script, signature+" {")
+	if !found {
 		return ""
 	}
 
-	rest := script[at:]
-	if end := strings.Index(rest, "\n}"); end >= 0 {
-		return rest[:end]
+	if body, _, ok := strings.Cut(rest, "\n}"); ok {
+		return body
 	}
 
 	return rest
