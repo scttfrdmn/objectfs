@@ -355,6 +355,20 @@ jobs:
 
           # No key was imported, so this package must be unsigned. A signature here — verifiable or not —
           # means something signed it that this workflow did not choose, which is worth stopping for.
+          #
+          # All four cells measured in rockylinux:9 rather than reasoned about, because three of the four
+          # exit 0 and only the text tells them apart:
+          #
+          #   unsigned, empty keyring:   rc=0, "digests OK"                 <- the intended state
+          #   signed,   empty keyring:   rc=1, "digests SIGNATURES NOT OK"  <- caught by rc, below
+          #   signed,   key imported:    rc=0, "digests signatures OK"
+          #   unsigned, key imported:    rc=0, "digests OK"                 <- the defect, caught above
+          #
+          # So the `signatures OK` case further down is unreachable in practice: rpm reports an
+          # unverifiable signature as a non-zero exit with SIGNATURES NOT OK, which is neither that
+          # pattern nor a match for it, and `rc` catches it first. Kept anyway, because what it is
+          # asserting is "no signature", and a future rpm reporting an unknown-key signature as a
+          # success would otherwise slip through as one.
           if [ "$rc" -ne 0 ]; then
             echo "::error::$pkg failed rpm -K with no signing key imported: $out"
             echo "An unsigned package verifies its digests and exits 0 against an empty keyring, so" \
