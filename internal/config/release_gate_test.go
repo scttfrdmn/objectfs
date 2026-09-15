@@ -342,16 +342,21 @@ func TestRequiredChecksStillHaveAJobToReportThem(t *testing.T) {
 
 	for _, file := range []string{"ci.yml", "security.yml"} {
 		for id, job := range readWorkflow(t, file).Jobs {
-			// Both, because a matrix job reports as `<name-or-id> (<cells>)` and either half can be
-			// the stable part. `modulefiles` sets `name: modulefiles (${{ matrix.system }})`
-			// specifically so its two required contexts do not carry an absolute interpreter path
-			// that a distro can move; the suffix is stripped from the declared name for the same
-			// reason it is stripped from the required-check string.
-			produced[id] = file
-
+			// A job reports under its `name:` when it has one and under its id otherwise — `name:`
+			// wins, and only one of the two is ever the check name. Recording both was this test's
+			// own first bug: with the id always present, renaming `modulefiles`' `name:` still
+			// matched on the id and the mutation passed. Caught by running it, not by reading it.
+			//
+			// The suffix strip applies to the declared name too, because a matrix job's name is
+			// interpolated: `modulefiles` sets `name: modulefiles (` + matrix.system + `)`
+			// deliberately, so that its two required contexts do not carry the absolute interpreter
+			// path that the default name would have put in them and that a distro can move.
+			reported := id
 			if job.Name != "" {
-				produced[requiredCheckSuffix.ReplaceAllString(job.Name, "")] = file
+				reported = requiredCheckSuffix.ReplaceAllString(job.Name, "")
 			}
+
+			produced[reported] = file
 		}
 	}
 
