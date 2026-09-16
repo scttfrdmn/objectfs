@@ -202,7 +202,7 @@ func TestZstdCLIReadsAFramedObject(t *testing.T) {
 	if !bytes.Contains(listing, []byte("Skippable Frames: 1")) {
 		t.Errorf("zstd -l did not report exactly one skippable frame:\n%s", listing)
 	}
-	if !bytes.Contains(listing, []byte(fmt.Sprintf("Zstandard Frames: %d", len(idx.Frames)))) {
+	if !bytes.Contains(listing, fmt.Appendf(nil, "Zstandard Frames: %d", len(idx.Frames))) {
 		t.Errorf("zstd -l did not report %d data frames:\n%s", len(idx.Frames), listing)
 	}
 	t.Logf("frames=%d, zstd -l says:\n%s", len(idx.Frames), listing)
