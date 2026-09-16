@@ -40,10 +40,10 @@ jobs:
       contents: read
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Set up Go
-      uses: actions/setup-go@v7
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -127,7 +127,7 @@ jobs:
     # v4's breaking changes are in the analysis actions (`init`/`analyze`) and the Node runtime;
     # `upload-sarif`'s inputs are unchanged, and all three call sites here ran green under v4.
     - name: Upload Gosec SARIF file
-      uses: github/codeql-action/upload-sarif@v4.38.0
+      uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       if: always()
       with:
         sarif_file: gosec.sarif
@@ -145,7 +145,7 @@ jobs:
     # advisories in test-only dependencies is a report nobody reads twice.
     - name: Run Trivy vulnerability scanner (repo)
       # v-prefixed: `@0.28.0` does not resolve. See the note in release.yml.
-      uses: aquasecurity/trivy-action@v0.36.0
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         scan-type: fs
         scan-ref: .
@@ -157,7 +157,7 @@ jobs:
 
     - name: Upload Trivy repo scan results
       if: always()
-      uses: github/codeql-action/upload-sarif@v4.38.0
+      uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       with:
         sarif_file: trivy-repo.sarif
 
