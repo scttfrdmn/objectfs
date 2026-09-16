@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/scttfrdmn/cargoship/pkg/aws/config"
 
 	"github.com/scttfrdmn/objectfs/internal/awsname"
 	"github.com/scttfrdmn/objectfs/internal/awsrates"
@@ -538,29 +537,5 @@ func ConvertTierToStorageClass(tier string) types.StorageClass {
 		return types.StorageClassIntelligentTiering
 	default:
 		return types.StorageClassStandard
-	}
-}
-
-// ConvertTierToCargoShipStorageClass converts our tier constants to CargoShip storage class types
-func ConvertTierToCargoShipStorageClass(tier string) config.StorageClass {
-	switch tier {
-	case TierStandard:
-		return config.StorageClassStandard
-	case TierStandardIA:
-		return config.StorageClassStandardIA
-	case TierOneZoneIA:
-		return config.StorageClassOneZoneIA
-	case TierReducedRedundancy:
-		return config.StorageClassStandard // Fallback to Standard (deprecated tier)
-	case TierGlacierIR:
-		return config.StorageClassGlacier // Use Glacier for instant retrieval (CargoShip limitation)
-	case TierGlacier:
-		return config.StorageClassGlacier
-	case TierDeepArchive:
-		return config.StorageClassDeepArchive
-	case TierIntelligent:
-		return config.StorageClassIntelligentTiering
-	default:
-		return config.StorageClassStandard
 	}
 }
