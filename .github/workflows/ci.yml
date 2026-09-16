@@ -105,9 +105,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -160,9 +160,9 @@ jobs:
         # artifact, and compiling it is what keeps it runnable.
         tag: [aws_s3, benchmark, distributed, e2e, integration, fuse_mount, s3compat]
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -184,9 +184,9 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -212,7 +212,7 @@ jobs:
     - name: Enforce per-package floors
       run: ./scripts/coverage-gate.sh coverage.out .coverage-floors
 
-    - uses: actions/upload-artifact@v7
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       if: always()
       with:
         name: coverage
@@ -230,12 +230,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
           # golangci-lint needs the merge base to diff against, which a shallow clone does not have.
         fetch-depth: 0
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -255,7 +255,7 @@ jobs:
       # `command not found`, because nothing but the action puts it on PATH. The `|| true` on that
       # step meant a missing binary and a clean repo were the same observation.
     - name: Install golangci-lint
-      uses: golangci/golangci-lint-action@v9
+      uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
         version: v2.12.2
         install-only: true
@@ -339,9 +339,9 @@ jobs:
         - {pkg: ./internal/awsname, target: FuzzValidateRegion}
         - {pkg: ./internal/coord, target: FuzzNewConfig}
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -350,7 +350,7 @@ jobs:
       run: .github/scripts/fuzz-smoke.sh '${{ matrix.pkg }}' '${{ matrix.target }}' 60
 
       # A counterexample is the whole point of the job, so it has to leave the machine.
-    - uses: actions/upload-artifact@v7
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       if: failure()
       with:
         name: fuzz-failure-${{ matrix.target }}
@@ -392,12 +392,12 @@ jobs:
         - {goos: darwin, goarch: amd64}
         - {goos: darwin, goarch: arm64}
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # setup-go runs before GOOS/GOARCH are in scope, deliberately: those are set per step below
       # rather than on the job, so nothing about the toolchain install or its cache keys is asked to
       # reason about a cross-compilation target.
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -439,9 +439,9 @@ jobs:
   sdk-metrics:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-python@v7
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
         python-version: '3.12'
 
@@ -485,7 +485,7 @@ jobs:
       # Node 22, not 20: 20 went end-of-life in April 2026, so it stops receiving security fixes
       # while this job keeps installing it. sdks/javascript declares `node >=16`, so nothing here
       # constrains the upper end — the pin was just never revisited. 22 is the active LTS.
-    - uses: actions/setup-node@v7
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: '22'
 
@@ -537,7 +537,7 @@ jobs:
       #
       # `mvn -B test` rather than `compile`: the tests use MockWebServer, so they need no network
       # beyond Maven's own dependency resolution and no credentials.
-    - uses: actions/setup-java@v6
+    - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
       with:
         distribution: temurin
         java-version: '17'
@@ -562,7 +562,7 @@ jobs:
       # `make test` builds the library, compiles tests/test_basic.c against the public header, and
       # runs both that binary and the Python ctypes smoke test. The integration halves of both skip
       # themselves without OBJECTFS_TEST_BUCKET, so this needs no credentials and reaches no network.
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -609,9 +609,9 @@ jobs:
   docs-site:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-node@v7
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: '22'
 
@@ -645,9 +645,9 @@ jobs:
   config-examples:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -690,9 +690,9 @@ jobs:
   deploy-manifests:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -760,9 +760,9 @@ jobs:
   systemd-unit:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -809,9 +809,9 @@ jobs:
   packaging:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -1084,9 +1084,9 @@ jobs:
           package: environment-modules
           interpreter: /usr/lib/x86_64-linux-gnu/modulecmd.tcl
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -1154,9 +1154,9 @@ jobs:
       contents: read
       issues: read
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
@@ -1232,7 +1232,7 @@ jobs:
           missing: tar
           install: zypper -q -n install tar gzip
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # Not `container:` on the job, because the checkout has to happen on the runner and the script
     # has to run inside each image — a job-level container would put the checkout inside it too and
@@ -1362,9 +1362,9 @@ jobs:
   repo-install:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
