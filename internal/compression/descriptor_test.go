@@ -72,6 +72,14 @@ func TestDescriptorRoundTripsAFramedObject(t *testing.T) {
 // reachable from outside: S3 user metadata is writable by anyone holding s3:PutObject, and
 // `aws s3 cp --metadata` carries an arbitrary value through unchanged, so a reader that spent
 // IndexLength without checking it would issue a prefix GET of up to 4 GiB on a four-byte edit.
+//
+// Each row asserts *which* check rejected it, not merely that something did, and that is not
+// belt-and-braces. The first version of this table hard-coded an index length of 2648 — copied from
+// this file's own doc-comment example, which was itself wrong — and 2648 is not the consistent length
+// for 64 frames, so a dozen rows were being rejected by the self-consistency check before reaching the
+// thing they were named for. The `unknown version` row in particular passed while the version check
+// was disabled entirely, which is how a mutation run found it. A table of rejections is the shape of
+// test most likely to pass for the wrong reason, because every wrong reason is still a rejection.
 func TestParseSeekableDescriptorRejectsGarbage(t *testing.T) {
 	t.Parallel()
 
@@ -87,36 +95,50 @@ func TestParseSeekableDescriptorRejectsGarbage(t *testing.T) {
 		t.Fatalf("the baseline descriptor %q does not parse: %v", good.String(), err)
 	}
 
+	// The consistent index lengths, computed rather than written: 2664 for 64 frames and 2704 for 65.
+	// Every row that is not about the index length uses the correct one, so that its own defect is the
+	// only thing left for the parser to find.
+	consistent := itoa(int(skippableHeaderSize + indexPayloadLen(64)))
+	forOneMoreFrame := itoa(int(skippableHeaderSize + indexPayloadLen(65)))
+
 	for _, tc := range []struct {
 		name string
 		text string
+		// want is a substring of the error, identifying which check fired.
+		want string
 	}{
-		{"empty", ""},
-		{"too few fields", "1/1048576/64"},
-		{"too many fields", "1/1048576/64/2648/0"},
-		{"non-numeric version", "v1/1048576/64/2648"},
-		{"non-numeric frame size", "1/1MiB/64/2648"},
-		{"negative frame size", "1/-1048576/64/2648"},
-		{"zero frame size", "1/0/64/2648"},
-		{"zero frame count", "1/1048576/0/2648"},
-		{"zero index length", "1/1048576/64/0"},
-		{"version over a byte", "256/1048576/64/2648"},
-		{"frame size over uint32", "1/4294967296/64/2648"},
-		{"frame count over uint32", "1/1048576/4294967296/2648"},
-		{"index length over uint32", "1/1048576/64/4294967296"},
-		{"index length disagrees with frame count", "1/1048576/64/2649"},
-		{"index length for a different frame count", "1/1048576/64/" + itoa(int(skippableHeaderSize+indexPayloadLen(65)))},
-		{"unknown version", "2/1048576/64/2648"},
-		{"leading space", " 1/1048576/64/2648"},
-		{"trailing newline", "1/1048576/64/2648\n"},
-		{"plus sign", "1/+1048576/64/2648"},
-		{"empty field", "1//64/2648"},
-		{"whole thing is separators", "///"},
+		{"empty", "", "fields"},
+		{"too few fields", "1/1048576/64", "fields"},
+		{"too many fields", "1/1048576/64/" + consistent + "/0", "fields"},
+		{"non-numeric version", "v1/1048576/64/" + consistent, "version"},
+		{"non-numeric frame size", "1/1MiB/64/" + consistent, "frame size"},
+		{"negative frame size", "1/-1048576/64/" + consistent, "frame size"},
+		{"zero frame size", "1/0/64/" + consistent, "frame size is zero"},
+		{"zero frame count", "1/1048576/0/" + consistent, "frame count is zero"},
+		{"zero index length", "1/1048576/64/0", "index length is zero"},
+		{"version over a byte", "256/1048576/64/" + consistent, "version"},
+		{"frame size over uint32", "1/4294967296/64/" + consistent, "frame size"},
+		{"frame count over uint32", "1/1048576/4294967296/" + consistent, "frame count"},
+		{"index length over uint32", "1/1048576/64/4294967296", "index length"},
+		{"index length off by one", "1/1048576/64/" + itoa(int(skippableHeaderSize+indexPayloadLen(64))+1), "inconsistent"},
+		{"index length for a different frame count", "1/1048576/64/" + forOneMoreFrame, "inconsistent"},
+		{"unknown version", "2/1048576/64/" + consistent, "is not"},
+		{"leading space", " 1/1048576/64/" + consistent, "version"},
+		{"trailing newline", "1/1048576/64/" + consistent + "\n", "index length"},
+		{"plus sign", "1/+1048576/64/" + consistent, "frame size"},
+		{"empty field", "1//64/" + consistent, "frame size"},
+		{"whole thing is separators", "///", "version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got, err := ParseSeekableDescriptor(tc.text); err == nil {
-				t.Errorf("ParseSeekableDescriptor(%q) returned %+v, want an error", tc.text, got)
+
+			got, err := ParseSeekableDescriptor(tc.text)
+			if err == nil {
+				t.Fatalf("ParseSeekableDescriptor(%q) returned %+v, want an error", tc.text, got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ParseSeekableDescriptor(%q) was rejected by the wrong check.\n got: %v\nwant an error mentioning %q",
+					tc.text, err, tc.want)
 			}
 		})
 	}
