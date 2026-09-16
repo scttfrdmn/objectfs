@@ -91,8 +91,30 @@ Test infrastructure:
 
 ## Related Projects
 
-- **CargoShip** (`/Users/scttfrdmn/src/cargoship`, `github.com/scttfrdmn/cargoship`) — streaming archive/upload pipeline; objectfs uses it for S3 throughput optimization
-- **GlobalFS** (`/Users/scttfrdmn/src/globalfs`, `github.com/scttfrdmn/globalfs`) — global namespace orchestration layer built on top of objectfs + cargoship
+Four repositories under `scttfrdmn` divide the S3 problem. **Only globalfs is cloned locally** — the
+`/Users/scttfrdmn/src/cargoship` path this section used to name does not exist, and neither does
+`src/lith`. Read those two over the GitHub API (`gh api repos/scttfrdmn/<repo>/contents/<path> -q
+.content | base64 -d`) rather than trusting a local path to be there.
+
+- **CargoShip** (`github.com/scttfrdmn/cargoship`) — bulk ingest: packs trees into compressed
+  archives with a manifest and streams them to S3. **Not a dependency of objectfs.** This section
+  used to say "objectfs uses it for S3 throughput optimization", which described the upload path
+  removed in v0.15.0 (#362); the last import — `ConvertTierToCargoShipStorageClass`, which had no
+  production caller — is gone too, so the module is out of `go.mod` entirely. It still matters as
+  **prior art**: its format 2.1 frame index is the design #185 proposes, already shipped, and its
+  `.goreleaser.yaml` is a working model for release packaging.
+- **lith** (`github.com/scttfrdmn/lith`) — **read-only** POSIX/FUSE over a bucket's *native* key
+  layout, plus an NFSv3 gateway. Its scope doc states the split deliberately: writes are "not an
+  extension of lith, but a separate thing. lith is the read half, done properly." So objectfs is the
+  read-**write** half, and lith is not a competitor to route around. There is currently zero
+  cross-reference in either direction.
+- **GlobalFS** (`/Users/scttfrdmn/src/globalfs`, `github.com/scttfrdmn/globalfs`) — global namespace
+  orchestration built **on top of** objectfs. It is the one **downstream consumer**: it imports
+  `objectfs/sdks/go/objectfs`, so a breaking change to that SDK's surface breaks it. It pins an older
+  objectfs, which is why a change here does not show up there until someone bumps it.
+- **substrate** (`/Users/scttfrdmn/src/substrate`, `github.com/scttfrdmn/substrate`) — the in-process
+  AWS endpoint `internal/testaws` runs against. A real dependency, and the one to file against when a
+  test needs a capability it lacks.
 
 ## Development
 
