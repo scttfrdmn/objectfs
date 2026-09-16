@@ -43,7 +43,38 @@ const (
 	// object. Without it, HeadObject would report the compressed ContentLength as
 	// the file size and the kernel would truncate every read at that length.
 	metaOriginalSize = "objectfs-original-size"
+
+	// metaSeekable holds the seekable-framing descriptor (#185) for an object stored as a leading
+	// index frame plus independently decodable zstd frames — version, frame size, frame count, and
+	// the index frame's length. See [compression.SeekableDescriptor].
+	//
+	// It is an accelerator, never the authority. The index is in the object, so an object that lost
+	// this key to a CopyObject is still seekable at the cost of one round trip, and one that has it
+	// still has every value in it checked against the index's own hash before anything is spent on
+	// it. That asymmetry is why this key can be treated as advisory while metaChecksum cannot.
+	metaSeekable = "objectfs-seekable"
 )
+
+// backendOwnedMetaKeys are the user-metadata keys this backend computes from the object's own bytes.
+//
+// A caller may not set them, and a caller that round-trips a metadata map read from HeadObject will
+// carry them without meaning to — which is why they are filtered rather than rejected. Filtering is
+// the safe direction for all three: metaChecksum and metaOriginalSize are recomputed from the bytes
+// being written, and a stale metaSeekable describes an index that is no longer at the head of the
+// object, which would send a reader to fetch a prefix that is now data.
+var backendOwnedMetaKeys = []string{metaChecksum, metaOriginalSize, metaSeekable}
+
+// isBackendOwnedMetaKey reports whether k is one of [backendOwnedMetaKeys], case-insensitively
+// because S3 lower-cases user-metadata keys in transit and a caller's map may not have been.
+func isBackendOwnedMetaKey(k string) bool {
+	for _, owned := range backendOwnedMetaKeys {
+		if strings.EqualFold(k, owned) {
+			return true
+		}
+	}
+
+	return false
+}
 
 // Backend implements the S3 storage backend with CargoShip optimization
 type Backend struct {
@@ -970,22 +1001,53 @@ func (b *Backend) prepareUpload(key string, data []byte, meta map[string]string)
 	checksumHex := hex.EncodeToString(rawHash[:])
 
 	// Apply transparent compression before upload.
+	//
+	// The seekable layout is attempted first, and the ordinary single-frame path is the fallback
+	// rather than the default. Framing is what makes a ranged read of a compressed object cost the
+	// frames it covers instead of the whole stored body — the amplification that is the documented
+	// reason compression defaults to off — and a framed object is a legal zstd stream, so a reader
+	// without frame support loses nothing but the saving. See [compression.Compressor.CompressFramed]
+	// for the five conditions under which it declines, all of which are ordinary rather than errors.
 	uploadData = data
 	compressed := false
+	descriptor := ""
+
 	if b.compressor != nil {
-		compressedData, wasCompressed, comprErr := b.compressor.Compress(data)
-		if comprErr != nil {
-			return nil, "", nil, fmt.Errorf("compress object %q: %w", key, comprErr)
+		framedData, desc, framed, framedErr := b.compressor.CompressFramed(data, rawHash)
+		if framedErr != nil {
+			return nil, "", nil, fmt.Errorf("frame object %q: %w", key, framedErr)
 		}
-		if wasCompressed {
-			uploadData = compressedData
+
+		switch {
+		case framed:
+			uploadData = framedData
 			contentEncoding = b.compressor.ContentEncoding()
 			compressed = true
-			b.logger.Debug("Object compressed for upload",
+			descriptor = desc.String()
+
+			b.logger.Debug("Object framed for upload",
 				"key", key,
 				"original_size", len(data),
 				"compressed_size", len(uploadData),
-				"ratio", float64(len(uploadData))/float64(len(data)))
+				"ratio", float64(len(uploadData))/float64(len(data)),
+				"frame_size", desc.FrameSize,
+				"frames", desc.FrameCount)
+
+		default:
+			compressedData, wasCompressed, comprErr := b.compressor.Compress(data)
+			if comprErr != nil {
+				return nil, "", nil, fmt.Errorf("compress object %q: %w", key, comprErr)
+			}
+			if wasCompressed {
+				uploadData = compressedData
+				contentEncoding = b.compressor.ContentEncoding()
+				compressed = true
+				b.logger.Debug("Object compressed for upload",
+					"key", key,
+					"original_size", len(data),
+					"compressed_size", len(uploadData),
+					"ratio", float64(len(uploadData))/float64(len(data)))
+			}
 		}
 	}
 
@@ -993,9 +1055,9 @@ func (b *Backend) prepareUpload(key string, data []byte, meta map[string]string)
 	// integrity keys, which are this method's to own and must not be overridable. The original size is
 	// recorded only for compressed objects, so HeadObject can report the size the kernel needs for
 	// reads rather than the compressed ContentLength.
-	objectMeta = make(map[string]string, len(meta)+2)
+	objectMeta = make(map[string]string, len(meta)+len(backendOwnedMetaKeys))
 	for k, v := range meta {
-		if strings.EqualFold(k, metaChecksum) || strings.EqualFold(k, metaOriginalSize) {
+		if isBackendOwnedMetaKey(k) {
 			// Not an error: a caller round-tripping metadata it read from HeadObject will carry these,
 			// and refusing the write would make the obvious way to preserve attributes fail. They are
 			// simply recomputed below.
@@ -1006,6 +1068,9 @@ func (b *Backend) prepareUpload(key string, data []byte, meta map[string]string)
 	objectMeta[metaChecksum] = checksumHex
 	if compressed {
 		objectMeta[metaOriginalSize] = strconv.FormatInt(int64(len(data)), 10)
+	}
+	if descriptor != "" {
+		objectMeta[metaSeekable] = descriptor
 	}
 
 	return uploadData, contentEncoding, objectMeta, nil
@@ -1023,6 +1088,13 @@ func (b *Backend) prepareUpload(key string, data []byte, meta map[string]string)
 // dropped the header would leave a compressed object permanently unreadable. Storage class is
 // restated because the default is STANDARD, so omitting it would silently promote an object out of
 // the tier the user is paying for — the same defect shape as L26.
+//
+// The user-metadata map is carried through by merging the caller's entries *under* the object's
+// current ones, so metaSeekable survives a chmod along with the two integrity keys. It has to: a
+// dropped descriptor turns a seekable object into a whole-object-read object, which is a permanent
+// performance regression that nothing reports. The merge is also why forgetting the key here would be
+// a performance bug and not a correctness one — the index is in the object — but the merge is what
+// keeps it from being either.
 func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[string]string) error {
 	start := time.Now()
 	defer func() {
@@ -1050,7 +1122,7 @@ func (b *Backend) SetObjectMetadata(ctx context.Context, key string, meta map[st
 	merged := make(map[string]string, len(head.Metadata)+len(meta))
 	maps.Copy(merged, head.Metadata)
 	for k, v := range meta {
-		if strings.EqualFold(k, metaChecksum) || strings.EqualFold(k, metaOriginalSize) {
+		if isBackendOwnedMetaKey(k) {
 			continue
 		}
 		merged[k] = v

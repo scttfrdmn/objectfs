@@ -176,12 +176,12 @@ fine.
 attributes survive a remount because they are stored on the object. Four properties are worth knowing
 before you rely on them.
 
-**A file's attributes share a 2 KB budget, and the usable part is 1758 bytes.** S3 caps an object's
+**A file's attributes share a 2 KB budget, and the usable part is 1694 bytes.** S3 caps an object's
 total user metadata at 2 KB across all keys, and *rejects* a request that exceeds it rather than
-truncating. ObjectFS already spends part of that on mode, uid, gid, mtime, the content checksum, and
-the original size, leaving 1758 bytes for names and values together — measured from the widest form of
-those keys, not estimated, and re-derived by a test so that adding a stored attribute cannot shrink the
-budget silently. Names and values are encoded to survive an HTTP header, which costs about 60% on top
+truncating. ObjectFS already spends part of that on mode, uid, gid, mtime, the content checksum, the
+original size, and the seekable-framing descriptor, leaving 1694 bytes for names and values together —
+measured from the widest form of those keys, not estimated, and re-derived by a test so that adding a
+stored attribute cannot shrink the budget silently. Names and values are encoded to survive an HTTP header, which costs about 60% on top
 of a name and 33% on top of a value. Exceeding the budget is `E2BIG` for a single value too large for
 any object, `ENOSPC` for a value that will not fit alongside what this file already has — the
 distinction `setxattr(2)` draws, and the one a caller retrying after freeing space depends on.
