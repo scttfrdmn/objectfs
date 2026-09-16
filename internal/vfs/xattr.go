@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/scttfrdmn/objectfs/internal/compression"
 )
 
 // Extended attributes, stored in S3 user metadata.
@@ -133,7 +135,8 @@ func metadataBytes(m map[string]string) int {
 }
 
 // reservedMetadataBytes is the worst-case cost of the metadata ObjectFS writes for itself: the four
-// POSIX attribute keys this package renders, plus the two integrity keys the storage backend adds.
+// POSIX attribute keys this package renders, plus the three the storage backend adds — the content
+// checksum, the original size, and the seekable-framing descriptor.
 //
 // Computed from the key constants rather than written as a number, so that renaming a key or adding
 // one cannot leave the figure stale — which is the failure this repository has hit repeatedly with
@@ -146,11 +149,17 @@ var reservedMetadataBytes = metadataBytes(map[string]string{
 	metaMtime: time.Date(9999, 12, 31, 23, 59, 59, 123456789, time.UTC).Format(time.RFC3339Nano),
 
 	// Written by the storage backend, not here, and reserved anyway: they are on the object and they
-	// count against the same limit. objectfs-original-size appears only on compressed objects, so
-	// reserving it always is deliberately pessimistic — a budget that is right only for uncompressed
-	// files is a budget that fails when compression is enabled.
+	// count against the same limit. objectfs-original-size and objectfs-seekable appear only on
+	// compressed objects, so reserving them always is deliberately pessimistic — a budget that is
+	// right only for uncompressed files is a budget that fails when compression is enabled.
 	metaChecksum:     strings.Repeat("0", 64),
 	metaOriginalSize: strconv.FormatInt(1<<63-1, 10),
+
+	// The widest form the seekable descriptor can take, taken from the compression package rather
+	// than written as a number here. The format owns its own width: counting it by hand is how this
+	// figure would come to disagree with the value actually stored, and the direction that fails is
+	// the one where S3 rejects a PUT that setfattr already accepted.
+	metaSeekable: strings.Repeat("0", compression.MaxSeekableDescriptorLen),
 })
 
 // XattrBudget is the number of metadata bytes extended attributes may occupy on one object.

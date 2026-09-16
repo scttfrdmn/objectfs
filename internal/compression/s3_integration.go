@@ -1,6 +1,7 @@
 package compression
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sort"
 
@@ -162,6 +163,78 @@ func (c *Compressor) Compress(data []byte) ([]byte, bool, error) {
 	}
 
 	return compressed, true, nil
+}
+
+// CompressFramed is [Compressor.Compress] for the seekable layout (#185): the returned body is a
+// leading index frame followed by independently decodable zstd frames, and desc is the fixed-size
+// summary to store in user metadata under the backend's seekable key.
+//
+// framed == false with a nil error means the object was not framed and the caller should take the
+// ordinary Compress path. That is the common answer, not an error path, and there are five reasons
+// for it:
+//
+//   - compression is disabled, or the object is below the configured minimum size;
+//   - the object is already in a compressed format, by the same [AlreadyCompressed] prefix check
+//     Compress uses;
+//   - the write codec is not zstd. gzip and lz4 have no equivalent of a skippable frame that a
+//     standard decoder is required to ignore, so framing them would produce an object only ObjectFS
+//     could read, which is a portability cost the format does not pay for zstd;
+//   - the object fits in one frame. An index over a single frame is 144 bytes buying nothing:
+//     there is no other frame to seek to, and a reader that wants any part of it fetches the whole
+//     body either way;
+//   - the framed body came out no smaller than the input, which is Compress's own discard rule.
+//
+// Nothing here consults a configuration flag, and that is deliberate. A framed object is a legal
+// zstd stream — `zstd -d` and any standard decoder read it, skipping the index — so the choice is
+// not between two formats a reader has to be told about. It is between an object whose ranged reads
+// cost one or two frames and one whose ranged reads cost the whole body, which for a 10 GiB object
+// is a difference of four orders of magnitude. The cost is stored size: a frame boundary throws away
+// the compressor's window, which measures under 1% on data with read locality and about 20% on
+// self-similar text at the 256 KiB frame-size floor. That is the trade, and it is made once here
+// rather than left as a knob whose wrong setting is invisible.
+//
+// contentSHA256 must be the hash of the whole uncompressed content, computed by the caller before
+// any encoding. It goes into the index frame so that an object which loses all of its user metadata
+// to a CopyObject is still self-verifying.
+func (c *Compressor) CompressFramed(data []byte, contentSHA256 [sha256.Size]byte) (
+	body []byte, desc SeekableDescriptor, framed bool, err error,
+) {
+	if !c.Enabled() || int64(len(data)) < c.minSize {
+		return nil, SeekableDescriptor{}, false, nil
+	}
+
+	if AlreadyCompressed(data) {
+		return nil, SeekableDescriptor{}, false, nil
+	}
+
+	// A type assertion rather than a Codec method, because framing is not a thing every codec can be
+	// asked to do badly. Adding FrameSupported() to the Codec interface would put a method on gzip and
+	// lz4 whose only correct implementation returns false forever.
+	zstdCodec, ok := c.codec.(*ZstdCodec)
+	if !ok {
+		return nil, SeekableDescriptor{}, false, nil
+	}
+
+	size := int64(len(data))
+	frameSize := DeriveFrameSize(size, zstdCodec.EstimateRatio(data))
+	if size <= frameSize {
+		return nil, SeekableDescriptor{}, false, nil
+	}
+
+	framedBody, idx, err := zstdCodec.CompressFramed(data, frameSize, contentSHA256)
+	if err != nil {
+		return nil, SeekableDescriptor{}, false, fmt.Errorf("frame: %w", err)
+	}
+
+	if int64(len(framedBody)) >= size {
+		return nil, SeekableDescriptor{}, false, nil
+	}
+
+	// The index length is read off the object rather than recomputed, so the descriptor records what
+	// was actually written. CompressFramed has already asserted that the two agree.
+	indexLength := idx.Frames[0].CompressedOffset
+
+	return framedBody, DescribeFrameIndex(idx, indexLength), true, nil
 }
 
 // Decompress decodes data according to contentEncoding, which is the object's own

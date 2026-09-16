@@ -12,10 +12,13 @@ import (
 	"bytes"
 	"errors"
 	"maps"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/scttfrdmn/objectfs/internal/compression"
 )
 
 // attrEqual compares two Attr values including their extended attributes.
@@ -476,9 +479,19 @@ func TestXattrBudgetIsTheS3LimitLessWhatObjectFSAlreadySpends(t *testing.T) {
 		Mtime: widestTime,
 	}
 	posix := widest.Metadata()
-	// The two integrity keys the backend adds, at their widest.
+	// The keys the backend adds, at their widest. The seekable descriptor is built through the
+	// compression package's own encoder at the format's field maxima rather than as a repeated
+	// character, so this asserts against the string that would really be stored: if the text form
+	// grows a field, this fails here instead of as an S3 400 on a file that also has extended
+	// attributes.
 	posix[metaChecksum] = strings.Repeat("0", 64)
 	posix[metaOriginalSize] = "9223372036854775807"
+	posix[metaSeekable] = compression.SeekableDescriptor{
+		Version:     math.MaxUint8,
+		FrameSize:   math.MaxUint32,
+		FrameCount:  math.MaxUint32,
+		IndexLength: math.MaxUint32,
+	}.String()
 
 	if got := metadataBytes(posix); got > reservedMetadataBytes {
 		t.Errorf("ObjectFS's own metadata costs %d bytes at its widest but only %d are reserved, so a "+
