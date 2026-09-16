@@ -43,6 +43,13 @@ const framedObjectSize = 4 << 20
 // compression ratio and a change to either the fixture or the cost model moves it.
 const framedObjectFrames = 4
 
+// callerSuppliedDescriptor is what a caller attempting to set the descriptor sends. It is a
+// well-formed, self-consistent descriptor for some *other* object — 64 frames of 1 MiB with a
+// 2664-byte index — deliberately, because that is the strongest adversary: a malformed value would be
+// rejected by the reader's own parse even if the filter let it through, so a test using one would pass
+// whether or not the filter exists.
+const callerSuppliedDescriptor = "1/1048576/64/2664"
+
 // putFramed writes a framed object and returns its content, its parsed descriptor, and the stored
 // bytes. It fails the test if framing did not engage, because every assertion after it would otherwise
 // pass vacuously against an ordinary compressed object.
@@ -342,7 +349,7 @@ func TestTheDescriptorIsNotCallerWritable(t *testing.T) {
 
 	want := compressible(8192)
 	err := backend.PutObject(ctx, key, want, map[string]string{
-		metaSeekableKey: "1/1048576/64/2648",
+		metaSeekableKey: callerSuppliedDescriptor,
 		"objectfs-mode": "644",
 	})
 	if err != nil {
@@ -387,7 +394,7 @@ func TestSetObjectMetadataPreservesTheDescriptor(t *testing.T) {
 	err := backend.SetObjectMetadata(ctx, key, map[string]string{
 		"objectfs-mode":  "600",
 		"objectfs-uid":   "1000",
-		metaSeekableKey:  "1/1048576/64/2648",
+		metaSeekableKey:  callerSuppliedDescriptor,
 		metaChecksumKey:  strings.Repeat("0", 64),
 		"objectfs-xattr": "irrelevant",
 	})

@@ -27,7 +27,11 @@ import (
 // losing the descriptor costs one round trip and nothing else, and [ParseFrameIndex] over a prefix
 // recovers everything here.
 //
-// The text form is `version/frameSize/frameCount/indexLength`, e.g. `1/1048576/64/2648`. Text
+// The text form is `version/frameSize/frameCount/indexLength`, e.g. `1/1048576/64/2664` — a 64 MiB
+// file in 1 MiB frames, whose index frame occupies the first 2664 bytes of the stored object. The
+// example is a *consistent* descriptor, and the length in it is not decorative: an earlier version of
+// this comment said 2648, which [ParseSeekableDescriptor] rejects, and the wrong number was copied
+// into a dozen test rows where it silently pre-empted the check each of them was written for. Text
 // rather than base64-packed binary for two reasons: S3 user metadata is a header value, so a text
 // form survives every tool in the path unchanged and is readable in `aws s3api head-object` output;
 // and at these magnitudes decimal is *shorter* than base64 of the equivalent fixed-width fields
