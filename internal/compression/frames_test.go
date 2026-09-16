@@ -449,6 +449,88 @@ func framedOrErr(c *ZstdCodec, src []byte, frameSize int64) ([]byte, *FrameIndex
 	return c.CompressFramed(src, frameSize, sha256.Sum256(src))
 }
 
+// TestDecompressFrameRejectsAnIndexThatLiesAboutTheDecodedSize covers the check that runs after the
+// decoder, which the checksum does not subsume. Frame is a plain struct any caller can build, so its
+// compressed bytes and their checksum can agree with each other while UncompressedSize disagrees with
+// both; without this check that frame hands back a different number of bytes than the reader was told
+// to expect, and the caller's own length arithmetic is what goes wrong, one layer up.
+func TestDecompressFrameRejectsAnIndexThatLiesAboutTheDecodedSize(t *testing.T) {
+	t.Parallel()
+	c := framedCodec(t)
+	obj, idx := framed(t, c, compressibleBytes(40000), 8192)
+	f := idx.Frames[0]
+	extent := obj[f.CompressedOffset : f.CompressedOffset+f.CompressedSize]
+
+	for _, delta := range []int64{1, -1} {
+		lying := f // the checksum still matches; only the claimed decoded length is wrong
+		lying.UncompressedSize = f.UncompressedSize + delta
+		if _, err := c.DecompressFrame(extent, lying); !errors.Is(err, ErrIndexCorrupt) {
+			t.Errorf("UncompressedSize off by %+d: got %v, want ErrIndexCorrupt", delta, err)
+		}
+	}
+}
+
+// TestParseFrameIndexRejectsAnIndexWithNoFrames is the case the total-coverage check exists for, and
+// it cannot be reached from the corruption table: zeroing the declared count there leaves the record
+// bytes in place, which the count-versus-records check rejects several lines earlier. Built directly
+// instead. Every other inconsistency the frame table can express is caught by the tiling check as the
+// loop runs; an empty table means the loop never runs, so the sum afterwards is the only witness.
+func TestParseFrameIndexRejectsAnIndexWithNoFrames(t *testing.T) {
+	t.Parallel()
+
+	obj, err := AppendFrameIndex(nil, &FrameIndex{
+		Version:          FrameIndexVersion,
+		FrameSize:        8192,
+		UncompressedSize: 40000,
+	})
+	if err != nil {
+		t.Fatalf("AppendFrameIndex: %v", err)
+	}
+	if _, _, err := ParseFrameIndex(obj); !errors.Is(err, ErrIndexCorrupt) {
+		t.Errorf("got %v, want ErrIndexCorrupt", err)
+	}
+}
+
+// TestParseFrameIndexRejectsASizeAboveMaxInt64 is separate from the corruption table for a reason
+// worth stating: the table's fixture has five frames, and with more than one frame the tiling check
+// rejects an absurd FrameSize before the MaxInt64 bound is ever consulted, so a row there would keep
+// passing with the bound deleted. With exactly one frame, FrameSize is never compared against a span
+// — only the last frame's length is, and it is measured against UncompressedSize — so a wire value of
+// MaxUint64 would reach FramesCovering as -1. `offset / -1` is then negative and the slice bound
+// immediately after it panics, which is the crash this bound exists to prevent.
+func TestParseFrameIndexRejectsASizeAboveMaxInt64(t *testing.T) {
+	t.Parallel()
+	c := framedCodec(t)
+	const payloadAt = skippableHeaderSize
+
+	for _, tc := range []struct {
+		name string
+		at   int
+	}{
+		{"frame size", payloadAt + 8},
+		{"content size", payloadAt + 16},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// One frame exactly. If this fixture ever grows a second, the tiling check starts
+			// answering first and this test silently stops testing the bound.
+			obj, idx := framed(t, c, compressibleBytes(4096), 4096)
+			if len(idx.Frames) != 1 {
+				t.Fatalf("fixture has %d frames, not 1; this test would pass for the wrong reason",
+					len(idx.Frames))
+			}
+
+			binary.LittleEndian.PutUint64(obj[tc.at:tc.at+8], math.MaxUint64)
+			resealIndex(t, obj)
+
+			if _, _, err := ParseFrameIndex(obj); !errors.Is(err, ErrIndexCorrupt) {
+				t.Errorf("got %v, want ErrIndexCorrupt", err)
+			}
+		})
+	}
+}
+
 func TestParseFrameIndexRejectsCorruption(t *testing.T) {
 	t.Parallel()
 	c := framedCodec(t)
@@ -522,22 +604,6 @@ func TestParseFrameIndexRejectsCorruption(t *testing.T) {
 			name: "frame size that does not tile the content",
 			damage: func(obj []byte, _ *FrameIndex) {
 				binary.LittleEndian.PutUint64(obj[payloadAt+8:payloadAt+16], 8191)
-			},
-			wantErr: ErrIndexCorrupt,
-		},
-		{
-			name: "frame size above MaxInt64",
-			damage: func(obj []byte, _ *FrameIndex) {
-				// The wire field is a uint64 and the in-memory field is an int64, so without the
-				// bound this arrives as a negative FrameSize and FramesCovering divides by it.
-				binary.LittleEndian.PutUint64(obj[payloadAt+8:payloadAt+16], 1<<63)
-			},
-			wantErr: ErrIndexCorrupt,
-		},
-		{
-			name: "total size above MaxInt64",
-			damage: func(obj []byte, _ *FrameIndex) {
-				binary.LittleEndian.PutUint64(obj[payloadAt+16:payloadAt+24], math.MaxUint64)
 			},
 			wantErr: ErrIndexCorrupt,
 		},

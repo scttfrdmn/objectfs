@@ -214,6 +214,11 @@ func DeriveFrameSize(uncompressedSize int64, ratio float64) int64 {
 	// Round to the nearest power of two in the exponent, not the value: halfway between 512 KiB
 	// and 1 MiB should land on the one whose log2 is closer, which is 724 KiB, not 768 KiB.
 	rounded := math.Ldexp(1, int(math.Round(math.Log2(optimum))))
+	// The floor arm is load-bearing: an optimum just above MinFrameSize can round *down* below it.
+	// The ceiling arm is not currently observable, because MaxFrameSize is itself a power of two and
+	// the guard above already returned for anything at or over it, so rounding can only reach exactly
+	// MaxFrameSize — which the default arm would also return. It stays because that stops being true
+	// the moment MaxFrameSize is changed to something that is not a power of two.
 	switch {
 	case rounded <= MinFrameSize:
 		return MinFrameSize
@@ -277,11 +282,6 @@ func (c *ZstdCodec) CompressFramed(src []byte, frameSize int64, contentSHA256 [s
 		body = c.encoder.EncodeAll(src[start:end], body)
 		encoded := body[before:]
 
-		if int64(len(encoded)) > math.MaxUint32 {
-			return nil, nil, fmt.Errorf("compressed frame at %d is %d bytes, exceeding %d",
-				start, len(encoded), int64(math.MaxUint32))
-		}
-
 		idx.Frames = append(idx.Frames, Frame{
 			CompressedOffset:   indexLen + before,
 			CompressedSize:     int64(len(encoded)),
@@ -312,6 +312,10 @@ func (c *ZstdCodec) CompressFramed(src []byte, frameSize int64, contentSHA256 [s
 // else. Passing a longer slice is rejected rather than tolerated: DecodeAll over a concatenation
 // happily decodes the following frames too, so a slack slice would silently return a neighbour's
 // content and pass every length check that came after.
+// The length check is a fast reject, not the guarantee: any length difference also changes the hash,
+// so the checksum below would catch a slack slice on its own. It runs first so the error names the
+// mismatch precisely and so a hostile CompressedSize cannot make this hash an arbitrarily large
+// buffer before being refused.
 func (c *ZstdCodec) DecompressFrame(frameBytes []byte, f Frame) ([]byte, error) {
 	if int64(len(frameBytes)) != f.CompressedSize {
 		return nil, fmt.Errorf("%w: frame at %d is %d bytes, index says %d",
