@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -98,8 +99,12 @@ func TestParseSeekableDescriptorRejectsGarbage(t *testing.T) {
 	// The consistent index lengths, computed rather than written: 2664 for 64 frames and 2704 for 65.
 	// Every row that is not about the index length uses the correct one, so that its own defect is the
 	// only thing left for the parser to find.
-	consistent := itoa(int(skippableHeaderSize + indexPayloadLen(64)))
-	forOneMoreFrame := itoa(int(skippableHeaderSize + indexPayloadLen(65)))
+	//
+	// strconv.Itoa rather than this package's own itoa helper: that one lives in a file behind
+	// `//go:build !integration`, so referencing it from here compiled fine under `go test` and broke
+	// `go vet -tags=integration ./...` — a CI job, in a file with no build constraint of its own.
+	consistent := strconv.Itoa(int(skippableHeaderSize + indexPayloadLen(64)))
+	forOneMoreFrame := strconv.Itoa(int(skippableHeaderSize + indexPayloadLen(65)))
 
 	for _, tc := range []struct {
 		name string
@@ -120,7 +125,7 @@ func TestParseSeekableDescriptorRejectsGarbage(t *testing.T) {
 		{"frame size over uint32", "1/4294967296/64/" + consistent, "frame size"},
 		{"frame count over uint32", "1/1048576/4294967296/" + consistent, "frame count"},
 		{"index length over uint32", "1/1048576/64/4294967296", "index length"},
-		{"index length off by one", "1/1048576/64/" + itoa(int(skippableHeaderSize+indexPayloadLen(64))+1), "inconsistent"},
+		{"index length off by one", "1/1048576/64/" + strconv.Itoa(int(skippableHeaderSize+indexPayloadLen(64))+1), "inconsistent"},
 		{"index length for a different frame count", "1/1048576/64/" + forOneMoreFrame, "inconsistent"},
 		{"unknown version", "2/1048576/64/" + consistent, "is not"},
 		{"leading space", " 1/1048576/64/" + consistent, "version"},
