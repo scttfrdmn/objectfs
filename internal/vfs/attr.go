@@ -200,6 +200,12 @@ const (
 	// place.
 	metaChecksum     = "objectfs-sha256"
 	metaOriginalSize = "objectfs-original-size"
+
+	// metaSeekable is the seekable-framing descriptor (#185), also written by the storage backend.
+	// This package neither reads nor writes it; it is named here because it occupies part of the same
+	// 2 KB user-metadata budget extended attributes are drawn from, and [reservedMetadataBytes] has to
+	// account for every key ObjectFS puts on an object whether or not this package understands it.
+	metaSeekable = "objectfs-seekable"
 )
 
 // AttrFromMetadata builds an Attr for a regular file from an object's stored user metadata.

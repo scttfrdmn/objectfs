@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Compressed objects are now written as independently decodable frames (#185), so that a ranged read
+  can eventually cost the frames it covers rather than the whole stored body.** A zstd object that spans
+  more than one frame is stored as a leading *skippable* frame carrying a frame index — frame size,
+  total size, per-frame compressed and uncompressed lengths, a SHA-256 per frame and one over the whole
+  content — followed by the content frames themselves.
+
+  **A framed object is an ordinary zstd stream.** The index rides in a skippable frame, which every
+  conformant decoder is required to ignore, so `aws s3 cp`, `zstd -d`, and ObjectFS's own existing
+  whole-object read path all return the file byte for byte with no knowledge of framing. Objects written
+  by earlier versions are untouched and read exactly as before. This is the property that makes it safe
+  to ship the write path on its own.
+
+  **What this release does not do is make any read faster.** The read path still fetches and decodes the
+  whole stored body; the frame-aware path is the next stage. Framing is being landed first and alone
+  because it changes the stored bytes of every compressible object a mount writes, and that change has
+  to be proven correct *through the unchanged reader* before anything is built on top of it. A ranged
+  read of a framed object returns the same bytes it did before, which is what the new tests assert.
+
+  A reader finds the index in one correctly-sized request via a new `objectfs-seekable` user-metadata
+  key holding `version/frameSize/frameCount/indexLength` — 15 bytes on a typical object, 36 at the
+  format's widest. It is redundant with the object's own index on purpose: the descriptor is checkable
+  for self-consistency before a byte is fetched, so a garbled value costs a rejected parse instead of a
+  4 GiB prefix GET. Like the checksum and original-size keys it is backend-owned — a caller cannot set
+  it, and it survives a `chmod`, which is a metadata-replacing `CopyObject` that would otherwise drop it.
+
+  **There is no configuration flag.** Framing is chosen automatically for a zstd object larger than one
+  frame, and declined in five ordinary cases: compression off, a non-zstd codec, below the compression
+  minimum size, content already in a compressed format, and a framed body no smaller than the input. The
+  frame size is derived per object rather than fixed, at `sqrt(40 * size * ratio)` rounded to a power of
+  two and clamped to [256 KiB, 16 MiB] — the minimum of a cold read's cost in bytes, being index records
+  plus one frame. Neither #185's original 1–4 MiB guess nor CargoShip's 16 MiB is adopted, because both
+  are the right answer for a different cost model; 16 MiB is what this formula gives for a single object
+  of about 2 TiB. The ratio is estimated from three 341 KiB windows spread across the object rather than
+  a single prefix, which was measured getting a file with an incompressible header wrong by 15x.
+
+  **The cost is stored size, and it is real.** Independently decodable frames cannot share a compression
+  window, so the ratio is worse than a single-frame encode: under 1% on data with read locality, and
+  about 20% on self-similar text at the 256 KiB floor. That is the trade being made deliberately, once,
+  here — against up to four orders of magnitude of read amplification on a ranged read of a large
+  compressed object — rather than exposed as a setting whose wrong value is invisible in both directions.
+
 - **The release is now signed, keylessly, with no key material and no repository secret.** Nothing in
   the release path was signed before. Nine assets each carried a `.sha256` sibling, and a hash file
   served from the same release as the asset it describes detects a corrupt download and proves nothing
@@ -38,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification command that does not work.
 
 ### Changed
+
+- **The extended-attribute budget is 1694 bytes per object, down from 1758.** The 64 bytes are the
+  widest form of the new `objectfs-seekable` key, and they are reserved on every object whether or not
+  that object is framed. S3 rejects an over-budget metadata write rather than truncating it, so a
+  reservation that is merely usually right would turn into a `setfattr` that succeeds followed by a
+  flush that fails, reported to a caller that can no longer act on it. The reservation is derived from
+  the descriptor type's own maximum width rather than written down, and a test asserts the arithmetic in
+  both directions, so it cannot go stale as the format changes.
 
 - **`CLAUDE.md`'s "Related Projects" section**, which was stale on three counts: it gave a local path
   for CargoShip that does not exist, it described objectfs as using CargoShip "for S3 throughput
