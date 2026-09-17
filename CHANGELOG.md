@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-17
+
+The 0.15.0 release built and never published.
+
+Everything up to the last step went green: the 40-job gate, five tarballs, three debs, three rpms with
+their checksum siblings, the Docker image pushed, the release binary scanned. Then the step that
+checksums every asset and signs the list exited on `sha256sum: objectfs-0.15.0-1.aarch64.rpm.sha256: no
+properly formatted checksum lines found`, and no release page was ever created.
+
+The cause is a format assumption that was written down as fact. GoReleaser's `checksum: split: true`
+writes a **bare** digest — 64 lowercase hex characters, no filename, no trailing newline, 64 bytes
+exactly — and `sha256sum -c` cannot read that at all; it needs a `<hash>  <name>` line and fails the
+whole file. The workflow ran `sha256sum -c "$asset.sha256"` over all eleven, under a comment asserting
+"the `<hash>  <name>` form that both this file and the per-asset siblings are written in". Review had
+nothing to catch: the code agreed with its own documentation. `scripts/install.sh` had it right the
+whole time, by comparing the digest directly rather than shelling out to check mode, which is also why
+this was invisible until a real publish.
+
+The `v0.15.0` tag stays where it is. `proxy.golang.org` had already cached it by the time the failure
+was diagnosed, so its hash is in the checksum database permanently; moving the tag would make `go get`
+fail for every consumer forever, and GlobalFS pins this module. So `v0.15.0` remains a valid module
+version whose code is exactly this code, and 0.15.1 is the first tag of it that publishes assets. The
+0.15.0 entry above describes what shipped; nothing in it changed.
+
+### Fixed
+
+- **The release could not publish.** `release.yml`'s checksum-and-sign step no longer uses
+  `sha256sum -c` on a per-asset `.sha256`. It reads the digest with `tr -d '[:space:]'` — chosen over
+  `awk '{print $1}'` so that a `<hash>  <name>` sibling, which a future GoReleaser or `split: false`
+  would write, is rejected loudly rather than silently absorbed — then asserts the shape (lowercase
+  hex, nothing else) and the length (64, because a truncated digest still compares equal to itself)
+  before comparing it against `checksums.txt`. Dropping `-c` costs no coverage: `checksums.txt` is
+  computed by `sha256sum $assets` from the bytes on disk one line above, so comparing each sibling
+  against it is what verifies the sibling against the artifact.
+- **The release notes printed a command that cannot work.** The integrity-only fallback said
+  `sha256sum -c objectfs-<platform>.tar.gz.sha256`, which fails on every asset of every release for
+  the reason above. It now supplies the filename the bare digest lacks. `SECURITY.md` carried the same
+  command and has the same fix.
+
+### Added
+
+- `internal/config/release_checksums_test.go` — the coupling that was missing. `.goreleaser.yml`
+  produces this format, `release.yml` cross-checks and documents it, and `scripts/install.sh` verifies
+  every user's download with it; nothing tied the three together, and the break was invisible until a
+  release was half-published. Three tests: no consumer passes a `.sha256` sibling to check mode
+  (walking `.github/workflows/` rather than enumerating it, so the next workflow is covered too, and
+  skipping comments, since both files now describe the broken command on purpose); `.goreleaser.yml`
+  still sets `split: true` and `algorithm: sha256`, because turning split off publishes no siblings at
+  all and `install.sh` treats a missing one as fatal; and `install.sh` still verifies by comparing a
+  non-empty published digest against a computed one — the non-vacuity guard, since a rewrite that
+  dropped verification entirely would satisfy the prohibition perfectly. Each was verified by
+  reintroducing the corresponding defect and watching the test fail.
+
 ## [0.15.0] - 2026-09-17
 
 Seekable compression, and a release built by one tool.
@@ -6424,7 +6477,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/scttfrdmn/objectfs/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/scttfrdmn/objectfs/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/scttfrdmn/objectfs/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/scttfrdmn/objectfs/compare/v0.12.0...v0.13.0

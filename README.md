@@ -374,10 +374,12 @@ fetch and trust out of band, nothing to rotate, and nothing whose absence could 
 unsigned. The chain is: bundle → `checksums.txt` → every asset.
 
 ```bash
-# 1. authenticity: the checksum list came from this repository's release workflow at this tag
+# 1. authenticity: the checksum list came from this repository's release workflow at this tag.
+#    Substitute the tag you downloaded from — the identity names it, so a tag that is not yours
+#    will not verify. Each release's notes print this command with its own tag filled in.
 cosign verify-blob \
   --bundle checksums.txt.cosign.bundle \
-  --certificate-identity 'https://github.com/scttfrdmn/objectfs/.github/workflows/release.yml@refs/tags/v0.15.0' \
+  --certificate-identity 'https://github.com/scttfrdmn/objectfs/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 
@@ -385,9 +387,18 @@ cosign verify-blob \
 sha256sum --ignore-missing -c checksums.txt
 ```
 
-Each release's notes print this command with that release's own tag in the identity, and the release
-job runs the same command against the same identity string before publishing — so a tag whose
-instructions would not work does not ship.
+The release job runs that same command, against the identity string it prints, before publishing — so
+a tag whose instructions would not work does not ship. The tag is a placeholder here rather than a
+real release because a version written into prose has no way to be told it has gone stale; the notes
+attached to each release are generated from that release's own ref.
+
+A per-asset `.sha256` is a bare digest with no filename, which is what GoReleaser's split checksums
+are. `sha256sum -c` cannot read one directly — supply the name it lacks:
+
+```bash
+printf '%s  %s\n' "$(cat objectfs-linux-amd64.tar.gz.sha256)" objectfs-linux-amd64.tar.gz \
+  | sha256sum -c
+```
 
 **The `.deb` and `.rpm` files themselves are not signed**, for the same reason there is no repository:
 package signing needs a long-lived GPG key. `apt install ./file.deb` and `dnf install ./file.rpm`

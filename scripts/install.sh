@@ -391,10 +391,15 @@ main() {
     fetch "$base/$asset.sha256" "$work/$asset.sha256" \
         || die "$asset exists for $tag but its .sha256 does not, so the download cannot be verified. Refusing to install an unverified binary"
 
-    # The published file is `<hash>  <name>`, which is sha256sum -c's format — but -c resolves the
-    # name relative to the working directory, so comparing the hash field directly is what makes
-    # this work regardless of where the file was staged. Extracting the field also means one code
-    # path for sha256sum and shasum, whose -c output differs.
+    # The published file is a bare 64-character digest with no filename and no trailing newline —
+    # that is what goreleaser's `checksum: split: true` writes, so `sha256sum -c` cannot read it at
+    # all ("no properly formatted checksum lines found"). Comparing the first field directly is what
+    # makes this work: it reads a bare digest and a `<hash>  <name>` line identically, so it survived
+    # the format changing underneath it. Do not "simplify" this to `-c`. Extracting the field also
+    # means one code path for sha256sum and shasum, whose -c output differs.
+    #
+    # `release.yml` made exactly that mistake on the same files and failed the v0.15.0 publish;
+    # `internal/config/release_checksums_test.go` now couples this format to both consumers.
     local want got
     want="$(awk '{print $1}' "$work/$asset.sha256")"
     [ -n "$want" ] || die "the checksum file for $asset is empty or malformed. Refusing to install an unverified binary"
