@@ -176,6 +176,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`internal/testaws`'s request-body byte counter had a data race, so `go test -race ./...` failed
+  about one run in twenty with a race in the harness rather than in anything under test.** The counter
+  is a wrapper around the request body that increments a field of an already-published `Request`, and
+  `recorder.snapshot` copies that struct — so the increment needed the recorder's own lock and did not
+  have it.
+
+  The recorder's in-flight wait does not cover this, which is why it survived the round of work that
+  added that wait. The wait covers what the handler goroutine does between publishing a request and
+  marking it served; the request body is not read by the handler. The reverse proxy hands it to its
+  transport, which forwards it to the emulator from its own `writeLoop` goroutine — and the transport
+  returns from `RoundTrip` on the response headers, so a response can arrive, the handler return, and
+  the request settle while that goroutine is still counting bytes. Nothing then orders the increment
+  against a test reading the log.
+
+  The consequence if it had gone unnoticed is a quietly small number rather than a crash:
+  `RequestBytes` is what every upload-path assertion measures, so a lost increment reads as a write path
+  that sent fewer bytes than it did. Reproduced with
+  `go test -race -count=30 -run TestRecorderLogsARequestBeforeItsCaller ./internal/testaws/`, which is
+  the existing test that reports it; a deliberate reproduction was attempted and is deliberately not in
+  the tree, because neither obvious way to force the interleaving reaches this counter — a faulted
+  request never reaches the proxy, and net/http's drain of an unread body happens below the wrapper.
+
 - **A tag now runs the same gate a pull request runs.** It did not, and the two sets were not merely
   unequal — they were disjoint. `ci.yml` defined sixteen jobs, `release.yml` defined five, they shared
   not one job id, and `grep -c workflow_call .github/workflows/*.yml` returned 0 in every file. So
@@ -6093,7 +6115,7 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 ## [0.7.1] - 2026-02-23
 
 ### Fixed
-- `internal/fuse/mount.go`: `MountManager` gains a `sync.Mutex` field (`mu`) protecting the `mounted`, `currentOpID`, and `server` fields, which were previously accessed without synchronisation from `Mount()`, `Unmount()`, a background goroutine, `IsMounted()`, `GetCurrentOperation()`, and `Remount()` — eliminates data race detected by `-race` (#98)
+- `internal/fuse/mount.go`: `MountManager` gains a `sync.Mutex` field (`mu`) protecting the `mounted`, `currentOpID`, and `server` fields, which were previously accessed without synchronization from `Mount()`, `Unmount()`, a background goroutine, `IsMounted()`, `GetCurrentOperation()`, and `Remount()` — eliminates data race detected by `-race` (#98)
 - `internal/fuse/mount.go`: `MountWatcher.checkMount()` removed spurious `!` operator from `actuallyMounted := !w.manager.isAlreadyMounted()` (should be `isAlreadyMounted()`, not its negation) — prevents permanent false "unexpected unmount" log warnings on every watcher tick; `Remount()` double-negation also cleaned up (#99)
 - `internal/adapter/adapter.go`: write buffer `MaxBufferSize` and `FlushThreshold` now use the configured `MaxMemory` value directly instead of dividing by 100 and 200 — the placeholder divisions reduced a 512 MB configured buffer to ~5 MiB, degrading write throughput by ~100× (#100)
 
