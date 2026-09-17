@@ -201,6 +201,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reading the constant would have the job look for a path nothing created and report it as a packaging
   failure.
 
+  `ci.yml` installs a prebuilt goreleaser with `goreleaser-action`'s `install-only` mode and then builds
+  with `make package-linux`, rather than letting the Makefile build the tool from source. goreleaser
+  v2.18.1 declares `go >= 1.27.1`, this module declares 1.26.0, and `setup-go` sets `GOTOOLCHAIN=local`
+  so that the Go it installed is the Go that runs — so `go install` refuses, and correctly: a job that
+  silently fetched a newer toolchain to build a release tool would build the release with a compiler
+  this project does not test against. A developer on the default `GOTOOLCHAIN=auto` never sees it. Three
+  files now pin the goreleaser version, so `TestTheGoreleaserVersionIsPinnedToOneValueEverywhere`
+  couples them: goreleaser owns the asset names, which makes a skew between the pull-request tool and
+  the release tool publishable.
+
 - **The extended-attribute budget is 1694 bytes per object, down from 1758.** The 64 bytes are the
   widest form of the new `objectfs-seekable` key, and they are reserved on every object whether or not
   that object is framed. S3 rejects an over-budget metadata write rather than truncating it, so a
