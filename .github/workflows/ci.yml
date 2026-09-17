@@ -887,11 +887,21 @@ jobs:
         sudo apt-get install -y lmod
 
         # Out of goreleaser's own metadata.json, not out of cmd/objectfs/main.go, because the version
-        # is in the *filename* and this step needs the one that was actually built. Those differ here
-        # on purpose: a local or CI build is a `--snapshot`, so the constant says 0.14.0 and the
-        # artifacts say 0.14.1-next. Reading the constant would have this step look for a path nothing
-        # created and report it as a packaging failure. metadata.json is written by the same run that
-        # chose the string, so there is nothing to translate and nothing to keep in step.
+        # is in the *filename* and this step needs the one that was actually built. Those differ, and
+        # by more than the suffix: this is a `--snapshot`, so goreleaser derives the version from the
+        # last tag and bumps the patch. On a developer's full clone that is 0.14.1-next from a v0.14.0
+        # tag; **in this job it is 0.0.1-next**, because `actions/checkout` clones one commit and no
+        # tags, so goreleaser finds none and falls back to v0.0.0. Neither number is the constant's.
+        #
+        # Deliberately not fixed with `fetch-depth: 0`. Nothing here depends on the version being any
+        # particular string — only on the packaging, the install and the modulefile agreeing on it,
+        # which they do at 0.0.1-next as readily as at 0.14.1-next — and a shallow clone is the
+        # stronger test of that agreement precisely because the number is one nothing could have
+        # hardcoded. release.yml does pass `fetch-depth: 0`, because there the tag *is* the version.
+        #
+        # Reading the constant would have this step look for a path nothing created and report it as a
+        # packaging failure. metadata.json is written by the same run that chose the string, so there
+        # is nothing to translate and nothing to keep in step.
         V=$(python3 -c 'import json,sys; print(json.load(open("dist/metadata.json"))["version"])')
         test -n "$V"
 

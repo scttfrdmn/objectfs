@@ -196,8 +196,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   One CI-visible consequence: `ci.yml`'s `packaging` job now reads the version it should look for out of
   `dist/metadata.json` rather than out of `cmd/objectfs/main.go`. A local or CI build is a `--snapshot`,
-  so the constant says `0.14.0` while the artifacts say `0.14.1-next`, and the modulefiles install to
-  `/usr/share/modulefiles/objectfs/<that string>` — verified by unpacking both a deb and an rpm.
+  so goreleaser derives the version from the last tag and bumps the patch: `0.14.1-next` on a full
+  clone, and `0.0.1-next` in the job itself, where `actions/checkout` fetches one commit and no tags so
+  goreleaser falls back to `v0.0.0`. The modulefiles install to
+  `/usr/share/modulefiles/objectfs/<that string>` either way, which is the only thing the job depends
+  on — and a number nothing could have hardcoded is the stronger test of that agreement, so the shallow
+  clone stays. `release.yml` passes `fetch-depth: 0`, because there the tag *is* the version.
   Reading the constant would have the job look for a path nothing created and report it as a packaging
   failure.
 
