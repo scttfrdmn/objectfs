@@ -204,9 +204,9 @@ scripts:
 
 # The rpm signature, and this exists because a container found its absence.
 #
-# `repo_gpgcheck=1` and `gpgcheck=1` in setup-repo-rhel.sh's stanza check two different things, and only
-# the first is about the repository. repo_gpgcheck verifies repomd.xml against repomd.xml.asc, which
-# pages.yml signs; gpgcheck verifies *each package's own embedded signature*, which nothing was
+# `repo_gpgcheck=1` and `gpgcheck=1` check two different things, and only the first is about the
+# repository. repo_gpgcheck verifies repomd.xml against repomd.xml.asc; gpgcheck — dnf's default on
+# every RHEL-family machine — verifies *each package's own embedded signature*, which nothing was
 # producing. So the first end-to-end run on rockylinux:9 got as far as downloading the package and then
 # failed with "Package objectfs-0.13.0-1.x86_64.rpm is not signed / Error: GPG check FAILED".
 #
@@ -218,9 +218,11 @@ scripts:
 #
 # The passphrase comes from the environment, unset in a normal `make package-linux`. nfpm skips signing
 # entirely when key_file names nothing readable, so a local build stays unsigned and a release build
-# signs — which is why release.yml writes the key to this path before calling make. An unsigned *release*
-# is not possible to ship silently: ci.yml's repo-install job installs with gpgcheck=1 on, and that is
-# the check that would have caught this in the first place had it existed.
+# signs — which is why release.yml writes the key to this path before calling make. The job that found
+# the missing signature was ci.yml's repo-install, which installed from throwaway-signed repositories
+# with gpgcheck=1 on; it is gone along with the repositories it built, which were never published. The
+# signature block stays because `dnf install ./objectfs-*.rpm` checks it too, and because a signed
+# package is worth more than the job that first noticed it was not.
 # `rpm:` at the top level, not `overrides.rpm:`. nfpm's overrides block accepts an `Overridables` — the
 # per-format fields like contents, depends and scripts — and `signature` is not one of them: it lives on
 # the format-specific `rpm:` section. Written the other way, nfpm refuses the whole config with "field

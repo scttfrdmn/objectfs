@@ -239,8 +239,8 @@ jobs:
 
     # The rpm signature, when there is a key to sign with.
     #
-    # setup-repo-rhel.sh writes `gpgcheck=1`, which verifies each package's own embedded signature —
-    # separate from `repo_gpgcheck=1`, which verifies the repository index. An unsigned rpm in a signed
+    # `gpgcheck=1` — dnf's default — verifies each package's own embedded signature, separate from
+    # `repo_gpgcheck=1`, which verifies a repository index. An unsigned rpm in a signed
     # repository installs from nowhere: dnf downloads it and stops with "Package objectfs-0.13.0-1.x86_64
     # .rpm is not signed / Error: GPG check FAILED". That is measured, not predicted; it is what the
     # first end-to-end run on rockylinux:9 did before nfpm.yaml grew a signature block.
@@ -254,21 +254,19 @@ jobs:
     #
     # This step used to `exit 1` here, on the reasoning that an unsigned rpm inside a signed repository
     # fails at `dnf install` for every user who added that repository while installing cleanly from a
-    # downloaded file — the failure mode most likely to ship unnoticed. That reasoning is still correct
-    # and it no longer applies, because there is no such user: no signing key exists, so pages.yml
-    # publishes no repository, objectfs.io/apt and objectfs.io/yum are unserved on purpose, and no page
-    # names them. Nothing anywhere tells apt or dnf to trust an ObjectFS repository, so nothing anywhere
-    # checks an ObjectFS package signature. Refusing here would block every release to protect nobody.
+    # downloaded file — the failure mode most likely to ship unnoticed. There is no such user and now
+    # there is no such repository either: objectfs.io/apt and objectfs.io/yum answered 404 for the whole
+    # life of the feature, and the machinery that would have filled them has been removed. Nothing
+    # anywhere tells apt or dnf to trust an ObjectFS repository, so refusing here would block every
+    # release to protect nobody.
     #
     # What establishes a package instead: the release assets carry SHA-256 sums, install.sh verifies the
     # tarball's and has no flag to skip it, and `dnf install ./objectfs-*.rpm` checks the package's
     # digests. That is weaker than a signature and it is what an unsigned release offers.
     #
-    # Setting GPG_SIGNING_KEY is the whole of the way back. This step signs, the verification below turns
-    # from an assertion that the packages are unsigned into an assertion that they verify, and pages.yml
-    # starts publishing the repositories on its next deploy. None of that path was removed — it is built
-    # and exercised end to end by ci.yml's repo-install job against an ephemeral key on every PR, which
-    # is why it can sit unused without rotting.
+    # Setting GPG_SIGNING_KEY still makes this step sign, and turns the verification below from an
+    # assertion that the packages are unsigned into an assertion that they verify. It no longer starts
+    # anything publishing, because there is nothing left to publish to.
     - name: Import the package signing key
       env:
         GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
@@ -280,7 +278,7 @@ jobs:
             "That is the intended state while no package repository is published: nothing instructs" \
             "apt or dnf to trust one, so nothing verifies a package signature. A downloaded package" \
             "still has its digests checked, and the release tarballs carry SHA-256 sums. Set the" \
-            "secret to sign, and pages.yml publishes the repositories on its next deploy."
+            "secret to sign."
           exit 0
         fi
 
@@ -378,7 +376,7 @@ jobs:
           if [ -n "${OBJECTFS_SIGNING_KEY_ID:-}" ]; then
             if [ "$rc" -ne 0 ]; then
               echo "::error::$pkg has no valid signature: $out"
-              echo "setup-repo-rhel.sh sets gpgcheck=1, so dnf would refuse this package with" \
+              echo "gpgcheck=1 is dnf's default, so it would refuse this package with" \
                 "'Package is not signed / Error: GPG check FAILED' after downloading it."
               exit 1
             fi
