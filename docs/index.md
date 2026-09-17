@@ -269,14 +269,16 @@ key to fetch and trust out of band:
 ```bash
 cosign verify-blob \
   --bundle checksums.txt.cosign.bundle \
-  --certificate-identity 'https://github.com/scttfrdmn/objectfs/.github/workflows/release.yml@refs/tags/v0.15.0' \
+  --certificate-identity 'https://github.com/scttfrdmn/objectfs/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 sha256sum --ignore-missing -c checksums.txt
 ```
 
-Every release's notes print that command with its own tag, and the release job runs it before
-publishing, so a release whose verification instructions do not work does not ship.
+Substitute the tag you downloaded from for `vX.Y.Z`; the identity names it, so another release's tag
+will not verify. Every release's notes print that command with its own tag already filled in, and the
+release job runs it before publishing, so a release whose verification instructions do not work does
+not ship.
 
 ### Basic Usage
 

@@ -532,10 +532,13 @@ jobs:
           echo "sha256sum --ignore-missing -c checksums.txt"
           echo '```'
           echo ""
-          echo "Without cosign, an integrity-only check (no authenticity guarantee):"
+          echo "Without cosign, an integrity-only check (no authenticity guarantee). A per-asset"
+          echo "\`.sha256\` holds a bare digest with no filename, which \`sha256sum -c\` cannot read, so"
+          echo "the filename is supplied here:"
           echo ""
           echo '```'
-          echo "sha256sum -c objectfs-<platform>.tar.gz.sha256"
+          echo "printf '%s  %s\\n' \"\$(cat objectfs-<platform>.tar.gz.sha256)\" objectfs-<platform>.tar.gz \\"
+          echo "  | sha256sum -c"
           echo '```'
           echo ""
           echo "Container image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION\`"
@@ -616,9 +619,18 @@ jobs:
 
         sha256sum $assets > checksums.txt
 
-        # The two sources must agree. `sha256sum -c` reads the `<hash>  <name>` form that both this
-        # file and the per-asset siblings are written in, so each sibling is checked as-is against the
-        # bytes on disk, and then against the line this step just wrote for the same asset.
+        # The two sources must agree. Note what the siblings actually contain: goreleaser's
+        # `checksum: split: true` writes a **bare 64-character digest** — no filename, no trailing
+        # newline, 64 bytes exactly. This step used to run `sha256sum -c "$asset.sha256"` on them,
+        # which cannot work, because -c needs a `<hash>  <name>` line and exits 1 with "no properly
+        # formatted checksum lines found". That is what failed the v0.15.0 publish, after the gate,
+        # the build, the packages and the image had all gone green — so the whole release was already
+        # built and unpublishable.
+        #
+        # The check that matters survives without -c, because `checksums.txt` was computed by
+        # `sha256sum $assets` from the bytes on disk one line above. Comparing each sibling to its
+        # line there verifies the sibling *against those bytes*; -c would have added nothing except a
+        # second reading of the same file. So assert the shape, then compare.
         for asset in $assets; do
           if [ ! -f "$asset.sha256" ]; then
             echo "::error::$asset has no $asset.sha256 sibling. scripts/install.sh fetches that exact" \
@@ -626,9 +638,27 @@ jobs:
             exit 1
           fi
 
-          sha256sum -c "$asset.sha256"
+          # `tr -d` rather than `awk '{print $1}'` so that a `<hash>  <name>` line — what a future
+          # goreleaser, or `split: false`, would write — is rejected loudly by the shape check below
+          # instead of being silently accepted. A format change here should stop the release, not be
+          # absorbed: the installer reads these files too.
+          sibling=$(tr -d '[:space:]' < "$asset.sha256")
 
-          sibling=$(awk '{print $1}' "$asset.sha256")
+          case $sibling in
+            *[!0-9a-f]*|"")
+              echo "::error::$asset.sha256 is not a bare lowercase hex digest: '$sibling'." \
+                "goreleaser's split checksums are expected to be 64 hex characters and nothing else;" \
+                "scripts/install.sh reads the same files, so a format change breaks the installer too."
+              exit 1
+              ;;
+          esac
+
+          if [ ${#sibling} -ne 64 ]; then
+            echo "::error::$asset.sha256 holds ${#sibling} hex characters, not the 64 a SHA-256 has." \
+              "A truncated digest still compares equal to itself, so this is checked explicitly."
+            exit 1
+          fi
+
           mine=$(awk -v a="$asset" '$2 == a || $2 == "*" a {print $1}' checksums.txt)
 
           if [ "$sibling" != "$mine" ]; then

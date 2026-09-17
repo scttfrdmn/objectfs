@@ -171,7 +171,11 @@ content-injection path.
 - A license-compliance check scoped to `./cmd/objectfs` — what is actually distributed.
 - Dependabot alerts, Dependabot security updates, secret scanning, and push protection are enabled
   on the repository.
-- Release assets carry a `.sha256` alongside each archive: `sha256sum -c objectfs-<platform>.tar.gz.sha256`.
+- Release assets carry a `.sha256` alongside each archive, plus a `checksums.txt` covering all of them
+  and a keyless cosign signature over that list. Verify authenticity first — the release notes print
+  the `cosign verify-blob` command — then integrity with `sha256sum --ignore-missing -c checksums.txt`.
+  A per-asset `.sha256` holds a bare digest with no filename, so `sha256sum -c` cannot read one
+  directly; `scripts/install.sh` compares the digest itself.
 
 Known-open security-labelled work is tracked with `type: security` in the
 [issue tracker](https://github.com/scttfrdmn/objectfs/issues?q=is%3Aissue+is%3Aopen+label%3A%22type%3A+security%22).
