@@ -58,29 +58,17 @@ const callerSuppliedDescriptor = "1/1048576/64/2664"
 // DeriveFrameSize scales the frame size with the square root of the ratio — so that fixture produced a
 // 1 MiB frame size, four frames of a few hundred stored bytes each, and a range table that ran off the
 // end of the file. A realistic ratio is also the one a real object has.
+//
+// The fixture itself is built by [putFramedObject] in seekable_read_test.go, which also parses the
+// object's frame index. This is the narrower view the write-path tests need; keeping one builder means
+// the two cannot come to disagree about what a framed fixture is.
 func putFramed(t *testing.T, ts *testaws.TestServer, backend *s3.Backend, key string) (
 	content []byte, desc compression.SeekableDescriptor, stored []byte,
 ) {
 	t.Helper()
 
-	content = semiCompressible(key, framedObjectSize)
-	if err := backend.PutObject(context.Background(), key, content, nil); err != nil {
-		t.Fatalf("PutObject: %v", err)
-	}
-
-	meta := ts.ObjectMetadata(key)
-
-	text, ok := meta[metaSeekableKey]
-	if !ok {
-		t.Fatalf("a %d-byte compressible object carries no %s, so it was stored as a single frame and "+
-			"every seekability assertion here would pass without testing anything. Metadata was %v",
-			framedObjectSize, metaSeekableKey, meta)
-	}
-
-	desc, err := compression.ParseSeekableDescriptor(text)
-	if err != nil {
-		t.Fatalf("the descriptor this backend stored does not parse: %q: %v", text, err)
-	}
+	f := putFramedObject(t, ts, backend, key, framedObjectSize)
+	content, desc, stored = f.content, f.desc, f.stored
 
 	if desc.FrameCount < framedObjectFrames {
 		t.Fatalf("a %d-byte object framed into %d frames of %d, and the callers here need at least %d "+
@@ -89,7 +77,7 @@ func putFramed(t *testing.T, ts *testaws.TestServer, backend *s3.Backend, key st
 			framedObjectFrames)
 	}
 
-	return content, desc, ts.GetObject(key)
+	return content, desc, stored
 }
 
 // TestFramedUploadStoresADescriptorThatDescribesTheObject is the write path's whole contract. The

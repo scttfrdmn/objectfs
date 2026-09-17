@@ -22,6 +22,19 @@ type BackendMetrics struct {
 	AccelerationEnabled bool          `json:"acceleration_enabled"`
 	AccelerationLatency time.Duration `json:"acceleration_latency"`
 
+	// Seekable-framing read metrics (#185).
+	//
+	// SeekableWholeFallbacks is the field that matters operationally. Every fallback is *correct* — the
+	// object still reads, byte for byte — so the feature's failure mode is not an error anyone sees but
+	// a silent return to whole-object transfer. Without a count, "reads got slow" has no evidence
+	// attached to it. SeekableLastFallbackReason names the most recent cause, in LastError's shape and
+	// for the same reason: an operator needs to know *which* of the several benign-looking causes is
+	// happening before they can act on it.
+	SeekableReads              int64  `json:"seekable_reads"`                // Ranged reads served from frames
+	SeekableReadBytes          int64  `json:"seekable_read_bytes"`           // Stored bytes those reads transferred
+	SeekableWholeFallbacks     int64  `json:"seekable_whole_fallbacks"`      // Framed objects read whole anyway
+	SeekableLastFallbackReason string `json:"seekable_last_fallback_reason"` // Why the last fallback happened
+
 	// Multipart upload metrics
 	MultipartUploads          int64         `json:"multipart_uploads"`           // Total multipart uploads initiated
 	MultipartUploadsParts     int64         `json:"multipart_uploads_parts"`     // Total parts uploaded
@@ -201,6 +214,33 @@ func (mc *MetricsCollector) GetFallbackRate() float64 {
 	}
 
 	return float64(mc.metrics.FallbackEvents) / float64(mc.metrics.AcceleratedRequests) * 100
+}
+
+// RecordSeekableRead records a ranged read served from an object's frames, and the stored bytes it
+// transferred — index frame plus data frames, i.e. what was actually pulled over the wire.
+//
+// Bytes, not latency. Latency on a mount is dominated by the kernel, the page cache and whatever else
+// the machine is doing, so a latency figure moves for reasons that have nothing to do with framing;
+// the bytes a read transfers is the quantity this feature changes and the one it should be judged on.
+func (mc *MetricsCollector) RecordSeekableRead(storedBytes int64) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.SeekableReads++
+	mc.metrics.SeekableReadBytes += storedBytes
+}
+
+// RecordSeekableWholeFallback records a framed object read whole anyway, with the reason.
+//
+// reason is a short fixed string, not a formatted message: it is a category to aggregate on, and one
+// that interpolated a key or an offset would be useless in a counter and would leak object names into
+// whatever scrapes this.
+func (mc *MetricsCollector) RecordSeekableWholeFallback(reason string) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.SeekableWholeFallbacks++
+	mc.metrics.SeekableLastFallbackReason = reason
 }
 
 // RecordMultipartUploadStart records when a multipart upload is initiated

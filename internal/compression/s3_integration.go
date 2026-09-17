@@ -2,6 +2,7 @@ package compression
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -269,6 +270,77 @@ func (c *Compressor) Decompress(data []byte, contentEncoding string) ([]byte, bo
 	}
 
 	return decompressed, true, nil
+}
+
+// FrameDecoder returns the codec able to decode individual frames of an object stored with
+// contentEncoding, or nil when there is none.
+//
+// nil is the ordinary answer, not a failure: only zstd has a skippable frame, so a gzip or lz4
+// object — or one written by another tool entirely — has no frames to decode and must be read whole.
+// The caller's response to nil is to take the whole-object path, which is always correct.
+//
+// Keyed on the object's own encoding rather than on this Compressor's write codec, for the reason
+// [Compressor.Decompress] gives: a bucket accumulates objects across configuration changes, and a
+// mount currently writing gzip must still be able to seek within the zstd objects it wrote last week.
+// The [Compressor.CompressFramed] version of this is a type assertion on c.codec because the write
+// side genuinely does depend on the configured codec; the read side must not.
+func (c *Compressor) FrameDecoder(contentEncoding string) *ZstdCodec {
+	if zstdCodec, ok := c.decoders[contentEncoding].(*ZstdCodec); ok {
+		return zstdCodec
+	}
+
+	return nil
+}
+
+// DecodeFrames decodes a contiguous run of frames and returns their concatenated content.
+//
+// body must hold precisely the stored bytes from frames[0].CompressedOffset through the end of the
+// last frame, which is one Range because [ZstdCodec.CompressFramed] lays frames down contiguously.
+// A caller that fetched a wider range must trim it before calling: the per-frame slicing here is
+// relative to frames[0].CompressedOffset, so slack at the front shifts every frame, and
+// [ZstdCodec.DecompressFrame] would reject the resulting slices against their recorded hashes rather
+// than return a neighbour's content.
+//
+// The returned buffer starts at frames[0].UncompressedOffset, not at the offset the caller asked
+// for. Slicing to the request is [FrameIndex.FramesCovering]'s second return value and is left to
+// the caller, because that is the value the caller already has to hold on to.
+func (c *Compressor) DecodeFrames(contentEncoding string, frames []Frame, body []byte) ([]byte, error) {
+	codec := c.FrameDecoder(contentEncoding)
+	if codec == nil {
+		return nil, fmt.Errorf("no frame decoder for content-encoding %q", contentEncoding)
+	}
+	if len(frames) == 0 {
+		return nil, errors.New("no frames to decode")
+	}
+
+	base := frames[0].CompressedOffset
+
+	// Sized from the index rather than grown, and the total is checked against the fetched body first
+	// so that a hostile or corrupt index cannot make this allocation arbitrarily large before any
+	// frame's hash has been consulted.
+	var wantCompressed, wantDecoded int64
+	for _, f := range frames {
+		wantCompressed += f.CompressedSize
+		wantDecoded += f.UncompressedSize
+	}
+
+	if int64(len(body)) != wantCompressed {
+		return nil, fmt.Errorf("%w: %d frames from offset %d need %d stored bytes, have %d",
+			ErrIndexCorrupt, len(frames), base, wantCompressed, len(body))
+	}
+
+	out := make([]byte, 0, wantDecoded)
+	for _, f := range frames {
+		start := f.CompressedOffset - base
+		decoded, err := codec.DecompressFrame(body[start:start+f.CompressedSize], f)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, decoded...)
+	}
+
+	return out, nil
 }
 
 // DecodableEncodings lists the Content-Encoding tokens this Compressor can decode, sorted.

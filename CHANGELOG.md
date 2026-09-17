@@ -21,11 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by earlier versions are untouched and read exactly as before. This is the property that makes it safe
   to ship the write path on its own.
 
-  **What this release does not do is make any read faster.** The read path still fetches and decodes the
-  whole stored body; the frame-aware path is the next stage. Framing is being landed first and alone
-  because it changes the stored bytes of every compressible object a mount writes, and that change has
-  to be proven correct *through the unchanged reader* before anything is built on top of it. A ranged
-  read of a framed object returns the same bytes it did before, which is what the new tests assert.
+  Framing was landed first and alone, ahead of the frame-aware reader below, because it changes the
+  stored bytes of every compressible object a mount writes, and that change had to be proven correct
+  *through the unchanged reader* before anything was built on top of it. A ranged read of a framed object
+  returns the same bytes it did before, which is what the write path's own tests assert.
 
   A reader finds the index in one correctly-sized request via a new `objectfs-seekable` user-metadata
   key holding `version/frameSize/frameCount/indexLength` — 15 bytes on a typical object, 36 at the
@@ -49,6 +48,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about 20% on self-similar text at the 256 KiB floor. That is the trade being made deliberately, once,
   here — against up to four orders of magnitude of read amplification on a ranged read of a large
   compressed object — rather than exposed as a setting whose wrong value is invisible in both directions.
+
+- **A ranged read of a framed object now transfers the frames it covers instead of the whole stored body
+  (#185).** This is the half of framing that changes what a read costs. A 4 KiB read of a 1 MiB
+  ~50%-compressible object went from transferring the whole 1,074,071-byte stored body to 134,554 bytes —
+  the frame index plus the one frame covering the offset. The saving scales with the object, not with the
+  read: at the 256 KiB frame-size floor a small read of a 10 GiB compressed object costs the index plus
+  one frame regardless of how large the object is.
+
+  Reads land on the frame path by both of the routes a compressed object is read through: a range
+  starting inside the stored body, which arrives as a 206 carrying the encoding, and one starting past
+  the end of it, which arrives as a 416 and takes the encoding from the index fetch. The second is the
+  common case on a well-compressed file, because the stored body is a fraction of the content length the
+  caller was told.
+
+  **Integrity is per frame, and it is stronger for a partial read than what it replaces.** Each frame's
+  SHA-256 is verified against the index before it is decoded, and the decoded length is checked against
+  the index's record of it. The whole-content `objectfs-sha256` cannot be checked by a read that
+  deliberately never holds the whole content, so the per-frame hashes take its place — they cover exactly
+  the bytes being returned, at frame granularity, where a whole-object hash can only report that some
+  byte somewhere differs. A read covering *every* frame is deliberately sent down the whole-object path,
+  which restores the whole-content check for whole-file reads and is also the cheaper request. A frame
+  that does not match its recorded hash is reported as non-retryable `DATA_CORRUPTION`, not worked around:
+  the whole-object path is not a second opinion, since the same damaged bytes are part of that stream too.
+
+  **Every other reason the frame path declines is counted, with the reason, because none of them fails.**
+  A declined framed read still returns the object byte for byte, so the feature's failure mode is not an
+  error anyone sees but a silent return to whole-object transfer — "reads got slow" with no evidence
+  attached. Four new metrics: `seekable_reads`, `seekable_read_bytes`, `seekable_whole_fallbacks`, and
+  `seekable_last_fallback_reason`, the last naming one of an unparsable descriptor, a non-zstd encoding,
+  an unusable index, a failed range fetch, a range covering every frame, or an object overwritten between
+  the index fetch and the frame fetch. Each is logged at warn rather than debug, for the same reason: at
+  debug it would be invisible in every deployment that has not enabled debug, which is all of them. An
+  object that was never framed is *not* counted, so the number tracks framed objects that could not be
+  served from their frames rather than how much of the bucket is unframed.
+
+  Because the index and the frames are two requests, an overwrite in between is otherwise completely
+  silent: both succeed, the lengths add up, and the frames get decoded against an index that no longer
+  describes them. The two responses' ETags are compared, and a mismatch falls back to one whole-object
+  GET, which yields a self-consistent view of whichever generation is current. ETag comparison rather
+  than `If-Match` deliberately — a store that accepts a precondition and ignores it is indistinguishable
+  from one that honours it, and a comparison of two values this process holds cannot be silently dropped.
+
+  Reads above `parallel_read_threshold` do not yet see the full benefit: the parallel fan-out is attempted
+  first and abandoned when it finds the object encoded, and the chunks it already launched have by then
+  transferred bytes framing would have avoided. Bounded by
+  `parallel_read_concurrency * read_chunk_size`, correct in every case, and tracked as #514.
 
 - **The release is now signed, keylessly, with no key material and no repository secret.** Nothing in
   the release path was signed before. Nine assets each carried a `.sha256` sibling, and a hash file
