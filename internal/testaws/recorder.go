@@ -378,15 +378,61 @@ func xmlEscape(s string) string {
 	return b.String()
 }
 
-// countingBody wraps a response body to count the bytes that pass through it.
+// countingBody wraps a request body to count the bytes that pass through it.
+//
+// The counter it increments lives inside a [Request] that has already been published, and [recorder.
+// snapshot] copies that struct. So the increment has to be under the same lock the snapshot takes.
+//
+// The in-flight wait in snapshot is not sufficient on its own, which is what makes this worth
+// spelling out. That wait covers everything the handler goroutine does between publish and serve — but
+// the body is not read by the handler. The reverse proxy hands it to its transport, and the transport
+// copies it to the upstream connection from its own writeLoop goroutine, which the handler never
+// joins. So when a response arrives before the request body has finished being forwarded — the
+// transport returns from RoundTrip on the response headers — the handler can return, serve() can settle
+// the request, and writeLoop is still incrementing this counter with nothing ordering it against a
+// caller reading the log.
+//
+//	Read at 0x... by goroutine N:            recorder.snapshot() ← TestServer.GETs()
+//	Previous write at 0x... by goroutine M:  countingBody.Read() ← net/http.(*transferWriter).doBodyCopy()
+//
+// TestRecorderLogsARequestBeforeItsCallerCanObserveTheResponse is what reports it:
+//
+//	go test -race -count=30 -run TestRecorderLogsARequestBeforeItsCaller ./internal/testaws/
+//
+// Locally that is a weak detector — roughly one run in twenty. Under CI's load it is not weak at all:
+// it failed twice in a row on a pull request that touched only internal/compression and
+// internal/storage/s3, where the extra parallel test load was enough to make the interleaving reliable.
+// A flake whose report names a file the author never touched is the expensive kind, which is why the
+// stack above is worth keeping written down.
+//
+// No deliberate reproduction is in the tree, and the reason is that the two obvious ways to force the
+// interleaving do not reach this counter. A faulted request never reaches the proxy, so its body is
+// never read through this wrapper at all, and net/http's post-handler drain of an unread body happens
+// inside its own body type, below the wrapper. The route that does occur is the third one, and it is
+// the frame above: the proxy forwarding the body to the upstream on the transport's goroutine while a
+// test calls GETs(). The window is "upstream answered early", which the emulator will not do on demand
+// — so the existing test under -count is the detector, and a hand-built one would only be a slower way
+// to wait for the same coincidence.
+//
+// A racing counter is a small wrong number, and that is why it matters here rather than being a
+// technicality: RequestBytes is what the upload-path assertions measure, so a lost increment reads as a
+// write path that sent fewer bytes than it did. Every assertion in this package is worth exactly what
+// the recorder's own synchronization is worth.
 type countingBody struct {
 	io.ReadCloser
-	n *int64
+
+	// mu is the recorder's own mutex, not a lock of this type's. Sharing it is the point: a separate
+	// lock would make the increment atomic without making it ordered against a snapshot.
+	mu *sync.Mutex
+	n  *int64
 }
 
 func (c *countingBody) Read(p []byte) (int, error) {
 	n, err := c.ReadCloser.Read(p)
+
+	c.mu.Lock()
 	*c.n += int64(n)
+	c.mu.Unlock()
 
 	return n, err
 }
@@ -477,7 +523,7 @@ func startRecorder(t *testing.T, target string) (string, *recorder) {
 		}
 
 		if r.Body != nil {
-			r.Body = &countingBody{ReadCloser: r.Body, n: &observed.RequestBytes}
+			r.Body = &countingBody{ReadCloser: r.Body, mu: &rec.mu, n: &observed.RequestBytes}
 		}
 
 		// Published before the response is served, and marked served after.
