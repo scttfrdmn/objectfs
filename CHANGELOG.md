@@ -106,11 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bundle → `checksums.txt` → every asset. The bundle carries the signature, the certificate and the
   Rekor transparency-log inclusion proof together, so verification is one offline command.
 
-  There is no key, so there is no secret. That matters beyond convenience: the GPG path in
-  `package-linux` warns and `exit 0`s when `GPG_SIGNING_KEY` is absent, which is why releases have been
-  shipping unsigned rpms. A signing mechanism whose failure mode is *silently unsigned* is the one
-  shape worse than none, because the absence is invisible. The keyless path has nothing that can be
-  missing.
+  There is no key, so there is no secret. That matters beyond convenience, and the GPG path it replaced
+  is the argument: it warned and `exit 0`d when `GPG_SIGNING_KEY` was absent — and the key was never
+  there, so every rpm this project ever published was unsigned. A signing mechanism whose failure mode
+  is *silently unsigned* is the one shape worse than none, because the absence is invisible. The
+  keyless path has nothing that can be missing. (The GPG apparatus itself is gone now; see Removed.)
 
   **Strictly additive.** Every existing asset keeps its name, and every per-asset `.sha256` sibling
   keeps its name, format and content, because `scripts/install.sh` fetches `<asset>.sha256` by exact
@@ -305,8 +305,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The GPG signing apparatus for the rpm, because nothing on any install path this project publishes
   ever checked the signature it produced.** `nfpm.yaml`'s `rpm.signature` block, `release.yml`'s
   key-import steps, the `$GITHUB_ENV`/`export` gate written for them and
-  `internal/config/rpm_signing_test.go`'s `TestTheRPMSigningPathStaysIntact` are gone, along with the
-  need for the `GPG_SIGNING_KEY` and `GPG_PASSPHRASE` repository secrets.
+  `internal/config/rpm_signing_test.go`'s `TestTheRPMSigningPathStaysIntact` are gone.
+
+  **`GPG_SIGNING_KEY` and `GPG_PASSPHRASE` did not need deleting, because they were never created.**
+  `gh api repos/scttfrdmn/objectfs/actions/secrets` reports `total_count: 0` — the repository has no
+  Actions secrets at all. So the signing path's documented behaviour on a missing key, "warn and
+  `exit 0`", was not a fallback: it was the only branch that ever ran, and every rpm this project has
+  ever published was unsigned. Two years of a mechanism, a test protecting it, and a `$GITHUB_ENV` gate
+  written for a bug inside it, over a key that did not exist.
 
   **The premise was measured and it is false.** Both the config and the test said, in those words, that
   "`gpgcheck=1` is dnf's default and verifies each package's own embedded signature, so
