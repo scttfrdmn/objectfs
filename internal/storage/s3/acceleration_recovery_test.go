@@ -149,6 +149,12 @@ func TestSubsequentReadsSkipTheWithdrawnEndpoint(t *testing.T) {
 // AccelerationStats read Active before the gate and so reported the pre-transition value, costing the
 // loop one extra iteration in which the probe actually went out. Fixing that read order (backend.go)
 // removed the accidental delay and exposed the predicate; a slow runner would have found it either way.
+//
+// The precondition below then failed in CI for the same underlying reason, one merge later, so it is
+// worth stating as a rule rather than as two separate fixes: in this test **no assertion may read an
+// instantaneous acceleration state**, because the whole point of a 25ms retry is that every such state
+// changes on its own within 25ms. Assert on something monotonic — Fallbacks going up, or the gate
+// having reached its terminal StateClosed — and the test stops depending on how loaded the runner is.
 func TestTheAccelerateEndpointComesBackWithinTheBackoff(t *testing.T) {
 	t.Parallel()
 
@@ -170,8 +176,16 @@ func TestTheAccelerateEndpointComesBackWithinTheBackoff(t *testing.T) {
 	if _, err := backend.GetObject(ctx, "recovered.bin", 0, -1); err != nil {
 		t.Fatalf("the read that triggers the fallback failed: %v", err)
 	}
-	if backend.AccelerationStats().Active {
-		t.Fatal("acceleration is still active, so nothing was withdrawn and this test cannot observe a " +
+	// Fallbacks rather than Active, and the difference is a CI failure on main. Active is instantaneous
+	// and legitimately true again within one AccelerationRetry of the withdrawal — 25ms here — because
+	// the backoff expires, the gate goes open→half-open, and Active follows. Reading it is also what
+	// performs that transition (TestAccelerationStatsDoesNotReportAStateItJustChanged is the same
+	// mechanism from the other side), so under load this guard could cause the recovery it exists to rule
+	// out and then report "nothing was withdrawn" — a diagnosis pointing at the gate when the fault was
+	// the clock. Fallbacks only counts up, and it counts exactly the withdrawal this test needs to have
+	// happened, so no amount of elapsed time can make it lie in either direction.
+	if backend.AccelerationStats().Fallbacks == 0 {
+		t.Fatal("no fallback was recorded, so nothing was withdrawn and this test cannot observe a " +
 			"recovery")
 	}
 
