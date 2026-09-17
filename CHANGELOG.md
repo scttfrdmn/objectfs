@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-17
+
+Seekable compression, and a release built by one tool.
+
+Two things landed. A compressed object is now written as independently decodable frames with an index
+in a leading skippable frame, and a ranged read fetches only the frames it covers: on a 1 MiB
+~50%-compressible object, a 4 KiB read went from transferring the whole 1,074,071-byte stored body to
+134,554 bytes — the index plus one frame. The saving scales with the object rather than the read, so at
+the 256 KiB frame-size floor a small read of a 10 GiB compressed object costs the index plus one frame
+however large the object is. A framed object is still an ordinary zstd stream that `zstd -d` reads.
+
+And the release itself is now GoReleaser's output rather than a Makefile's. One `.goreleaser.yml`
+replaces `nfpm.yaml` and the hand-rolled tarball, checksum and package steps; publishing stays outside
+it, in the workflow that already did it. `linux/armv7` gets packages for the first time. What that
+convergence removed is most of this entry's `Removed` section: the apt and yum repositories that were
+built and tested for three releases and never published a byte, and the GPG signing apparatus for the
+rpm — which turned out never to have had a key, so every rpm this project ever published was unsigned.
+The release is signed now, keylessly, with cosign and no repository secret at all.
+
 ### Added
 
 - **Compressed objects are now written as independently decodable frames (#185), so that a ranged read
@@ -225,7 +244,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`CLAUDE.md`'s "Related Projects" section**, which was stale on three counts: it gave a local path
   for CargoShip that does not exist, it described objectfs as using CargoShip "for S3 throughput
-  optimization" — a path deleted in v0.15.0 and, as of this entry, not even a dependency — and it did
+  optimization" — a path deleted in v0.12.0 and, as of this entry, not even a dependency — and it did
   not mention **lith**, the read-only FUSE-over-S3 sibling whose scope doc defines objectfs as the
   read-write half. It now says which repositories are actually cloned locally and which have to be read
   over the API, marks globalfs as the one downstream consumer, and records CargoShip's remaining value
@@ -273,11 +292,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The CargoShip module dependency, and the dead tier converter that was the only thing holding it
   in.** `ConvertTierToCargoShipStorageClass` had no production caller — its only callers were the two
-  unit tests written for it — and the upload path it existed to serve was removed in v0.15.0 (#362).
+  unit tests written for it — and the upload path it existed to serve was removed in v0.12.0 (#362).
   `github.com/scttfrdmn/cargoship v0.24.2` is out of `go.mod` and `go.sum`, against a current upstream
   of v0.31.3 that objectfs was seven minor versions behind and had no reason to follow.
 
-  The v0.15.0 entry that removed the upload path decided this function should stay, and gave two
+  The v0.12.0 entry that removed the upload path decided this function should stay, and gave two
   reasons that are worth recording as circular rather than quietly reversing: "it has its own unit
   tests" (the tests exist only to exercise it, so they are not independent evidence of a caller) and
   "CargoShip's `awsconfig` types are still used for tier mapping" (they were used *only* here, by this
@@ -287,7 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleting rather than keeping it against a future caller. Two of the eight tiers had no CargoShip
   counterpart and were silently collapsed: `GLACIER_IR` became `GLACIER`, turning an instant-retrieval
   tier into one that takes minutes to hours, and `REDUCED_REDUNDANCY` became `STANDARD`. Same family as
-  the v0.15.0 defect where every object was stored as `INTELLIGENT_TIERING` whatever the tier said — a
+  the v0.10.1 defect where every object was stored as `INTELLIGENT_TIERING` whatever the tier said — a
   tier defect is silent by nature, since the object is readable and nothing fails.
 
   `ConvertTierToStorageClass`, the AWS SDK converter that production actually uses, is untouched.
@@ -6405,7 +6424,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/scttfrdmn/objectfs/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/scttfrdmn/objectfs/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/scttfrdmn/objectfs/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/scttfrdmn/objectfs/compare/v0.11.0...v0.12.0

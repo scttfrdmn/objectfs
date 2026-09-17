@@ -99,10 +99,10 @@ Four repositories under `scttfrdmn` divide the S3 problem. **Only globalfs is cl
 - **CargoShip** (`github.com/scttfrdmn/cargoship`) — bulk ingest: packs trees into compressed
   archives with a manifest and streams them to S3. **Not a dependency of objectfs.** This section
   used to say "objectfs uses it for S3 throughput optimization", which described the upload path
-  removed in v0.15.0 (#362); the last import — `ConvertTierToCargoShipStorageClass`, which had no
+  removed in v0.12.0 (#362); the last import — `ConvertTierToCargoShipStorageClass`, which had no
   production caller — is gone too, so the module is out of `go.mod` entirely. It still matters as
-  **prior art**: its format 2.1 frame index is the design #185 proposes, already shipped, and its
-  `.goreleaser.yaml` is a working model for release packaging.
+  **prior art**: its format 2.1 frame index is the design #185 proposed, now shipped here too, and its
+  `.goreleaser.yaml` was the working model for this project's release packaging.
 - **lith** (`github.com/scttfrdmn/lith`) — **read-only** POSIX/FUSE over a bucket's *native* key
   layout, plus an NFSv3 gateway. Its scope doc states the split deliberately: writes are "not an
   extension of lith, but a separate thing. lith is the read half, done properly." So objectfs is the

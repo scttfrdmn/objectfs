@@ -358,16 +358,48 @@ zypper install ./objectfs-*.rpm   # openSUSE
 ```
 
 **There is no apt or yum repository, so `apt upgrade` will not reach ObjectFS** — upgrading means
-downloading the next release's package. The repository is built and tested on every pull request but
-it is not published, because publishing one means signing it: apt refuses an unsigned repository
-outright and dnf's `gpgcheck` is on by default, so a repository without a signing key is not a lesser
-version of a signed one, it is a repository nothing can install from. Rather than stand up a key and
-the rotation it commits us to, ObjectFS publishes packages and leaves the repository dormant.
+downloading the next release's package. There is no repository because publishing one means signing it:
+apt refuses an unsigned repository outright and dnf's `gpgcheck` is on by default, so a repository
+without a signing key is not a lesser version of a signed one, it is a repository nothing can install
+from. Rather than stand up a key and the rotation it commits us to, ObjectFS publishes packages
+directly.
 
-The packages are unsigned for the same reason, and what stands in for a signature is a checksum: each
-release asset has a published SHA-256, `install.sh` verifies the tarball's with no flag to skip it, and
-`apt install ./file.deb` and `dnf install ./file.rpm` check the package's own digests. That is a weaker
-guarantee than a signature — it establishes that the file arrived intact, not who built it.
+Two separate things about signatures, because neither covers the other:
+
+**The release is signed.** Every release carries a `checksums.txt` covering all of its assets, and a
+[cosign](https://github.com/sigstore/cosign) signature over *that* document in
+`checksums.txt.cosign.bundle`. The signature is made keylessly from the release workflow's OIDC
+identity, so there is **no key material and no repository secret** anywhere in the path — nothing to
+fetch and trust out of band, nothing to rotate, and nothing whose absence could silently degrade to
+unsigned. The chain is: bundle → `checksums.txt` → every asset.
+
+```bash
+# 1. authenticity: the checksum list came from this repository's release workflow at this tag
+cosign verify-blob \
+  --bundle checksums.txt.cosign.bundle \
+  --certificate-identity 'https://github.com/scttfrdmn/objectfs/.github/workflows/release.yml@refs/tags/v0.15.0' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+
+# 2. integrity: your download against that now-trusted list
+sha256sum --ignore-missing -c checksums.txt
+```
+
+Each release's notes print this command with that release's own tag in the identity, and the release
+job runs the same command against the same identity string before publishing — so a tag whose
+instructions would not work does not ship.
+
+**The `.deb` and `.rpm` files themselves are not signed**, for the same reason there is no repository:
+package signing needs a long-lived GPG key. `apt install ./file.deb` and `dnf install ./file.rpm`
+install a local file without one — dnf's `localpkg_gpgcheck` defaults to off, so no configuration change
+is needed — and both check the package's own internal digests. Those digests establish that the file
+arrived intact, not who built it; the cosign signature above is what establishes provenance.
+
+Every asset also has a `.sha256` sibling, and `install.sh` verifies the tarball's with no flag to skip
+it. Treat those as integrity only: a `.sha256` is served from the same release as the asset it
+describes, so it catches a corrupt download and says nothing about origin. The signed `checksums.txt`
+is the one that does, and the release job cross-checks the two hash sources against each other before
+publishing either.
 
 ### HPC sites: environment modules
 

@@ -34,7 +34,9 @@ curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/main/scripts/ins
 `--prefix` installs elsewhere and `--version` pins a release. The checksum is always verified and
 there is no flag to skip it — note what that does and does not establish: the `.sha256` travels the
 same channel as the tarball, so a mismatch means a corrupted or tampered download, not that the
-release itself is authentic. That is a signature's job, and this project does not sign releases yet.
+release itself is authentic. Authenticity is a signature's job, and each release carries one: a cosign
+signature over its `checksums.txt`, in `checksums.txt.cosign.bundle`, made keylessly from the release
+workflow's identity. The release notes print the `cosign verify-blob` command to check it.
 
 The default prefix is `~/.local` rather than `/usr/local` deliberately. Many of this project's users
 are on a shared login node with no root, and an installer whose default needs `sudo` teaches people
@@ -55,8 +57,9 @@ There is no apt or yum repository, so `apt upgrade` does not reach ObjectFS — 
 downloading the next release's package. That is deliberate: apt refuses an unsigned repository and
 `gpgcheck` is on by default under dnf, so publishing one means holding and rotating a signing key
 indefinitely, and a key that goes stale is worse for the machines that trusted it than no repository
-was. The packages are unsigned for the same reason; installing a downloaded one verifies its digests,
-and every release asset carries a published SHA-256.
+was. The packages themselves are unsigned for the same reason — that too would mean a GPG key;
+installing a downloaded one verifies its digests, and every release asset carries a published SHA-256.
+The signed `checksums.txt` above is what establishes where the assets came from.
 
 Or build from source:
 
