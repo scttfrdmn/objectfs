@@ -111,10 +111,12 @@ func TestSmallReadOfLargeObjectDoesNotFetchTheWholeThing(t *testing.T) {
 // TestSmallReadOfCompressedObjectStaysCorrect is the other half of the C4 fix: reading a range of an
 // object that *is* compressed still has to return the right bytes.
 //
-// A zstd frame is not seekable, so a range of the decoded content cannot be served from a range of
-// the stored bytes — the whole object must be fetched and decoded. Amplification is the price of
-// compression here, and it is a documented tradeoff rather than a defect. What would be a defect is
-// returning the wrong bytes, which is what a naive "always range" fix would do.
+// It used to also assert that this cost the whole stored body, because a single zstd stream is not
+// seekable and there was no way to decode part of one. Seekable framing (#185) removed that
+// constraint: the object is written as independently decodable frames with an index, so a range of
+// the decoded content is served from the frames covering it. The test now asserts both halves —
+// still the right bytes, and no longer the whole body — because the correctness half is the one a
+// naive "always range" fix breaks, and it is the half that must survive any amplification work.
 //
 //nolint:tparallel // the subtests share a request recorder and must run in order; see below
 func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
@@ -150,6 +152,19 @@ func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
 	if stored := ts.ObjectSize(key); stored >= objectSize {
 		t.Fatalf("stored size %d did not shrink below %d; compression did not engage and this test "+
 			"proves nothing", stored, objectSize)
+	}
+
+	// The byte budget below only means something if the object was framed. Without this check, a
+	// regression that stopped emitting descriptors — or a fixture that drifted under the frame-size
+	// floor and came out as a single unframed stream — would make the reads fall back to whole-object
+	// transfer, and the budget would then be measuring nothing while still passing or failing for
+	// reasons unrelated to framing.
+	if desc, ok := ts.ObjectMetadata(key)[metaSeekableKey]; !ok {
+		t.Fatalf("the object carries no %s descriptor, so it was not framed and the transfer budget "+
+			"below would not be an assertion about seekable reads. Metadata: %v",
+			metaSeekableKey, ts.ObjectMetadata(key))
+	} else {
+		t.Logf("framed: %s = %s", metaSeekableKey, desc)
 	}
 
 	// Two reads: one whose range falls inside the compressed body, and one whose range falls past
@@ -197,13 +212,28 @@ func TestSmallReadOfCompressedObjectStaysCorrect(t *testing.T) {
 					"decoded ones", len(got), r.offset, r.offset+readSize)
 			}
 
-			// The whole object had to cross the wire, since a zstd frame cannot be sliced. Asserting
-			// it keeps the tradeoff explicit: if a later change makes this cheap, this assertion is
-			// the one that should be revisited rather than silently satisfied.
-			if n := ts.BytesRead(key); n < stored {
-				t.Errorf("read %d bytes to decode a %d-byte compressed body; the whole body is "+
-					"needed. Requests: %s", n, stored, describe(ts.Requests()))
+			// This assertion used to read the other way round: `n < stored` was the *failure*
+			// condition, because a zstd stream cannot be sliced and the whole body had to cross the
+			// wire to decode any of it. Its comment said that if a later change ever made this cheap,
+			// this was the assertion to revisit rather than quietly satisfy. Seekable framing (#185)
+			// is that change, and this is that revision.
+			//
+			// The bound is half the stored body rather than a precise byte count. What the read
+			// actually transfers is the index frame plus the one data frame covering the offset — for
+			// this fixture about 138 KiB against a 537 KiB body — and pinning that exactly would make
+			// this test fail on any change to the frame-size derivation, which is a tuning decision
+			// with its own tests. Half is far inside what framing buys and far outside what the
+			// whole-object path could ever produce, so it distinguishes the two without pinning either.
+			n := ts.BytesRead(key)
+			if n >= stored/2 {
+				t.Errorf("read %d bytes to serve %d bytes at offset %d of a framed object, against a "+
+					"%d-byte stored body. A framed object should cost the index plus the frames the "+
+					"range covers; this looks like a whole-object fetch. Requests: %s",
+					n, readSize, r.offset, stored, describe(ts.Requests()))
 			}
+
+			t.Logf("%d bytes at offset %d transferred %d of %d stored bytes (%.1f%%)",
+				readSize, r.offset, n, stored, float64(n)/float64(stored)*100)
 		})
 	}
 }

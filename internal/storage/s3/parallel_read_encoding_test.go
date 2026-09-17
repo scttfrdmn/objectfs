@@ -97,13 +97,18 @@ func TestFanOutIsDecidedByTheObjectNotTheConfig(t *testing.T) {
 }
 
 // TestFanOutOnACompressedObjectFallsBackAndStaysCorrect is the other half: an object that *is*
-// compressed must not be served from assembled ranges, because a zstd frame is not seekable and
-// there is nothing to fan out across.
+// compressed must not be served from assembled ranges, because the fan-out's chunk boundaries are
+// offsets into the encoded body and the caller asked for offsets into the decoded content.
 //
 // Declining the fan-out for such an object was always the correct intent — the comment on the old
 // gate said so. The defect was its scope. So the fix has to keep the intent while narrowing the
 // scope, and this test is what holds it: the read has to return the right bytes, and it has to reach
-// them through the whole-object path.
+// them somewhere other than the fan-out.
+//
+// Where that "somewhere" is has changed. Before #185 it was a whole-object fetch, and this test
+// asserted an unranged GET to say so. A framed object is now served from the frames covering the
+// range, so the assertion is inverted: every GET must be ranged. The fan-out itself is unchanged and
+// still declined.
 //
 // Two offsets, because a compressed object reaches the fallback by two different routes and only one
 // of them involves a response header. A read starting inside the stored body gets a 206 carrying
@@ -154,6 +159,15 @@ func TestFanOutOnACompressedObjectFallsBackAndStaysCorrect(t *testing.T) {
 			"proves nothing", stored, objectSize)
 	}
 
+	// The all-GETs-are-ranged assertion below is only about framing if the object was framed. An
+	// unframed compressed object legitimately takes the whole-object path and would fail it, so
+	// without this the test could not tell "framing regressed" from "the fixture stopped framing".
+	if _, ok := ts.ObjectMetadata(key)[metaSeekableKey]; !ok {
+		t.Fatalf("the object carries no %s descriptor, so it was not framed and a whole-object fetch "+
+			"would be the correct way to read it. Metadata: %v",
+			metaSeekableKey, ts.ObjectMetadata(key))
+	}
+
 	reads := []struct {
 		name   string
 		offset int64
@@ -194,21 +208,38 @@ func TestFanOutOnACompressedObjectFallsBackAndStaysCorrect(t *testing.T) {
 					"the decoded ones", readSize, r.offset, r.offset, r.offset+readSize)
 			}
 
-			// And it reached them by fetching the whole stored body, which is the only way to decode
-			// any part of a zstd frame. Asserting it keeps the tradeoff explicit rather than implied:
-			// if seekable framing ever makes this cheap, this is the assertion to revisit rather than
-			// one to quietly satisfy.
-			unranged := 0
+			// This assertion has been inverted. It used to require that an *unranged* GET was issued,
+			// because fetching the whole stored body was the only way to decode any part of a zstd
+			// stream; its comment said that if seekable framing ever made this cheap, this was the
+			// assertion to revisit rather than quietly satisfy. #185 is that change.
+			//
+			// The fan-out is still declined — the correctness assertion above is what holds that, and
+			// it is the stronger witness: had the chunks been assembled, the ranges would have been
+			// applied to the encoded body and every byte would be wrong. What is new is where the
+			// declined fan-out lands. It used to land on one whole-object GET; it now lands on the
+			// framed path, which issues only ranged GETs. So an unranged GET here means framing
+			// stopped engaging on this object and the read regressed to whole-body transfer.
 			for _, g := range ts.GETs(key) {
 				if !g.IsRanged() {
-					unranged++
+					t.Errorf("an unranged GET was issued for a framed object, so the read fetched the "+
+						"whole stored body. A declined fan-out should fall through to the framed path, "+
+						"which fetches the index and the frames covering the range.\nRequests: %s",
+						describe(ts.Requests()))
+
+					break
 				}
 			}
 
-			if unranged == 0 {
-				t.Errorf("no unranged GET was issued for a compressed object; the whole body has to "+
-					"be fetched to decode any of it.\nRequests: %s", describe(ts.Requests()))
-			}
+			// The transferred total is logged, not asserted, and the reason is worth writing down: it
+			// includes the fan-out chunks that were fetched and then abandoned. #228 chose
+			// attempt-then-fall-back so the cost of the encoding probe lands on compressed objects
+			// rather than on every large read, and at the time a compressed object was already paying
+			// a whole-body fetch, so the wasted chunks were free. With framing they are no longer
+			// free — they are most of what this read now transfers. Asserting a budget here would be
+			// asserting the size of that waste, which is #514's subject, not this test's.
+			t.Logf("%d bytes at offset %d transferred %d bytes over %d GETs against a %d-byte stored "+
+				"body, including the abandoned fan-out chunks",
+				readSize, r.offset, ts.BytesRead(key), len(ts.GETs(key)), stored)
 		})
 	}
 }

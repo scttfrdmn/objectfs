@@ -476,6 +476,20 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 
 	switch {
 	case ranged && err == nil && read.contentEncoding != "":
+		// The response that told us the body is encoded also carried the seekable descriptor, if the
+		// object has one, so the frame path can be attempted without a further request to discover it.
+		// ok == false means this object cannot be served from frames and the re-fetch below is the only
+		// way; readFramed has already counted and logged why.
+		if framed, ok, framedErr := b.readFramed(ctx, key, offset, size, read.metadata, read.contentEncoding); ok || framedErr != nil {
+			if framedErr != nil {
+				return nil, framedErr
+			}
+
+			b.costOptimizer.RecordAccess(key, int64(len(framed)))
+
+			return framed, nil
+		}
+
 		fetchOffset, fetchSize = 0, 0
 		read, err = b.getObjectRange(ctx, key, fetchOffset, fetchSize)
 
@@ -500,6 +514,20 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 			// Inside an uncompressed object but S3 refused the range: not something to paper over
 			// with a whole-object fetch.
 			return nil, err
+		}
+
+		// This is the arm a large framed object is most often read through, not the one above: the
+		// stored body is a fraction of the content length the caller was told, so any read far enough
+		// into a well-compressed file lands past the end of it and arrives here as a 416. Only the HEAD's
+		// metadata is in hand, so the encoding is left for the index fetch to report.
+		if framed, ok, framedErr := b.readFramed(ctx, key, offset, size, info.Metadata, ""); ok || framedErr != nil {
+			if framedErr != nil {
+				return nil, framedErr
+			}
+
+			b.costOptimizer.RecordAccess(key, int64(len(framed)))
+
+			return framed, nil
 		}
 
 		fetchOffset, fetchSize = 0, 0
