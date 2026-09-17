@@ -125,6 +125,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Releases are built and packaged by GoReleaser (#502).** One `.goreleaser.yml` replaces `nfpm.yaml`,
+  `release.yml`'s five-cell `build` matrix (131 lines) and its `package-linux` job (274) — the two jobs
+  collapse into one `artifacts` job of 162 lines, and the release now has one description of itself
+  where it had two that agreed by convention. `make package-linux` runs the same binary over the same
+  config, so what a pull request proves and what a tag does are the same operation.
+
+  **The published layout does not change.** The same five tarballs under the same names, each holding
+  the same platform-named binary, each with its own `.sha256` sibling; the same `.deb` and `.rpm`
+  filename conventions; the same twelve install destinations; the same two maintainer scriptlets. Three
+  of goreleaser's defaults had to be overridden to keep it that way, and each of the three was found by
+  building and inspecting rather than by reading documentation:
+
+  - **`file_name_template: "{{ .ConventionalFileName }}"`.** goreleaser's default names a package
+    `objectfs_0.16.0_linux_amd64.rpm` — a Go-flavoured name on an rpm, where `amd64` is not what rpm
+    calls that architecture and `_linux_` appears in no rpm anywhere. The override restores each
+    format's own convention, including the architecture spellings: `amd64`/`arm64`/`armhf` for deb and
+    `x86_64`/`aarch64`/`armv7hl` for rpm.
+  - **`files: [none*]` on the archive, not `files: []`.** An empty list reads as unset and goreleaser's
+    defaulter fills it in; measured, all five tarballs came out carrying `CHANGELOG.md`, `LICENSE` and
+    `README.md` beside the binary. `none*` is a glob that matches nothing, which is the documented way
+    to say "no extra files" — it logs `no files matched glob=none*` and ships one file per tarball.
+  - **`checksum: split: true`.** The default writes one combined `checksums.txt` and no per-asset
+    siblings. `scripts/install.sh` fetches `<asset>.sha256` by exact name and treats its absence as
+    fatal, so the default would publish a complete-looking release that breaks the documented
+    one-liner on every platform at once. `release_signing_test.go` now gates that one word.
+
+  **Two builds of the same source, and the reason is a defect a build log cannot show.** The tarball's
+  binary is named for its platform — `install.sh` looks up `objectfs-linux-amd64` after extracting, and
+  five downloads coexist in one directory — while the package's binary has to be `objectfs`, because
+  that is what the systemd unit, both modulefiles and `scripts/postinstall.sh` invoke. goreleaser has no
+  rename step between a build and an archive, so one build cannot serve both. With a single
+  platform-named build the rpm came out carrying `/usr/bin/objectfs-linux-amd64`: it built, installed,
+  ran its scriptlet, exited 0, and then answered `objectfs: command not found`. Every packaging test
+  passed, because the binary is not a `contents:` entry.
+  `TestThePackagedBinaryIsOnThePathAsObjectfs` is that gate, and it is new.
+
+  **Two of the gates written for this change did not hold, and mutation is what said so.**
+  `TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes` pinned the archive's `name_template` and
+  not the archived binary's, which are separate templates that have to be the same string — the tarball
+  holds one file and `install.sh` looks it up by name — so shortening one of the two passed every test
+  in the package and would have produced a release that downloads, verifies its checksum, and dies on
+  "does not contain objectfs-linux-amd64" on all five platforms at once. And the check written to reject
+  `goreleaser build` searched the step for the word "release", which is a substring of
+  "goreleaser/goreleaser-action": `args: build --clean` passed it. It now reads the `args:` input by
+  name.
+
+  **Publishing deliberately stays outside goreleaser** (`release: disable: true`). Three things the
+  `publish` job does have no goreleaser equivalent: release notes extracted from a hand-written
+  `CHANGELOG.md` rather than from commit subjects, a cross-check that the per-asset `.sha256` files and
+  `checksums.txt` agree *before* either is served, and a `cosign verify-blob` against the same
+  certificate identity the notes tell a reader to pass.
+
+  **The version's authority is unchanged and the chain is one hop shorter.** `nfpm.yaml` read
+  `${OBJECTFS_VERSION}` and the Makefile sed'd the `version` constant into that variable; goreleaser
+  takes the version from the git tag, and `release.yml` still asserts the tag equals `"v"` plus the
+  constant. There are deliberately no `-X` ldflags — `version` in `cmd/objectfs/main.go` is an untyped
+  **constant**, so the linker cannot rewrite it, and every release before #375 passed that flag and
+  shipped a binary reporting the hardcoded value anyway. `TestPackageVersionComesFromTheVersionConstant`
+  now fails on a re-added `-X main.version`, which is the mistake that looks like it works.
+
+  Two behavioural changes went in with it, both deliberate:
+
+  - **armv7 now gets a `.deb` and an `.rpm`.** nfpm's output is per linux platform and armv7 is already
+    a build target here, so it gets packages like the other two architectures. The old Makefile loop
+    built amd64 and arm64 only, and `release.yml`'s comment recorded that asymmetry as a limitation
+    rather than a decision. A release now carries 11 assets — 5 tarballs, 3 debs, 3 rpms — up from 9.
+  - **`-trimpath`**, which was not previously passed. It strips the build machine's absolute paths out
+    of the binary, so a build is reproducible from the tag rather than from the runner.
+
+  One CI-visible consequence: `ci.yml`'s `packaging` job now reads the version it should look for out of
+  `dist/metadata.json` rather than out of `cmd/objectfs/main.go`. A local or CI build is a `--snapshot`,
+  so goreleaser derives the version from the last tag and bumps the patch: `0.14.1-next` on a full
+  clone, and `0.0.1-next` in the job itself, where `actions/checkout` fetches one commit and no tags so
+  goreleaser falls back to `v0.0.0`. The modulefiles install to
+  `/usr/share/modulefiles/objectfs/<that string>` either way, which is the only thing the job depends
+  on — and a number nothing could have hardcoded is the stronger test of that agreement, so the shallow
+  clone stays. `release.yml` passes `fetch-depth: 0`, because there the tag *is* the version.
+  Reading the constant would have the job look for a path nothing created and report it as a packaging
+  failure.
+
+  `ci.yml` installs a prebuilt goreleaser with `goreleaser-action`'s `install-only` mode and then builds
+  with `make package-linux`, rather than letting the Makefile build the tool from source. goreleaser
+  v2.18.1 declares `go >= 1.27.1`, this module declares 1.26.0, and `setup-go` sets `GOTOOLCHAIN=local`
+  so that the Go it installed is the Go that runs — so `go install` refuses, and correctly: a job that
+  silently fetched a newer toolchain to build a release tool would build the release with a compiler
+  this project does not test against. A developer on the default `GOTOOLCHAIN=auto` never sees it. Three
+  files now pin the goreleaser version, so `TestTheGoreleaserVersionIsPinnedToOneValueEverywhere`
+  couples them: goreleaser owns the asset names, which makes a skew between the pull-request tool and
+  the release tool publishable.
+
 - **The extended-attribute budget is 1694 bytes per object, down from 1758.** The 64 bytes are the
   widest form of the new `objectfs-seekable` key, and they are reserved on every object whether or not
   that object is framed. S3 rejects an over-budget metadata write rather than truncating it, so a
@@ -170,11 +260,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually about repositories. `TestWorkflowExpressionsAreValid` — an unparseable `${{ }}`, *including
   one inside a YAML comment*, fails the whole workflow file before any job starts, with no job list and
   no log — is now `internal/config/workflow_expressions_test.go`.
-  `TestTheRPMSigningPathStaysIntact` and the docs-absence walk are now
-  `internal/config/rpm_signing_test.go`; rpm signing matters with no repository in sight, since
-  `gpgcheck=1` is dnf's default for a downloaded file too and each rpm stands alone with no equivalent
-  of apt's InRelease chain. The `$GITHUB_ENV`-does-not-reach-its-own-step gate moved with it: that
-  mistake belongs to `$GITHUB_ENV`, not to the job that first made it.
+  The docs-absence walk is now `internal/config/package_repositories_test.go`.
+  `TestTheRPMSigningPathStaysIntact` moved there too and then did not survive: the premise quoted in
+  its header — "`gpgcheck=1` is dnf's default for a downloaded file too" — turned out to be false, and
+  the GPG apparatus went with it. See the Removed entry below, which records the measurement.
 
   `scripts/install.sh` and both of its CI jobs are deliberately kept. It is repo-independent — it reads
   tarballs straight from the GitHub release — it is the path that works on a machine with no root and
@@ -212,6 +301,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `globalfs/internal/coordinator` → `objectfs/sdks/go/objectfs` → `objectfs/internal/storage/s3` →
   `cargoship/pkg/aws/config`, so that one import was the whole reason a downstream consumer of the Go
   SDK compiled an archiving library it never called.
+
+- **The GPG signing apparatus for the rpm, because nothing on any install path this project publishes
+  ever checked the signature it produced.** `nfpm.yaml`'s `rpm.signature` block, `release.yml`'s
+  key-import steps, the `$GITHUB_ENV`/`export` gate written for them and
+  `internal/config/rpm_signing_test.go`'s `TestTheRPMSigningPathStaysIntact` are gone, along with the
+  need for the `GPG_SIGNING_KEY` and `GPG_PASSPHRASE` repository secrets.
+
+  **The premise was measured and it is false.** Both the config and the test said, in those words, that
+  "`gpgcheck=1` is dnf's default and verifies each package's own embedded signature, so
+  `dnf install ./objectfs-*.rpm` checks it too". The first clause is right and the second does not
+  follow. dnf has two separate settings, read out of a `rockylinux:9` container rather than reasoned
+  about:
+
+  ```text
+  gpgcheck = True            # packages coming from a *repository*
+  localpkg_gpgcheck = False  # packages named as a local file  <-- the only path this project has
+  ```
+
+  So a deliberately unsigned rpm built from the new config was installed with
+  `dnf install ./objectfs-0.14.0-1.aarch64.rpm`. It installed, pulled `fuse3` in as a Recommends, ran
+  the postinstall scriptlet, reported `Signature : (none)` under `rpm -qi`, and answered
+  `objectfs version`. dnf raised nothing.
+
+  The failure that originally motivated the signature was real — "Package objectfs-0.13.0-1.x86_64.rpm
+  is not signed / Error: GPG check FAILED" — and it came from `ci.yml`'s `repo-install` job installing
+  out of a throwaway-signed *yum repository* with `gpgcheck=1`. That is the repository path, governed by
+  the first setting, and it is the path deleted above: `objectfs.io/yum` answered 404 for the whole life
+  of the feature. What was left was a key whose signature nothing checks, kept intact by a test whose
+  own header explained that releases ship unsigned anyway.
+
+  **What a downloaded package's integrity rests on is what a tarball's rests on**, and it is stronger
+  than the deleted signature was in the one way that matters: a SHA-256 published beside the asset,
+  which `scripts/install.sh` has no flag to skip, plus `checksums.txt` and a keyless cosign bundle over
+  it, verified in the run that produced it against the certificate identity the release notes name.
+  Publishing an apt or yum repository is what would make a package signature load-bearing again, and it
+  would want a fresh key at that point regardless.
 
 ### Fixed
 

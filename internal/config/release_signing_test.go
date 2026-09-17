@@ -11,7 +11,7 @@ import (
 
 // The release is signed, keylessly, and the signature is verified by the run that made it.
 //
-// Before this, nothing in the release path was signed. Nine assets each carried a `.sha256` sibling,
+// Before this, nothing in the release path was signed. Every asset carried a `.sha256` sibling,
 // and a sibling served from the same release as the asset it describes detects a corrupt download
 // and proves nothing at all about origin: whoever can replace an asset can replace its hash file in
 // the same motion. The one signing mechanism the repository did have — GPG, for the rpm's embedded
@@ -192,9 +192,10 @@ func TestTheSigningPathIsKeyless(t *testing.T) {
 	if strings.Contains(step, "secrets.") {
 		t.Error("the keyless signing step in release.yml references `secrets.`.\n" +
 			"Keyless signing needs no secret, and introducing one gives the mechanism a failure mode " +
-			"it does not currently have: absent secret means unsigned, which is what the GPG path in " +
-			"`package-linux` does (it warns and exits 0). If a secret is genuinely required, this is " +
-			"no longer the keyless design and the release notes' claim about it is wrong.")
+			"it does not currently have: absent secret means unsigned, which is what the deleted GPG " +
+			"path did (it warned and exited 0, so a release shipped unsigned and green). If a secret is " +
+			"genuinely required, this is no longer the keyless design and the release notes' claim " +
+			"about it is wrong.")
 	}
 
 	// cosign should not be handed a key either.
@@ -213,28 +214,58 @@ func TestTheSigningPathIsKeyless(t *testing.T) {
 // an addition, not a replacement: dropping the siblings would break every installer invocation on
 // the next release, and the installer's own tests would not catch it because they read the script
 // rather than the release.
+//
+// Where the siblings come from has changed and the contract has not. release.yml used to write them
+// itself, twice — `sha256sum "$BINARY_NAME.tar.gz" > "$BINARY_NAME.tar.gz.sha256"` in the build matrix
+// and `sha256sum "$pkg" > "$pkg.sha256"` in the packaging job — and this test named both literals.
+// goreleaser writes them now, and the setting that decides is one word:
+//
+//	checksum:
+//	  split: true
+//
+// `split: false`, which is goreleaser's default, produces a single `checksums.txt` and *no* siblings.
+// So this is not a preference: the default breaks the documented installer on every platform at once,
+// and it breaks it in a way that looks like a working release — the tarball is published, the
+// checksum document is published, and install.sh dies on a 404 for a file that used to exist.
 func TestEveryAssetKeepsItsChecksumSibling(t *testing.T) {
 	t.Parallel()
 
+	// The siblings, from the config that writes them. Read as text rather than through readGoreleaser's
+	// struct because what matters is the two lines together: `split` under `checksum`, not a `split:`
+	// anywhere in the file.
+	packaging := withoutComments(readFile(t, filepath.Join(repoRoot(t), packagingFile)))
+
+	checksum, _, found := strings.Cut(packaging, "\nnfpms:")
+	if _, after, ok := strings.Cut(checksum, "\nchecksum:"); ok && found {
+		if !strings.Contains(after, "split: true") {
+			t.Errorf("%s's `checksum:` section does not set `split: true`. goreleaser's default writes "+
+				"one combined checksums.txt and no `<asset>.sha256` siblings, and scripts/install.sh "+
+				"fetches a sibling by exact name and treats its absence as fatal — so the next release "+
+				"would publish every tarball and break the documented one-liner on every platform.",
+				packagingFile)
+		}
+	} else {
+		t.Errorf("%s has no `checksum:` section before its `nfpms:` section. Without one goreleaser "+
+			"still writes checksums, using its own defaults, which do not include the per-asset "+
+			"siblings scripts/install.sh requires.", packagingFile)
+	}
+
+	// And the publish job has to keep requiring them. This is the half that catches a sibling that
+	// silently stops being produced for one asset kind rather than for all of them: the loop below
+	// walks every asset it is about to attach and fails on the first one with no sibling.
 	source := withoutComments(releaseWorkflowSource(t))
 
-	// The two places siblings are written: the build matrix, for tarballs, and package-linux, for the
-	// deb and the rpm.
-	for _, want := range []string{
-		`sha256sum "$BINARY_NAME.tar.gz" > "$BINARY_NAME.tar.gz.sha256"`,
-		`sha256sum "$pkg" > "$pkg.sha256"`,
-	} {
-		if !strings.Contains(source, want) {
-			t.Errorf("release.yml no longer contains:\n\t%s\n"+
-				"That is how a published asset gets its `.sha256` sibling, and scripts/install.sh "+
-				"fetches that exact name. Without it the installer fails on every platform, on the "+
-				"next release, and no test that reads install.sh can see it.", want)
-		}
+	if !strings.Contains(source, `if [ ! -f "$asset.sha256" ]`) {
+		t.Error("release.yml's publish job no longer checks that each asset has its `.sha256` sibling " +
+			"before attaching it. That check is what makes a goreleaser default change visible on the " +
+			"release that introduces it rather than on the first install after it.")
 	}
 
 	if !strings.Contains(source, "checksums.txt") {
 		t.Error("release.yml no longer produces checksums.txt, which is the document the keyless " +
-			"signature covers. Without it the signature has nothing to attest to.")
+			"signature covers. Without it the signature has nothing to attest to. goreleaser does not " +
+			"write it under `split: true` — the publish job builds it from the assets and cross-checks " +
+			"it against the siblings, so both hash sources are proven to agree before either is served.")
 	}
 }
 

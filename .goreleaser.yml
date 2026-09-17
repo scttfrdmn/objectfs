@@ -1,0 +1,297 @@
+# GoReleaser builds and packages every release artifact. It does not publish them.
+#
+# That split is deliberate and it is the whole design of this file. `release.yml` used to hand-roll
+# both halves: a five-cell build matrix (131 lines) and an nfpm loop over two architectures and two
+# formats (274 lines), each with its own tarring, its own checksum writing and its own artifact
+# upload. Those are the parts goreleaser does better, and they are gone. The publishing half is not,
+# because it does several things goreleaser has no opinion about and this project cares about:
+#
+#   - release notes are extracted from CHANGELOG.md, which is Keep a Changelog and hand-written.
+#     goreleaser's `changelog:` builds notes from commit subjects instead, which for this repository
+#     would replace paragraphs explaining a defect with the one-line summary of the commit that fixed
+#     it.
+#   - the per-asset `.sha256` files are cross-checked against `checksums.txt` before anything is
+#     published, so the two hash sources cannot disagree on the release page.
+#   - the cosign signature is verified in the run that made it, against the certificate identity the
+#     release notes tell a user to pass.
+#
+# So `release:` below is disabled — which is what makes `goreleaser release --clean`, the command
+# release.yml runs, build and package without touching GitHub — and the existing publish job takes
+# `dist/` from there. `--skip=publish` would do the same thing from the command line; the config says
+# it instead, so that `make package-linux` and a tag agree without depending on matching flags.
+# Nothing about the published layout changes.
+#
+# What did change, and why:
+#
+#   - **`-trimpath`.** Not previously passed. It strips the build machine's absolute paths out of the
+#     binary, which makes the build reproducible from the tag rather than from the runner, and
+#     integrity is this project's first priority.
+#   - **armv7 gets a .deb and an .rpm.** nfpm's output is per linux platform, and armv7 is a build
+#     target here — Raspberry Pi collectors and edge instruments writing to S3 — so it now gets
+#     packages like the other two architectures. The hand-rolled loop built amd64 and arm64 only, and
+#     release.yml's comment called that asymmetry out as a Makefile limitation rather than a decision.
+#     A release now carries 6 packages and 5 tarballs instead of 4 and 5.
+version: 2
+
+# `version` in cmd/objectfs/main.go is an untyped **constant**, so the linker cannot rewrite it and
+# there are deliberately no `-X` ldflags here: every release before #375 passed them and shipped a
+# binary reporting the hardcoded value anyway. release.yml asserts the tag and the constant agree
+# instead, which is the check that actually holds.
+#
+# `.Version` below therefore comes from the tag and is used for *file names and package metadata*
+# only. A mismatch between it and what the binary reports is caught before this file runs.
+# Two builds of the same source, and they differ in exactly one thing: what the binary is called.
+#
+# The tarball and the package disagree about that, and both are right. A tarball is extracted by
+# hand or by install.sh, so its binary is named for its platform — five downloads can sit in one
+# directory without overwriting each other, and install.sh renames on install. A package puts its
+# binary on `PATH`, so it must be `objectfs`: `/usr/bin/objectfs-linux-amd64` is not a command anyone
+# types, and the systemd unit, the two modulefiles and scripts/postinstall.sh all invoke `objectfs`.
+#
+# goreleaser has no rename step between a build and an archive, so one build cannot satisfy both —
+# measured, not assumed. With a single platform-named build the rpm came out carrying
+# `/usr/bin/objectfs-linux-amd64`, which installs cleanly and then answers `objectfs: command not
+# found`: a package that is broken in the only way that matters and correct in every way a build log
+# shows.
+builds:
+- id: archives
+  main: ./cmd/objectfs
+  # `objectfs-linux-amd64`, not `objectfs`, because that is the layout scripts/install.sh reads: it
+  # extracts, looks for `$PROGRAM-$platform`, and renames as it installs. A bare `objectfs` here
+  # fails every documented one-liner with install.sh's own message for it — "the release layout has
+  # changed and this script needs updating".
+  binary: >-
+    objectfs-{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+  env:
+  - CGO_ENABLED=0
+  # Linux and macOS only, because that is what builds. `internal/fuse` carries
+  # `//go:build linux || darwin` and `platform_unsupported.go` fails the build on anything else by
+  # design, so a windows or freebsd cell could never produce an artifact. Adding a GOOS means adding
+  # a FUSE binding for it first; see internal/fuse/doc.go.
+  goos:
+  - linux
+  - darwin
+  goarch:
+  - amd64
+  - arm64
+  - arm
+  # armv7 explicitly, not whatever the toolchain defaults to: armv6 and armv7 are not interchangeable
+  # binaries and the artifact is named for 7, so the flag has to say 7 rather than be trusted to keep
+  # meaning it. linux/armv7 is #198 — it was dropped once for a one-line compile error where
+  # `safeIntToUint32` bounded an `int` against `0xFFFFFFFF`, which does not fit a 32-bit `int`: the
+  # guard against overflow overflowed. ci.yml's cross-build matrix carries linux/arm and linux/386
+  # cells so a 32-bit break is a red pull request rather than a platform quietly leaving the matrix.
+  goarm:
+  - "7"
+  ignore:
+  # No 32-bit ARM macOS has ever existed.
+  - goos: darwin
+    goarch: arm
+  flags:
+  - -trimpath
+  ldflags:
+  - -s -w
+  tags:
+  - release
+  - netgo
+
+# The package build. Linux only — there is no .deb or .rpm for macOS — so this is three more compiles
+# rather than five, and they take about six seconds together.
+- id: packages
+  main: ./cmd/objectfs
+  binary: objectfs
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux
+  goarch:
+  - amd64
+  - arm64
+  - arm
+  goarm:
+  - "7"
+  flags:
+  - -trimpath
+  ldflags:
+  - -s -w
+  tags:
+  - release
+  - netgo
+
+archives:
+- id: objectfs
+  # Only the platform-named build. Without this the `packages` build would be archived too, and the
+  # release would carry a second set of five tarballs whose name_template collides with the first.
+  ids:
+  - archives
+  formats: [tar.gz]
+  # `objectfs-linux-amd64.tar.gz`, matching what install.sh fetches and what every previous release
+  # published. goreleaser's default template is `{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}`,
+  # which would silently rename every asset and break the installer for every platform at once.
+  name_template: >-
+    objectfs-{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+  # One file in the archive, the binary, which is what every previous release shipped.
+  #
+  # `none*` is a glob that matches nothing, and it is goreleaser's documented way to say "no extra
+  # files" — **not** `files: []`. An empty list reads as unset and the defaulter fills it in, which
+  # was measured here: with `files: []` all five tarballs came out holding CHANGELOG.md, LICENSE and
+  # README.md beside the binary. That is not a break — install.sh looks up the platform-named binary
+  # by name and ignores its neighbors — but it would have quietly added a 200 KB changelog to every
+  # tarball on every platform, and the empty list looks exactly like it worked.
+  files:
+  - none*
+  wrap_in_directory: false
+
+# One `.sha256` per asset, which is the name scripts/install.sh fetches:
+#
+#     fetch "$base/$asset.sha256" ... || die "$asset exists for $tag but its .sha256 does not"
+#
+# It treats a missing checksum as fatal and refuses to install unverified, so `split` is not a
+# preference here — a single `checksums.txt` would break the installer on every platform. release.yml
+# builds the combined list itself and cross-checks it against these siblings, so both forms are
+# published and they are proven to agree before the release page exists.
+checksum:
+  split: true
+  algorithm: sha256
+
+# The .deb and the .rpm.
+#
+# This replaces nfpm.yaml, which is deleted. One definition rather than two: the Makefile's
+# `package-linux` loop invoked nfpm directly with `OBJECTFS_VERSION` and `OBJECTFS_ARCH` set in the
+# environment, so the packaging config and the release pipeline agreed only by convention. They now
+# agree because there is one of them, and `make package-linux` calls goreleaser.
+nfpms:
+- id: objectfs
+  # The build whose binary is called `objectfs`. Naming the wrong one here is the defect described
+  # above the builds section, and it is invisible in a build log.
+  ids:
+  - packages
+  package_name: objectfs
+  # Each format's own convention, which is not the same string in the two worlds:
+  #
+  #     objectfs_0.14.0-1_amd64.deb        objectfs-0.14.0-1.x86_64.rpm
+  #     objectfs_0.14.0-1_arm64.deb        objectfs-0.14.0-1.aarch64.rpm
+  #     objectfs_0.14.0-1_armhf.deb        objectfs-0.14.0-1.armv7hl.rpm
+  #
+  # goreleaser's default template is `{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}` for
+  # both, which produced `objectfs_0.14.0_linux_amd64.rpm` — a Go-flavored name on an rpm, where
+  # `amd64` is not the architecture rpm calls it and `_linux_` appears in no rpm anywhere. The
+  # published assets keep the names nfpm was already giving them.
+  file_name_template: "{{ .ConventionalFileName }}"
+  formats:
+  - deb
+  - rpm
+  maintainer: Scott Friedman <3011922+scttfrdmn@users.noreply.github.com>
+  vendor: ObjectFS
+  homepage: https://github.com/scttfrdmn/objectfs
+  license: Apache-2.0
+  description: |-
+    FUSE filesystem presenting a POSIX interface over AWS S3.
+    ObjectFS mounts an S3 bucket as a directory tree for research computing and institutional
+    deployments: reads, writes, directory listings, and metadata, with a local cache and read-ahead.
+    It is not a POSIX-compliant filesystem — hard links, mmap-shared writes, and byte-range locking
+    are unsupported by design. See the supported-operations table in the README for what works and
+    which tools are known not to.
+  section: utils
+  priority: optional
+  release: "1"
+  # Recommends rather than Depends, because a mount needs fuse3 and everything else objectfs does —
+  # `objectfs config`, `objectfs version`, the cost estimator — does not. A hard dependency would
+  # make the package uninstallable on a machine where FUSE is deliberately absent, and
+  # scripts/postinstall.sh already exits zero with a warning in that case.
+  recommends:
+  - fuse3
+  # No `bugs.url` and deliberately no repository URL: there is no published apt or yum repository for
+  # ObjectFS, and naming one here would put an address into every installed package's metadata that
+  # nothing serves. See CHANGELOG under Removed.
+  contents:
+  - src: ./configs/systemd/objectfs@.service
+    dst: /usr/lib/systemd/system/objectfs@.service
+    file_info:
+      mode: 0644
+  # Under /usr/share, not /etc. An example config in /etc is a conffile: dpkg then prompts on every
+  # upgrade whose shipped copy changed, and the operator's real config is the one in /etc/objectfs
+  # that postinstall.sh writes once and never touches again.
+  - src: ./configs/example.yaml
+    dst: /usr/share/objectfs/configs/example.yaml
+    file_info:
+      mode: 0644
+  - src: ./examples/config.yaml
+    dst: /usr/share/objectfs/configs/full-schema.yaml
+    file_info:
+      mode: 0644
+  # Where Lmod and Environment Modules actually look. The `.lua` is Lmod's and the extensionless file
+  # is Tcl's, and both are versioned directories under a name — `objectfs/0.16.0` — because that is
+  # how `module load objectfs/0.16.0` resolves.
+  - src: ./configs/modules/objectfs.lua
+    dst: /usr/share/modulefiles/objectfs/{{ .Version }}.lua
+    file_info:
+      mode: 0644
+  - src: ./configs/modules/objectfs.tcl
+    dst: /usr/share/modulefiles/objectfs/{{ .Version }}
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/doc/objectfs/LICENSE
+    file_info:
+      mode: 0644
+  - src: ./README.md
+    dst: /usr/share/doc/objectfs/README.md
+    file_info:
+      mode: 0644
+  - dst: /etc/objectfs
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /var/cache/objectfs
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /var/log/objectfs
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /mnt/objectfs
+    type: dir
+    file_info:
+      mode: 0755
+  # Top level rather than per-format, so one script serves both. They read their action argument in
+  # both conventions — dpkg's "configure"/"remove"/"upgrade" and rpm's instance count — and
+  # preremove.sh branches on it, because an upgrade must not tear down running mounts.
+  scripts:
+    postinstall: ./scripts/postinstall.sh
+    preremove: ./scripts/preremove.sh
+  # **There is deliberately no `rpm.signature` block, and the reason is measured.**
+  #
+  # nfpm.yaml had one, on a stated premise: "`gpgcheck=1` is dnf's default and verifies each package's
+  # own embedded signature, so `dnf install ./objectfs-*.rpm` checks it too." The first half is right
+  # and the second does not follow. dnf has two separate settings, and they were read out of a
+  # rockylinux:9 container rather than reasoned about:
+  #
+  #     gpgcheck = True            # packages coming from a *repository*
+  #     localpkg_gpgcheck = False  # packages named as a local file  <-- this path
+  #
+  # So `dnf install ./objectfs-0.14.0-1.aarch64.rpm` was run against a deliberately unsigned build of
+  # this very config. It installed, pulled fuse3 in as a Recommends, ran the postinstall scriptlet,
+  # reported `Signature : (none)` in `rpm -qi`, and `objectfs version` answered. dnf raised nothing.
+  #
+  # The failure that first motivated the signature — "Package objectfs-0.13.0-1.x86_64.rpm is not
+  # signed / Error: GPG check FAILED" — was real, but it came from ci.yml's `repo-install` job
+  # installing out of a throwaway-signed *yum repository* with `gpgcheck=1`. That is the repository
+  # path, and it is the setting above that governs it. There is no such repository: objectfs.io/yum
+  # answered 404 for the whole life of the feature and the machinery is gone.
+  #
+  # What that leaves is a signing key whose signature nothing on either install path ever checks, and
+  # roughly 276 lines of workflow importing it. Both are gone. The integrity of a downloaded package
+  # rests on the same thing as the tarballs': a SHA-256 published beside it, which install.sh has no
+  # flag to skip, and a cosign bundle over the checksum list. Publishing an apt or yum repository is
+  # what would make a package signature load-bearing again, and it would want a fresh key anyway.
+
+# release.yml publishes, not goreleaser. See this file's header: the release notes come from
+# CHANGELOG.md, the two hash sources are cross-checked against each other, and the cosign signature
+# is verified against the identity the notes name — none of which goreleaser models.
+release:
+  disable: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"

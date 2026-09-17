@@ -21,7 +21,7 @@ env:
 # build failed, the other six matrix entries were cancelled with it, and `Create Release` had already
 # succeeded. Every release this project has ever cut failed, and every one left a page up.
 #
-# Now `build` produces artifacts, `publish` needs it, and a failed build means no release page at all —
+# Now `artifacts` produces them, `publish` needs it, and a failed build means no release page at all —
 # which is recoverable by fixing the build and re-pushing the tag. `gh release create` also replaces
 # both `actions/create-release@v1` and `actions/upload-release-asset@v1`: they are archived, run on
 # Node 12, and were the reason the upload half needed an `upload_url` handed between jobs.
@@ -70,60 +70,48 @@ jobs:
       contents: read
       issues: read
 
-  # Build release binaries. No release exists yet; artifacts are handed to `publish` below.
+  # Every release artifact — five tarballs, three debs, three rpms and a checksum beside each — from
+  # one goreleaser invocation.
+  #
+  # This replaces two jobs and 405 lines: a five-cell `build` matrix that compiled, tarred and
+  # checksummed one platform per cell, and a `package-linux` job that imported a GPG key, ran nfpm
+  # through a Makefile loop over two architectures and two formats, and then verified the signature
+  # state of what it produced. `.goreleaser.yml` holds what those did and the reasoning behind each
+  # choice; read it before changing anything here, because the constraints are not obvious from this
+  # side — the binary inside a tarball is named for its platform and the one inside a package is not,
+  # and a single build cannot satisfy both.
+  #
+  # What did **not** move into goreleaser is publishing. `release:` is disabled in the config and the
+  # `publish` job below still creates the release page, because three things it does have no
+  # goreleaser equivalent: notes extracted from a hand-written CHANGELOG.md rather than from commit
+  # subjects, a cross-check that the per-asset `.sha256` files and `checksums.txt` agree before either
+  # is published, and a `cosign verify-blob` against the same identity string the notes tell a reader
+  # to pass. See that job.
   #
   # `needs: gate` is at the *root* of this graph on purpose, on both of the two jobs that have no
   # other dependency, so every job downstream is transitively gated by construction. The cheaper
-  # arrangement — let build and package-linux run in parallel with the gate, and hang `needs: gate`
-  # only on the two jobs with outward-facing effects (`docker-build-push` pushes to ghcr,
-  # `publish` creates the release page) — saves the gate's wall clock on a green release and is
-  # the wrong trade twice over. It makes bypassing the gate a matter of per-job discipline, so the
-  # next job added here is ungated unless whoever adds it remembers; and a release is not a
-  # latency-sensitive operation, whereas an unverified one is unrecoverable in the direction that
-  # matters. `internal/config/release_gate_test.go` asserts the reachability rather than the two
-  # literal `needs:` entries, so an arrangement that keeps the property is free to change.
-  build:
-    name: Build
+  # arrangement — let this run in parallel with the gate, and hang `needs: gate` only on the jobs with
+  # outward-facing effects (`docker-build-push` pushes to ghcr, `publish` creates the release page) —
+  # saves the gate's wall clock on a green release and is the wrong trade twice over. It makes
+  # bypassing the gate a matter of per-job discipline, so the next job added here is ungated unless
+  # whoever adds it remembers; and a release is not a latency-sensitive operation, whereas an
+  # unverified one is unrecoverable in the direction that matters.
+  # `internal/config/release_gate_test.go` asserts the reachability rather than the literal `needs:`
+  # entries, so an arrangement that keeps the property is free to change.
+  artifacts:
+    name: Build and Package
     runs-on: ubuntu-latest
     needs: gate
     permissions:
       contents: read
-    # Linux and macOS only, because that is what builds. `internal/fuse` carries
-    # `//go:build linux || darwin` and `platform_unsupported.go` fails the build on anything else by
-    # design, so windows/amd64 and freebsd/amd64 could never have produced an artifact. Adding a
-    # GOOS back means adding a FUSE binding for it first; see internal/fuse/doc.go.
-    #
-    # linux/armv7 is back (#198). It was dropped alongside those two, but for a different reason: not
-    # a missing binding, a one-line compile error — `safeIntToUint32` bounded an `int` against
-    # `0xFFFFFFFF`, which does not fit a 32-bit `int`. The guard against overflow overflowed. Fixed by
-    # comparing as uint64, and ci.yml's cross-build matrix now carries linux/arm and linux/386 cells
-    # so a 32-bit break is a red PR rather than a platform quietly leaving the matrix.
-    #
-    # 32-bit ARM is a real target here — Raspberry Pi collectors and edge instruments writing to S3 —
-    # and shipping it is part of testing it: a platform that builds but is never shipped gets no
-    # runtime exposure at all.
-    strategy:
-      matrix:
-        include:
-        - goos: linux
-          goarch: amd64
-          name: linux-amd64
-        - goos: linux
-          goarch: arm64
-          name: linux-arm64
-        - goos: linux
-          goarch: arm
-          goarm: '7'
-          name: linux-armv7
-        - goos: darwin
-          goarch: amd64
-          name: darwin-amd64
-        - goos: darwin
-          goarch: arm64
-          name: darwin-arm64
     steps:
     - name: Checkout code
       uses: actions/checkout@v7
+      with:
+        # goreleaser reads the version, the previous tag and the commit date out of git history, and
+        # actions/checkout fetches one commit with no tags by default. Without this it stops with
+        # "git doesn't contain any tags" — on a tag push, which is the only time this workflow runs.
+        fetch-depth: 0
 
     # setup-go's own cache, matching ci.yml. The hand-rolled actions/cache@v3 block this replaces
     # keyed on go.mod and go.sum but cached only ~/go/pkg/mod, leaving the build cache out — so
@@ -151,324 +139,94 @@ jobs:
         fi
         echo "tag $TAG matches the declared version"
 
-    - name: Build binary
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-        # Empty for every non-arm cell, which the toolchain ignores. Set explicitly for linux/arm
-        # rather than left to whatever the toolchain defaults to: armv6 and armv7 are not
-        # interchangeable binaries, and the artifact is named linux-armv7, so the flag has to say 7
-        # rather than trusting that it will keep meaning 7.
-        GOARM: ${{ matrix.goarm }}
-        CGO_ENABLED: 0
-      run: |
-        # No -X ldflags: `main.Version` does not exist. cmd/objectfs/main.go declares an untyped
-        # `version` *constant*, which the linker cannot rewrite, so every previous release silently
-        # ignored these flags and shipped a binary reporting the hardcoded value. The step above
-        # asserts the constant and the tag agree instead of pretending to inject one.
-        LDFLAGS="-s -w"
-
-        mkdir -p dist
-        BINARY_NAME="objectfs-${{ matrix.name }}"
-        go build -ldflags "$LDFLAGS" -tags "release,netgo" -o "dist/$BINARY_NAME" ./cmd/objectfs
-
-        cd dist
-        tar -czf "$BINARY_NAME.tar.gz" "$BINARY_NAME"
-
-        # A checksum per asset, so a download can be verified without trusting the transport.
-        # Named alongside the archive rather than collected into one SHA256SUMS file, because the
-        # matrix jobs run concurrently and have nowhere to append to.
-        sha256sum "$BINARY_NAME.tar.gz" > "$BINARY_NAME.tar.gz.sha256"
-        rm "$BINARY_NAME"
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: release-${{ matrix.name }}
-        path: dist/*
-        if-no-files-found: error
-        retention-days: 7
-
-  # The .deb and the .rpm, attached to the release.
-  #
-  # These have been buildable for as long as nfpm.yaml has existed, and ci.yml's `packaging` job builds
-  # both and installs the deb on every PR — but this workflow had no reference to `package-linux`,
-  # `nfpm`, `.deb` or `.rpm`, so every published release was five tar.gz binaries and their checksums
-  # and nothing else. A package that CI proves installable and that no user can obtain is the same
-  # defect as scripts/preremove.sh before #207: working code with nothing invoking it.
-  #
-  # This is the half of #138 that needs no hosting decision. That issue asks for apt and yum repository
-  # setup scripts pointing at `packages.objectfs.io`, which does not exist: Porkbun answers a wildcard,
-  # so that name resolves exactly like every other name under the domain and completes no TLS
-  # handshake. (`objectfs.io` itself is now served — `pages.yml` publishes it — but only the apex is,
-  # and the wildcard is why resolution is not the way to tell.) `dpkg -i` and `rpm -i` against a
-  # downloaded asset need no repository at all, and they are what an operator can actually do today.
-  #
-  # A separate job rather than a step in `build`: package building is amd64+arm64 in one invocation, so
-  # it does not fit a five-cell matrix that includes armv7 and two darwin targets, and nfpm has no
-  # darwin output. Its own job also means a packaging failure names itself in the checks list instead of
-  # appearing as a mysterious failure of `build (linux-amd64)`.
-  #
-  # No armv7 package. `make package-linux` builds amd64 and arm64, matching nfpm.yaml's OBJECTFS_ARCH
-  # contract; the armv7 tar.gz still ships, so that platform is not losing its artifact. Adding a third
-  # architecture is a change to the Makefile loop and to packaging_test.go's expectations, not to this
-  # job.
-  package-linux:
-    name: Build Linux Packages
-    runs-on: ubuntu-latest
-    # See `build` above for why the gate is a dependency of the roots rather than of the jobs with
-    # outward-facing effects.
-    needs: gate
-    permissions:
-      contents: read
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v7
-
-    - name: Set up Go
-      uses: actions/setup-go@v7
-      with:
-        go-version-file: ${{ env.GO_VERSION_FILE }}
-        cache: true
-
-    # The same three assertions ci.yml's packaging job opens with, for the same reason: nfpm.yaml's
+    # The same assertions ci.yml's packaging job opens with, for the same reason: .goreleaser.yml's
     # destinations, scripts/postinstall.sh's paths and the version constant have to agree, and a
     # release is the worst place to find out they do not.
-    - name: nfpm.yaml agrees with the scripts, the Makefile and the version constant
-      run: go test ./internal/config/ -run 'TestPackag|TestPostinstall|TestPreremove|TestMakefile'
+    - name: .goreleaser.yml agrees with the scripts, the Makefile and the version constant
+      run: go test ./internal/config/ -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestTheGoreleaserVersion|TestPostinstall|TestPreremove|TestMakefile'
 
-    # The rpm signature, when there is a key to sign with.
+    # `version:` pins the goreleaser binary exactly, not to a floating `~> v2`, and that is a
+    # different judgement from the `@v7` on the action above. The action is a wrapper that downloads
+    # and runs a tool; the tool decides what the published assets are *called* and what is inside
+    # them. A goreleaser minor that changed a default file name would rename every asset on the
+    # release page — which is exactly the class of change `.goreleaser.yml` overrides two templates to
+    # prevent, and it would land on a tag, after the gate, with no pull request to notice it. This is
+    # the version every artifact in .goreleaser.yml's comments was measured against.
+    - name: Build every binary, tarball and package
+      uses: goreleaser/goreleaser-action@v7
+      with:
+        version: v2.18.1
+        args: release --clean
+
+    # The version inside the package, read back from the package.
     #
-    # `gpgcheck=1` — dnf's default — verifies each package's own embedded signature, separate from
-    # `repo_gpgcheck=1`, which verifies a repository index. An unsigned rpm in a signed
-    # repository installs from nowhere: dnf downloads it and stops with "Package objectfs-0.13.0-1.x86_64
-    # .rpm is not signed / Error: GPG check FAILED". That is measured, not predicted; it is what the
-    # first end-to-end run on rockylinux:9 did before nfpm.yaml grew a signature block.
-    #
-    # No equivalent for the deb, and that asymmetry is real rather than an omission: apt's InRelease
-    # signature covers the Packages indexes, which carry each .deb's checksum, so one signature at the
-    # top transitively covers the packages. rpm has no such chain — each package stands alone.
-    #
-    # Skips rather than refusing when the secret is absent, and that is a statement about what this
-    # project publishes rather than a relaxed check.
-    #
-    # This step used to `exit 1` here, on the reasoning that an unsigned rpm inside a signed repository
-    # fails at `dnf install` for every user who added that repository while installing cleanly from a
-    # downloaded file — the failure mode most likely to ship unnoticed. There is no such user and now
-    # there is no such repository either: objectfs.io/apt and objectfs.io/yum answered 404 for the whole
-    # life of the feature, and the machinery that would have filled them has been removed. Nothing
-    # anywhere tells apt or dnf to trust an ObjectFS repository, so refusing here would block every
-    # release to protect nobody.
-    #
-    # What establishes a package instead: the release assets carry SHA-256 sums, install.sh verifies the
-    # tarball's and has no flag to skip it, and `dnf install ./objectfs-*.rpm` checks the package's
-    # digests. That is weaker than a signature and it is what an unsigned release offers.
-    #
-    # Setting GPG_SIGNING_KEY still makes this step sign, and turns the verification below from an
-    # assertion that the packages are unsigned into an assertion that they verify. It no longer starts
-    # anything publishing, because there is nothing left to publish to.
-    - name: Import the package signing key
-      env:
-        GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+    # Nothing else in this repository does this, and nfpm.yaml's own comment named the gap before it
+    # was deleted: "nothing
+    # reads a package's version back to compare it, so `objectfs version` inside
+    # objectfs_0.12.0_amd64.deb would say 0.13.0 and no gate anywhere would notice". The step above
+    # checks the tag against the constant; this checks the constant against what was actually written
+    # into the package metadata, which is the one link in that chain nothing else covers.
+    - name: The packages carry the tag's version, and every asset is here
       run: |
         set -euo pipefail
-
-        if [ -z "${GPG_SIGNING_KEY:-}" ]; then
-          echo "::warning::GPG_SIGNING_KEY is not set, so the rpms in this release are unsigned." \
-            "That is the intended state while no package repository is published: nothing instructs" \
-            "apt or dnf to trust one, so nothing verifies a package signature. A downloaded package" \
-            "still has its digests checked, and the release tarballs carry SHA-256 sums. Set the" \
-            "secret to sign."
-          exit 0
-        fi
-
-        # A dedicated keyring under the runner's workspace, discarded with the runner. The key is a
-        # signing subkey; the master key is offline and never reaches CI, so this secret cannot certify
-        # a new key as ours.
-        export GNUPGHOME="$RUNNER_TEMP/gnupg"
-        mkdir -p "$GNUPGHOME"
-        chmod 700 "$GNUPGHOME"
-        printf '%s' "$GPG_SIGNING_KEY" | gpg --batch --quiet --import
-
-        FPR="$(gpg --batch --with-colons --list-secret-keys \
-          | awk -F: '$1 == "fpr" { print $10; exit }')"
-        [ -n "$FPR" ] || { echo "::error::GPG_SIGNING_KEY imported no secret key"; exit 1; }
-
-        # nfpm needs the secret key as a file and the key as a 16-hex-digit long key ID. Not the
-        # fingerprint: nfpm parses key_id as a uint64 and a 40-character value overflows it, with an
-        # error that names strconv rather than the format expected. See nfpm.yaml's comment.
-        gpg --batch --armor --export-secret-keys "$FPR" > "$GNUPGHOME/signing-key.asc"
-
-        {
-          echo "GNUPGHOME=$GNUPGHOME"
-          echo "OBJECTFS_SIGNING_KEY_FILE=$GNUPGHOME/signing-key.asc"
-          echo "OBJECTFS_SIGNING_KEY_ID=${FPR: -16}"
-        } >> "$GITHUB_ENV"
-
-        echo "signing rpms with ${FPR: -16}"
-
-    - name: Build the deb and the rpm
-      env:
-        # nfpm invokes gpg for the rpm signature and cannot answer a prompt, so the passphrase comes
-        # from gpg's configuration. Written here rather than in the import step because $GNUPGHOME only
-        # becomes an environment variable for *subsequent* steps.
-        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-      run: |
-        set -euo pipefail
-
-        # $GNUPGHOME as well as the passphrase: the import step above skips itself when there is no
-        # signing key, and it is the step that sets $GNUPGHOME. The two secrets are independent, so a
-        # passphrase set without a key would otherwise reach `"$GNUPGHOME/pass"` with the variable
-        # unbound and kill this step under `set -u` — a release failing on a directory it has no
-        # signing key to put anything in.
-        if [ -n "${GPG_PASSPHRASE:-}" ] && [ -n "${GNUPGHOME:-}" ]; then
-          printf '%s' "$GPG_PASSPHRASE" > "$GNUPGHOME/pass"
-          chmod 600 "$GNUPGHOME/pass"
-          {
-            echo "pinentry-mode loopback"
-            echo "passphrase-file $GNUPGHOME/pass"
-          } > "$GNUPGHOME/gpg.conf"
-        fi
-
-        make package-linux
-
-    # Every rpm's signature state is the state this release intends, checked with rpm's own verifier.
-    #
-    # Not "nfpm exited 0". nfpm signs only when key_file names a readable file, and silently produces an
-    # unsigned package otherwise — that is the correct behaviour for a local `make package-linux` and the
-    # exact reason a release cannot infer signing from a zero exit status. `rpm -K` is the check a user's
-    # dnf performs, so it is the check that belongs here.
-    #
-    # Both outcomes are asserted, and the unsigned one is asserted rather than skipped. Two situations
-    # produce an unsigned rpm and they are worlds apart: no secret, which is the current intended state,
-    # and a secret that was imported and then failed to reach nfpm — which is exactly what happened once,
-    # when a step wrote the signing variables to $GITHUB_ENV and ran make in the same shell, where a
-    # $GITHUB_ENV write does not apply. Both look identical from the outside: four packages, a green run.
-    # So the branch is chosen by whether the import step ran, and each branch then insists on the
-    # signature state its own branch implies. A skip would let the two swap places silently.
-    - name: Every rpm's signature state is the intended one
-      run: |
-        set -euo pipefail
-
-        # rpm is on ubuntu-latest as a client; it needs no rpm-based distribution to verify a signature.
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq rpm
-
-        keyring="$RUNNER_TEMP/rpmdb"
-        rpm --dbpath "$keyring" --initdb
-
-        if [ -n "${OBJECTFS_SIGNING_KEY_ID:-}" ]; then
-          gpg --batch --armor --export "${OBJECTFS_SIGNING_KEY_ID}" > "$RUNNER_TEMP/pub.asc"
-          rpm --dbpath "$keyring" --import "$RUNNER_TEMP/pub.asc"
-        fi
-
-        for pkg in dist/*.rpm; do
-          # The status is captured rather than allowed to end the step, so each branch below can say what
-          # went wrong in its own terms. A signature `rpm -K` cannot check — signed by a key that is not
-          # in the keyring — exits non-zero, and in the unsigned branch that means something other than
-          # this workflow signed the package: a diagnosis about gpgcheck would be the wrong one to print.
-          rc=0
-          out="$(rpm --dbpath "$keyring" -K "$pkg" 2>&1)" || rc=$?
-
-          # "digests signatures OK" is the signed answer; "digests OK" alone means the digests were
-          # checked and there was no signature to check. Both exit 0, which is why the *text* is what
-          # this asserts — a status check here would pass on every unsigned package.
-          if [ -n "${OBJECTFS_SIGNING_KEY_ID:-}" ]; then
-            if [ "$rc" -ne 0 ]; then
-              echo "::error::$pkg has no valid signature: $out"
-              echo "gpgcheck=1 is dnf's default, so it would refuse this package with" \
-                "'Package is not signed / Error: GPG check FAILED' after downloading it."
-              exit 1
-            fi
-
-            case "$out" in
-              *"signatures OK"*) echo "ok: $out" ;;
-              *) echo "::error::$pkg verified digests but carries no signature: $out"; exit 1 ;;
-            esac
-
-            continue
-          fi
-
-          # No key was imported, so this package must be unsigned. A signature here — verifiable or not —
-          # means something signed it that this workflow did not choose, which is worth stopping for.
-          #
-          # All four cells measured in rockylinux:9 rather than reasoned about, because three of the four
-          # exit 0 and only the text tells them apart:
-          #
-          #   unsigned, empty keyring:   rc=0, "digests OK"                 <- the intended state
-          #   signed,   empty keyring:   rc=1, "digests SIGNATURES NOT OK"  <- caught by rc, below
-          #   signed,   key imported:    rc=0, "digests signatures OK"
-          #   unsigned, key imported:    rc=0, "digests OK"                 <- the defect, caught above
-          #
-          # So the `signatures OK` case further down is unreachable in practice: rpm reports an
-          # unverifiable signature as a non-zero exit with SIGNATURES NOT OK, which is neither that
-          # pattern nor a match for it, and `rc` catches it first. Kept anyway, because what it is
-          # asserting is "no signature", and a future rpm reporting an unknown-key signature as a
-          # success would otherwise slip through as one.
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::$pkg failed rpm -K with no signing key imported: $out"
-            echo "An unsigned package verifies its digests and exits 0 against an empty keyring, so" \
-              "this is either a corrupt package or one signed by a key this workflow did not import."
-            exit 1
-          fi
-
-          case "$out" in
-            *"signatures OK"*)
-              echo "::error::$pkg carries a signature and no signing key was imported: $out"
-              echo "Something outside the 'Import the package signing key' step signed this package."
-              exit 1
-              ;;
-            *"digests OK"*) echo "ok, unsigned as intended: $out" ;;
-            *) echo "::error::$pkg did not verify its digests: $out"; exit 1 ;;
-          esac
-        done
-
-    # The version inside the package, read back from the package. Nothing else in this repository does
-    # this, and nfpm.yaml's own comment names the gap: "nothing reads a package's version back to
-    # compare it, so `objectfs version` inside objectfs_0.12.0_amd64.deb would say 0.13.0 and no gate
-    # anywhere would notice". The tag is already checked against the constant in `build`; this checks
-    # the constant against what nfpm actually wrote, which is the one link in that chain that was
-    # unverified.
-    - name: The packages carry the tag's version, and there are four of them
-      run: |
         TAG=${GITHUB_REF#refs/tags/v}
 
-        # The filename carries the release suffix too: nfpm writes objectfs_0.13.0-1_amd64.deb, not
-        # objectfs_0.13.0_amd64.deb. Verified against a local `make package-linux` rather than guessed —
-        # the first version of this step spelled it without the -1 and would have failed the release it
-        # was added to protect.
-        for arch in amd64 arm64; do
+        # Each format's own naming, which is not the same string in the two worlds — deb says amd64
+        # and rpm says x86_64 — and both carry nfpm's `-1` release suffix:
+        #
+        #   objectfs_0.14.0-1_amd64.deb   objectfs-0.14.0-1.x86_64.rpm
+        #   objectfs_0.14.0-1_arm64.deb   objectfs-0.14.0-1.aarch64.rpm
+        #   objectfs_0.14.0-1_armhf.deb   objectfs-0.14.0-1.armv7hl.rpm
+        #
+        # Spelled out rather than globbed, because a glob passes on a missing architecture and the
+        # whole point of reading the version back is that a plausible-looking dist/ is not evidence.
+        for arch in amd64 arm64 armhf; do
           deb="dist/objectfs_${TAG}-1_${arch}.deb"
           test -f "$deb" || { echo "::error::expected $deb, and it is not there"; ls -l dist; exit 1; }
 
           got=$(dpkg-deb --field "$deb" Version)
-          # nfpm writes the deb version as <version>-<release>, and nfpm.yaml pins release to 1.
           [ "$got" = "$TAG-1" ] || {
             echo "::error::$deb declares version $got, and this tag is $TAG"
             exit 1
           }
         done
 
-        # rpm names its architectures differently: x86_64 and aarch64, not amd64 and arm64. Globbed
-        # rather than spelled out, because that mapping is nfpm's and not a contract this job should
-        # restate — but the count is asserted, so a silently missing rpm still fails.
-        rpms=$(ls dist/*.rpm | wc -l)
-        [ "$rpms" -eq 2 ] || { echo "::error::expected 2 rpms, found $rpms"; ls -l dist; exit 1; }
-
-        # A checksum per package, matching what `build` does for the tarballs, so a download can be
-        # verified without trusting the transport.
-        cd dist
-        for pkg in *.deb *.rpm; do
-          sha256sum "$pkg" > "$pkg.sha256"
+        for arch in x86_64 aarch64 armv7hl; do
+          rpm="dist/objectfs-${TAG}-1.${arch}.rpm"
+          test -f "$rpm" || { echo "::error::expected $rpm, and it is not there"; ls -l dist; exit 1; }
         done
 
-        ls -l
+        # The tarballs, by the names scripts/install.sh fetches. install.sh builds this string itself
+        # from `uname`, so a rename here breaks the documented one-liner on that platform and nothing
+        # else in the repository would fail.
+        for platform in linux-amd64 linux-arm64 linux-armv7 darwin-amd64 darwin-arm64; do
+          tgz="dist/objectfs-$platform.tar.gz"
+          test -f "$tgz" || { echo "::error::expected $tgz, and it is not there"; ls -l dist; exit 1; }
 
-    - name: Upload the packages
+          # And the platform-named binary inside it, which is the other half of install.sh's contract:
+          # it extracts, looks for exactly this name, and dies with "the release layout has changed
+          # and this script needs updating" if it is absent. Checked here because the failure is
+          # otherwise found by a user rather than by a run.
+          tar -tzf "$tgz" | grep -qx "objectfs-$platform" || {
+            echo "::error::$tgz does not contain a file named objectfs-$platform"
+            echo "scripts/install.sh looks that name up after extracting and refuses to guess."
+            tar -tzf "$tgz"
+            exit 1
+          }
+        done
+
+        ls -l dist
+
+    - name: Upload the artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: release-packages
+        name: release-dist
+        # Explicit globs, not `dist/*`. goreleaser leaves artifacts.json, metadata.json, config.yaml
+        # and one directory per build target in dist/, and `publish` attaches everything it receives
+        # to the release page — so a bare glob would publish goreleaser's internal bookkeeping,
+        # including the absolute paths of the runner's working directory, as release assets.
         path: |
+          dist/*.tar.gz
           dist/*.deb
           dist/*.rpm
           dist/*.sha256
@@ -582,7 +340,7 @@ jobs:
   security-scan:
     name: Security Scan Release
     runs-on: ubuntu-latest
-    needs: build
+    needs: artifacts
     permissions:
       contents: read
       security-events: write
@@ -590,12 +348,19 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v7
 
-    - name: Download the linux/amd64 artifact
+    # Every asset, and then one tarball out of it. There is one artifact now rather than one per
+    # platform, so this downloads more than it scans; the alternative is a second upload step whose
+    # only purpose is to let this job download less.
+    - name: Download the release artifacts
       uses: actions/download-artifact@v8
       with:
-        name: release-linux-amd64
+        name: release-dist
         path: scan
 
+    # linux/amd64 specifically, and not a loop over all five. Trivy's rootfs scanner reads the Go build
+    # information a binary carries — module paths and versions — which is identical across the five
+    # cells because they are one source tree built five times. Scanning all of them would report the
+    # same findings five times and take five times as long.
     - name: Unpack
       run: tar -xzf scan/objectfs-linux-amd64.tar.gz -C scan
 
@@ -628,10 +393,12 @@ jobs:
   publish:
     name: Publish Release
     runs-on: ubuntu-latest
-    # package-linux gates publishing too. A release that attaches the tarballs and silently omits the
-    # packages is worse than one that fails: the page looks complete, and the omission is only visible
-    # to someone who knew to expect a .deb.
-    needs: [build, package-linux, docker-build-push, security-scan]
+    # `artifacts` covers the packages as well as the tarballs, so this dependency gates both. A release
+    # that attaches the tarballs and silently omits the packages is worse than one that fails: the page
+    # looks complete, and the omission is only visible to someone who knew to expect a .deb. That used
+    # to need two entries here — `build` and `package-linux` — and it was possible to add a third job
+    # producing an asset and forget the third entry.
+    needs: [artifacts, docker-build-push, security-scan]
     permissions:
       contents: write
       # For keyless signing, and for nothing else. `cosign sign-blob` exchanges this run's OIDC token
@@ -639,9 +406,16 @@ jobs:
       # it, so the signature's identity is `.../release.yml@refs/tags/vX.Y.Z` rather than a person or
       # a key. There is **no key material and no repository secret anywhere in this path** — nothing
       # to store, nothing to rotate, nothing to leak, and nothing whose absence silently degrades to
-      # unsigned (which is exactly what the GPG path does two jobs up: an empty `GPG_SIGNING_KEY`
-      # warns and exits 0). `id-token: write` sounds alarming and is not: it grants the ability to
-      # mint an OIDC token describing this workflow, not write access to anything.
+      # unsigned. `id-token: write` sounds alarming and is not: it grants the ability to mint an OIDC
+      # token describing this workflow, not write access to anything.
+      #
+      # This is now the *only* signature in the release path. There used to be a second one — a GPG
+      # signature on each rpm — with the failure mode this paragraph describes: an absent
+      # `GPG_SIGNING_KEY` warned and exited 0, so unsigned rpms were the default. It is gone, and not
+      # because it was inconvenient: dnf checks a package signature on the repository path
+      # (`gpgcheck`), not when a package is named as a local file (`localpkg_gpgcheck`, which defaults
+      # to false), so on the only install path this project publishes nothing ever read it. Measured
+      # in a rockylinux:9 container against an unsigned build; see .goreleaser.yml.
       id-token: write
     env:
       # Defined once, used twice: by `cosign verify-blob` in this job, and by the verification
@@ -783,18 +557,20 @@ jobs:
     # What the two files buy. Today's `.sha256` siblings are served by the same host, over the same
     # release, as the artifact they describe — so they detect corruption in transit and prove nothing
     # whatsoever about authenticity. Anyone who can alter an asset can alter its hash file in the same
-    # motion. `checksums.txt` collects all nine artifact digests into one document, and
+    # motion. `checksums.txt` collects all eleven artifact digests into one document, and
     # `checksums.txt.cosign.bundle` is a Sigstore signature over *that* document, bound to the
     # identity of the workflow that produced it. The chain is: bundle → checksums.txt → every asset.
     # That is the first thing in this project's release path that a forged asset cannot satisfy.
     #
-    # Keyless, so there is no key. No `secrets.*` is read here and none needs to exist; contrast the
-    # GPG path in `package-linux`, which warns and `exit 0`s when its secret is absent and therefore
-    # ships unsigned rpms by default — a signing mechanism whose failure mode is "silently unsigned"
-    # is the one shape worse than none, because it makes the absence invisible.
+    # Keyless, so there is no key. No `secrets.*` is read here and none needs to exist, and this is
+    # the whole of the release path's signing now. The rpm's GPG signature used to sit beside it with
+    # the opposite property — it warned and `exit 0`ed when its secret was absent, so unsigned rpms
+    # were the default, and a signing mechanism whose failure mode is "silently unsigned" is the one
+    # shape worse than none. See the `id-token` comment above for why it was removed rather than
+    # fixed.
     #
     # The two hash sources are cross-checked rather than trusted to agree. Publishing `checksums.txt`
-    # next to nine `.sha256` files invites exactly one new failure: the two disagree, and a user
+    # next to eleven `.sha256` files invites exactly one new failure: the two disagree, and a user
     # cannot tell which is lying. That would be *worse* than shipping neither, so the loop below
     # recomputes and compares, and a mismatch fails the publish before any page exists. It also
     # catches the boring version of the same problem — an artifact that arrived truncated from
@@ -823,15 +599,16 @@ jobs:
           exit 1
         fi
 
-        # 9 today: 5 tarballs, 2 debs, 2 rpms. A floor, not an equality — adding a platform should not
-        # fail here — but zero and one are both signs that the download half broke, and the count is
-        # printed so the run records what was signed.
+        # 11 today: 5 tarballs, 3 debs, 3 rpms. A floor, not an equality — adding a platform should
+        # not fail here — but zero and one are both signs that the download half broke, and the count
+        # is printed so the run records what was signed. It was 9 until armv7 started getting a .deb
+        # and an .rpm like the other two architectures; see .goreleaser.yml.
         count=$(printf '%s\n' "$assets" | wc -l | tr -d ' ')
         echo "signing a checksum list over $count assets:"
         printf '  %s\n' $assets
 
-        if [ "$count" -lt 9 ]; then
-          echo "::error::expected at least 9 assets (5 tarballs, 2 debs, 2 rpms) and found $count." \
+        if [ "$count" -lt 11 ]; then
+          echo "::error::expected at least 11 assets (5 tarballs, 3 debs, 3 rpms) and found $count." \
             "A release that omits a platform's artifact looks complete on the page; the omission is" \
             "only visible to someone who knew to expect it."
           exit 1

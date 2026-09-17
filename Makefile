@@ -81,7 +81,7 @@ help:
 	@echo "  $(COLOR_GREEN)install$(COLOR_RESET)        Install binary to GOPATH/bin"
 	@echo "  $(COLOR_GREEN)docker$(COLOR_RESET)         Build Docker image"
 	@echo "  $(COLOR_GREEN)package$(COLOR_RESET)        Create distribution tarballs"
-	@echo "  $(COLOR_GREEN)package-linux$(COLOR_RESET)  Create .deb and .rpm packages (nfpm, amd64 + arm64)"
+	@echo "  $(COLOR_GREEN)package-linux$(COLOR_RESET)  Build every release artifact (goreleaser: 5 tarballs, 3 debs, 3 rpms)"
 	@echo "  $(COLOR_GREEN)version$(COLOR_RESET)        Show version information"
 	@echo ""
 	@echo "$(COLOR_BOLD)Development workflow (solo dev):$(COLOR_RESET)"
@@ -265,45 +265,54 @@ package: build-all | $(DIST_DIR)/.mkdir
 	done
 	@echo "$(COLOR_GREEN)Packages created in $(DIST_DIR)/$(COLOR_RESET)"
 
-# Build the Linux .deb and .rpm packages, via nfpm and nfpm.yaml.
+# Build every release artifact locally, via goreleaser and .goreleaser.yml.
 #
 # This is the target #207 is about. Before it, `scripts/preremove.sh` was a working uninstall script
 # that nothing in the repository referenced — only a package manager can invoke a pre-removal hook,
 # and there was no packaging system in the tree at all. `package` above makes tarballs, which have no
 # scriptlets and no maintainer scripts.
 #
-# The version comes out of cmd/objectfs/main.go with the same sed expression
-# .github/workflows/release.yml uses to check a tag against it. Not $(VERSION): that is `git describe`,
-# which on a dirty tree or an untagged commit produces things like v0.12.0-14-gabc123-dirty, and
-# neither dpkg nor rpm accepts a hyphenated version in that position. The constant is the authority
-# CLAUDE.md names, and internal/config/packaging_test.go fails if a literal version ever appears in
-# nfpm.yaml.
+# It used to loop nfpm over {deb, rpm} × {amd64, arm64} with OBJECTFS_VERSION and OBJECTFS_ARCH in the
+# environment, and it built the four packages only — the tarballs came from a separate five-cell matrix
+# living in .github/workflows/release.yml, so what a release published and what this target produced
+# were two implementations that agreed by convention. They are now one config, which is the point:
+# `make package-linux` runs the same file the release runs, so a packaging change is testable here
+# before it is testable only by pushing a tag.
 #
-# Four packages: {deb, rpm} × {amd64, arm64}. Both formats from one config, which is why nfpm rather
-# than a debian/ directory plus a .spec — two hand-maintained descriptions of the same install layout
-# is two places for it to drift.
-NFPM_VERSION := v2.47.0
-NFPM ?= $(shell command -v nfpm 2>/dev/null || echo $(shell go env GOPATH)/bin/nfpm)
-PKG_VERSION := $(shell sed -n 's/^[[:space:]]*version = "\(.*\)"/\1/p' cmd/objectfs/main.go)
+# **Eleven artifacts, and the version says `-next`.** Both are worth expecting rather than debugging.
+# The eleven are 5 tarballs + 3 debs + 3 rpms, armv7 now included; the suffix is because `--snapshot`
+# is what builds a version that is not a tag, and it labels the output for the *next* patch —
+# objectfs_0.14.1~next-1_amd64.deb from a tree whose constant says 0.14.0. That is honest rather than
+# awkward: a locally built package is not the release, and a tagged release build in CI derives its
+# version from the tag with no suffix at all.
+#
+# The version is therefore goreleaser's, not $(VERSION) and no longer read out of
+# cmd/objectfs/main.go by sed. $(VERSION) is `git describe`, which on a dirty tree produces things
+# like v0.12.0-14-gabc123-dirty, and neither dpkg nor rpm accepts a hyphenated version in that
+# position. internal/config/packaging_test.go still fails if a literal version appears in the
+# packaging config.
+#
+# GORELEASER_VERSION is one of three copies of this pin — release.yml and ci.yml both pass it to
+# goreleaser-action — and internal/config/packaging_test.go fails if they drift, because a PR that
+# proves a packaging change under one goreleaser and a tag that publishes it under another is the whole
+# argument for this target undone.
+GORELEASER_VERSION := v2.18.1
+GORELEASER ?= $(shell command -v goreleaser 2>/dev/null || echo $(shell go env GOPATH)/bin/goreleaser)
 
 .PHONY: package-linux
-package-linux: build-linux | $(DIST_DIR)/.mkdir
-	@if [ -z "$(PKG_VERSION)" ]; then \
-		echo "$(COLOR_RED)could not read the version constant from cmd/objectfs/main.go$(COLOR_RESET)"; \
-		exit 1; \
+package-linux:
+	@if [ ! -x "$(GORELEASER)" ]; then \
+		echo "$(COLOR_YELLOW)goreleaser not found; installing $(GORELEASER_VERSION) from source...$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)This needs a Go toolchain new enough for goreleaser itself — it declares a"; \
+		echo "higher minimum than this module does, so GOTOOLCHAIN=local will refuse. Either unset it"; \
+		echo "(the default, GOTOOLCHAIN=auto, fetches what goreleaser asks for) or install a prebuilt"; \
+		echo "binary: brew install goreleaser, or goreleaser/goreleaser-action with install-only, which"; \
+		echo "is what CI does.$(COLOR_RESET)"; \
+		go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION); \
 	fi
-	@if [ ! -x "$(NFPM)" ]; then \
-		echo "$(COLOR_YELLOW)nfpm not found; installing $(NFPM_VERSION)...$(COLOR_RESET)"; \
-		go install github.com/goreleaser/nfpm/v2/cmd/nfpm@$(NFPM_VERSION); \
-	fi
-	@echo "$(COLOR_BLUE)Building deb and rpm packages for objectfs $(PKG_VERSION)...$(COLOR_RESET)"
-	@for arch in amd64 arm64; do \
-		for format in deb rpm; do \
-			OBJECTFS_VERSION=$(PKG_VERSION) OBJECTFS_ARCH=$$arch \
-				$(NFPM) package --config nfpm.yaml --packager $$format --target $(DIST_DIR)/ || exit 1; \
-		done; \
-	done
-	@echo "$(COLOR_GREEN)Packages created in $(DIST_DIR)/$(COLOR_RESET)"
+	@echo "$(COLOR_BLUE)Building binaries, tarballs, debs and rpms...$(COLOR_RESET)"
+	@$(GORELEASER) release --snapshot --clean
+	@echo "$(COLOR_GREEN)Artifacts created in $(DIST_DIR)/$(COLOR_RESET)"
 
 # Create release
 release: clean check build-all package

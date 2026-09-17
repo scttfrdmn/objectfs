@@ -2,7 +2,6 @@ package config
 
 import (
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -27,24 +26,16 @@ import (
 // 32-bit word-width canary and we do not publish a 386 binary. An extra CI cell costs a minute and
 // catches things; an unbuilt release cell ships them.
 
-// releaseMatrixEntry matches the `- goos: linux` line that opens a matrix entry.
-var releaseMatrixEntry = regexp.MustCompile(`^-\s+goos:\s*(\S+)`)
-
-// yamlKeyValue matches a `key: value` line, with optional quotes around the value. GOARCH values
-// like '386' are quoted in YAML because bare 386 parses as an integer.
-var yamlKeyValue = regexp.MustCompile(`^(\w+):\s*'?"?([^'"]+)'?"?$`)
-
 // TestEveryReleasePlatformIsCompiledInCI is the coupling itself.
 func TestEveryReleasePlatformIsCompiledInCI(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
 
-	shipped := releasePlatforms(t, readFile(t, filepath.Join(root, ".github", "workflows", "release.yml")))
+	shipped := releasePlatforms(t)
 	if len(shipped) == 0 {
-		t.Fatal("read no platforms out of release.yml's build matrix — the job may have been renamed " +
-			"or its matrix reformatted, and an empty set satisfies the assertion below without " +
-			"checking anything")
+		t.Fatal("read no platforms out of .goreleaser.yml's archive build — the build may have been " +
+			"renamed, and an empty set satisfies the assertion below without checking anything")
 	}
 
 	compiled := crossBuildPlatforms(t, readFile(t, filepath.Join(root, ".github", "workflows", "ci.yml")))
@@ -60,7 +51,7 @@ func TestEveryReleasePlatformIsCompiledInCI(t *testing.T) {
 
 		goos, goarch, _ := strings.Cut(p, "/")
 
-		t.Errorf("release.yml builds and publishes a %s binary, but ci.yml's cross-build matrix has "+
+		t.Errorf(".goreleaser.yml builds and publishes a %s binary, but ci.yml's cross-build matrix has "+
 			"no cell for it, so no PR compiles it.\n"+
 			"\tAdd `- {goos: %s, goarch: %s}` to that matrix. This is #198's failure mode: "+
 			"linux/armv7 was shipped from a matrix nothing else built, it stopped compiling on a "+
@@ -109,52 +100,27 @@ func TestThirtyTwoBitIsStillInTheCrossBuildMatrix(t *testing.T) {
 	t.Logf("32-bit cells compiled by CI: %s", strings.Join(found, ", "))
 }
 
-// releasePlatforms reads goos/goarch pairs out of release.yml's build matrix.
+// releasePlatforms returns the goos/goarch pairs a release compiles and publishes.
 //
-// Parsed line-wise rather than by unmarshalling, matching build_tags_test.go's reasoning: the point
-// is to read what CI will actually run, and a YAML round-trip through a hand-written struct is one
-// more place for the two to disagree.
-func releasePlatforms(t *testing.T, workflow string) []string {
+// It reads .goreleaser.yml's archive build, which is where release.yml's five-cell `include:` matrix
+// went. That matrix was parsed line-wise here, deliberately — "read what CI will actually run" — and
+// the same reasoning still applies to the file it moved to: goreleaserTargets expands the cross
+// product goreleaser expands, out of the config goreleaser reads, rather than out of a description of
+// it. The parsing this replaced is gone from both this file and install_script_test.go.
+//
+// Duplicates are possible in principle (two goos entries cannot collide, but a malformed list could)
+// and are collapsed, because the callers ask set questions.
+func releasePlatforms(t *testing.T) []string {
 	t.Helper()
 
-	var (
-		platforms []string
-		goos      string
-		inMatrix  bool
-	)
+	seen := make(map[string]bool)
 
-	for line := range strings.SplitSeq(workflow, "\n") {
-		trimmed := strings.TrimSpace(line)
+	var platforms []string
 
-		if trimmed == "include:" {
-			inMatrix = true
-
-			continue
-		}
-
-		if !inMatrix {
-			continue
-		}
-
-		// Entries are `- goos: x` followed by indented keys. A line that is neither ends the matrix —
-		// including `steps:`, which is what actually follows it.
-		if m := releaseMatrixEntry.FindStringSubmatch(trimmed); m != nil {
-			goos = m[1]
-
-			continue
-		}
-
-		if goos == "" {
-			break
-		}
-
-		m := yamlKeyValue.FindStringSubmatch(trimmed)
-		if m == nil {
-			break
-		}
-
-		if m[1] == "goarch" {
-			platforms = append(platforms, goos+"/"+m[2])
+	for _, target := range goreleaserTargets(t, "archives") {
+		if !seen[target.Platform()] {
+			seen[target.Platform()] = true
+			platforms = append(platforms, target.Platform())
 		}
 	}
 

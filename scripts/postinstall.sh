@@ -1,7 +1,7 @@
 #!/bin/bash
 # ObjectFS post-installation scriptlet (deb postinst / rpm %post).
 #
-# Wired into both packages by nfpm.yaml. Everything here is a *guard check plus an action*, never a
+# Wired into both packages by .goreleaser.yml's `nfpms:` section. Everything here is a *guard check plus an action*, never a
 # bare action, because a package scriptlet is not run once: dpkg runs postinst on every
 # reconfiguration and rpm runs %post on every upgrade. The previous version of this file ran
 # `mkdir -p` and `chmod 755` unconditionally over four directories, so an operator who had tightened
@@ -39,7 +39,7 @@ set -u
 # which is the only way to assert the idempotency claims above without being root on a throwaway
 # machine.
 #
-# Nothing in nfpm.yaml sets it. It is read rather than hardcoded to "" so that the test exercises
+# Nothing in the packaging sets it. It is read rather than hardcoded to "" so that the test exercises
 # this exact file rather than a copy of it with the paths rewritten.
 ROOT="${OBJECTFS_ROOT:-}"
 

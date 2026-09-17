@@ -25,30 +25,69 @@ import (
 // every upgrade — so an operator who tightened /etc/objectfs got it widened back by the next
 // `apt upgrade`, silently.
 //
-// The tests below are in two groups. The first reads nfpm.yaml against the filesystem and against
-// the scripts, so a path can only be wrong in one place at a time. The second *runs* the scripts
+// The tests below are in two groups. The first reads the packaging config against the filesystem and
+// against the scripts, so a path can only be wrong in one place at a time. The second *runs* the scripts
 // against a scratch root and asserts what they do, because "idempotent" is a claim about behavior
 // and a claim about behavior that is only checked by reading the source is not checked.
 
-// nfpmFile is the packaging configuration, relative to the module root.
-const nfpmFile = "nfpm.yaml"
-
-// nfpmConfig is the subset of nfpm's schema these tests assert on.
+// packagingFile is the packaging configuration, relative to the module root.
 //
-// A hand-written subset rather than nfpm's own Config type, deliberately: importing
-// github.com/goreleaser/nfpm/v2 would add a packaging tool to this module's dependency graph — and
-// to every downstream consumer's — to check four fields. The fields named here are the ones with a
-// counterpart elsewhere in the repository, which is what these tests are about.
+// It is `.goreleaser.yml` rather than the `nfpm.yaml` these tests were written against, and the
+// section they read is `nfpms:` — goreleaser embeds nfpm, so the schema for a package is nfpm's own,
+// one nesting level deeper. That move deleted a second description of the same install layout:
+// nfpm.yaml was invoked by a Makefile loop over two architectures and two formats, while the release
+// tarballs came from a five-cell matrix written out longhand inside release.yml, and the two agreed
+// only by convention. Everything below is unchanged in substance, because the `contents:` schema is
+// the same schema.
+const packagingFile = ".goreleaser.yml"
+
+// goreleaserConfig is the subset of goreleaser's schema these tests assert on.
+//
+// A hand-written subset rather than goreleaser's own Config type, deliberately: importing
+// github.com/goreleaser/goreleaser/v2 would add a release tool to this module's dependency graph —
+// and to every downstream consumer's — to read a handful of fields. The fields named here are the
+// ones with a counterpart elsewhere in the repository, which is what these tests are about.
+type goreleaserConfig struct {
+	Builds   []goreleaserBuild `yaml:"builds"`
+	Archives []struct {
+		ID           string   `yaml:"id"`
+		IDs          []string `yaml:"ids"`
+		NameTemplate string   `yaml:"name_template"`
+	} `yaml:"archives"`
+	Nfpms []nfpmConfig `yaml:"nfpms"`
+}
+
+// goreleaserBuild is one entry of `builds:`.
+type goreleaserBuild struct {
+	ID     string   `yaml:"id"`
+	Binary string   `yaml:"binary"`
+	Goos   []string `yaml:"goos"`
+	Goarch []string `yaml:"goarch"`
+	Goarm  []string `yaml:"goarm"`
+	// Ignore removes cells from the goos × goarch × goarm cross product. An entry matches a cell when
+	// every field it names matches; fields it leaves empty are wildcards, which is goreleaser's rule
+	// and not this test's invention.
+	Ignore []struct {
+		Goos   string `yaml:"goos"`
+		Goarch string `yaml:"goarch"`
+		Goarm  string `yaml:"goarm"`
+	} `yaml:"ignore"`
+}
+
+// nfpmConfig is one entry of goreleaser's `nfpms:` list.
 type nfpmConfig struct {
-	Name     string `yaml:"name"`
-	Version  string `yaml:"version"`
-	Arch     string `yaml:"arch"`
-	Platform string `yaml:"platform"`
-	Contents []struct {
-		Src    string `yaml:"src"`
-		Dst    string `yaml:"dst"`
-		Type   string `yaml:"type"`
-		Expand bool   `yaml:"expand"`
+	ID string `yaml:"id"`
+	// IDs names the builds this package takes its binary from. Which build that is decides what the
+	// installed binary is *called*, and getting it wrong is the defect
+	// TestThePackagedBinaryIsOnThePathAsObjectfs exists for.
+	IDs         []string `yaml:"ids"`
+	PackageName string   `yaml:"package_name"`
+	Bindir      string   `yaml:"bindir"`
+	Formats     []string `yaml:"formats"`
+	Contents    []struct {
+		Src  string `yaml:"src"`
+		Dst  string `yaml:"dst"`
+		Type string `yaml:"type"`
 	} `yaml:"contents"`
 	Scripts struct {
 		PreInstall  string `yaml:"preinstall"`
@@ -58,30 +97,220 @@ type nfpmConfig struct {
 	} `yaml:"scripts"`
 }
 
-// readNfpm parses nfpm.yaml.
-func readNfpm(t *testing.T) nfpmConfig {
+// readGoreleaser parses .goreleaser.yml.
+func readGoreleaser(t *testing.T) goreleaserConfig {
 	t.Helper()
 
-	var cfg nfpmConfig
-	if err := yaml.UnmarshalStrict([]byte(readFile(t, filepath.Join(repoRoot(t), nfpmFile))), &cfg); err != nil {
+	body := readFile(t, filepath.Join(repoRoot(t), packagingFile))
+
+	var cfg goreleaserConfig
+	if err := yaml.UnmarshalStrict([]byte(body), &cfg); err != nil {
 		// Not UnmarshalStrict's usual meaning here: this struct is a deliberate subset, so an
 		// unknown key is expected. yaml.v2's strict mode errors on unknown keys, so the parse is
 		// non-strict below and this branch only catches malformed YAML.
 		if !strings.Contains(err.Error(), "not found in type") {
-			t.Fatalf("%s does not parse as YAML: %v", nfpmFile, err)
+			t.Fatalf("%s does not parse as YAML: %v", packagingFile, err)
 		}
 
-		if err := yaml.Unmarshal([]byte(readFile(t, filepath.Join(repoRoot(t), nfpmFile))), &cfg); err != nil {
-			t.Fatalf("%s does not parse as YAML: %v", nfpmFile, err)
+		if err := yaml.Unmarshal([]byte(body), &cfg); err != nil {
+			t.Fatalf("%s does not parse as YAML: %v", packagingFile, err)
 		}
-	}
-
-	if len(cfg.Contents) == 0 {
-		t.Fatalf("%s lists no contents. Either the file was restructured or this test stopped "+
-			"reading it, and an empty list satisfies every assertion below", nfpmFile)
 	}
 
 	return cfg
+}
+
+// readNfpm returns the one `nfpms:` entry.
+//
+// Exactly one, asserted rather than assumed. Two entries would be a legitimate way to express this —
+// one per format, so each could carry its own `file_name_template` — and every test below reads the
+// first, so a second one would be silently unchecked: a package shipping the wrong layout with a
+// green suite.
+func readNfpm(t *testing.T) nfpmConfig {
+	t.Helper()
+
+	cfg := readGoreleaser(t)
+
+	if len(cfg.Nfpms) != 1 {
+		t.Fatalf("%s has %d `nfpms:` entries, and these tests read one. Either the file was "+
+			"restructured or they stopped reading it, and an absent entry satisfies every assertion "+
+			"below", packagingFile, len(cfg.Nfpms))
+	}
+
+	nfpm := cfg.Nfpms[0]
+
+	if len(nfpm.Contents) == 0 {
+		t.Fatalf("%s's nfpms entry lists no contents. Either the file was restructured or this test "+
+			"stopped reading it, and an empty list satisfies every assertion below", packagingFile)
+	}
+
+	return nfpm
+}
+
+// goreleaserTarget is one compiled cell: a goos, a goarch, and — for 32-bit ARM only — a goarm.
+type goreleaserTarget struct {
+	Goos   string
+	Goarch string
+	Goarm  string
+}
+
+// Platform is the `goos/goarch` pair, which is how a ci.yml cross-build cell names the same thing.
+func (g goreleaserTarget) Platform() string { return g.Goos + "/" + g.Goarch }
+
+// Asset is the platform suffix in a published asset name: the `linux-armv7` of
+// `objectfs-linux-armv7.tar.gz`.
+//
+// This reimplements archiveNameTemplate in Go, which is a real risk — the two could disagree — so
+// TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes, in this file and therefore in every run
+// that reaches any caller of this method, fails if the config's template is no longer that string.
+func (g goreleaserTarget) Asset() string {
+	if g.Goarch == "arm" {
+		return g.Goos + "-armv" + g.Goarm
+	}
+
+	return g.Goos + "-" + g.Goarch
+}
+
+// archiveNameTemplate is the name_template Asset models.
+//
+// Held as a literal so a change to the config is a failure here rather than a silent divergence.
+// Every published tarball name and the whole of scripts/install.sh's URL construction follow from it.
+const archiveNameTemplate = "objectfs-{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+
+// goreleaserTargets expands one build's goos × goarch × goarm cross product, minus its ignores.
+//
+// This is the authority release_platforms_test.go and install_script_test.go used to read out of
+// release.yml's build matrix. That matrix was a five-cell `include:` list carrying `goos`, `goarch`,
+// `goarm` and a hand-written `name` per cell, and both files parsed it line-wise. It is gone —
+// goreleaser expands the cross product itself — so the platforms a release publishes are now a
+// computation over three lists rather than an enumeration, and this function is that computation.
+//
+// The cost of the change is that the asset name is no longer written down per cell: `name:` was the
+// authority precisely so nothing had to re-derive `linux-armv7` from `arm` plus `7`. Asset does
+// re-derive it, and the template assertion below is what keeps that honest.
+func goreleaserTargets(t *testing.T, buildID string) []goreleaserTarget {
+	t.Helper()
+
+	cfg := readGoreleaser(t)
+
+	var build *goreleaserBuild
+
+	for i := range cfg.Builds {
+		if cfg.Builds[i].ID == buildID {
+			build = &cfg.Builds[i]
+		}
+	}
+
+	if build == nil {
+		t.Fatalf("%s has no build with id %q. These tests read the platforms a release publishes out "+
+			"of that build, and a build it cannot find means every platform assertion downstream is "+
+			"vacuous rather than failing", packagingFile, buildID)
+	}
+
+	if len(build.Goos) == 0 || len(build.Goarch) == 0 {
+		t.Fatalf("%s's %q build names no goos or no goarch. goreleaser defaults both to a list this "+
+			"function does not model — linux, darwin, windows × amd64, arm64, 386 — so it would report "+
+			"platforms the release does not publish", packagingFile, buildID)
+	}
+
+	// goreleaser's own default when `goarm:` is absent is ["6"], not the toolchain's. Modeled here
+	// rather than treated as "no arm version", because getting it wrong would name the asset
+	// objectfs-linux-armv6 and every check against install.sh would fail for the wrong reason.
+	goarms := build.Goarm
+	if len(goarms) == 0 {
+		goarms = []string{"6"}
+	}
+
+	var targets []goreleaserTarget
+
+	for _, goos := range build.Goos {
+		for _, goarch := range build.Goarch {
+			// goarm only exists for 32-bit ARM. Iterating it for amd64 would emit duplicate cells.
+			versions := []string{""}
+			if goarch == "arm" {
+				versions = goarms
+			}
+
+			for _, goarm := range versions {
+				ignored := false
+
+				for _, ig := range build.Ignore {
+					if (ig.Goos == "" || ig.Goos == goos) &&
+						(ig.Goarch == "" || ig.Goarch == goarch) &&
+						(ig.Goarm == "" || ig.Goarm == goarm) {
+						ignored = true
+					}
+				}
+
+				if !ignored {
+					targets = append(targets, goreleaserTarget{Goos: goos, Goarch: goarch, Goarm: goarm})
+				}
+			}
+		}
+	}
+
+	return targets
+}
+
+// TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes guards the string every asset name comes
+// from.
+//
+// goreleaserTarget.Asset, scripts/install.sh's URL construction, release.yml's per-tarball
+// verification loop and the documented install one-liner all encode the same naming convention in
+// four different languages. Three of them are checked against each other by other tests in this
+// package; this is the one that pins the template itself, because a change to it renames every asset
+// on the release page at once and goreleaser's own default — `{{.ProjectName}}_{{.Version}}_{{.Os}}_
+// {{.Arch}}` — is a different convention entirely.
+//
+// The archive's name and the archived binary's name are two independent templates that have to be the
+// same string, and this asserts both. `wrap_in_directory: false` means the tarball holds exactly one
+// file, and install.sh extracts it and then looks up `objectfs-linux-amd64` by name before renaming it
+// to `objectfs` — a rename it does because a user cannot invoke the platform-named binary. So a build
+// whose `binary:` drifts from the archive's `name_template` produces a tarball that downloads,
+// verifies its checksum and then dies on "does not contain objectfs-linux-amd64". Mutating one of the
+// two templates and leaving the other passed every test in this package before this half existed.
+func TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes(t *testing.T) {
+	t.Parallel()
+
+	cfg := readGoreleaser(t)
+
+	if len(cfg.Archives) != 1 {
+		t.Fatalf("%s has %d `archives:` entries, and this package reads one", packagingFile,
+			len(cfg.Archives))
+	}
+
+	if got := strings.TrimSpace(cfg.Archives[0].NameTemplate); got != archiveNameTemplate {
+		t.Errorf("%s's archive name_template is\n\t%s\nand this package models\n\t%s\n\n"+
+			"Every published tarball is renamed by that difference. scripts/install.sh builds the "+
+			"download URL from `uname` output and has no way to discover the new shape: it fetches a "+
+			"404 and reports that the release layout changed. If the rename is deliberate, install.sh, "+
+			"release.yml's verification loop, the README one-liner and archiveNameTemplate here all "+
+			"move together.", packagingFile, got, archiveNameTemplate)
+	}
+
+	var archived *goreleaserBuild
+
+	for i := range cfg.Builds {
+		if cfg.Builds[i].ID == "archives" {
+			archived = &cfg.Builds[i]
+		}
+	}
+
+	if archived == nil {
+		t.Fatalf("%s has no build with id \"archives\", which is the one the tarballs are built from",
+			packagingFile)
+	}
+
+	if got := strings.TrimSpace(archived.Binary); got != archiveNameTemplate {
+		t.Errorf("%s's \"archives\" build names its binary\n\t%s\nand the archive it goes into is named"+
+			"\n\t%s\n\nThose have to be the same string. The tarball holds one file and no directory, and "+
+			"scripts/install.sh extracts it and then looks that exact name up before renaming it to "+
+			"objectfs — so a release built this way downloads, passes its checksum, and dies on \"does "+
+			"not contain objectfs-<platform>\" on every platform at once. goreleaser has no rename step "+
+			"between a build and an archive, which is why the two templates exist separately and why "+
+			"nothing else notices when they disagree.", packagingFile, got,
+			strings.TrimSpace(cfg.Archives[0].NameTemplate))
+	}
 }
 
 // TestPackagingInvokesBothScriptlets is #207's assertion, stated as a test rather than as a grep.
@@ -104,7 +333,7 @@ func TestPackagingInvokesBothScriptlets(t *testing.T) {
 			t.Errorf("%s does not set %s (%s).\nThat is #207 exactly: a maintainer script only a "+
 				"package manager can invoke, referenced by nothing, so it never runs. A package that "+
 				"installs cleanly and leaves mounted filesystems behind on removal is worse than no "+
-				"package.", nfpmFile, s.field, s.when)
+				"package.", packagingFile, s.field, s.when)
 
 			continue
 		}
@@ -114,8 +343,8 @@ func TestPackagingInvokesBothScriptlets(t *testing.T) {
 
 		if err != nil {
 			t.Errorf("%s sets %s: %s, which does not exist. nfpm fails at package time on this, so "+
-				"it is caught either way — but it is caught here without needing nfpm installed.",
-				nfpmFile, s.field, s.path)
+				"it is caught either way — but it is caught here without needing goreleaser installed.",
+				packagingFile, s.field, s.path)
 
 			continue
 		}
@@ -128,18 +357,82 @@ func TestPackagingInvokesBothScriptlets(t *testing.T) {
 	}
 }
 
-// TestPackagedFilesExist checks every src in nfpm.yaml against the filesystem.
+// TestThePackagedBinaryIsOnThePathAsObjectfs is the gate on a defect that a build log cannot show.
 //
-// The binary is the one entry whose src cannot be stat'ed, because it is a build artifact —
-// build/objectfs-linux-${OBJECTFS_ARCH}, produced by `make build-linux`. It is checked against the
-// Makefile instead, which is the actual coupling: a rename of the artifact in one file and not the
-// other produces a packaging step that fails only when someone runs it.
+// goreleaser puts a build's binary into a package under `bindir` using the name that *build* gives
+// it, and it has no rename step between a build and a package. The tarball and the package disagree
+// about what that name should be, and both are right: a tarball's binary is named for its platform,
+// so install.sh can find it and five downloads can coexist in one directory, while a package's
+// binary goes on `PATH` and has to be `objectfs`.
+//
+// So .goreleaser.yml carries two builds of the same source, and this asserts the `nfpms:` entry
+// points at the right one. Naming the wrong one produced `/usr/bin/objectfs-linux-amd64` — measured,
+// in a rockylinux:9 container: the rpm built, installed, ran its scriptlet, exited 0, and then
+// `objectfs version` answered "command not found". Every other test in this file passed, because
+// every `contents:` destination was still correct; the binary is not a `contents:` entry.
+//
+// The same wrong name would also break the systemd unit (`ExecStart=/usr/bin/objectfs`), both
+// modulefiles, and every command in scripts/postinstall.sh's own output.
+func TestThePackagedBinaryIsOnThePathAsObjectfs(t *testing.T) {
+	t.Parallel()
+
+	cfg := readGoreleaser(t)
+	nfpm := readNfpm(t)
+
+	if len(nfpm.IDs) != 1 {
+		t.Fatalf("%s's nfpms entry names %d builds in `ids:` (%v), and this test reads one. With no "+
+			"`ids:` at all goreleaser packages *every* build, which here means the package would take "+
+			"whichever of the two it saw first — and one of them names its binary for the platform.",
+			packagingFile, len(nfpm.IDs), nfpm.IDs)
+	}
+
+	var binary string
+	found := false
+
+	for _, b := range cfg.Builds {
+		if b.ID == nfpm.IDs[0] {
+			binary = strings.TrimSpace(b.Binary)
+			found = true
+		}
+	}
+
+	if !found {
+		t.Fatalf("%s's nfpms entry takes its binary from build %q, and no build has that id. "+
+			"goreleaser fails on this, so it is caught either way — but it is caught here without a "+
+			"release.", packagingFile, nfpm.IDs[0])
+	}
+
+	if binary != "objectfs" {
+		t.Errorf("%s packages build %q, whose binary is %q, so the package installs "+
+			"/usr/bin/%s.\nThat is not a command anyone types, and nothing fails at package time: the "+
+			"package builds, installs, runs its scriptlets and exits 0, and then `objectfs` is not "+
+			"found. configs/systemd/objectfs@.service, both modulefiles and scripts/postinstall.sh all "+
+			"invoke `objectfs` by that exact name.\nThe platform-named build is for the tarballs, which "+
+			"scripts/install.sh renames as it installs.", packagingFile, nfpm.IDs[0], binary, binary)
+	}
+
+	// bindir unset means goreleaser's default, /usr/bin, which is what everything above expects. A
+	// value is only worth flagging if it is a different directory.
+	if nfpm.Bindir != "" && nfpm.Bindir != "/usr/bin" {
+		t.Errorf("%s sets bindir: %s. The systemd unit hardcodes /usr/bin/objectfs and the "+
+			"modulefiles deliberately do not prepend to PATH because /usr/bin is already on it; "+
+			"moving the binary breaks both without failing anything at package time.",
+			packagingFile, nfpm.Bindir)
+	}
+}
+
+// TestPackagedFilesExist checks every src in the packaging against the filesystem.
+//
+// Every src is a literal repository path now. Under nfpm.yaml one was not: the binary was a
+// `contents:` entry whose src was `build/objectfs-linux-${OBJECTFS_ARCH}`, a build artifact that
+// could not be stat'ed, so this test reached into the Makefile to confirm `build-linux` wrote that
+// exact name. goreleaser places the binary itself from the build it names in `ids:`, so that
+// coupling is gone and what replaced it is TestThePackagedBinaryIsOnThePathAsObjectfs.
 func TestPackagedFilesExist(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
 	cfg := readNfpm(t)
-	makefile := expandMakeVariables(readFile(t, filepath.Join(root, "Makefile")))
 
 	var checked int
 
@@ -147,89 +440,42 @@ func TestPackagedFilesExist(t *testing.T) {
 		if c.Type == "dir" {
 			if c.Src != "" {
 				t.Errorf("%s: a `type: dir` entry for %s also names a src (%s), which nfpm ignores",
-					nfpmFile, c.Dst, c.Src)
+					packagingFile, c.Dst, c.Src)
 			}
 
 			continue
 		}
 
 		if c.Src == "" {
-			t.Errorf("%s: the entry for %s has no src", nfpmFile, c.Dst)
+			t.Errorf("%s: the entry for %s has no src", packagingFile, c.Dst)
 
 			continue
 		}
 
 		checked++
 
-		// An entry carrying ${...} is a build artifact by construction: nfpm only expands a src that
-		// sets `expand: true`, and the only variable substitution in this file selects the staged
-		// binary per architecture.
-		if strings.Contains(c.Src, "${") {
-			if !c.Expand {
-				t.Errorf("%s: src %s contains ${...} but does not set `expand: true`, so nfpm treats "+
-					"it as a literal path and the glob fails at package time", nfpmFile, c.Src)
-			}
-
-			for _, arch := range []string{"amd64", "arm64"} {
-				want := strings.ReplaceAll(c.Src, "${OBJECTFS_ARCH}", arch)
-				want = strings.TrimPrefix(filepath.Clean(want), "./")
-
-				if !strings.Contains(makefile, want) {
-					t.Errorf("%s packages %s, and with OBJECTFS_ARCH=%s that is %s — a path the "+
-						"Makefile never writes.\nNothing builds it, so `make package-linux` fails on a "+
-						"missing file. The artifact name lives in build-linux's recipe; the two have to "+
-						"agree.", nfpmFile, c.Src, arch, want)
-				}
-			}
+		// A src is a path, not a template. goreleaser expands `{{ }}` on both sides of an entry, and
+		// two destinations use it — the modulefiles put the version in the filename — but a templated
+		// *src* would mean the packaging reads a file whose name depends on the release, which nothing
+		// here does and which this loop could not check.
+		if strings.Contains(c.Src, "{{") {
+			t.Errorf("%s: src %s is a template. Every source is a file in the repository, so this "+
+				"test can stat it; a templated src is a path that only exists at release time.",
+				packagingFile, c.Src)
 
 			continue
 		}
 
 		if _, err := os.Stat(filepath.Join(root, filepath.Clean(c.Src))); err != nil {
 			t.Errorf("%s packages %s → %s, and that source file does not exist in the repository",
-				nfpmFile, c.Src, c.Dst)
+				packagingFile, c.Src, c.Dst)
 		}
 	}
 
 	if checked == 0 {
 		t.Fatalf("%s has no file entries at all — only directories. A package that installs no "+
-			"files is not the thing #207 asks for", nfpmFile)
+			"files is not the thing #207 asks for", packagingFile)
 	}
-}
-
-// makeSimpleAssignment matches the `NAME := value` form. Only `:=`, not `=` or `?=`: a recursively
-// expanded variable can reference one defined later, and resolving those properly means implementing
-// make.
-var makeSimpleAssignment = regexp.MustCompile(`(?m)^([A-Z_][A-Z0-9_]*)\s*:=\s*(.*)$`)
-
-// expandMakeVariables substitutes $(NAME) for simply-expanded variables defined in the Makefile.
-//
-// Needed because build-linux writes its artifact as
-// `$(BUILD_DIR)/$(BINARY_NAME)-linux-amd64`, so a literal search for "build/objectfs-linux-amd64"
-// finds nothing while the recipe is perfectly correct. Without this the coupling check below reports
-// a false failure — which is worse than no check, because the fix people reach for is deleting it.
-//
-// Deliberately not a make implementation: no functions, no conditionals, no recursive expansion of
-// `=` variables. Two passes so that `$(BINARY_PATH)`, itself defined in terms of `$(BIN_DIR)`,
-// resolves. Any variable it cannot resolve simply stays as-is, and the assertion that then fails is
-// reporting a genuine "the Makefile does not write this path anywhere I can see", which is worth
-// looking at.
-func expandMakeVariables(makefile string) string {
-	vars := make(map[string]string)
-
-	for _, m := range makeSimpleAssignment.FindAllStringSubmatch(makefile, -1) {
-		vars[m[1]] = strings.TrimSpace(m[2])
-	}
-
-	expanded := makefile
-
-	for range 2 {
-		for name, value := range vars {
-			expanded = strings.ReplaceAll(expanded, "$("+name+")", value)
-		}
-	}
-
-	return expanded
 }
 
 // TestPackageVersionComesFromTheVersionConstant pins CLAUDE.md's single-authority rule into the
@@ -238,60 +484,78 @@ func expandMakeVariables(makefile string) string {
 // A literal here would be the sixth copy of a number this repository once gave five different
 // answers to, and the worst-placed one: nothing reads a package's metadata back to compare it, so
 // `objectfs version` inside objectfs_0.12.0_amd64.deb could report 0.13.0 and no gate would notice.
-// .github/workflows/release.yml already checks the tag against the constant; this checks the package.
 //
-// Both halves are asserted, because either alone is satisfiable while being wrong: nfpm.yaml must
-// take the version from the environment, and the Makefile must put the constant into that
-// environment.
+// The chain is one hop shorter than it was. nfpm.yaml took its version from `${OBJECTFS_VERSION}` and
+// the Makefile sed'd the constant out of main.go into that variable — so this test asserted both
+// halves, since either alone is satisfiable while being wrong. goreleaser derives the version from
+// the git tag instead, and there is no variable and no Makefile step in between. What is left to
+// check is that nothing reintroduces a second authority:
+//
+//   - the packaging config must not name a version at all, and
+//   - release.yml must compare the tag against the constant, because that comparison is now the
+//     *only* thing tying the tag goreleaser reads to the number the binary prints.
 func TestPackageVersionComesFromTheVersionConstant(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
-	cfg := readNfpm(t)
 
-	if !strings.Contains(cfg.Version, "${") {
-		//nolint:gosec // a path built from the module root this test located
-		mainGo, err := os.ReadFile(filepath.Join(root, "cmd", "objectfs", "main.go"))
-		if err != nil {
-			t.Fatalf("read cmd/objectfs/main.go: %v", err)
-		}
-
-		declared := "unknown"
-		if m := versionConstant.FindSubmatch(mainGo); m != nil {
-			declared = string(m[1])
-		}
-
-		t.Fatalf("%s hardcodes version: %q. The authority is the `version` constant in "+
-			"cmd/objectfs/main.go (currently %s), and a number copied into a config file has no way "+
-			"to be told it is stale — which is how this repository came to give five different "+
-			"answers at once. Take it from ${OBJECTFS_VERSION} and let the Makefile supply it.",
-			nfpmFile, cfg.Version, declared)
+	//nolint:gosec // a path built from the module root this test located
+	mainGo, err := os.ReadFile(filepath.Join(root, "cmd", "objectfs", "main.go"))
+	if err != nil {
+		t.Fatalf("read cmd/objectfs/main.go: %v", err)
 	}
 
-	// The variable nfpm.yaml reads, e.g. "OBJECTFS_VERSION" out of "${OBJECTFS_VERSION}".
-	envVar := strings.Trim(strings.TrimPrefix(strings.TrimSpace(cfg.Version), "$"), "{}")
-
-	makefile := readFile(t, filepath.Join(root, "Makefile"))
-
-	if !strings.Contains(makefile, envVar+"=") {
-		t.Errorf("%s takes its version from ${%s}, and the Makefile never sets it. nfpm expands an "+
-			"unset variable to the empty string, so the packaging step would build objectfs__amd64.deb "+
-			"or fail on an invalid version — neither of which says what went wrong.", nfpmFile, envVar)
+	m := versionConstant.FindSubmatch(mainGo)
+	if m == nil {
+		t.Fatal("cmd/objectfs/main.go has no `version = \"...\"` constant, which is the authority " +
+			"every check below is relative to")
 	}
 
-	// The extraction itself. Not a literal in the Makefile either — it has to read main.go, with the
-	// same expression release.yml uses, and $(VERSION) is specifically wrong here: it is `git
-	// describe`, which yields v0.12.0-14-gabc123-dirty on an untagged or dirty tree, and neither dpkg
-	// nor rpm accepts that.
-	if !strings.Contains(makefile, "cmd/objectfs/main.go") {
-		t.Errorf("the Makefile sets %s without reading cmd/objectfs/main.go. Wherever the value "+
-			"comes from instead, it is a second authority for the version.", envVar)
+	declared := string(m[1])
+
+	// A literal version in the packaging config, comments excluded. The comments are full of example
+	// filenames — `objectfs_0.14.0-1_amd64.deb` — which are illustration and go stale harmlessly; a
+	// version in a *value* is read by goreleaser and overrides the tag.
+	// withoutComments is release_packages_test.go's, written for the same reason against a workflow
+	// rather than against this config.
+	body := withoutComments(readFile(t, filepath.Join(root, packagingFile)))
+
+	if strings.Contains(body, declared) {
+		t.Errorf("%s contains the literal version %s outside a comment. The authority is the "+
+			"`version` constant in cmd/objectfs/main.go, and goreleaser takes the package version from "+
+			"the git tag — a third copy here has no way to be told it is stale, which is how this "+
+			"repository came to give five different answers at once.", packagingFile, declared)
+	}
+
+	// And no attempt to inject it at link time. `version` in main.go is an untyped **constant**, so
+	// `-X main.version=...` is silently a no-op: the linker cannot rewrite a constant, and every
+	// release before #375 passed that flag and shipped a binary reporting the hardcoded value anyway.
+	// A green build plus a wrong `objectfs version` is the exact shape of failure this file exists for.
+	if strings.Contains(body, "-X main.version") ||
+		strings.Contains(body, "-X 'main.version") {
+		t.Errorf("%s passes -X main.version in ldflags. `version` in cmd/objectfs/main.go is a "+
+			"constant, so the linker cannot rewrite it — the flag is accepted, the build is green, and "+
+			"the binary reports the hardcoded value. Whoever added it will believe the version is "+
+			"injected. #375 removed exactly this.", packagingFile)
+	}
+
+	// The one remaining link, in the workflow that publishes. Asserted here rather than in
+	// release_packages_test.go because it is this file's invariant: with the Makefile out of the chain,
+	// a tag that disagrees with the constant is a release whose assets are all named for a version the
+	// binary inside them denies.
+	release := readFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
+
+	if !strings.Contains(release, "cmd/objectfs/main.go") {
+		t.Error("release.yml never reads cmd/objectfs/main.go. goreleaser names every asset, and " +
+			"stamps every package's metadata, from the git tag — nothing checks that tag against the " +
+			"constant the binary actually prints, so `objectfs version` inside " +
+			"objectfs_0.15.0-1_amd64.deb can say 0.14.0 with every job green.")
 	}
 }
 
 // TestPackagingAndPostinstallAgreeOnTheExampleConfigPath is the seam most likely to break silently.
 //
-// nfpm.yaml installs configs/example.yaml to a path under /usr/share, and postinstall.sh copies it
+// The packaging installs configs/example.yaml to a path under /usr/share, and postinstall.sh copies it
 // from that path to /etc/objectfs/config.yaml if and only if the target does not already exist. If
 // the two paths disagree, the package still installs, the scriptlet still exits 0 — postinstall.sh
 // exits 0 unconditionally by design — and the operator gets no starting configuration, with one
@@ -316,14 +580,14 @@ func TestPackagingAndPostinstallAgreeOnTheExampleConfigPath(t *testing.T) {
 
 	if len(packaged) != 1 {
 		t.Fatalf("%s installs configs/example.yaml to %d destinations (%v); expected exactly one, "+
-			"which is the one postinstall.sh copies from", nfpmFile, len(packaged), packaged)
+			"which is the one postinstall.sh copies from", packagingFile, len(packaged), packaged)
 	}
 
 	if !strings.Contains(script, packaged[0]) {
 		t.Errorf("%s installs the example config to %s, and scripts/postinstall.sh does not mention "+
 			"that path — so it copies nothing and /etc/objectfs/config.yaml is never created.\n"+
 			"Both files have to name the same path. The scriptlet exits 0 either way by design, so "+
-			"this failure is invisible at install time.", nfpmFile, packaged[0])
+			"this failure is invisible at install time.", packagingFile, packaged[0])
 	}
 
 	// And the file that gets copied has to be one the loader accepts. TestShippedConfigsLoadAndValidate
@@ -351,7 +615,7 @@ func TestPackagingDoesNotShipConfigFilesUnderEtc(t *testing.T) {
 		t.Errorf("%s ships a file to %s. A packaged file under /etc is a dpkg conffile, so an upgrade "+
 			"prompts the operator to merge it — which hangs an unattended apt run. scripts/postinstall.sh "+
 			"copies from /usr/share instead, only when the target is absent, which leaves the operator "+
-			"owning the file they put settings into.", nfpmFile, c.Dst)
+			"owning the file they put settings into.", packagingFile, c.Dst)
 	}
 }
 
@@ -374,28 +638,36 @@ func TestPackagingShipsTheSystemdUnitUnderUsr(t *testing.T) {
 	if found == "" {
 		t.Fatalf("%s does not package configs/systemd/objectfs@.service. Without it, `systemctl "+
 			"enable objectfs@name` fails after a clean install and every instruction in the docs that "+
-			"starts with systemctl is wrong.", nfpmFile)
+			"starts with systemctl is wrong.", packagingFile)
 	}
 
 	if !strings.HasPrefix(found, "/usr/lib/systemd/system/") {
 		t.Errorf("%s installs the systemd unit to %s. A package's units belong in "+
 			"/usr/lib/systemd/system; /etc/systemd/system is where an operator's override goes, and "+
 			"systemd gives that precedence — a package occupying the path leaves an override nowhere "+
-			"to win from.", nfpmFile, found)
+			"to win from.", packagingFile, found)
 	}
 }
 
+// versionTemplate is the reference the two modulefile destinations put in their filename.
+//
+// goreleaser's template, not nfpm's `${OBJECTFS_VERSION}`: goreleaser renders `contents:` through its
+// own template engine before handing the config to nfpm, and its version comes from the git tag.
+const versionTemplate = "{{ .Version }}"
+
 // TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem checks the two entries whose dst
-// is a computed path, which is the only place in nfpm.yaml where that is true.
+// is a computed path, which is the only place in the packaging where that is true.
 //
-// Every other rule has a fixed destination; these two put ${OBJECTFS_VERSION} in the *filename*,
-// because that is how Lmod and TCL Modules decide what `module load objectfs/<version>` means.
-// MODULEPATH names a directory, the directory below it is the module name, and the file inside that is
-// the version. Three things can go wrong here and none of them fail at package time:
+// Every other rule has a fixed destination; these two put the version in the *filename*, because that
+// is how Lmod and TCL Modules decide what `module load objectfs/<version>` means. MODULEPATH names a
+// directory, the directory below it is the module name, and the file inside that is the version.
+// Three things can go wrong here and none of them fail at package time:
 //
-//   - **`expand` omitted.** nfpm treats the dst as a literal, and the package ships a file named
-//     `${OBJECTFS_VERSION}.lua`. It installs successfully. `module avail` lists a version called
-//     "${OBJECTFS_VERSION}" and nobody can load it.
+//   - **The version written as a literal.** It installs successfully, and it is right for exactly one
+//     release. Under nfpm this failure had a different shape — an entry that omitted `expand: true`
+//     shipped a file literally named `${OBJECTFS_VERSION}.lua`, and `module avail` listed a version
+//     nobody could load. goreleaser expands `{{ }}` in every dst unconditionally, so what is left to
+//     get wrong is hardcoding.
 //   - **The version moved into a directory.** objectfs/<version>/objectfs.lua adds a third level, and
 //     Lmod then reads the *version* as the name.
 //   - **The TCL file keeps its extension.** Installed as `0.13.0.tcl`, the version is reported as
@@ -413,11 +685,6 @@ func TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem(t *testing
 
 	cfg := readNfpm(t)
 
-	// The version variable nfpm.yaml uses for the package version, so this test names the same one
-	// rather than assuming the spelling. TestPackageVersionComesFromTheVersionConstant is what asserts
-	// it is a variable at all.
-	versionRef := strings.TrimSpace(cfg.Version)
-
 	for _, want := range []struct {
 		src string
 		// dst is the required destination, with the version reference substituted in.
@@ -427,15 +694,15 @@ func TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem(t *testing
 	}{
 		{
 			src: "configs/modules/objectfs.lua",
-			dst: "/usr/share/modulefiles/objectfs/" + versionRef + ".lua",
+			dst: "/usr/share/modulefiles/objectfs/" + versionTemplate + ".lua",
 			why: "Lmod requires the .lua extension to parse the file as Lua, and strips it before " +
 				"reporting the version — so this one, and only this one, keeps its extension.",
 		},
 		{
 			src: "configs/modules/objectfs.tcl",
-			dst: "/usr/share/modulefiles/objectfs/" + versionRef,
+			dst: "/usr/share/modulefiles/objectfs/" + versionTemplate,
 			why: "For TCL Modules the filename is the version string, so a .tcl suffix here makes " +
-				"`module avail` report a version called \"" + versionRef + ".tcl\".",
+				"`module avail` report a version called \"" + versionTemplate + ".tcl\".",
 		},
 	} {
 		var found []string
@@ -447,11 +714,11 @@ func TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem(t *testing
 
 			found = append(found, c.Dst)
 
-			if !c.Expand {
-				t.Errorf("%s installs %s to %s without `expand: true`. nfpm only substitutes variables "+
-					"in an entry that asks, so the package ships a file literally named %q — which "+
-					"installs cleanly and cannot be loaded.",
-					nfpmFile, want.src, c.Dst, filepath.Base(c.Dst))
+			if !strings.Contains(c.Dst, "{{") {
+				t.Errorf("%s installs %s to %s, with no version template in the path. That is correct "+
+					"for one release and wrong for every release after it, and nothing fails: the "+
+					"package installs, `module avail` lists a version, and it is the wrong number.",
+					packagingFile, want.src, c.Dst)
 			}
 		}
 
@@ -459,7 +726,7 @@ func TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem(t *testing
 			t.Errorf("%s installs %s to %d destinations (%v); expected exactly one, %s.\nWithout it, a "+
 				"site that installs the package still has to fetch the modulefile out of a source "+
 				"checkout, which is what #145 exists to stop.",
-				nfpmFile, want.src, len(found), found, want.dst)
+				packagingFile, want.src, len(found), found, want.dst)
 
 			continue
 		}
@@ -467,7 +734,8 @@ func TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem(t *testing
 		if found[0] != want.dst {
 			t.Errorf("%s installs %s to %s, want %s.\n%s\nThe module systems read the version out of "+
 				"this path, so the wrong one means `module load objectfs` exports the wrong "+
-				"OBJECTFS_VERSION — with no error anywhere.", nfpmFile, want.src, found[0], want.dst, want.why)
+				"OBJECTFS_VERSION — with no error anywhere.",
+				packagingFile, want.src, found[0], want.dst, want.why)
 		}
 	}
 }
@@ -476,8 +744,13 @@ func TestPackagingShipsTheModulefilesWhereTheModuleSystemsLookForThem(t *testing
 //
 // #207 notes that `make package` only makes tarballs, and it still does — a tarball is the right
 // artifact for a release download. The deb and the rpm need their own target, and it needs to build
-// both formats, because the entire argument for nfpm over a debian/ directory plus a .spec is that
-// one config describes both.
+// both formats, because the entire argument for one packaging config over a debian/ directory plus a
+// .spec is that one config describes both.
+//
+// The reason a Makefile target matters more than it looks: it is the only way to build a package
+// without pushing a tag. `package-linux` is what ci.yml's `packaging` job runs on every pull request,
+// so the release path and the pull-request path invoke the same command against the same config —
+// which is what makes a green PR evidence about a release.
 func TestMakefileBuildsPackages(t *testing.T) {
 	t.Parallel()
 
@@ -489,17 +762,113 @@ func TestMakefileBuildsPackages(t *testing.T) {
 			"it, which is #207 unresolved.")
 	}
 
-	if !strings.Contains(makefile, nfpmFile) {
-		t.Errorf("the Makefile's packaging target does not reference %s", nfpmFile)
+	// goreleaser by name, not the config filename: it finds .goreleaser.yml itself, so a target that
+	// referenced the file by name would be referencing it in a comment. The nfpm loop this replaced
+	// passed `--config nfpm.yaml` explicitly, which is why this used to be a filename check.
+	if !strings.Contains(makefile, "goreleaser") {
+		t.Errorf("the Makefile's package-linux target does not invoke goreleaser, which is what "+
+			"reads %s. Whatever it runs instead is a second packaging path, and the one CI exercises "+
+			"on a pull request is then not the one a release uses.", packagingFile)
 	}
 
+	// Both formats, read out of the config rather than grepped for in the Makefile. The old assertion
+	// looked for the strings "deb" and "rpm" anywhere in the Makefile, which the word "debug" satisfies.
+	formats := readNfpm(t).Formats
+
 	for _, format := range []string{"deb", "rpm"} {
-		if !strings.Contains(makefile, format) {
-			t.Errorf("the Makefile never mentions %s. Both formats come from one nfpm config; "+
-				"building only one of them is half the deliverable", format)
+		found := false
+
+		for _, f := range formats {
+			if f == format {
+				found = true
+			}
+		}
+
+		if !found {
+			t.Errorf("%s does not build %s — its formats are %v. Both come from one config; building "+
+				"only one of them is half the deliverable.", packagingFile, format, formats)
 		}
 	}
 }
+
+// TestTheGoreleaserVersionIsPinnedToOneValueEverywhere couples the three copies of the pin.
+//
+// The Makefile's GORELEASER_VERSION, ci.yml's `packaging` job and release.yml's `artifacts` job each
+// name a goreleaser version, and the reason all three pin it exactly rather than floating on `~> v2`
+// is that goreleaser decides what the published assets are *called* and what is inside them. A minor
+// that changed a default file name would rename every asset on the release page — the class of change
+// .goreleaser.yml overrides two templates to prevent.
+//
+// Which makes a *disagreement* between the three the same defect wearing a different hat: a pull
+// request proving a packaging change under one goreleaser, and a tag publishing it under another. The
+// pin is only worth having if there is one of it.
+//
+// Read as a set with a floor on the count, not as three named lookups. A fourth workflow that installs
+// goreleaser has to join this assertion or fail it; a version that stops being found fails rather than
+// passing vacuously, which is the direction an enumerated gate has to fail in.
+func TestTheGoreleaserVersionIsPinnedToOneValueEverywhere(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+
+	pins := make(map[string][]string)
+
+	m := goreleaserPin.FindStringSubmatch(readFile(t, filepath.Join(root, "Makefile")))
+	if m == nil {
+		t.Fatal("the Makefile does not set GORELEASER_VERSION. package-linux either stopped pinning " +
+			"the tool or stopped installing it, and with nothing to compare against every assertion " +
+			"below is vacuous")
+	}
+
+	pins[m[1]] = append(pins[m[1]], "Makefile's GORELEASER_VERSION")
+
+	// Steps that use the action, rather than every `version:` in the file. The first version of this
+	// read the latter and found v2.12.2 in ci.yml — golangci-lint's pin, under golangci-lint-action —
+	// which is a real pin of a real tool and has nothing to do with this one.
+	for _, workflow := range []string{"ci.yml", "release.yml"} {
+		body := withoutComments(readFile(t, filepath.Join(root, ".github", "workflows", workflow)))
+
+		steps := stepsUsing(body, "goreleaser/goreleaser-action")
+		if len(steps) == 0 {
+			t.Errorf("%s never uses goreleaser/goreleaser-action. ci.yml has to install goreleaser for "+
+				"`make package-linux` (the Makefile's from-source fallback cannot run under "+
+				"GOTOOLCHAIN=local, which setup-go sets) and release.yml has to run it", workflow)
+
+			continue
+		}
+
+		for _, step := range steps {
+			version := actionInput(step, "version")
+			if version == "" {
+				t.Errorf("%s uses goreleaser-action without pinning `version:`, so it runs whatever the "+
+					"action defaults to. goreleaser decides what the published assets are *called*: a "+
+					"minor that changed a default file name would rename every asset on the release page, "+
+					"which is the class of change .goreleaser.yml overrides two templates to prevent",
+					workflow)
+
+				continue
+			}
+
+			pins[version] = append(pins[version], workflow)
+		}
+	}
+
+	if len(pins) > 1 {
+		t.Errorf("the goreleaser version is pinned to %d different values: %v.\n"+
+			"All of them have to agree. `make package-linux` exists so that the command a developer runs, "+
+			"the command ci.yml's packaging job runs on every pull request, and the command release.yml "+
+			"runs on a tag are the same command over the same config — and a version skew means the "+
+			"pull request proved a different tool than the release used. goreleaser owns the asset "+
+			"names, so that difference is publishable.", len(pins), pins)
+	}
+}
+
+// goreleaserPin matches the Makefile's `GORELEASER_VERSION := v2.18.1`.
+//
+// Only the Makefile. The workflows' pins are read out of the goreleaser-action step that sets them,
+// because a bare `version:` is also golangci-lint-action's input and matching it here reported a
+// version skew that did not exist.
+var goreleaserPin = regexp.MustCompile(`GORELEASER_VERSION :?= (v\d+\.\d+\.\d+)`)
 
 // ------------------------------------------------------------------------------------------------
 // The behavioral half: the scripts are run, not read.
@@ -565,19 +934,19 @@ func stagedRoot(t *testing.T) string {
 
 	root := t.TempDir()
 
-	// 0755 and 0644 are the modes nfpm.yaml gives these two paths, and reproducing them is the
+	// 0755 and 0644 are the modes the packaging gives these two paths, and reproducing them is the
 	// whole point of the fixture — a scratch root at a mode the package would never produce tests
 	// the script against a system that cannot exist. gosec reads any 0644 write as a finding
 	// (G301/G306) without a way to know the file is a copy of /usr/share/objectfs/configs/
 	// example.yaml, which is world-readable by design: it is the example, and the secret-bearing
 	// file is the 0600 /etc/objectfs/config.yaml the script derives from it.
 	dir := filepath.Join(root, "usr", "share", "objectfs", "configs")
-	if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- /usr/share must be traversable; matches nfpm.yaml
+	if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- /usr/share must be traversable; matches the packaging
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 
 	src := readFile(t, filepath.Join(repoRoot(t), "configs", "example.yaml"))
-	if err := os.WriteFile(filepath.Join(dir, "example.yaml"), []byte(src), 0o644); err != nil { // #nosec G306 -- the shipped example is world-readable; matches nfpm.yaml
+	if err := os.WriteFile(filepath.Join(dir, "example.yaml"), []byte(src), 0o644); err != nil { // #nosec G306 -- the shipped example is world-readable; matches the packaging
 		t.Fatalf("stage example.yaml: %v", err)
 	}
 
