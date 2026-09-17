@@ -161,6 +161,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed, because the binary is not a `contents:` entry.
   `TestThePackagedBinaryIsOnThePathAsObjectfs` is that gate, and it is new.
 
+  **Two of the gates written for this change did not hold, and mutation is what said so.**
+  `TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes` pinned the archive's `name_template` and
+  not the archived binary's, which are separate templates that have to be the same string — the tarball
+  holds one file and `install.sh` looks it up by name — so shortening one of the two passed every test
+  in the package and would have produced a release that downloads, verifies its checksum, and dies on
+  "does not contain objectfs-linux-amd64" on all five platforms at once. And the check written to reject
+  `goreleaser build` searched the step for the word "release", which is a substring of
+  "goreleaser/goreleaser-action": `args: build --clean` passed it. It now reads the `args:` input by
+  name.
+
   **Publishing deliberately stays outside goreleaser** (`release: disable: true`). Three things the
   `publish` job does have no goreleaser equivalent: release notes extracted from a hand-written
   `CHANGELOG.md` rather than from commit subjects, a cross-check that the per-asset `.sha256` files and
