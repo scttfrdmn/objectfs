@@ -254,14 +254,29 @@ two setup scripts, the CI job that installed from throwaway-signed copies in thr
 Pages step that would have built them. What is left is the thing that was already working, which is
 the two commands above.
 
-The packages are unsigned, for the same reason there is no repository, and a checksum is what stands in
-for the signature. Installing a downloaded package verifies the package's own digests; every release
-asset has a published SHA-256; `install.sh` verifies the tarball's.
+The packages themselves are unsigned, for the same reason there is no repository: that would mean
+holding a GPG key. Installing a downloaded package verifies the package's own digests, every release
+asset has a published SHA-256, and `install.sh` verifies the tarball's with no flag to skip it.
 
-The checksum is always verified and there is no flag to skip it. Note what that establishes: the
-`.sha256` travels the same channel as the tarball, so a mismatch means a corrupted or tampered
-download, not that the release is authentic. That is a signature's job, and this project does not sign
-releases yet.
+Note what a checksum alone establishes, and what it does not: the `.sha256` travels the same channel as
+the tarball, so a mismatch means a corrupted or tampered download, not that the release is authentic.
+Authenticity is a signature's job, and **the release is signed** — not with a GPG key on the packages,
+but keylessly over the checksum list. Each release carries a `checksums.txt` covering all of its assets
+and a cosign signature over that document in `checksums.txt.cosign.bundle`, made from the release
+workflow's OIDC identity, so there is no key material and no repository secret in the path and no public
+key to fetch and trust out of band:
+
+```bash
+cosign verify-blob \
+  --bundle checksums.txt.cosign.bundle \
+  --certificate-identity 'https://github.com/scttfrdmn/objectfs/.github/workflows/release.yml@refs/tags/v0.15.0' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+```
+
+Every release's notes print that command with its own tag, and the release job runs it before
+publishing, so a release whose verification instructions do not work does not ship.
 
 ### Basic Usage
 
