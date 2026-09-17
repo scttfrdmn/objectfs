@@ -177,7 +177,7 @@ func (b *Backend) readFramed(
 	//
 	// ETag comparison rather than If-Match on the second request, for the reason CLAUDE.md gives about
 	// establishing capabilities by probing: a store that accepts If-Match and ignores it is
-	// indistinguishable from one that honours it, and a precondition silently dropped is worse than no
+	// indistinguishable from one that honors it, and a precondition silently dropped is worse than no
 	// precondition, because it reports a guarantee it is not providing. A comparison of two values this
 	// process holds cannot be silently dropped by anything. It is also the pattern the parallel read
 	// path already uses across its chunks.

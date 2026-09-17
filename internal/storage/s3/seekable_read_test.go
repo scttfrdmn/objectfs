@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
@@ -130,9 +131,7 @@ func reseed(t *testing.T, ts *testaws.TestServer, f framedObject, mutate func(st
 	stored := bytes.Clone(f.stored)
 
 	meta := make(map[string]string, len(f.meta))
-	for k, v := range f.meta {
-		meta[k] = v
-	}
+	maps.Copy(meta, f.meta)
 
 	mutate(stored, meta)
 	seedRaw(t, ts, f.key, stored, meta, f.encoding)
@@ -281,7 +280,7 @@ func TestFramedReadIsCorrectAcrossFrameBoundaries(t *testing.T) {
 // carries no body, so that route is the cheaper one and it is also the common one: the stored body is
 // a fraction of the content length the caller was told, so any read far enough into a well-compressed
 // file lands past its end. Testing only one of them would leave the other's accounting unpinned.
-func TestFramedReadTransfersOnlyTheFramesItCovers(t *testing.T) {
+func TestFramedReadTransfersOnlyTheFramesItCovers(t *testing.T) { //nolint:tparallel // the subtests share one recorder; see the suppression on the loop
 	t.Parallel()
 
 	ts := testaws.Start(t)
@@ -832,7 +831,7 @@ func TestFramedReadReportsDamagedFramesRatherThanFallingBack(t *testing.T) {
 // means every closed file costs an extra round trip that can only return nothing. And an off-by-one
 // here is invisible to a correctness test, because a whole-object fallback returns the same empty slice
 // — which is what a mutation run showed. The assertion that makes it visible is the request count.
-func TestFramedReadAtExactlyEndOfContentReturnsNothing(t *testing.T) {
+func TestFramedReadAtExactlyEndOfContentReturnsNothing(t *testing.T) { //nolint:tparallel // the subtests share one recorder; see the suppression on the loop
 	t.Parallel()
 
 	ts := testaws.Start(t)
@@ -852,6 +851,7 @@ func TestFramedReadAtExactlyEndOfContentReturnsNothing(t *testing.T) {
 
 	f := putFramedObject(t, ts, backend, "seekable/at-eof", size)
 
+	//nolint:paralleltest // each case resets the shared request recorder; they must not overlap
 	for _, r := range []struct {
 		name   string
 		offset int64
@@ -910,7 +910,7 @@ func TestFramedReadAtExactlyEndOfContentReturnsNothing(t *testing.T) {
 // by clamping at the last frame. So the bytes come back correct and nothing is obviously wrong; a
 // mutation confirmed the whole suite still passed. What it costs is every frame from the offset to the
 // end of the object, on a read that asked for the tail of a large file.
-func TestFramedOpenEndedReadStartsAtTheOffset(t *testing.T) {
+func TestFramedOpenEndedReadStartsAtTheOffset(t *testing.T) { //nolint:tparallel // the subtests share one recorder; see the suppression on the loop
 	t.Parallel()
 
 	ts := testaws.Start(t)
@@ -933,8 +933,9 @@ func TestFramedOpenEndedReadStartsAtTheOffset(t *testing.T) {
 	// Near the end, so "to the end from here" and "the whole object from here" are very different
 	// numbers of frames. At the start of the object the two agree, which is why that offset would make
 	// this test vacuous.
-	offset := int64(size) - int64(f.idx.FrameSize)/2
+	offset := int64(size) - f.idx.FrameSize/2
 
+	//nolint:paralleltest // each case resets the shared request recorder; they must not overlap
 	for _, size := range []int64{0, -1} {
 		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
 			ts.ResetRequests()
