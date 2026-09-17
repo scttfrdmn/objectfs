@@ -822,7 +822,30 @@ jobs:
         cache: true
 
     - name: .goreleaser.yml agrees with the scripts, the Makefile and the version constant
-      run: go test ./internal/config/ -v -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestPostinstall|TestPreremove|TestMakefile'
+      run: go test ./internal/config/ -v -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestTheGoreleaserVersion|TestPostinstall|TestPreremove|TestMakefile'
+
+    # A prebuilt goreleaser on PATH, so `make package-linux` below finds it and does not fall back to
+    # building it from source. That fallback cannot work here and it is not the Makefile's fault:
+    # goreleaser v2.18.1 declares `go >= 1.27.1`, this module declares 1.26.0, and setup-go sets
+    # GOTOOLCHAIN=local so that the Go it installed is the Go that runs. The result is
+    #
+    #   go: github.com/goreleaser/goreleaser/v2@v2.18.1 requires go >= 1.27.1
+    #       (running go 1.26.6; GOTOOLCHAIN=local)
+    #
+    # which is exactly right: pinning the toolchain is the point of GOTOOLCHAIN=local, and a job that
+    # silently downloaded a newer Go to build a release tool would be building the release with a
+    # different compiler than the one this project tests against. A developer with the default
+    # GOTOOLCHAIN=auto never sees this, which is why it reached a pull request — measured there rather
+    # than predicted here.
+    #
+    # `install-only`, so the step installs and runs nothing. `make package-linux` is still what builds,
+    # which is the property this job exists for: the command a release runs, the command a developer
+    # runs, and the command this job runs all read the same config. release.yml uses this same action at
+    # this same pin; internal/config/packaging_test.go fails if the three copies of the version drift.
+    - uses: goreleaser/goreleaser-action@v7
+      with:
+        version: v2.18.1
+        install-only: true
 
     - name: Build every artifact, including the deb and the rpm
       run: make package-linux

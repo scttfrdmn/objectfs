@@ -291,13 +291,23 @@ package: build-all | $(DIST_DIR)/.mkdir
 # like v0.12.0-14-gabc123-dirty, and neither dpkg nor rpm accepts a hyphenated version in that
 # position. internal/config/packaging_test.go still fails if a literal version appears in the
 # packaging config.
+#
+# GORELEASER_VERSION is one of three copies of this pin — release.yml and ci.yml both pass it to
+# goreleaser-action — and internal/config/packaging_test.go fails if they drift, because a PR that
+# proves a packaging change under one goreleaser and a tag that publishes it under another is the whole
+# argument for this target undone.
 GORELEASER_VERSION := v2.18.1
 GORELEASER ?= $(shell command -v goreleaser 2>/dev/null || echo $(shell go env GOPATH)/bin/goreleaser)
 
 .PHONY: package-linux
 package-linux:
 	@if [ ! -x "$(GORELEASER)" ]; then \
-		echo "$(COLOR_YELLOW)goreleaser not found; installing $(GORELEASER_VERSION)...$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)goreleaser not found; installing $(GORELEASER_VERSION) from source...$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)This needs a Go toolchain new enough for goreleaser itself — it declares a"; \
+		echo "higher minimum than this module does, so GOTOOLCHAIN=local will refuse. Either unset it"; \
+		echo "(the default, GOTOOLCHAIN=auto, fetches what goreleaser asks for) or install a prebuilt"; \
+		echo "binary: brew install goreleaser, or goreleaser/goreleaser-action with install-only, which"; \
+		echo "is what CI does.$(COLOR_RESET)"; \
 		go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION); \
 	fi
 	@echo "$(COLOR_BLUE)Building binaries, tarballs, debs and rpms...$(COLOR_RESET)"

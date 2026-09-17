@@ -143,7 +143,7 @@ jobs:
     # destinations, scripts/postinstall.sh's paths and the version constant have to agree, and a
     # release is the worst place to find out they do not.
     - name: .goreleaser.yml agrees with the scripts, the Makefile and the version constant
-      run: go test ./internal/config/ -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestPostinstall|TestPreremove|TestMakefile'
+      run: go test ./internal/config/ -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestTheGoreleaserVersion|TestPostinstall|TestPreremove|TestMakefile'
 
     # `version:` pins the goreleaser binary exactly, not to a floating `~> v2`, and that is a
     # different judgement from the `@v7` on the action above. The action is a wrapper that downloads

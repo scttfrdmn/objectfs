@@ -791,6 +791,85 @@ func TestMakefileBuildsPackages(t *testing.T) {
 	}
 }
 
+// TestTheGoreleaserVersionIsPinnedToOneValueEverywhere couples the three copies of the pin.
+//
+// The Makefile's GORELEASER_VERSION, ci.yml's `packaging` job and release.yml's `artifacts` job each
+// name a goreleaser version, and the reason all three pin it exactly rather than floating on `~> v2`
+// is that goreleaser decides what the published assets are *called* and what is inside them. A minor
+// that changed a default file name would rename every asset on the release page — the class of change
+// .goreleaser.yml overrides two templates to prevent.
+//
+// Which makes a *disagreement* between the three the same defect wearing a different hat: a pull
+// request proving a packaging change under one goreleaser, and a tag publishing it under another. The
+// pin is only worth having if there is one of it.
+//
+// Read as a set with a floor on the count, not as three named lookups. A fourth workflow that installs
+// goreleaser has to join this assertion or fail it; a version that stops being found fails rather than
+// passing vacuously, which is the direction an enumerated gate has to fail in.
+func TestTheGoreleaserVersionIsPinnedToOneValueEverywhere(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+
+	pins := make(map[string][]string)
+
+	m := goreleaserPin.FindStringSubmatch(readFile(t, filepath.Join(root, "Makefile")))
+	if m == nil {
+		t.Fatal("the Makefile does not set GORELEASER_VERSION. package-linux either stopped pinning " +
+			"the tool or stopped installing it, and with nothing to compare against every assertion " +
+			"below is vacuous")
+	}
+
+	pins[m[1]] = append(pins[m[1]], "Makefile's GORELEASER_VERSION")
+
+	// Steps that use the action, rather than every `version:` in the file. The first version of this
+	// read the latter and found v2.12.2 in ci.yml — golangci-lint's pin, under golangci-lint-action —
+	// which is a real pin of a real tool and has nothing to do with this one.
+	for _, workflow := range []string{"ci.yml", "release.yml"} {
+		body := withoutComments(readFile(t, filepath.Join(root, ".github", "workflows", workflow)))
+
+		steps := stepsUsing(body, "goreleaser/goreleaser-action")
+		if len(steps) == 0 {
+			t.Errorf("%s never uses goreleaser/goreleaser-action. ci.yml has to install goreleaser for "+
+				"`make package-linux` (the Makefile's from-source fallback cannot run under "+
+				"GOTOOLCHAIN=local, which setup-go sets) and release.yml has to run it", workflow)
+
+			continue
+		}
+
+		for _, step := range steps {
+			version := actionInput(step, "version")
+			if version == "" {
+				t.Errorf("%s uses goreleaser-action without pinning `version:`, so it runs whatever the "+
+					"action defaults to. goreleaser decides what the published assets are *called*: a "+
+					"minor that changed a default file name would rename every asset on the release page, "+
+					"which is the class of change .goreleaser.yml overrides two templates to prevent",
+					workflow)
+
+				continue
+			}
+
+			pins[version] = append(pins[version], workflow)
+		}
+	}
+
+	if len(pins) > 1 {
+		t.Errorf("the goreleaser version is pinned to %d different values: %v.\n"+
+			"All of them have to agree. `make package-linux` exists so that the command a developer runs, "+
+			"the command ci.yml's packaging job runs on every pull request, and the command release.yml "+
+			"runs on a tag are the same command over the same config — and a version skew means the "+
+			"pull request proved a different tool than the release used. goreleaser owns the asset "+
+			"names, so that difference is publishable.", len(pins), pins)
+	}
+}
+
+// goreleaserPin matches the Makefile's `GORELEASER_VERSION := v2.18.1`.
+//
+// Only the Makefile. The workflows' pins are read out of the goreleaser-action step that sets them,
+// because a bare `version:` is also golangci-lint-action's input and matching it here reported a
+// version skew that did not exist.
+var goreleaserPin = regexp.MustCompile(`GORELEASER_VERSION :?= (v\d+\.\d+\.\d+)`)
+
 // ------------------------------------------------------------------------------------------------
 // The behavioral half: the scripts are run, not read.
 // ------------------------------------------------------------------------------------------------
