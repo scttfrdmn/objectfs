@@ -790,10 +790,10 @@ jobs:
   # packaging — the deb and the rpm are built, installed, and removed, on a real dpkg.
   #
   # Its own job for the reason systemd-unit is: what it checks cannot be checked by `go test`. The
-  # Go tests in internal/config/packaging_test.go read nfpm.yaml against the filesystem and *run*
-  # the two maintainer scripts against a scratch root, which covers every coupling and every
-  # idempotency claim — but not whether dpkg accepts the archive, and not whether it runs the
-  # scriptlets in the states it actually runs them in.
+  # Go tests in internal/config/packaging_test.go read .goreleaser.yml's `nfpms:` section against the
+  # filesystem and *run* the two maintainer scripts against a scratch root, which covers every
+  # coupling and every idempotency claim — but not whether dpkg accepts the archive, and not whether
+  # it runs the scriptlets in the states it actually runs them in.
   #
   # #207's diagnosis was that scripts/preremove.sh could never run, because a pre-removal hook is
   # invokable only by a package manager and there was no packaging in the tree. So the check that
@@ -803,8 +803,13 @@ jobs:
   #
   # dpkg only. There is no rpm on ubuntu-latest and installing one gives a database with no
   # distribution behind it, so `rpm -i` would fail on unrelated dependency resolution rather than
-  # on anything about this package. The rpm is still *built* here — nfpm's rpm writer is where a
-  # malformed spec would surface — and `rpm -qp` under a container is the follow-on worth having.
+  # on anything about this package. All three rpms are still *built* here — nfpm's rpm writer is where
+  # a malformed spec would surface — and `rpm -qp` under a container is the follow-on worth having.
+  #
+  # `make package-linux` is goreleaser now, so this job builds the tarballs as well as the packages and
+  # takes about thirty seconds longer than the nfpm loop it replaces. That is the cost of the property
+  # worth having: the command a release runs and the command this job runs are the same command
+  # reading the same config, so a packaging change cannot be green here and broken on a tag.
   # ---------------------------------------------------------------------------------------------
   packaging:
     runs-on: ubuntu-latest
@@ -816,10 +821,10 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
-    - name: nfpm.yaml agrees with the scripts, the Makefile and the version constant
-      run: go test ./internal/config/ -v -run 'TestPackag|TestPostinstall|TestPreremove|TestMakefile'
+    - name: .goreleaser.yml agrees with the scripts, the Makefile and the version constant
+      run: go test ./internal/config/ -v -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestPostinstall|TestPreremove|TestMakefile'
 
-    - name: Build the deb and the rpm
+    - name: Build every artifact, including the deb and the rpm
       run: make package-linux
 
     - name: Install the deb, and let the postinstall scriptlet run
@@ -858,8 +863,13 @@ jobs:
       run: |
         sudo apt-get install -y lmod
 
-        # From the constant, with release.yml's expression, because the version is in the *filename*.
-        V=$(sed -n 's/^[[:space:]]*version = "\(.*\)"/\1/p' cmd/objectfs/main.go)
+        # Out of goreleaser's own metadata.json, not out of cmd/objectfs/main.go, because the version
+        # is in the *filename* and this step needs the one that was actually built. Those differ here
+        # on purpose: a local or CI build is a `--snapshot`, so the constant says 0.14.0 and the
+        # artifacts say 0.14.1-next. Reading the constant would have this step look for a path nothing
+        # created and report it as a packaging failure. metadata.json is written by the same run that
+        # chose the string, so there is nothing to translate and nothing to keep in step.
+        V=$(python3 -c 'import json,sys; print(json.load(open("dist/metadata.json"))["version"])')
         test -n "$V"
 
         test -f "/usr/share/modulefiles/objectfs/$V.lua"
@@ -874,7 +884,8 @@ jobs:
         echo "$avail"
         if [ "$(printf '%s\n' "$avail" | grep -c "objectfs/$V\b")" != "1" ]; then
           echo "::error::\`module avail\` does not list exactly one objectfs/$V. Shipping the Lmod" \
-            "and TCL files into one directory is supposed to yield a single module; see nfpm.yaml."
+            "and TCL files into one directory is supposed to yield a single module; see" \
+            ".goreleaser.yml."
           exit 1
         fi
 
@@ -888,8 +899,8 @@ jobs:
         # modulefiles_test.go's comment at TestModulefilesLoadUnderRealModuleSystems.
         if ! printf '%s\n' "$out" | grep -qE "^OBJECTFS_VERSION=$V;?$"; then
           echo "::error::loading the installed module did not export OBJECTFS_VERSION=$V. The" \
-            "modulefile reads its version out of its own install path, so this is nfpm.yaml's dst" \
-            "and the modulefile disagreeing."
+            "modulefile reads its version out of its own install path, so this is the nfpms dst in" \
+            ".goreleaser.yml and the modulefile disagreeing."
           exit 1
         fi
 
@@ -967,7 +978,7 @@ jobs:
         test -f /etc/objectfs/config.yaml
 
         # The package's own files are gone, which is the other half of a removal working. Every
-        # path here is one nfpm.yaml ships, so dpkg owns it and `remove` — not just `purge` — takes
+        # path here is one .goreleaser.yml ships, so dpkg owns it and `remove` — not just `purge` — takes
         # it.
         test ! -f /usr/bin/objectfs
         test ! -f /usr/lib/systemd/system/objectfs@.service
@@ -992,7 +1003,7 @@ jobs:
         #   E: Unable to locate package objectfs
         #
         # dpkg keeps a removed package in the `rc` state — removed, config-files remain — only when
-        # it has **conffiles**, and a conffile is precisely what nfpm.yaml declines to create by
+        # it has **conffiles**, and a conffile is precisely what the packaging declines to create by
         # shipping nothing under /etc (a packaged file there prompts on upgrade, which hangs an
         # unattended `apt upgrade`). With no conffiles there is no residual state, so `remove` is
         # already complete: the package leaves dpkg's database entirely, apt no longer knows the name,
@@ -1011,7 +1022,7 @@ jobs:
           *config-files*)
             echo "::error::objectfs is in dpkg's rc state, so it now ships a conffile. That means" \
               "an upgrade will prompt the operator to merge it, which hangs an unattended apt run —" \
-              "see the /etc reasoning in nfpm.yaml. If this is intended, it needs a postremove" \
+              "see the /etc reasoning in .goreleaser.yml. If this is intended, it needs a postremove" \
               "scriptlet and this step needs to become a real purge test."
             exit 1
             ;;

@@ -15,7 +15,7 @@ import (
 // It is part (b) of #138 and the same shape of gate as release_platforms_test.go is for #198 and
 // release_packages_test.go is for the packages: two files that must agree, with nothing connecting
 // them. install.sh builds a download URL out of a platform name it derives from `uname`, and
-// release.yml decides what those names are. A platform the release publishes and the script cannot
+// .goreleaser.yml decides what those names are. A platform the release publishes and the script cannot
 // name is a user on that architecture reading a 404; a name the script produces and the release does
 // not publish is the same 404 from the other direction.
 //
@@ -48,7 +48,7 @@ func installScript(t *testing.T) string {
 
 // TestInstallScriptNamesEveryPublishedAsset is the coupling itself.
 //
-// Every asset in release.yml's build matrix must be a name install.sh can produce, and every name
+// Every asset .goreleaser.yml's archive build produces must be a name install.sh can produce, and every name
 // install.sh can produce must be a published asset. Both directions, because they fail differently
 // and both fail as a 404 the user cannot interpret: a published platform the script cannot name is
 // unreachable through the documented install path, and a name the script invents is a download that
@@ -56,18 +56,11 @@ func installScript(t *testing.T) string {
 func TestInstallScriptNamesEveryPublishedAsset(t *testing.T) {
 	t.Parallel()
 
-	root := repoRoot(t)
-
-	// The asset names, taken from the same matrix release_platforms_test.go reads. `name:` is the
-	// authority rather than goos/goarch, because the asset is called objectfs-linux-armv7 while the
-	// matrix cell is goarch: arm with goarm: 7 — deriving the name from the pair would reproduce the
-	// arithmetic release.yml already did and could disagree with it.
-	published := releaseAssetNames(t, readFile(t, filepath.Join(root, ".github", "workflows",
-		"release.yml")))
+	// The asset names, computed from the same build release_platforms_test.go reads.
+	published := releaseAssetNames(t)
 	if len(published) == 0 {
-		t.Fatal("read no asset names out of release.yml's build matrix — the job may have been " +
-			"renamed or its matrix reformatted, and an empty set satisfies everything below without " +
-			"checking anything")
+		t.Fatal("read no asset names out of .goreleaser.yml's archive build — the build may have been " +
+			"renamed, and an empty set satisfies everything below without checking anything")
 	}
 
 	produced := installScriptPlatforms(t, installScript(t))
@@ -81,7 +74,7 @@ func TestInstallScriptNamesEveryPublishedAsset(t *testing.T) {
 			continue
 		}
 
-		t.Errorf("release.yml publishes objectfs-%s.tar.gz and scripts/install.sh cannot produce the "+
+		t.Errorf("the release publishes objectfs-%s.tar.gz and scripts/install.sh cannot produce the "+
 			"name %q, so there is no `uname` result on that platform that leads to that asset. A user "+
 			"there gets a 404 from the documented install path, or is told their machine is "+
 			"unsupported on a platform this project ships a binary for", asset, asset)
@@ -92,7 +85,7 @@ func TestInstallScriptNamesEveryPublishedAsset(t *testing.T) {
 			continue
 		}
 
-		t.Errorf("scripts/install.sh can produce the platform name %q and release.yml publishes no "+
+		t.Errorf("scripts/install.sh can produce the platform name %q and the release publishes no "+
 			"objectfs-%s.tar.gz, so a machine of that shape downloads a URL that does not exist. The "+
 			"404 arrives with no explanation of which of the two files is wrong", asset, asset)
 	}
@@ -385,51 +378,25 @@ func functionBody(script, signature string) string {
 	return rest
 }
 
-// releaseAssetNames reads the `name:` values out of release.yml's build matrix.
+// releaseAssetNames returns the platform suffix of every tarball a release publishes.
 //
-// The same walk releasePlatforms does, reading a different key. Kept separate rather than
-// generalised: that function's callers want goos/goarch pairs to compare against ci.yml's
-// cross-build cells, and this one wants the asset suffix, which is a third value in the same cell.
-func releaseAssetNames(t *testing.T, workflow string) []string {
+// It used to read the `name:` value out of each cell of release.yml's build matrix, and the comment
+// here argued for that: `name:` was the authority rather than goos/goarch, "because the asset is
+// called objectfs-linux-armv7 while the matrix cell is goarch: arm with goarm: 7 — deriving the name
+// from the pair would reproduce the arithmetic release.yml already did and could disagree with it".
+//
+// That matrix is gone, and with it the written-down name. goreleaser expands the cross product and
+// renders one `name_template` over it, so the arithmetic now happens in exactly one place and this
+// function does have to reproduce it. What keeps the old objection answered is
+// TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes, which fails if that template is no longer
+// the one goreleaserTarget.Asset models — so the two cannot drift silently, they collide loudly.
+func releaseAssetNames(t *testing.T) []string {
 	t.Helper()
 
-	var (
-		names    []string
-		inMatrix bool
-		inEntry  bool
-	)
+	var names []string
 
-	for line := range strings.SplitSeq(workflow, "\n") {
-		trimmed := strings.TrimSpace(line)
-
-		if trimmed == "include:" {
-			inMatrix = true
-
-			continue
-		}
-
-		if !inMatrix {
-			continue
-		}
-
-		if releaseMatrixEntry.MatchString(trimmed) {
-			inEntry = true
-
-			continue
-		}
-
-		if !inEntry {
-			break
-		}
-
-		m := yamlKeyValue.FindStringSubmatch(trimmed)
-		if m == nil {
-			break
-		}
-
-		if m[1] == "name" {
-			names = append(names, m[2])
-		}
+	for _, target := range goreleaserTargets(t, "archives") {
+		names = append(names, target.Asset())
 	}
 
 	sort.Strings(names)

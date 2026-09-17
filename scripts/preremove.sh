@@ -1,7 +1,7 @@
 #!/bin/bash
 # ObjectFS pre-removal scriptlet (deb prerm / rpm %preun).
 #
-# Wired into both packages by nfpm.yaml. Runs *before* the package's files are deleted, which is why
+# Wired into both packages by .goreleaser.yml's `nfpms:` section. Runs *before* the package's files are deleted, which is why
 # it can still use /usr/bin/objectfs — that matters, because `objectfs unmount` is the only unmount
 # path that reports which of several methods it tried and what is holding a mount open.
 #
@@ -272,7 +272,7 @@ main() {
     # Printed even on failure, because the operator retrying the removal should not have to wonder
     # whether the first attempt deleted their configuration.
     #
-    # "contents", precisely, and the distinction is not pedantry. nfpm.yaml ships these three as
+    # "contents", precisely, and the distinction is not pedantry. The packaging ships these three as
     # `type: dir` entries, so the package manager owns the directories themselves and will remove
     # each one that is empty. What it will not touch is anything inside: a directory holding a config
     # file or a cache is non-empty, so it survives with its contents. Claiming the directories are

@@ -2,7 +2,6 @@ package config
 
 import (
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -29,15 +28,16 @@ import (
 //
 // Note the direction, as in release_platforms_test.go: this asserts ci ⊆ release for package formats.
 // A format built in CI and not shipped is the defect. A format shipped and not built in CI would be a
-// different and worse defect, and it cannot occur here — both come out of the same `make package-linux`
-// invocation, which is itself asserted by TestMakefileBuildsPackages.
+// different and worse defect, and it cannot occur here — both come out of one `.goreleaser.yml`,
+// invoked by `make package-linux` in CI and by the goreleaser action on a tag, running the same
+// binary over the same config. TestMakefileBuildsPackages asserts the CI half of that.
 
 // TestReleaseAttachesTheLinuxPackages is the coupling itself.
 func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
-	release := readFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
+	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
 
 	// Comments are stripped before any of this, and that is not a detail. The first version of these two
 	// checks ran strings.Contains over the whole file and both survived mutation: deleting the `run: make
@@ -45,22 +45,53 @@ func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	// package-linux` builds, and removing the .deb and .rpm upload paths still passed, because a comment
 	// and the summary step both name them. A gate satisfied by prose about a step is the same defect as a
 	// documentation gate satisfied by prose about a config key — it reads as coverage and asserts nothing.
-	effective := withoutComments(release)
+	effective := withoutComments(workflow)
 
-	// The build has to happen, as an executable line. Checked by the Makefile target rather than by a job
-	// name, because the target is the contract: TestMakefileBuildsPackages already asserts what it
-	// produces, so a release that invokes it inherits that.
+	// The build has to happen. `make package-linux` was the literal here, and hasCommandLine existed to
+	// recognize it whether the step was a one-line `run:` or a block scalar — the signing key's gpg.conf
+	// had to be written before make ran, so the spelling changed while the property held.
 	//
-	// `run: make package-linux` was the literal, and it broke when the step gained a second line — the
-	// signing key's gpg.conf has to be written before make runs, so the one-line `run:` became a block.
-	// The property held throughout; the spelling did not. What matters is that the target is invoked as a
-	// command, so a line whose first field is `make` and which names the target is what is checked, with
-	// comments already stripped above.
-	if !hasCommandLine(effective, "make", "package-linux") {
-		t.Error("release.yml never runs `make package-linux`, so no published release carries a " +
-			".deb or an .rpm. Both are built and installed by ci.yml's packaging job on every PR, which " +
-			"means the formats are proven and unobtainable at the same time — the #207 shape of defect: " +
-			"working code with nothing invoking it")
+	// release.yml no longer shells out to make. It runs the goreleaser action, which downloads a pinned
+	// goreleaser and hands it the same config `make package-linux` hands a developer's copy. So the step
+	// is found by the action it uses rather than by its name or by a command line: the action is the
+	// contract, and a step name is prose.
+	steps := stepsUsing(effective, "goreleaser/goreleaser-action")
+	if len(steps) == 0 {
+		t.Fatal("release.yml never runs goreleaser, so no published release carries a .deb or an " +
+			".rpm — or a tarball. Both package formats are built and installed by ci.yml's packaging job " +
+			"on every PR, which would leave them proven and unobtainable at the same time: the #207 " +
+			"shape of defect, working code with nothing invoking it")
+	}
+
+	// And it has to be asked to `release`, not to `build`. `goreleaser build` compiles the binaries and
+	// produces no archive, no package and no checksum — a step that succeeds, a job that goes green, and
+	// a dist/ holding five bare binaries under per-target directories that no upload glob matches. The
+	// release page would come out empty of everything except the notes.
+	//
+	// `--snapshot` is checked for too, and it is the subtler mistake of the two, because it is what
+	// `make package-linux` correctly passes: a snapshot ignores the tag and stamps the version as
+	// `0.14.1-next`, so every asset on a v0.14.0 release page would be named for a version that does not
+	// exist.
+	releaseStep := ""
+
+	for _, step := range steps {
+		if strings.Contains(step, "release") {
+			releaseStep = step
+		}
+	}
+
+	if releaseStep == "" {
+		t.Errorf("release.yml runs the goreleaser action without `release` in its args:\n%s\n\n"+
+			"`goreleaser build` compiles the binaries and stops: no tarballs, no packages, no checksums. "+
+			"The step passes and dist/ holds bare binaries under per-target directories that no upload "+
+			"glob matches", strings.Join(steps, "\n---\n"))
+	}
+
+	if strings.Contains(releaseStep, "--snapshot") {
+		t.Error("release.yml passes --snapshot to goreleaser. A snapshot build ignores the tag and " +
+			"derives its version from the previous one — v0.14.0 would publish assets named 0.14.1-next, " +
+			"with package metadata to match. `make package-linux` passes it deliberately, because a " +
+			"developer building from an untagged tree has no other version to use; a release must not")
 	}
 
 	// And the packages have to reach the release. Building them into an artifact nothing attaches is the
@@ -70,7 +101,7 @@ func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	// The upload is what is asserted, not any mention of the path. `publish` also globs dist/ into the
 	// summary, and a package that reaches the summary and not the upload is listed in a job log nobody
 	// reads while being absent from the release.
-	upload := jobStep(t, effective, "Upload the packages")
+	upload := jobStep(t, effective, "Upload the artifacts")
 	for _, format := range []string{".deb", ".rpm"} {
 		if !strings.Contains(upload, "dist/*"+format) {
 			t.Errorf("the package upload step does not include dist/*%s. A package built into a workflow "+
@@ -82,22 +113,33 @@ func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	// The publish job has to wait for it. Without this, a packaging failure lets the release publish
 	// anyway, silently missing the packages — which is worse than a failed release, because the page
 	// looks finished and the omission is visible only to someone who knew to expect a .deb.
-	needs := needsList(t, release, "Publish Release")
-	if !strings.Contains(needs, "package-linux") {
-		t.Errorf("the Publish Release job's `needs` is %q and does not include package-linux, so a "+
-			"packaging failure would publish a release with the tarballs and no packages. A release that "+
-			"looks complete and is not is harder to notice than one that failed", needs)
+	//
+	// The job named is `artifacts`, which is where the five-cell build matrix and the nfpm loop were
+	// merged: one job now produces every tarball, every package and every checksum, so there is no
+	// longer a packaging job that can fail while the tarball job succeeds. That merge removed a failure
+	// mode and this assertion is what stops the remaining one.
+	needs := needsList(t, workflow, "Publish Release")
+	if !strings.Contains(needs, "artifacts") {
+		t.Errorf("the Publish Release job's `needs` is %q and does not include artifacts, so a "+
+			"packaging failure would publish a release with no assets at all \u2014 the notes are built from "+
+			"CHANGELOG.md and do not need the build to have run. A release that looks complete and is "+
+			"not is harder to notice than one that failed", needs)
 	}
 }
 
-// TestReleaseChecksThePackageVersionAgainstTheTag guards the one link nfpm.yaml names as unchecked.
+// TestReleaseChecksThePackageVersionAgainstTheTag guards the one link nothing else covers.
 //
-// nfpm.yaml's own comment states the gap this closes: "nothing reads a package's version back to
+// nfpm.yaml's own comment stated the gap this closes: "nothing reads a package's version back to
 // compare it, so `objectfs version` inside objectfs_0.12.0_amd64.deb would say 0.13.0 and no gate
 // anywhere would notice". Both halves of the chain were verified and the join was not — release.yml
 // checks the tag against the version constant, and TestPackageVersionComesFromTheVersionConstant
-// checks that nfpm.yaml reads the constant rather than a literal, but nothing read the version back
-// out of a built package.
+// checks that the packaging config holds no version of its own, but nothing read the version back out
+// of a built package.
+//
+// goreleaser makes the chain shorter and does not make this redundant: the version now comes from the
+// tag through goreleaser's own template rather than through an environment variable, and reading it
+// back out of the .deb is still the only check that the value which reached the package metadata is
+// the value the tag named.
 //
 // A wrong version in a package is not cosmetic. `apt-get install --only-upgrade` and `dnf update`
 // decide whether to act by comparing versions, so a package declaring a version it does not contain is
@@ -110,44 +152,59 @@ func TestReleaseChecksThePackageVersionAgainstTheTag(t *testing.T) {
 
 	if !strings.Contains(release, "dpkg-deb --field") {
 		t.Error("release.yml builds the packages without reading a version back out of one. nfpm.yaml's " +
-			"comment names this exact gap: the tag is checked against the version constant and the " +
-			"constant against nfpm.yaml, and nothing checks either against what nfpm actually wrote. A " +
+			"comment named this exact gap: the tag is checked against the version constant and nothing " +
+			"checks either against what the packaging actually wrote. A " +
 			"package declaring a version it does not contain makes `apt-get install --only-upgrade` a " +
 			"no-op, which is an upgrade that silently does not happen")
 	}
 
-	// The -1 matters and is easy to get wrong: nfpm writes objectfs_0.13.0-1_amd64.deb and a Version
-	// field of 0.13.0-1, because nfpm.yaml pins `release: '1'`. The first draft of that workflow step
+	// The -1 matters and is easy to get wrong: the deb is objectfs_0.13.0-1_amd64.deb with a Version
+	// field of 0.13.0-1, because the packaging pins `release: "1"`. The first draft of that workflow step
 	// spelled the filename without the suffix and would have failed the release it was added to protect
 	// — caught by running `make package-linux` locally rather than by reasoning about the name.
 	if !strings.Contains(release, "$TAG-1") {
-		t.Error("release.yml compares a package version without the `-1` release suffix. nfpm.yaml pins " +
-			"`release: '1'`, so both the filename and the Version field carry it: " +
+		t.Error("release.yml compares a package version without the `-1` release suffix. .goreleaser.yml " +
+			"pins `release: \"1\"`, so both the filename and the Version field carry it: " +
 			"objectfs_0.13.0-1_amd64.deb, Version 0.13.0-1. A comparison against a bare version fails " +
 			"every release")
 	}
 }
 
-// hasCommandLine reports whether any line runs cmd with arg among its words.
+// stepsUsing returns the body of every step whose `uses:` names action.
 //
-// Written for `make package-linux`, where the step may be a one-line `run:` or a block scalar with the
-// invocation somewhere inside it, and both are correct. A leading `run: ` is stripped so the one-line
-// form is recognized as the command it is.
-func hasCommandLine(doc, cmd, arg string) bool {
-	for line := range strings.SplitSeq(doc, "\n") {
-		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "run: ")
+// Steps rather than the whole file, because what has to be read is one step's `with:` block: `args:`
+// belongs to the step that sets it, and a workflow that runs goreleaser twice — once with `--snapshot`
+// for a dry run, once for real — would satisfy any file-wide substring check in both directions at
+// once.
+//
+// Split on `- name: `, which every step in this repository's workflows has. A step that used an action
+// without naming it would be invisible here; that is a lint failure in this project's own conventions
+// before it is a gap in this test.
+func stepsUsing(workflow, action string) []string {
+	var (
+		steps   []string
+		current []string
+	)
 
-		fields := strings.Fields(trimmed)
-		if len(fields) == 0 || fields[0] != cmd {
-			continue
+	flush := func() {
+		if len(current) > 0 && strings.Contains(strings.Join(current, "\n"), "uses: "+action) {
+			steps = append(steps, strings.Join(current, "\n"))
 		}
 
-		if slices.Contains(fields[1:], arg) {
-			return true
-		}
+		current = nil
 	}
 
-	return false
+	for line := range strings.SplitSeq(workflow, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "- name: ") {
+			flush()
+		}
+
+		current = append(current, line)
+	}
+
+	flush()
+
+	return steps
 }
 
 // withoutComments drops full-line YAML comments.
