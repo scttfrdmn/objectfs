@@ -261,6 +261,14 @@ func goreleaserTargets(t *testing.T, buildID string) []goreleaserTarget {
 // package; this is the one that pins the template itself, because a change to it renames every asset
 // on the release page at once and goreleaser's own default — `{{.ProjectName}}_{{.Version}}_{{.Os}}_
 // {{.Arch}}` — is a different convention entirely.
+//
+// The archive's name and the archived binary's name are two independent templates that have to be the
+// same string, and this asserts both. `wrap_in_directory: false` means the tarball holds exactly one
+// file, and install.sh extracts it and then looks up `objectfs-linux-amd64` by name before renaming it
+// to `objectfs` — a rename it does because a user cannot invoke the platform-named binary. So a build
+// whose `binary:` drifts from the archive's `name_template` produces a tarball that downloads,
+// verifies its checksum and then dies on "does not contain objectfs-linux-amd64". Mutating one of the
+// two templates and leaving the other passed every test in this package before this half existed.
 func TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes(t *testing.T) {
 	t.Parallel()
 
@@ -278,6 +286,30 @@ func TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes(t *testing.T) {
 			"404 and reports that the release layout changed. If the rename is deliberate, install.sh, "+
 			"release.yml's verification loop, the README one-liner and archiveNameTemplate here all "+
 			"move together.", packagingFile, got, archiveNameTemplate)
+	}
+
+	var archived *goreleaserBuild
+
+	for i := range cfg.Builds {
+		if cfg.Builds[i].ID == "archives" {
+			archived = &cfg.Builds[i]
+		}
+	}
+
+	if archived == nil {
+		t.Fatalf("%s has no build with id \"archives\", which is the one the tarballs are built from",
+			packagingFile)
+	}
+
+	if got := strings.TrimSpace(archived.Binary); got != archiveNameTemplate {
+		t.Errorf("%s's \"archives\" build names its binary\n\t%s\nand the archive it goes into is named"+
+			"\n\t%s\n\nThose have to be the same string. The tarball holds one file and no directory, and "+
+			"scripts/install.sh extracts it and then looks that exact name up before renaming it to "+
+			"objectfs — so a release built this way downloads, passes its checksum, and dies on \"does "+
+			"not contain objectfs-<platform>\" on every platform at once. goreleaser has no rename step "+
+			"between a build and an archive, which is why the two templates exist separately and why "+
+			"nothing else notices when they disagree.", packagingFile, got,
+			strings.TrimSpace(cfg.Archives[0].NameTemplate))
 	}
 }
 
