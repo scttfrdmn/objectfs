@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,6 +29,7 @@ import (
 	"github.com/scttfrdmn/objectfs/internal/compression"
 	"github.com/scttfrdmn/objectfs/internal/storage/s3"
 	"github.com/scttfrdmn/objectfs/internal/testaws"
+	objectfserrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 // framedObject is a written framed object plus everything a test needs to reason about its layout:
@@ -737,6 +740,13 @@ func TestFramedReadDetectsAnOverwriteBetweenTheIndexAndTheFrames(t *testing.T) {
 // second opinion — the same damaged frame is part of that stream too — so the choice is not between a
 // cheap wrong answer and an expensive right one. It is between reporting corruption and hiding it
 // behind whatever the codec makes of the damage.
+//
+// Which is exactly why this test asserts *which* check failed rather than just that a corruption error
+// came back. Making the framed path fall back instead of erroring still produces a corruption error:
+// the whole-object read that follows fails its own objectfs-sha256 comparison over the same damaged
+// bytes. A mutation run confirmed that, so an assertion of "error, code DataCorruption, not retryable"
+// passes with this entire branch deleted. The message and the frame-specific details are what tell the
+// two apart.
 func TestFramedReadReportsDamagedFramesRatherThanFallingBack(t *testing.T) {
 	t.Parallel()
 
@@ -771,4 +781,272 @@ func TestFramedReadReportsDamagedFramesRatherThanFallingBack(t *testing.T) {
 
 	got, err := backend.GetObject(context.Background(), f.key, readAt, readSize)
 	requireCorruptionError(t, err, got, readSize)
+
+	// Which check fired. Both paths report corruption over these bytes, so this is the whole assertion.
+	var objErr *objectfserrors.ObjectFSError
+	if !errors.As(err, &objErr) {
+		t.Fatalf("error is unstructured: %v", err)
+	}
+
+	if !strings.Contains(objErr.Message, "does not match the index stored with it") {
+		t.Errorf("corruption was reported as %q.\nWant the framed path's per-frame check. This message "+
+			"is the whole-content objectfs-sha256 check downstream of a fallback, which means the "+
+			"framed path declined a damaged frame instead of refusing it — and a partial read that "+
+			"declines has to fetch and hash the whole object to notice anything is wrong at all.\n"+
+			"Details: %v", objErr.Message, objErr.Details)
+	}
+
+	// The frame-level detail an operator needs, and a second way the two messages cannot be confused:
+	// only the framed path knows which frames and which stored span were involved.
+	for _, key := range []string{"frames", "span_start", "span_length"} {
+		if _, ok := objErr.Details[key]; !ok {
+			t.Errorf("the corruption error carries no %q detail, so it does not say which stored bytes "+
+				"failed. Details: %v", key, objErr.Details)
+		}
+	}
+
+	// And it must not have been recorded as a fallback: a fallback is a performance event an operator
+	// may reasonably ignore, and damaged stored bytes are not that.
+	m := backend.GetMetrics()
+	if m.SeekableWholeFallbacks != 0 {
+		t.Errorf("SeekableWholeFallbacks = %d (reason %q) for a damaged frame, want 0. Damage is not a "+
+			"fallback — it is reported to the caller, and counting it here buries it among the "+
+			"structural declines that are safe to ignore",
+			m.SeekableWholeFallbacks, m.SeekableLastFallbackReason)
+	}
+
+	if m.SeekableReads != 0 {
+		t.Errorf("SeekableReads = %d, want 0: a read that failed integrity did not serve anything and "+
+			"must not be counted as a framed read served", m.SeekableReads)
+	}
+}
+
+// TestFramedReadAtExactlyEndOfContentReturnsNothing pins the boundary at the top of the content.
+//
+// `offset == UncompressedSize` is the offset a sequential reader arrives at when it finishes the file,
+// and every filesystem read loop issues it: read until short, then read once more to see EOF. So this
+// is not an edge case, it is the last request of every full-file read.
+//
+// It has to be answered from the index, without a second request. The index has already been fetched
+// and it already says how long the content is, so the answer is available; going to the store for it
+// means every closed file costs an extra round trip that can only return nothing. And an off-by-one
+// here is invisible to a correctness test, because a whole-object fallback returns the same empty slice
+// — which is what a mutation run showed. The assertion that makes it visible is the request count.
+func TestFramedReadAtExactlyEndOfContentReturnsNothing(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireRangeGET()
+
+	backend := ts.Backend(func(cfg *s3.Config) {
+		cfg.Compression.Enabled = true
+		cfg.Compression.Algorithm = "zstd"
+		cfg.Compression.Level = 3
+		cfg.Compression.MinSize = "4KB"
+		cfg.ParallelReadThreshold = 0
+	})
+
+	ctx := context.Background()
+
+	const size = 2 << 20
+
+	f := putFramedObject(t, ts, backend, "seekable/at-eof", size)
+
+	for _, r := range []struct {
+		name   string
+		offset int64
+	}{
+		{"exactly at the end", size},
+		{"one past the end", size + 1},
+		{"far past the end", size * 2},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			// Not parallel: these subtests share one backend and assert on its request log and metrics.
+			ts.ResetRequests()
+
+			got, err := backend.GetObject(ctx, f.key, r.offset, 4096)
+			if err != nil {
+				t.Fatalf("GetObject(%d, 4096) at or past the end of a %d-byte object: %v\nA read past "+
+					"EOF is a normal filesystem event, not an error", r.offset, size, err)
+			}
+
+			if len(got) != 0 {
+				t.Errorf("reading at offset %d of a %d-byte object returned %d bytes, want none",
+					r.offset, size, len(got))
+			}
+
+			// Exactly the index. The offset is past the content, so no frame covers it and no frame
+			// fetch is warranted; and the framed path knows that from the index alone.
+			gets := ts.GETs(f.key)
+			if len(gets) > 2 {
+				t.Errorf("%d GETs to answer a read at offset %d, which cannot return anything.\nThe "+
+					"index says the content is %d bytes, so the empty answer is available without "+
+					"fetching frames.\nRequests: %s",
+					len(gets), r.offset, size, describe(ts.Requests()))
+			}
+
+			if n := ts.BytesRead(f.key); n > f.desc.IndexLength+1024 {
+				t.Errorf("%d bytes transferred to answer a read past the end of a %d-byte object "+
+					"(index is %d bytes). This looks like a whole-object fetch",
+					n, size, f.desc.IndexLength)
+			}
+		})
+	}
+
+	// An EOF probe is not a fallback. Counting it would mean every closed file logged one, which is how
+	// a counter stops being worth alerting on.
+	if m := backend.GetMetrics(); m.SeekableWholeFallbacks != 0 {
+		t.Errorf("SeekableWholeFallbacks = %d (reason %q) after three reads past EOF, want 0",
+			m.SeekableWholeFallbacks, m.SeekableLastFallbackReason)
+	}
+}
+
+// TestFramedOpenEndedReadStartsAtTheOffset covers `size <= 0`, which the backend's own contract defines
+// as "from the offset to the end of the object".
+//
+// The framed path has to turn that into a length before it can look up covering frames, and the length
+// is `UncompressedSize - offset`. Dropping the offset — asking for the whole content starting partway
+// in — produces a request for more content than exists past that point, and FramesCovering answers it
+// by clamping at the last frame. So the bytes come back correct and nothing is obviously wrong; a
+// mutation confirmed the whole suite still passed. What it costs is every frame from the offset to the
+// end of the object, on a read that asked for the tail of a large file.
+func TestFramedOpenEndedReadStartsAtTheOffset(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireRangeGET()
+
+	backend := ts.Backend(func(cfg *s3.Config) {
+		cfg.Compression.Enabled = true
+		cfg.Compression.Algorithm = "zstd"
+		cfg.Compression.Level = 3
+		cfg.Compression.MinSize = "4KB"
+		cfg.ParallelReadThreshold = 0
+	})
+
+	ctx := context.Background()
+
+	const size = 2 << 20
+
+	f := putFramedObject(t, ts, backend, "seekable/open-ended", size)
+
+	// Near the end, so "to the end from here" and "the whole object from here" are very different
+	// numbers of frames. At the start of the object the two agree, which is why that offset would make
+	// this test vacuous.
+	offset := int64(size) - int64(f.idx.FrameSize)/2
+
+	for _, size := range []int64{0, -1} {
+		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
+			ts.ResetRequests()
+
+			got, err := backend.GetObject(ctx, f.key, offset, size)
+			if err != nil {
+				t.Fatalf("GetObject(%d, %d): %v", offset, size, err)
+			}
+
+			if want := f.content[offset:]; !bytes.Equal(got, want) {
+				t.Fatalf("an open-ended read at offset %d returned %d bytes, want the %d bytes to the "+
+					"end of the object", offset, len(got), len(want))
+			}
+
+			// The span it should have needed: the frames covering [offset, end), computed from the
+			// index the same way the production code computes it.
+			_, spanLen := f.spanFor(offset, int64(len(f.content))-offset)
+
+			// Plus the index, plus the encoding-discovery response. Both routes into the framed path
+			// cost one request before it runs; at this offset — past the end of a ~50%-compressible
+			// stored body — that is a 416 carrying only S3's error document.
+			budget := f.desc.IndexLength + spanLen + 1024
+
+			if n := ts.BytesRead(f.key); n > budget {
+				t.Errorf("an open-ended read at offset %d of a %d-byte object transferred %d bytes "+
+					"against a budget of %d (a %d-byte index plus a %d-byte frame span).\nThe length "+
+					"an open-ended read resolves to is UncompressedSize minus the offset; resolving it "+
+					"to UncompressedSize asks for content that does not exist past this point and "+
+					"fetches every frame to the end of the object to answer it.\nRequests: %s",
+					offset, size, n, budget, f.desc.IndexLength, spanLen, describe(ts.Requests()))
+			}
+		})
+	}
+}
+
+// TestFramedReadOfANonZstdEncodingDeclinesAfterFetchingTheIndex is the second of the two decoder
+// checks, and the reason there are two.
+//
+// The first check uses the Content-Encoding the caller already has in hand, and declines before
+// spending a request. But one of the two routes into this path does not have it: a read whose offset is
+// past the end of the *stored* body gets a 416, which carries no headers about the object, so the
+// encoding is only known once the index request comes back. That is the common route on a
+// well-compressed file — it is how any read in the second half of a 2:1 compressed object arrives —
+// and on that route the re-check after the index fetch is the only decoder check there is.
+//
+// A gzip object carrying a seekable descriptor is not a state ObjectFS writes. It is the state a bucket
+// is in when something else rewrote an object in place, or when a descriptor was copied onto the wrong
+// object, and the frame decoder must not be handed bytes it has no format for.
+func TestFramedReadOfANonZstdEncodingDeclinesAfterFetchingTheIndex(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireRangeGET()
+
+	backend := ts.Backend(func(cfg *s3.Config) {
+		cfg.Compression.Enabled = true
+		cfg.Compression.Algorithm = "zstd"
+		cfg.Compression.Level = 3
+		cfg.Compression.MinSize = "4KB"
+		cfg.ParallelReadThreshold = 0
+	})
+
+	ctx := context.Background()
+
+	const (
+		size     = 2 << 20
+		readSize = 4096
+	)
+
+	f := putFramedObject(t, ts, backend, "seekable/gzip-descriptor", size)
+
+	// Same content and same descriptor, gzip bytes. The descriptor is now a lie about the body, which
+	// is the whole point: it is what sends the read down the framed path.
+	gz := gzipBytes(t, f.content)
+	seedRaw(t, ts, f.key, gz, f.meta, "gzip")
+
+	// Past the end of the gzip body, so the read arrives via the 416 route with no Content-Encoding in
+	// hand — the route where the pre-fetch decoder check has nothing to check.
+	readAt := int64(len(gz)) + (size-int64(len(gz)))/2
+	if readAt >= size {
+		t.Fatalf("gzip of the fixture is %d bytes against a %d-byte object, leaving no offset that is "+
+			"past the stored body and inside the content; without one this test takes the 206 route and "+
+			"the check it exists for is never reached", len(gz), size)
+	}
+
+	ts.ResetRequests()
+
+	got, err := backend.GetObject(ctx, f.key, readAt, readSize)
+	if err != nil {
+		t.Fatalf("GetObject(%d, %d) of a gzip object carrying a seekable descriptor: %v\nThe descriptor "+
+			"is wrong about the body, but the body is a valid gzip stream and the read is answerable by "+
+			"fetching it whole", readAt, readSize, err)
+	}
+
+	if want := f.content[readAt : readAt+readSize]; !bytes.Equal(got, want) {
+		t.Fatalf("reading a gzip object with a seekable descriptor returned %d bytes that are not the "+
+			"object's content at [%d:%d]. Frame offsets from the descriptor applied to gzip bytes is "+
+			"exactly the failure the post-index decoder check exists to prevent",
+			len(got), readAt, readAt+readSize)
+	}
+
+	m := backend.GetMetrics()
+	if m.SeekableLastFallbackReason != "no_frame_decoder" {
+		t.Errorf("SeekableLastFallbackReason = %q, want %q (fallbacks %d, framed reads %d).\nThe read "+
+			"was correct, but a gzip body must be declined for having no frame decoder. Any other "+
+			"reason means it was declined by accident and the decoder check is not what stopped it.\n"+
+			"Requests: %s",
+			m.SeekableLastFallbackReason, "no_frame_decoder",
+			m.SeekableWholeFallbacks, m.SeekableReads, describe(ts.Requests()))
+	}
+
+	if m.SeekableReads != 0 {
+		t.Errorf("SeekableReads = %d, want 0: nothing was served from frames", m.SeekableReads)
+	}
 }
