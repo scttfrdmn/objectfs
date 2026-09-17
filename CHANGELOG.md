@@ -143,6 +143,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The apt and yum package repositories, which were built and tested for three releases and never
+  published a single byte.** `scripts/setup-repo-debian.sh` (264 lines), `scripts/setup-repo-rhel.sh`
+  (273), `ci.yml`'s `repo-install` job (375), `pages.yml`'s repository-building step (235) and
+  `internal/config/served_repositories_test.go` (867) are gone — about 2,000 lines whose entire output
+  was two addresses that answered 404 for the whole life of the feature. `install.sh`, served from the
+  same workflow, answered 200 the entire time, which is how the difference was established rather than
+  assumed.
+
+  **Nothing a user could reach changes.** No page ever documented the repositories — a gate in
+  `internal/config` forbade it, on the reasoning that a documented `curl … | sudo bash` one-liner
+  fetching a signing key that 404s is worse than no instructions at all — so there is no user to
+  migrate and no address to redirect. What users had is what they keep: a `.deb` and an `.rpm` for
+  amd64 and arm64 attached to every release, which `apt install ./objectfs_*.deb` and
+  `dnf install ./objectfs-*.rpm` take directly, plus the five tarballs and `install.sh`.
+
+  The old gate's header argued the repositories were "dormant, not abandoned, and the difference
+  between the two is whether the path is still checked". That was internally coherent and it accounted
+  for the wrong cost. Publishing needed a repository secret nobody was going to create, because doing
+  so commits the project to holding a signing key and rotating it for as long as anyone has the
+  repository configured — the reasoning `docs/index.md` still gives for not publishing one. So the path
+  stayed checked, at the cost of two-thirds of this repository's workflow YAML, in order to remain one
+  secret away from a decision that had already been made in the other direction.
+
+  Three gates outlived the deletion and moved rather than going with it, because none of them was
+  actually about repositories. `TestWorkflowExpressionsAreValid` — an unparseable `${{ }}`, *including
+  one inside a YAML comment*, fails the whole workflow file before any job starts, with no job list and
+  no log — is now `internal/config/workflow_expressions_test.go`.
+  `TestTheRPMSigningPathStaysIntact` and the docs-absence walk are now
+  `internal/config/rpm_signing_test.go`; rpm signing matters with no repository in sight, since
+  `gpgcheck=1` is dnf's default for a downloaded file too and each rpm stands alone with no equivalent
+  of apt's InRelease chain. The `$GITHUB_ENV`-does-not-reach-its-own-step gate moved with it: that
+  mistake belongs to `$GITHUB_ENV`, not to the job that first made it.
+
+  `scripts/install.sh` and both of its CI jobs are deliberately kept. It is repo-independent — it reads
+  tarballs straight from the GitHub release — it is the path that works on a machine with no root and
+  no package-manager entry, which describes a large share of the HPC login nodes this project targets,
+  and it is the one address in this whole area that was actually serving traffic. Deleting a live
+  install path's tests would have reduced safety rather than machinery.
+
 - **The CargoShip module dependency, and the dead tier converter that was the only thing holding it
   in.** `ConvertTierToCargoShipStorageClass` had no production caller — its only callers were the two
   unit tests written for it — and the upload path it existed to serve was removed in v0.15.0 (#362).

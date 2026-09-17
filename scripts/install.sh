@@ -12,10 +12,14 @@
 # name under the domain and still completes no TLS handshake. Resolution was never the evidence.
 #
 # What GitHub already hosts is a tarball per platform and a SHA-256 beside it. That needs no
-# hosting decision, so it is what this installs. When a package repository exists, this script
-# gains a branch that prefers it; the download path stays, because it is the one that works on a
-# machine with no root, no package manager entry, and no network path to a third-party repo —
-# which describes a large share of the HPC login nodes this project is for.
+# hosting decision, so it is what this installs — and it is now the only thing that will. The
+# repository branch this comment used to promise is not coming: the apt and yum repositories were
+# built, kept green in CI for several releases, and never published a byte, so the machinery has been
+# removed rather than left waiting for a hosting decision nobody was going to make. The download path
+# was in any case the one that works on a machine with no root, no package manager entry, and no
+# network path to a third-party repo — which describes a large share of the HPC login nodes this
+# project is for. Releases also carry a .deb and an .rpm for anyone who wants one; `apt install
+# ./objectfs_*.deb` takes a file directly and needs no repository.
 #
 # THE CHECKSUM IS NOT OPTIONAL AND THERE IS NO FLAG TO SKIP IT.
 #

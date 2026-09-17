@@ -247,10 +247,12 @@ reach, and rotating it on a schedule, indefinitely and for as long as anyone has
 stale or lost key is worse than no repository, because it leaves a trusted signer on machines that
 already ran the setup. ObjectFS publishes packages and does not take that on.
 
-The build is written and stays exercised: `ci.yml`'s `repo-install` job constructs both repositories
-against a throwaway key on every pull request and installs from them in `ubuntu:24.04`,
-`rockylinux:9` and `opensuse/leap:15.6`, checking that a tampered index is refused. Publishing is one
-repository secret away, and nothing about that path has to be rewritten first.
+The machinery to build those repositories was written, kept green on every pull request for several
+releases, and never published a single byte — every address it would have served answered 404 for the
+whole life of the feature, while `install.sh` answered 200 the entire time. It has been removed: the
+two setup scripts, the CI job that installed from throwaway-signed copies in three containers, and the
+Pages step that would have built them. What is left is the thing that was already working, which is
+the two commands above.
 
 The packages are unsigned, for the same reason there is no repository, and a checksum is what stands in
 for the signature. Installing a downloaded package verifies the package's own digests; every release

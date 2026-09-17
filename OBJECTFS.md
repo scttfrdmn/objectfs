@@ -521,36 +521,22 @@ sudo mv objectfs-linux-amd64 /usr/local/bin/objectfs
 objectfs --version
 ```
 
-#### Package Manager Installation
+#### Package Installation
 
-**Ubuntu/Debian**:
-
-```bash
-# Add repository
-curl -fsSL https://apt.your-org.com/gpg | sudo apt-key add -
-echo "deb https://apt.your-org.com stable main" | sudo tee /etc/apt/sources.list.d/objectfs.list
-
-# Install
-sudo apt update
-sudo apt install objectfs
-```
-
-**CentOS/RHEL**:
+Each release attaches a `.deb` and an `.rpm` for amd64 and arm64. Download the one for your
+distribution from <https://github.com/scttfrdmn/objectfs/releases> and install it directly:
 
 ```bash
-# Add repository
-sudo tee /etc/yum.repos.d/objectfs.repo << EOF
-[objectfs]
-name=ObjectFS
-baseurl=https://rpm.your-org.com/stable
-enabled=1
-gpgcheck=1
-gpgkey=https://rpm.your-org.com/gpg
-EOF
-
-# Install
-sudo yum install objectfs
+apt install ./objectfs_*.deb      # Debian, Ubuntu
+dnf install ./objectfs-*.rpm      # RHEL, Fedora, Rocky
+zypper install ./objectfs-*.rpm   # openSUSE
 ```
+
+**There is no apt or yum repository**, so `apt upgrade` and `dnf upgrade` do not reach ObjectFS;
+upgrading means downloading the next release's package. This section used to give repository setup
+commands for `apt.your-org.com` and `rpm.your-org.com` — placeholder addresses that never resolved,
+so the instructions could not have worked for anyone who tried them. `docs/index.md` explains why a
+repository is not published rather than merely unfinished.
 
 **Container Deployment**:
 

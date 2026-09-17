@@ -53,13 +53,15 @@ func TestPagesWorkflowServesTheInstallScript(t *testing.T) {
 
 	workflow := withoutComments(pagesWorkflow(t))
 
-	// The copy and the byte comparison, matched as the pair of properties rather than as two literal
-	// command lines. They were literals — `cp scripts/install.sh _site/install.sh` and the matching
-	// `cmp` — until the workflow grew two more served scripts and did the copying in a loop over all
-	// three. Both properties still held and both assertions failed, which is the right failure to have
-	// but the wrong reason: a gate spelling out one of several correct shell spellings tests the
-	// spelling. What has to be true is that the installer is copied from scripts/ into the site root
-	// and compared byte for byte, however the step is written.
+	// The copy and the byte comparison. This went literal → loop-tolerant → literal again: the workflow
+	// grew two more served scripts (setup-repo-debian.sh, setup-repo-rhel.sh) and did the copying in a
+	// loop, so a gate spelling out one correct shell spelling failed for the wrong reason — both
+	// properties still held. Those two scripts are gone with the apt and yum repositories they
+	// configured, install.sh is the only served script, and the loop went back to a literal `cp`, so the
+	// loop-parsing half of this gate went with it rather than sitting here uncovered against a shape
+	// nothing writes. If the step is ever reshaped again the failure below is the legible kind — it names
+	// the property that has to hold, and a gate that goes red on a correct rewrite is recoverable in a
+	// way one that silently passes on a missing step is not.
 	//
 	// A `cp` from the wrong path succeeds, and a site serving some other file called install.sh is the
 	// failure this whole file is about — so the comparison is not optional decoration on the copy.
@@ -89,82 +91,15 @@ func TestPagesWorkflowServesTheInstallScript(t *testing.T) {
 }
 
 // copiesAndComparesFromScripts reports whether a workflow copies scripts/<name> into the site root and
-// compares the two, in either the per-file or the loop-over-names form.
-//
-// Two spellings are accepted, because both are correct and the workflow has now used each:
+// compares the two:
 //
 //	cp scripts/install.sh _site/install.sh   ... cmp scripts/install.sh _site/install.sh
-//	for script in install.sh ...; do cp "scripts/$script" "_site/$script" ... cmp ... done
 //
-// The loop form is recognized by the name appearing in the loop's word list *and* the loop body doing a
-// `cp`-and-`cmp` between scripts/ and _site/. That is deliberately not a shell parse: what it has to
-// distinguish is a served file from an unserved one, and both forms name the file either way.
+// Both halves are required. A `cp` from the wrong path succeeds, so the `cmp` is what distinguishes a
+// site serving the reviewed file from a site serving something else under the same name.
 func copiesAndComparesFromScripts(workflow, name string) bool {
-	// The explicit form first.
-	if strings.Contains(workflow, "cp scripts/"+name+" _site/"+name) &&
-		strings.Contains(workflow, "cmp scripts/"+name+" _site/"+name) {
-		return true
-	}
-
-	// The loop form. The variable name is not assumed; what is required is a `for` line that lists this
-	// file, and a body that copies and compares scripts/<var> against _site/<var>.
-	var (
-		inLoop bool
-		listed bool
-		copied bool
-		cmped  bool
-	)
-
-	for line := range strings.SplitSeq(workflow, "\n") {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, " in ") {
-			inLoop = true
-			// Each word with `;` trimmed, because the last item of the list carries the `; do` that ends
-			// the line: `for script in install.sh setup-repo-debian.sh setup-repo-rhel.sh; do`. Without
-			// this the final entry never matches, which is a check that silently only ever covers the
-			// items that happen not to be last.
-			listed = false
-
-			for field := range strings.FieldsSeq(trimmed) {
-				if strings.TrimRight(field, ";") == name {
-					listed = true
-
-					break
-				}
-			}
-
-			copied, cmped = false, false
-
-			continue
-		}
-
-		if !inLoop {
-			continue
-		}
-
-		if trimmed == "done" {
-			inLoop = false
-
-			continue
-		}
-
-		if strings.HasPrefix(trimmed, "cp ") && strings.Contains(trimmed, `"scripts/$`) &&
-			strings.Contains(trimmed, `"_site/$`) {
-			copied = true
-		}
-
-		if strings.HasPrefix(trimmed, "cmp ") && strings.Contains(trimmed, `"scripts/$`) &&
-			strings.Contains(trimmed, `"_site/$`) {
-			cmped = true
-		}
-
-		if listed && copied && cmped {
-			return true
-		}
-	}
-
-	return false
+	return strings.Contains(workflow, "cp scripts/"+name+" _site/"+name) &&
+		strings.Contains(workflow, "cmp scripts/"+name+" _site/"+name)
 }
 
 // hasSequenceEntry reports whether any line of a YAML document is exactly `- value`, at any indent.
