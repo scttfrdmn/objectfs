@@ -72,22 +72,27 @@ func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	// `make package-linux` correctly passes: a snapshot ignores the tag and stamps the version as
 	// `0.14.1-next`, so every asset on a v0.14.0 release page would be named for a version that does not
 	// exist.
+	//
+	// Read out of the `args:` value rather than looked for in the step. The first version of this
+	// searched the step body for "release" and survived the mutation it was written for: the action is
+	// `goreleaser/goreleaser-action`, and "gorelease*r*" contains "release", so every step that uses it
+	// satisfied the check whatever its args said. `build --clean` passed.
 	releaseStep := ""
 
 	for _, step := range steps {
-		if strings.Contains(step, "release") {
+		if head, _, _ := strings.Cut(strings.TrimSpace(actionInput(step, "args")), " "); head == "release" {
 			releaseStep = step
 		}
 	}
 
 	if releaseStep == "" {
-		t.Errorf("release.yml runs the goreleaser action without `release` in its args:\n%s\n\n"+
+		t.Errorf("no goreleaser step in release.yml runs the `release` command:\n%s\n\n"+
 			"`goreleaser build` compiles the binaries and stops: no tarballs, no packages, no checksums. "+
 			"The step passes and dist/ holds bare binaries under per-target directories that no upload "+
 			"glob matches", strings.Join(steps, "\n---\n"))
 	}
 
-	if strings.Contains(releaseStep, "--snapshot") {
+	if strings.Contains(actionInput(releaseStep, "args"), "--snapshot") {
 		t.Error("release.yml passes --snapshot to goreleaser. A snapshot build ignores the tag and " +
 			"derives its version from the previous one — v0.14.0 would publish assets named 0.14.1-next, " +
 			"with package metadata to match. `make package-linux` passes it deliberately, because a " +
@@ -205,6 +210,25 @@ func stepsUsing(workflow, action string) []string {
 	flush()
 
 	return steps
+}
+
+// actionInput returns the value of one `with:` input of a step, or "" if the step does not set it.
+//
+// A named input rather than the step body, because a substring search over a step that uses an action
+// is answered by the action's own name: `strings.Contains(step, "release")` is true for every step
+// using `goreleaser/goreleaser-action`, whatever its args are. That is how a check for `release` rather
+// than `build` came to pass with `build --clean` in the file.
+//
+// Single-line scalars only. A block scalar (`args: |`) would come back empty, which fails the caller
+// rather than passing it — the direction a parser that stops understanding its input should fail in.
+func actionInput(step, name string) string {
+	for line := range strings.SplitSeq(step, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), name+": "); ok {
+			return strings.Trim(strings.TrimSpace(value), `'"`)
+		}
+	}
+
+	return ""
 }
 
 // withoutComments drops full-line YAML comments.
