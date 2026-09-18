@@ -265,8 +265,10 @@ func TestFanOutOnACompressedObjectFallsBackAndStaysCorrect(t *testing.T) {
 // fetch and made them the entire cost.
 //
 // So the assertions are about *requests not made*, not about latency: chunk 1's range is never asked
-// for, no GET covers the whole read as the discovery fetch did, and the transferred total lands near
-// what the framed read alone costs rather than near the stored body.
+// for, no GET covers the whole read as the discovery fetch did, chunk 0's body is declined once its
+// headers have answered the question, and the transferred total lands within one abandoned chunk of what
+// the framed read alone costs rather than near the stored body. Why the decline is asserted on a counter
+// while the rest are asserted on the wire is explained where it happens.
 //
 // The offsets are the sibling test's two, for the same reason: a read starting inside the stored body
 // learns the encoding from a response header, and one starting past its end gets nothing but 416s and
@@ -322,6 +324,7 @@ func TestFanOutOnACompressedObjectProbesWithOneChunk(t *testing.T) {
 	chunk1 := fmt.Sprintf("bytes=%d-%d", chunkSize, 2*chunkSize-1)
 
 	transferred := map[int64]int64{}
+	declines := map[int64]int64{}
 
 	//nolint:paralleltest // shared request recorder; the cases reset and then assert on it, in order
 	for _, r := range []struct {
@@ -373,24 +376,60 @@ func TestFanOutOnACompressedObjectProbesWithOneChunk(t *testing.T) {
 
 			transferred[r.offset] = ts.BytesRead(key)
 
-			t.Logf("%d bytes at offset %d transferred %d bytes over %d GETs against a %d-byte stored body",
-				readSize, r.offset, ts.BytesRead(key), len(ts.GETs(key)), stored)
+			// Cumulative over the test, not per-read: the collector has no reset and these cases run in
+			// order, so the assertions below are about which case moved it.
+			declines[r.offset] = backend.GetMetrics().FanOutProbeDeclines
+
+			t.Logf("%d bytes at offset %d transferred %d bytes over %d GETs against a %d-byte stored "+
+				"body, with %d chunk bodies declined so far",
+				readSize, r.offset, ts.BytesRead(key), len(ts.GETs(key)), stored, declines[r.offset])
 		})
+	}
+
+	// The third saving — chunk 0's own body going untransferred once its headers say the object is
+	// encoded — is asserted on the counter and not on the bytes, and that split is deliberate.
+	//
+	// It cannot be asserted on the bytes because the quantity is not deterministic. The recorder counts
+	// what the emulator *wrote* toward the client, and a client that closes a response body mid-stream
+	// does not stop a write already accepted by a socket buffer. The same read measured 614 abandoned
+	// bytes on darwin and all 1,048,576 of them on the Linux CI runner, whose loopback buffer swallowed
+	// the whole chunk before the close was noticed. Both runs declined the body; only one could see it.
+	//
+	// So the budget below tolerates a full chunk, and this counter is what keeps the decline itself
+	// honest. Removing the probe's verdict leaves it at zero on every platform.
+	if declines[0] < 1 {
+		t.Errorf("the read at offset 0 declined %d chunk bodies; it must decline at least one.\n"+
+			"Chunk 0's response headers said the object was Content-Encoding'd, which means its body is "+
+			"stored bytes this read cannot use — the framed path re-reads the frames it needs. Reading "+
+			"it anyway is a whole chunk transferred to learn nothing, and on a Linux runner it is the "+
+			"one saving of #514 that the byte count cannot see.\nMetrics: %+v", declines[0],
+			backend.GetMetrics())
+	}
+
+	// A read whose every chunk is refused cannot consult a probe at all, so it must not have moved the
+	// counter. This is what makes the assertion above specific rather than a count of "some probe
+	// somewhere declined": the two cases reach the framed path by different routes, and only the first
+	// one has headers to decline on.
+	if declines[objectSize-readSize] != declines[0] {
+		t.Errorf("the read past the end of the stored body took the declines from %d to %d. Every chunk "+
+			"of that read is refused with a 416, so no response headers exist for a probe to be asked "+
+			"about — it learns the encoding from a HEAD. A decline here means the probe is being "+
+			"consulted somewhere this test does not describe.\nMetrics: %+v",
+			declines[0], declines[objectSize-readSize], backend.GetMetrics())
 	}
 
 	// The byte assertion, and it is calibrated against the other read rather than against a constant.
 	//
 	// A fixed budget was tried first and is too blunt to be worth having. The framed read of 2 MiB costs
 	// about a quarter of the stored body here, so any budget loose enough to survive the compression
-	// ratio moving is also loose enough to hide a whole 1 MiB chunk — and "chunk 0's body was
-	// transferred anyway" is one of the three things this fix does. Verified by mutation: with the
-	// probe's body-declining removed, a `stored*3/4` budget passes.
+	// ratio moving is also loose enough to hide a whole extra chunk. Verified by mutation rather than
+	// argued: with the probe's body-declining removed, a `stored*3/4` budget passes.
 	//
 	// The read past the end of the stored body is the calibration. Every chunk of it is refused with a
 	// 416, so it cannot transfer a chunk byte even in principle: what it transfers *is* the framed cost
-	// of a 2 MiB read of this object. The read at offset 0 must cost the same thing, because framing is
-	// the path both of them end up on. Anything more is bytes moved before the read knew where it was
-	// going.
+	// of a 2 MiB read of this object. The read at offset 0 must cost that plus, at worst, the one chunk
+	// it abandoned — because framing is the path both of them end up on. Anything beyond that is bytes
+	// moved before the read knew where it was going.
 	inside, insideOK := transferred[0]
 	pastEnd, pastEndOK := transferred[objectSize-readSize]
 
@@ -399,16 +438,22 @@ func TestFanOutOnACompressedObjectProbesWithOneChunk(t *testing.T) {
 			transferred)
 	}
 
-	// A quarter of a chunk. Large enough for the two framed reads to differ in how many frames they
-	// touch and in the 416 bodies the second one collects, far smaller than the chunk or the discovery
-	// GET that either regression would add.
-	if allowance := int64(chunkSize / 4); inside > pastEnd+allowance {
+	// One chunk for the abandoned body, plus a quarter of one for the two framed reads differing in how
+	// many frames they touch and in the 416 bodies the second one collects.
+	//
+	// Which makes this a backstop and not the primary gate, and worth being clear about: an abandoned
+	// chunk body and an extra chunk requested are the same 1 MiB, so no budget that tolerates the first
+	// can catch the second. The exact detectors are the two range cases above — they name the requests —
+	// and the decline counter. What is left for the bytes is everything this test did not think to
+	// enumerate, and in particular the regression that costs the most: a fall back to fetching the whole
+	// stored body, four times this budget.
+	if allowance := int64(chunkSize + chunkSize/4); inside > pastEnd+allowance {
 		t.Errorf("a %d-byte read at offset 0 transferred %d bytes; the same-sized read past the end of "+
 			"the %d-byte stored body transferred %d, and both are served by the framed path.\n"+
-			"The %d extra bytes are the fan-out's — chunks launched before chunk 0's headers came "+
-			"back, chunk 0's own body transferred after they said the object was encoded, or a "+
-			"discovery GET re-learning the descriptor those headers already carried. That is #514: "+
-			"the measured figure was 4,221,321 of a 4,293,520-byte body, 98%%.\nRequests: %s",
+			"The %d extra bytes are more than the one chunk this read may abandon, so they are the "+
+			"fan-out's: chunks launched before chunk 0's headers came back, or a discovery GET "+
+			"re-learning the descriptor those headers already carried. That is #514: the measured "+
+			"figure was 4,221,321 of a 4,293,520-byte body, 98%%.\nRequests: %s",
 			readSize, inside, stored, pastEnd, inside-pastEnd, describe(ts.Requests()))
 	}
 }

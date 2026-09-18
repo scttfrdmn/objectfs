@@ -833,16 +833,25 @@ func (b *Backend) getObjectRangeProbed(
 				// circuit breaker wrapping this call and the health tracker below. A routing decision
 				// is neither. Returning an error here would trip s3-get's breaker on every large read
 				// of a compressed object and take the component degraded on reads that all succeed.
-				if probe != nil && !probe(objectHeaders{
-					contentEncoding: contentEncoding,
-					metadata:        metadata,
-					etag:            etag,
-				}) {
-					bodySkipped = true
+				if probe != nil {
+					declined := !probe(objectHeaders{
+						contentEncoding: contentEncoding,
+						metadata:        metadata,
+						etag:            etag,
+					})
 
-					b.healthTracker.RecordSuccess("s3-reads")
+					// Counted here rather than at the probe's own definition, because this is where the
+					// verdict is acted on: a probe that returned false and a body that went untransferred
+					// are the same event, and one counter for both cannot drift from the behaviour.
+					b.metricsCollector.RecordFanOutProbe(declined)
 
-					return nil
+					if declined {
+						bodySkipped = true
+
+						b.healthTracker.RecordSuccess("s3-reads")
+
+						return nil
+					}
 				}
 
 				body, readErr := io.ReadAll(result.Body)
