@@ -60,6 +60,7 @@ type goreleaserConfig struct {
 // goreleaserBuild is one entry of `builds:`.
 type goreleaserBuild struct {
 	ID     string   `yaml:"id"`
+	Main   string   `yaml:"main"`
 	Binary string   `yaml:"binary"`
 	Goos   []string `yaml:"goos"`
 	Goarch []string `yaml:"goarch"`
@@ -435,6 +436,81 @@ func TestThePackagedBinaryIsOnThePathAsObjectfs(t *testing.T) {
 			"modulefiles deliberately do not prepend to PATH because /usr/bin is already on it; "+
 			"moving the binary breaks both without failing anything at package time.",
 			packagingFile, nfpm.Bindir)
+	}
+}
+
+// TestThePackagesShipTheMountHelper is the assertion the one above cannot make.
+//
+// TestThePackagedBinaryIsOnThePathAsObjectfs asserts properties of whatever `nfpms.ids` happens to name,
+// so dropping `mount-helper` from `ids:` *and* deleting its build together leaves it entirely satisfied:
+// one id, resolving to a build, supplying `objectfs`. What would be gone is `/etc/fstab` support, and it
+// would be gone in a package that builds, installs, runs its scriptlets and exits 0 — with the failure
+// arriving at an operator's next `mount -a` as `unknown filesystem type 'objectfs'`.
+//
+// The binary name is asserted exactly, with the dot. mount(8) does not search for a helper: it exec's
+// /sbin/mount.$TYPE, a path compiled into util-linux, so the filename is the entire registration
+// mechanism and `mount-objectfs` or `mountobjectfs` registers nothing.
+func TestThePackagesShipTheMountHelper(t *testing.T) {
+	t.Parallel()
+
+	const (
+		helperMain   = "./cmd/mount.objectfs"
+		helperBinary = "mount.objectfs"
+	)
+
+	cfg := readGoreleaser(t)
+	nfpm := readNfpm(t)
+
+	var helper *goreleaserBuild
+
+	for i, b := range cfg.Builds {
+		if strings.TrimSpace(b.Main) == helperMain {
+			helper = &cfg.Builds[i]
+
+			break
+		}
+	}
+
+	if helper == nil {
+		t.Fatalf("%s has no build whose main is %s. That package is the /etc/fstab mount helper (#136); "+
+			"without a build for it the packages install cleanly and every fstab entry fails with "+
+			"mount(8)'s \"unknown filesystem type 'objectfs'\".", packagingFile, helperMain)
+	}
+
+	if got := strings.TrimSpace(helper.Binary); got != helperBinary {
+		t.Errorf("the %s build names its binary %q, want %q exactly. mount(8) exec's /sbin/mount.$TYPE — a "+
+			"path compiled into util-linux, not searched for on PATH — so the filename is the whole "+
+			"registration and any other spelling registers nothing.", helperMain, got, helperBinary)
+	}
+
+	// Linux only, and not for tidiness: there is no /sbin/mount.TYPE protocol on macOS, so a darwin cell
+	// would publish a binary that cannot be registered anywhere.
+	if len(helper.Goos) != 1 || helper.Goos[0] != "linux" {
+		t.Errorf("the %s build targets goos %v, want [linux]. mount(8)'s helper protocol is a util-linux "+
+			"thing.", helperMain, helper.Goos)
+	}
+
+	found := false
+
+	for _, id := range nfpm.IDs {
+		if id == helper.ID {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Errorf("%s's nfpms `ids:` (%v) does not name the mount-helper build %q, so the .deb and .rpm "+
+			"carry no /usr/bin/mount.objectfs — and scripts/postinstall.sh then warns that it is missing "+
+			"and creates no link. The warning is the only signal; the install still succeeds.",
+			packagingFile, nfpm.IDs, helper.ID)
+	}
+
+	// The link's target, in the one other place it is written down. scripts/postinstall.sh hardcodes
+	// /usr/bin/mount.objectfs, so a bindir change would leave the scriptlet linking to nothing — which is
+	// checked for the `objectfs` binary above and matters identically here.
+	if nfpm.Bindir != "" && nfpm.Bindir != "/usr/bin" {
+		t.Errorf("%s sets bindir: %s, and scripts/postinstall.sh links /sbin/mount.objectfs to "+
+			"/usr/bin/mount.objectfs by that literal path.", packagingFile, nfpm.Bindir)
 	}
 }
 
