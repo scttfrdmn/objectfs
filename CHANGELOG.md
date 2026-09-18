@@ -117,6 +117,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`bind`.** `mount(8)` handles a bind mount itself and never reaches a helper; an entry that asks
     a filesystem helper for one is a mistake in the fstab.
 
+  The `packaging` job is where the whole chain is observed at once, because nothing in this repository
+  can prove `mount(8)` finds the helper except `mount(8)` finding it: it installs the `.deb`, checks
+  that `/sbin/mount.objectfs` resolves to a runnable file, and then runs `mount -t objectfs` with an
+  option the helper refuses, so nothing forks and no bucket or credential is touched. The assertion is
+  on the message rather than the exit code, since a missing helper and a helper that tried to mount
+  both exit nonzero — measured against real util-linux, where the two are `unknown filesystem type
+  'objectfs'` at 32 and `mount.objectfs: unrecognized option` at 1. Removal asserts the link is gone
+  too: `dpkg` cannot take it, since the package deliberately contains no path under `/sbin`, so a
+  `preremove` that missed it would leave a dangling `/sbin/mount.TYPE` behind on a machine with no
+  ObjectFS installed. That job also stopped filtering its pre-check with a `-run` list of test names,
+  which #136 walked straight into — `TestThePackagesShipTheMountHelper` matched none of the seven
+  alternatives, so the packaging job would not have run the one test asserting the helper has a build
+  and an nfpm id.
+
   Each refusal names the remedy. Both of these are departures from what #136 specifies, and both were
   re-verified against the current tree rather than assumed: the issue's `exec objectfs mount …
   --foreground` would hang, and its `ro`, `uid=` and `gid=` translations have no flags to translate

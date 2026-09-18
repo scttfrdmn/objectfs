@@ -834,8 +834,21 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
-    - name: .goreleaser.yml agrees with the scripts, the Makefile and the version constant
-      run: go test ./internal/config/ -v -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestTheGoreleaserVersion|TestPostinstall|TestPreremove|TestMakefile'
+    # The whole package, not a `-run` list. It used to be
+    #
+    #   -run 'TestPackag|TestThePackagedBinary|TestTheArchiveName|TestTheGoreleaserVersion|TestPostinstall|TestPreremove|TestMakefile'
+    #
+    # and #136 walked straight into what is wrong with that: `TestThePackagesShipTheMountHelper` matches
+    # none of those seven alternatives — `TestPackag` is not a substring of `TestThePackages` — so the
+    # one test asserting the mount helper has a build and an nfpm id would not have run in the job whose
+    # name is about exactly that. It ran in `test`, so nothing was unverified, but this job's fast
+    # pre-check silently stopped covering a packaging test the moment one was added with a name nobody
+    # had thought to enumerate.
+    #
+    # The package takes about 1.5 seconds, which is the entire argument: the filter bought nothing and
+    # cost the property that a new packaging test is picked up by the packaging job for free.
+    - name: The packaging config agrees with the scripts, the Makefile and the version constant
+      run: go test ./internal/config/ -v
 
     # A prebuilt goreleaser on PATH, so `make package-linux` below finds it and does not fall back to
     # building it from source. That fallback cannot work here and it is not the Makefile's fault:
@@ -879,6 +892,72 @@ jobs:
 
         # 0600, because it is the file an operator will paste a key into.
         [ "$(stat -c %a /etc/objectfs/config.yaml)" = "600" ]
+
+        # The mount helper, on a real dpkg. #136's own tests run scripts/postinstall.sh against a
+        # staged root through OBJECTFS_ROOT, which is the right way to cover its branches but cannot
+        # see two things only a real install decides: whether nfpm put the binary where the scriptlet
+        # looks for it, and whether dpkg runs the scriptlet at all.
+        test -x /usr/bin/mount.objectfs
+        test -L /sbin/mount.objectfs
+        [ "$(readlink /sbin/mount.objectfs)" = "/usr/bin/mount.objectfs" ]
+
+        # And the link resolves to a runnable file. `-L` plus a readlink comparison is satisfied by a
+        # dangling link, which is the failure a usrmerge layout would produce if the target path were
+        # ever wrong.
+        test -x /sbin/mount.objectfs
+
+    - name: mount(8) resolves -t objectfs to the installed helper
+      run: |
+        # The end-to-end claim of #136, and the only step that can make it: `/sbin/mount.TYPE` is
+        # compiled into util-linux, so nothing in this repository can prove mount(8) finds the helper
+        # except mount(8) finding it. Everything else — the goreleaser build, the nfpm id, the
+        # scriptlet's symlink — is a step towards this one observation.
+        #
+        # An option the helper refuses, so nothing forks and nothing touches the network: no bucket is
+        # resolved, no credentials are read, and the run cannot hang. mount(8) cannot consume an
+        # option it does not recognise for a filesystem type it does not know, so the string reaches
+        # the helper, which exits 1 — mount(8)'s code for a bad invocation.
+        sudo mkdir -p /mnt/objectfs-ci
+
+        set +e
+        out=$(sudo mount -t objectfs s3://bucket /mnt/objectfs-ci -o objectfs-ci-probe 2>&1)
+        rc=$?
+        set -e
+        echo "$out"
+
+        # Asserted on the message rather than on the exit code alone, because every way this can fail
+        # is also a nonzero exit, and the two interesting failures are told apart only by what was
+        # printed. Both arms below were measured against real util-linux 2.38.1 in a container rather
+        # than reasoned about, since what mount(8) does with an unknown source and an unknown option
+        # before it reaches a helper is not something the man page settles:
+        #
+        #   no helper:  rc=32, "mount: /mnt/objectfs-ci: unknown filesystem type 'objectfs'."
+        #   helper:     rc=1,  "mount.objectfs: unrecognized option \"objectfs-ci-probe\"."
+        #
+        # so `s3://bucket` does reach the helper untouched, and the option string with it.
+        if printf '%s\n' "$out" | grep -q "unknown filesystem type"; then
+          echo "::error::mount(8) reported an unknown filesystem type, which is the pre-#136 state:" \
+            "it looked for /sbin/mount.objectfs and did not find it. That path is compiled into" \
+            "util-linux, so this is the symlink scripts/postinstall.sh creates being absent, not a" \
+            "PATH or configuration problem. Output was: $out"
+          exit 1
+        fi
+
+        if ! printf '%s\n' "$out" | grep -q '^mount\.objectfs: unrecognized option'; then
+          echo "::error::\`mount -t objectfs\` produced output from neither the helper nor a" \
+            "missing-helper error, so it failed for a third reason and this step is no longer" \
+            "testing what it claims to. Output was: $out"
+          exit 1
+        fi
+
+        # 1, not 32: the helper refused the invocation before starting a mount. A 32 here would mean
+        # it got as far as trying, which for an option it does not recognise is the -s behaviour and
+        # -s was not passed.
+        if [ "$rc" != "1" ]; then
+          echo "::error::the helper exited $rc rather than 1 for an unrecognized option. 1 is" \
+            "mount(8)'s code for a bad invocation; 32 would mean it attempted the mount anyway."
+          exit 1
+        fi
 
     # The end of the chain #145 and #207 are two halves of, and the only step that runs all of it:
     # nfpm computes a destination, dpkg installs it, Lmod finds it by walking MODULEPATH, and the
@@ -1029,6 +1108,18 @@ jobs:
         test ! -f /usr/bin/objectfs
         test ! -f /usr/lib/systemd/system/objectfs@.service
         test ! -f /usr/share/objectfs/configs/example.yaml
+        test ! -f /usr/bin/mount.objectfs
+
+        # The symlink too, and this one dpkg does not take: /sbin/mount.objectfs is created by
+        # scripts/postinstall.sh rather than shipped, precisely so that the package contains no path
+        # under an aliased directory, which means only scripts/preremove.sh can remove it. A leftover
+        # link is worse than a leftover file — it is a dangling /sbin/mount.TYPE, so `mount -t objectfs`
+        # would fail with an exec error on a machine where nothing named objectfs is installed.
+        if [ -e /sbin/mount.objectfs ] || [ -L /sbin/mount.objectfs ]; then
+          echo "::error::/sbin/mount.objectfs survived removal, dangling. scripts/preremove.sh" \
+            "unlinks it only when it is a symlink to /usr/bin/mount.objectfs; see unlink_mount_helper."
+          exit 1
+        fi
 
         # The modulefiles too, and this one is worth asserting rather than assuming: a leftover
         # modulefile is worse than a leftover data file, because `module load objectfs` would still
