@@ -69,11 +69,24 @@ name: CI
 #     instead of demonstrating it.
 #     `TestWorkflowExpressionsAreParseable` in `internal/config/served_repositories_test.go`
 #     enforces it, and `internal/config/release_gate_test.go` enforces items 1 and 2.
+#  5. **Do not add a `branches:` filter to `pull_request`.** It had `branches: [main]` until #512,
+#     and the effect was that a pull request based on anything other than `main` ran *none* of the
+#     jobs below. Not one failed; the checks simply never existed, so the only row `gh pr checks`
+#     returned was `dependabot  skipping`, and a stacked PR read as green because nothing was red.
+#     #511 was reviewed in that state. The gap also closes at precisely the moment it stops
+#     mattering — GitHub retargets the PR to `main` when its parent merges, and CI finally runs
+#     after review already happened against zero signal. `push` keeps its filter, which is a
+#     different question: that one stops a feature-branch push from duplicating the pull request's
+#     run, and it is correct as written. `security.yml` had the same filter and lost it in the same
+#     change, which mattered more than it looks: `Security Scan` is a required context.
+#     `TestNoPullRequestTriggerFiltersItsBaseBranch` walks every workflow and enforces this.
 on:
   push:
     branches: [main]
+  # No `branches:` filter here, deliberately — see item 5 in the header. A base filter means a pull
+  # request stacked on a feature branch runs *none* of the jobs below, and reads as green because
+  # the checks never exist rather than because they passed.
   pull_request:
-    branches: [main]
   # Invoked by release.yml, so a tag runs this exact file. No inputs and no secrets: the only
   # secret any job here reads is `secrets.GITHUB_TOKEN`, which a called workflow always has
   # without `secrets: inherit`.
@@ -1370,4 +1383,3 @@ jobs:
 
         grep -q SAME <<<"$out" || {
           echo "::error::two runs of install.sh on $IMAGE left different binaries."; exit 1; }
-
