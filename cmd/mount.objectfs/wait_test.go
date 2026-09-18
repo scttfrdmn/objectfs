@@ -319,6 +319,29 @@ func TestStartAndWait(t *testing.T) {
 		if !processAlive(t, pidFile) {
 			t.Error("the child exited when the helper returned; the mount would not survive")
 		}
+
+		// A session of its own, which is what Setsid buys. Without it the mount shares this process's
+		// group and takes the SIGINT or SIGHUP sent to whatever ran `mount -a` — so at boot the mount dies
+		// with the unit that started it, and at a terminal Ctrl-C on an unrelated command unmounts the
+		// filesystem. Asserted on the group id, because the child surviving this helper's *return* does
+		// not demonstrate it would survive a signal.
+		pid, ok := readPid(pidFile)
+		if !ok {
+			t.Fatal("could not read the child's pid")
+		}
+
+		childGroup, err := syscall.Getpgid(pid)
+		if err != nil {
+			t.Fatalf("Getpgid(%d): %v", pid, err)
+		}
+		ownGroup, err := syscall.Getpgid(0)
+		if err != nil {
+			t.Fatalf("Getpgid(0): %v", err)
+		}
+		if childGroup == ownGroup {
+			t.Errorf("the child is in process group %d, the same as this process. A signal to the group "+
+				"that ran the mount would take the mount down with it", childGroup)
+		}
 	})
 
 	t.Run("the child exits before the mount appears", func(t *testing.T) {

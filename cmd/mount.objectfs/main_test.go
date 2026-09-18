@@ -553,6 +553,10 @@ func TestObjectfsPath(t *testing.T) {
 func TestRunRefusesBeforeForking(t *testing.T) {
 	t.Setenv("OBJECTFS_BINARY", fakeObjectfs(t, `echo "the mount should not have been attempted" >&2; exit 0`))
 
+	// Nothing here should reach a log, since nothing here should reach a mount. Redirected anyway, so that
+	// a regression which does reach one writes into this test's temp directory rather than into /var/log.
+	withLogDir(t, t.TempDir())
+
 	tests := []struct {
 		name    string
 		args    []string
