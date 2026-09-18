@@ -272,6 +272,8 @@ func TestFanOutOnACompressedObjectFallsBackAndStaysCorrect(t *testing.T) {
 // learns the encoding from a response header, and one starting past its end gets nothing but 416s and
 // has to learn it from a HEAD. Only the first route has headers to hand back, so they are the two halves
 // of this fix and not one case twice.
+//
+//nolint:tparallel // the subtests share a request recorder and must run in order; see below
 func TestFanOutOnACompressedObjectProbesWithOneChunk(t *testing.T) {
 	t.Parallel()
 

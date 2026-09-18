@@ -446,7 +446,7 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 			// where the seekable descriptor lives — so the framed path starts here rather than after
 			// the ranged GET below, which would spend a request and some stored bytes being told what
 			// is already in hand.
-			var enc *fanOutEncoded
+			var enc *fanOutEncodedError
 			if stderr.As(parallelErr, &enc) && len(enc.metadata) > 0 {
 				if framed, ok, framedErr := b.readFramed(
 					ctx, key, offset, size, enc.metadata, enc.contentEncoding,
@@ -2275,6 +2275,11 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 		// On the way out as well, so a chunk 0 that never reaches a response header cannot leave the
 		// fan-out below blocked on a verdict that is not coming. probeOnce makes it a no-op when the
 		// probe already published.
+		//
+		// Without this the read deadlocks rather than failing, and it deadlocks on the ordinary case:
+		// a 416 for a range starting past the end of a compressed stored body never produces a
+		// header. Verified by removing it — the package times out instead of reporting anything, so
+		// there is no test that can turn this into a clean failure and the line itself is the fix.
 		defer publishHeaders(nil)
 
 		return fetchChunk(0, func(h objectHeaders) bool {
@@ -2310,7 +2315,7 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 			// framed read at frame offsets from the wrong object. That case falls back to rediscovery,
 			// which is what every case did before this.
 			if probeHeaders != nil && probeHeaders.contentEncoding != "" {
-				return nil, &fanOutEncoded{
+				return nil, &fanOutEncodedError{
 					contentEncoding: probeHeaders.contentEncoding,
 					metadata:        probeHeaders.metadata,
 				}
@@ -2330,7 +2335,7 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 				// descriptor is safe to hand on in a way a stale chunk header would not be. No
 				// contentEncoding: HeadObject does not report it, and readFramed treats an empty hint
 				// as "unknown" rather than "unencoded" and resolves it from the index fetch.
-				return nil, &fanOutEncoded{metadata: info.Metadata}
+				return nil, &fanOutEncodedError{metadata: info.Metadata}
 			}
 		}
 
@@ -2403,7 +2408,7 @@ var errReadAbandoned = fmt.Errorf("parallel read chunk abandoned after a sibling
 var errFanOutOnEncodedObject = stderr.New(
 	"parallel read abandoned: the object is stored encoded and cannot be assembled from ranges")
 
-// fanOutEncoded is [errFanOutOnEncodedObject] carrying what the response that raised it already said
+// fanOutEncodedError is [errFanOutOnEncodedObject] carrying what the response that raised it already said
 // about the object.
 //
 // The point is the metadata. A compressed object's user metadata holds the seekable descriptor, and the
@@ -2414,7 +2419,7 @@ var errFanOutOnEncodedObject = stderr.New(
 // It unwraps to the sentinel so every existing errors.Is check keeps working unchanged. Callers that
 // want the metadata use errors.As; callers that only want the routing decision need no change, and a
 // path that cannot vouch for the metadata returns the bare sentinel instead.
-type fanOutEncoded struct {
+type fanOutEncodedError struct {
 	// contentEncoding may be empty when the encoding was established by a HEAD, which does not report
 	// it. Empty means "unknown" to readFramed, not "unencoded".
 	contentEncoding string
@@ -2423,9 +2428,9 @@ type fanOutEncoded struct {
 	metadata map[string]string
 }
 
-func (e *fanOutEncoded) Error() string { return errFanOutOnEncodedObject.Error() }
+func (e *fanOutEncodedError) Error() string { return errFanOutOnEncodedObject.Error() }
 
-func (e *fanOutEncoded) Unwrap() error { return errFanOutOnEncodedObject }
+func (e *fanOutEncodedError) Unwrap() error { return errFanOutOnEncodedObject }
 
 // shrunkMidRead is the error for a chunk of a parallel read whose range the object could not
 // satisfy, in either of the two forms that takes: fewer bytes than requested, or a refusal.
