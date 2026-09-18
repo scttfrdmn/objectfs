@@ -87,6 +87,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that had never been executed on any run. The floor stays at 72 deliberately: ratcheting it to the
   new measurement would spend the margin the work was done to create. (#438)
 
+- **A hung CI job could hold a pull request's required checks for six hours.** No job in any of the
+  five workflows declared `timeout-minutes`, so every one of them inherited GitHub's default of 360
+  minutes. Nothing here takes anything like that — the whole gate is under five minutes of wall clock
+  and the longest job anywhere is a 15-minute two-platform docker build — so a job that reaches the
+  default has not run long, it has hung: a test deadlocked on a channel, an `apt-get` waiting on a
+  prompt that will never come, a `curl` to a host that stopped answering. `cancel-in-progress` does
+  not rescue it, because a new push cancels the run rather than the wait and then starts its own
+  six-hour clock.
+
+  All 23 eligible jobs now carry a bound sized from observed runtime — a generous multiple of each
+  job's worst measured run with a floor of 10 minutes, so a hang fails in minutes and a slow runner
+  never fails at all. The 24th, `release.yml`'s `gate`, cannot have one: Actions rejects
+  `timeout-minutes` on a job that calls a reusable workflow, and rejects it by failing the entire file
+  before any job starts. It is bounded by the jobs inside the workflow it calls.
+
+  `TestEveryWorkflowJobHasATimeout` walks `.github/workflows` rather than naming files, so a workflow
+  added later cannot arrive without one, and it bounds the value at 60 minutes as well as requiring
+  it: `timeout-minutes: 360` would satisfy a presence check while bounding nothing. (#531)
+
 ### Added
 
 - **An `/etc/fstab` mount helper, so an ObjectFS filesystem can be mounted the way every other

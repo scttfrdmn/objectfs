@@ -14,8 +14,9 @@ name: CI
 # that the release set stay a superset of the CI set, and it was not even a subset in a useful
 # sense: it was a disjoint set with a different name.
 #
-# Four things to know before editing, because each one is a way to reintroduce the drift or to
-# break every open pull request:
+# Six things to know before editing, because each one is a way to reintroduce the drift or to
+# break every open pull request. (It said "four" while listing five, which is the same class of
+# mistake as a version number in prose: a count restated beside the thing it counts.)
 #
 #  1. **Do not extract these jobs into a separate `gate.yml`.** That is the obvious shape and it
 #     would orphan every required status check on `main`. A `workflow_call` job reports its checks
@@ -80,6 +81,18 @@ name: CI
 #     run, and it is correct as written. `security.yml` had the same filter and lost it in the same
 #     change, which mattered more than it looks: `Security Scan` is a required context.
 #     `TestNoPullRequestTriggerFiltersItsBaseBranch` walks every workflow and enforces this.
+#  6. **Every job declares `timeout-minutes`, and a new one has to.** GitHub's default is 360
+#     minutes, and nothing here takes six hours: the whole gate is under five minutes of wall clock.
+#     So a job that reaches the default has not run long, it has hung — a deadlocked test, an
+#     `apt-get` waiting on a prompt, a `curl` to a host that stopped answering — and it holds this
+#     repository's required checks for six hours while it does. `cancel-in-progress` does not rescue
+#     it either: a new push cancels the run, not the wait, so the next push starts its own six-hour
+#     clock. The numbers below are a generous multiple of each job's worst observed run with a floor
+#     of 10 minutes, sized so a hang fails in minutes and a slow runner never fails at all.
+#     `TestEveryWorkflowJobHasATimeout` walks every workflow in `.github/workflows` and requires one
+#     on every job, within 1..60. It exempts exactly one thing, and for a syntax reason rather than a
+#     judgement: a job that calls a reusable workflow with `uses:` may not carry `timeout-minutes` at
+#     all — see `release.yml`'s `gate`, which is bounded by the jobs in this file anyway.
 on:
   push:
     branches: [main]
@@ -117,6 +130,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -160,6 +174,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   build-tags:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -196,6 +211,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -242,6 +258,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -335,6 +352,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   fuzz-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GOMEMLIMIT: 768MiB
     strategy:
@@ -394,6 +412,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   cross-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -451,6 +470,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   sdk-metrics:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -621,6 +641,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   docs-site:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -657,6 +678,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   config-examples:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -702,6 +724,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   deploy-manifests:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -772,6 +795,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   systemd-unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -826,6 +850,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   packaging:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1218,6 +1243,7 @@ jobs:
     # can no longer arrive. The system is the part of the identity that is stable.
     name: modulefiles (${{ matrix.system }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       # Both legs run to completion. A failure under Lmod says nothing about TCL and the reviewer
       # wants both answers from one push.
@@ -1298,6 +1324,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   labels:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: read
@@ -1362,6 +1389,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   install-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
