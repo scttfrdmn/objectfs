@@ -41,9 +41,12 @@ const timeoutCeiling = 60
 // One exemption, and it is a syntax rule rather than a judgement call: a job that calls a reusable
 // workflow with `uses:` may not carry `timeout-minutes` at all. The allowed keys on such a job are
 // `name`, `uses`, `with`, `secrets`, `needs`, `if` and `permissions`, and adding an eighth fails the
-// whole file at parse time — no job, no log. `release.yml`'s `gate` is that job. It is not an unbounded
-// hole: the jobs inside the workflow it calls are the jobs checked here, so the gate is bounded by
-// theirs.
+// whole file at parse time — no job, no log. `release.yml`'s `gate` is that job.
+//
+// It is not an unbounded hole. The jobs inside the workflow it calls are jobs this test checks, and
+// because `ci.yml` has no `needs:` at all its fifteen jobs run in parallel — so the caller is bounded by
+// the longest of them, 20 minutes, not by their sum. That holds only while the call is local, which is
+// why the exemption checks where `uses:` points.
 func TestEveryWorkflowJobHasATimeout(t *testing.T) {
 	t.Parallel()
 
@@ -96,7 +99,7 @@ func TestEveryWorkflowJobHasATimeout(t *testing.T) {
 
 			// The exemption is checked, not assumed: a reusable-workflow caller has `uses:` and no
 			// `steps:`. A job with both is not a caller and does not get out of the rule.
-			_, callsWorkflow := job["uses"]
+			target, callsWorkflow := job["uses"].(string)
 			_, hasSteps := job["steps"]
 
 			if callsWorkflow && !hasSteps {
@@ -108,6 +111,27 @@ func TestEveryWorkflowJobHasATimeout(t *testing.T) {
 						"\tpermissions. Remove it — the called workflow's own jobs carry the timeouts.",
 						e.Name(), id)
 				}
+
+				// And the exemption only holds for a workflow whose jobs this test can see. A local
+				// `./.github/workflows/x.yml` is walked by this loop, so the caller inherits real bounds
+				// from real jobs. `owner/repo/.github/workflows/x.yml@ref` is not: its jobs live in
+				// another repository at a ref this test does not read, and exempting it would mean a job
+				// with no timeout of its own calling something with no timeout this repository can
+				// verify — a genuine six-hour hole wearing the same shape as the legitimate exemption.
+				// There is no way to bound such a job (the key is rejected), so the only honest outcome
+				// is to fail and make someone decide.
+				if !strings.HasPrefix(target, "./.github/workflows/") {
+					t.Errorf("%s: job %v calls the external reusable workflow %q.\n"+
+						"\tIt cannot carry `timeout-minutes` — Actions rejects the key beside `uses:` —\n"+
+						"\tand this test cannot read the called workflow's jobs either, so nothing bounds\n"+
+						"\tit. That is the one shape where this exemption stops being sound. Either\n"+
+						"\tvendor the workflow into .github/workflows so its jobs are checked here, or\n"+
+						"\treplace the call with a job that runs the action in `steps:` and can be\n"+
+						"\tbounded.", e.Name(), id, target)
+				} else if _, err := os.Stat(filepath.Join(repoRoot(t), strings.TrimPrefix(target, "./"))); err != nil {
+					t.Errorf("%s: job %v calls %q, which does not exist: %v", e.Name(), id, target, err)
+				}
+
 				exempt++
 
 				continue
