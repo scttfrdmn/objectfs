@@ -572,9 +572,26 @@ func (cp *ConnectionPool) ConnectAll(ctx context.Context) error {
 	return nil
 }
 
-// GetConnection returns the next available connection (round-robin)
+// GetConnection returns the next available connection (round-robin).
+//
+// An empty pool is an error and not a panic, which is the #525 finding gosec described backwards. It
+// reported the int→uint32 conversion below, which needs more than four billion managers before it can
+// misbehave, and said nothing about the `% 0` in the same expression, which needs none:
+// NewConnectionPool(name, 0, ...) builds an empty pool without complaint, and a pool size read from
+// configuration is how that happens. The panic was a divide-by-zero in a package whose entire subject is
+// surviving failures.
 func (cp *ConnectionPool) GetConnection() (any, error) {
-	// Try round-robin first
+	// Before the round-robin, because the round-robin is a modulo by this length.
+	if len(cp.managers) == 0 {
+		return nil, errors.NewError(errors.ErrCodeConnectionPool,
+			"connection pool holds no connections").WithComponent(cp.name)
+	}
+
+	// Try round-robin first.
+	//
+	// #nosec G115 -- len(cp.managers) is the size NewConnectionPool was called with, one
+	// ConnectionManager per unit; narrowing it needs a pool of more than 2^32 live connections, which
+	// exceeds what the process could hold long before the conversion could misrepresent it.
 	index := cp.nextIndex.Add(1) % uint32(len(cp.managers))
 	conn, err := cp.managers[index].GetConnection()
 	if err == nil {
