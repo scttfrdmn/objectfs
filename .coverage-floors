@@ -348,12 +348,40 @@ internal/adapter         40
 # the code they cover was unowned — deleting the clamp in xattrSize left the whole package green.
 #
 # This entry is the first one in this file set from CI's own log rather than a local run, which is the
-# lesson the three paragraphs above kept re-learning. It matters more here than the load-dependence they
-# describe: CI is ubuntu-latest and compiles unmount_path_linux.go (52 lines) where a darwin run compiles
-# unmount_path_darwin.go (44), so the two platforms do not even have the same denominator. Darwin
-# measured 72.2% and linux 72.5% for the same tree. There is no Docker on the development machine, so the
-# linux figure is not obtainable except from a PR — which means the ratchet is a second commit, after the
-# feature is green, and not part of the commit that earned the points.
+# lesson the three paragraphs above kept re-learning. Darwin measures 72.2% and linux 72.5% for the same
+# tree, and there is no Docker on the development machine, so the linux figure is not obtainable except
+# from a PR — which means the ratchet is a second commit, after the feature is green, and not part of the
+# commit that earned the points.
+#
+# That paragraph used to explain the darwin/linux gap by saying the two platforms "do not even have the
+# same denominator", since internal/fuse compiles unmount_path_linux.go (52 lines) on CI and
+# unmount_path_darwin.go (44) locally. Measured rather than reasoned about, that is wrong: coverage counts
+# *statements*, not lines, and both files contribute exactly 2 — the package totals 1140 statements on
+# both platforms. The real gap is seven blocks in mount.go and xattr.go that one platform executes and the
+# other does not, and it is 823/1140 against 827/1140. The conclusion the paragraph drew is right and the
+# reason it gave was not, which is worth correcting in place: a wrong reason that predicts the right
+# answer is the kind that survives.
+#
+# The denominator does move, though — with the *toolchain*, which is a bigger effect than the platform and
+# was not known when the paragraph above was written. Go 1.26.6 counts 1140 statements in this package;
+# Go 1.27.1 counts 1790, because it splits coverage blocks far more finely (filesystem.go alone goes from
+# 209 blocks to 298). So a local number is uncomparable to CI's for two independent reasons, and a
+# GOTOOLCHAIN=auto machine with a newer Go than go.mod's silently gets the finer granularity: 1.27.1
+# measured this package at 71.96% where 1.26.6 measured 72.19%, from the same tests and the same tree. Any
+# local check of a floor has to pin the toolchain — `GOTOOLCHAIN=go1.26.6 go test -covermode=atomic` —
+# and every floor in this file shifts when CI's Go moves to 1.27.
+#
+# 72 stays at 72 after #438, deliberately, and this is the one place in this file where a floor is held
+# below the measurement on purpose. #438 was the gate failing on an unrelated Dependabot bump: two runs of
+# the coverage job on the same commit measured 71.84% and 72.54%, which is a 0.5-point floor being decided
+# by how loaded the runner was. The eight statements that moved were all one arm — fetch serving a
+# follower from a GET already in flight, the slice it takes, and coveringLocked's returning branch — and a
+# follower only exists when a second read arrives while the first GET is outstanding, which an idle
+# machine arranges by accident. They are owned by tests now (see the four tests above
+# TestFetchServesAFollowerFromAGetAlreadyInFlight in read_path_test.go), which both removes the swing and
+# adds six statements linux had never covered at all. Ratcheting to the new measurement would spend that
+# margin immediately and buy back the flake the moment another statement turns out to be load-dependent;
+# the point of the work was the margin, so the margin is what it keeps.
 internal/fuse            72
 
 # internal/cache went 74 → 76 with the re-keying work — the byte-range keying, splitting, coalescing,

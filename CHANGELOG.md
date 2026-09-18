@@ -28,12 +28,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is to stop a feature-branch push from duplicating the pull request's own run.
   (#512)
 
+- **The `coverage` gate flaked on `internal/fuse`, failing unrelated pull requests.** Two runs of the
+  job on the same commit measured the package at 71.84% and 72.54% against a floor of 72, so a
+  0.5-point margin was being decided by how loaded the runner was; one Dependabot bump that does not
+  import the package at all failed on it.
+
+  The two profiles differ by exactly eight statements, and all eight are one arm: `fetch` serving a
+  read from a GET already in flight, the `slice` it takes from that leader, and `coveringLocked`'s
+  returning branch. A follower only exists when a second read for a contained range arrives while the
+  first GET is still outstanding — which an idle machine arranges by accident and a loaded runner does
+  not — so the arm was covered by luck rather than by a test.
+
+  Those statements are owned by tests now, which removes the swing and also covers six statements
+  that had never been executed on any run. The floor stays at 72 deliberately: ratcheting it to the
+  new measurement would spend the margin the work was done to create. (#438)
+
 ### Added
 
 - `TestNoPullRequestTriggerFiltersItsBaseBranch` walks `.github/workflows/` and fails on a
   `branches:` or `branches-ignore:` filter under `pull_request` or `pull_request_target`. The
   directory is walked rather than enumerated because the next workflow to arrive with
   `branches: [main]` copied out of a README is the case a hard-coded file list cannot see.
+
+- Four tests owning the read path's flight-sharing follower arm: a follower served from an in-flight
+  GET without issuing its own, a follower whose leader came up short at EOF issuing its own rather
+  than being handed a truncated result, a follower declining to inherit a failed leader's error, and a
+  table test driving `inflightFetch.slice`'s range arithmetic across both boundaries. (#438)
+
+### Changed
+
+- `.coverage-floors` records two corrections to how a floor must be measured. The darwin/linux
+  difference in `internal/fuse` is **not** a denominator difference — coverage counts statements, and
+  both platforms total 1140; the gap is seven blocks in `mount.go` and `xattr.go` that one platform
+  executes and the other does not. The denominator does move with the **toolchain**, which is a larger
+  effect and was not previously known: Go 1.26.6 counts 1140 statements in that package where Go
+  1.27.1 counts 1790, because it splits coverage blocks more finely. A local floor check must pin the
+  toolchain (`GOTOOLCHAIN=go1.26.6 go test -covermode=atomic`), and every floor in the file shifts
+  when CI's Go moves to 1.27. (#438)
 
 ## [0.15.1] - 2026-09-17
 

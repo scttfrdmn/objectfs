@@ -1320,7 +1320,7 @@ func TestJoinAnswersOnlyForAFetchThatContainsTheWholeRange(t *testing.T) {
 		},
 		{
 			name: "a range ending one byte late", off: 8180, length: 13, wantHit: false,
-			why:  "the tail byte is not among the bytes in flight, and half of an answer is not one",
+			why: "the tail byte is not among the bytes in flight, and half of an answer is not one",
 		},
 		{
 			name: "a range entirely past the fetch", off: 16384, length: 1024, wantHit: false,
