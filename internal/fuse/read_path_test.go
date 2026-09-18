@@ -16,6 +16,7 @@ package fuse
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -1068,5 +1069,330 @@ func TestPrefetchDropsARangeAlreadyEntirelyInFlight(t *testing.T) {
 		t.Errorf("a prefetch entirely inside an in-flight read issued %d GET(s); every byte it asked "+
 			"for was already being fetched, so the object's bytes would be paid for twice",
 			after-before)
+	}
+}
+
+// The four tests below own fetch's follower path: the arm that serves a read from a GET already in
+// flight instead of issuing a duplicate.
+//
+// They exist because that arm was covered by luck, and #438 is what luck looks like when it runs out.
+// Two runs of the coverage job on the same commit (ff795af9, run 31767088547) measured internal/fuse at
+// 71.84% and 72.54%, and the difference between the two profiles is exactly eight statements, all of
+// them here: fetch's `join` arm, the `slice` it calls, and coveringLocked's returning branch. Nothing
+// else in the package moved. A follower only exists when a second read for a contained range arrives
+// while the first GET is still outstanding, which an idle machine arranges by accident and a loaded
+// runner does not — so the gate's 0.5-point margin was being spent on how busy the runner was, and one
+// Dependabot bump that touched nothing in this package failed on it.
+//
+// The leader is therefore constructed rather than raced for: registered through start, given its result
+// directly, and its done channel closed without going through finish. That is the state a real follower
+// observes — finish removes a fetch from the map before it closes done, so a leader that is both joinable
+// and complete is precisely the window a follower is woken in — and building it directly is what makes
+// these deterministic instead of load-dependent.
+
+// TestFetchServesAFollowerFromAGetAlreadyInFlight is the arm the whole mechanism exists for: the second
+// caller pays nothing.
+//
+// Asserted on the request log rather than on returned bytes alone, because a follower that returns the
+// right bytes after issuing its own GET is indistinguishable from one that shared, except in the bill.
+func TestFetchServesAFollowerFromAGetAlreadyInFlight(t *testing.T) {
+	t.Parallel()
+
+	f := newReadPathFixture(t)
+	payload := f.srv.SeedRandom("shared.dat", 64<<10)
+
+	// A GET for the whole object, complete but not yet retired.
+	leader, _ := f.fs.fetches.start("shared.dat", 0, 64<<10)
+	leader.data = payload
+	close(leader.done)
+
+	before := len(f.srv.GETs("shared.dat"))
+
+	got, err := f.fs.fetch(t.Context(), "shared.dat", 1024, 4096)
+	if err != nil {
+		t.Fatalf("fetch of a range covered by an in-flight GET: %v", err)
+	}
+
+	if want := payload[1024 : 1024+4096]; !bytes.Equal(got, want) {
+		t.Errorf("a follower got %d bytes that do not match the object's [1024,5120); the slice is "+
+			"taken at an offset relative to the leader's range, so an absolute offset here reads the "+
+			"wrong bytes and returns them as though they were right", len(got))
+	}
+
+	if after := len(f.srv.GETs("shared.dat")); after != before {
+		t.Errorf("a follower whose range was entirely inside an in-flight GET issued %d GET(s) of its "+
+			"own; those bytes were already being transferred and are now paid for twice", after-before)
+	}
+}
+
+// TestFetchIssuesItsOwnGetWhenTheLeaderCameUpShort is the correctness half, and it is the reason slice
+// returns a bool at all.
+//
+// A GET that runs into EOF answers with fewer bytes than its range asked for, so a leader does not
+// necessarily hold every byte its range claims. Handing a follower the truncated tail would be a short
+// read reported as a complete one — the filesystem's worst failure mode, since the caller has no way to
+// tell. The follower must issue its own request, which will come up short too, and correctly so.
+func TestFetchIssuesItsOwnGetWhenTheLeaderCameUpShort(t *testing.T) {
+	t.Parallel()
+
+	f := newReadPathFixture(t)
+	payload := f.srv.SeedRandom("short.dat", 64<<10)
+
+	// Claims the whole object, holds only the first kilobyte of it.
+	leader, _ := f.fs.fetches.start("short.dat", 0, 64<<10)
+	leader.data = payload[:1024]
+	close(leader.done)
+
+	before := len(f.srv.GETs("short.dat"))
+
+	got, err := f.fs.fetch(t.Context(), "short.dat", 4096, 4096)
+	if err != nil {
+		t.Fatalf("fetch behind a leader that came up short: %v", err)
+	}
+
+	if want := payload[4096 : 4096+4096]; !bytes.Equal(got, want) {
+		t.Errorf("a follower behind a short leader returned %d bytes that are not the object's "+
+			"[4096,8192). The bytes it asked for were past the end of what the leader actually held, so "+
+			"the only correct answer is its own read", len(got))
+	}
+
+	if after := len(f.srv.GETs("short.dat")); after == before {
+		t.Error("a follower whose leader held none of the bytes it asked for issued no GET, so it " +
+			"returned data the leader never read")
+	}
+}
+
+// TestFetchIssuesItsOwnGetWhenTheLeaderFailed pins the asymmetry stated on the fetches field: a
+// prefetch carries a 5-second deadline and a read carries none, so a read that inherited its leader's
+// error would be failed by a timeout that was never its own.
+//
+// The leader here holds a full result *and* an error, which fetchUncached never produces — it returns
+// nil data on failure. That is the point. With nil data the length check in slice rejects the leader on
+// its own, so `leader.err == nil` is redundant in production and a test using a realistic failed leader
+// passes whether the check is there or not: deleting it leaves the package green. Giving the leader bytes
+// it must not hand over is what makes the branch load-bearing, and the branch is worth owning because the
+// comment on the fetches field commits to it — if a leader ever does come back with partial data and an
+// error, the rule that a read does not inherit a prefetch's failure has to still hold.
+func TestFetchIssuesItsOwnGetWhenTheLeaderFailed(t *testing.T) {
+	t.Parallel()
+
+	f := newReadPathFixture(t)
+	payload := f.srv.SeedRandom("failed-leader.dat", 64<<10)
+
+	leader, _ := f.fs.fetches.start("failed-leader.dat", 0, 64<<10)
+	leader.data = payload
+	leader.err = errors.New("context deadline exceeded")
+	close(leader.done)
+
+	before := len(f.srv.GETs("failed-leader.dat"))
+
+	got, err := f.fs.fetch(t.Context(), "failed-leader.dat", 2048, 1024)
+	if err != nil {
+		t.Fatalf("a read behind a failed leader inherited its error: %v. A prefetch's deadline is not "+
+			"the read's, and a read has none", err)
+	}
+
+	if after := len(f.srv.GETs("failed-leader.dat")); after == before {
+		t.Error("a read behind a failed leader took that leader's bytes instead of issuing its own GET. " +
+			"The leader reported an error, so what it holds is not an answer — a prefetch that timed out " +
+			"half way would otherwise be served to a reader as a complete result")
+	}
+
+	if want := payload[2048 : 2048+1024]; !bytes.Equal(got, want) {
+		t.Errorf("a follower behind a failed leader returned %d bytes that are not the object's "+
+			"[2048,3072)", len(got))
+	}
+}
+
+// TestInflightFetchSliceReportsOnlyTheBytesItHolds drives slice directly, so its arithmetic is owned
+// independently of whether any caller happens to reach it.
+func TestInflightFetchSliceReportsOnlyTheBytesItHolds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fetchOff int64
+		held     int
+		off      int64
+		length   int64
+		wantOK   bool
+		why      string
+	}{
+		{
+			name: "a range inside what the fetch holds", fetchOff: 0, held: 8192,
+			off: 1024, length: 4096, wantOK: true,
+			why: "the ordinary follower",
+		},
+		{
+			name: "the whole of what the fetch holds", fetchOff: 4096, held: 4096,
+			off: 4096, length: 4096, wantOK: true,
+			why: "a range contains itself, so an equal range is a hit",
+		},
+		{
+			name: "one byte past the end of what it holds", fetchOff: 0, held: 4096,
+			off: 0, length: 4097, wantOK: false,
+			why: "off-by-one at the far end is the boundary a >= would get wrong",
+		},
+		{
+			name: "a range the fetch claimed but came up short of", fetchOff: 0, held: 1024,
+			off: 2048, length: 512, wantOK: false,
+			why: "this is the EOF case: the range was claimed, the bytes were never read",
+		},
+		{
+			name: "a range starting before the fetch", fetchOff: 4096, held: 4096,
+			off: 2048, length: 1024, wantOK: false,
+			why: "start goes negative; without the check this slices from a negative index and panics",
+		},
+		{
+			name: "the first byte of the fetch", fetchOff: 4096, held: 4096,
+			off: 4096, length: 1, wantOK: true,
+			why: "start is exactly zero, the other side of the negative boundary",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Offsets are absolute, so the byte at a given file offset has one correct value however the
+			// fetch that carries it is framed — which is what makes a misplaced slice visible.
+			whole := testaws.DeterministicBytes("slice.dat", int(tc.fetchOff)+tc.held)
+
+			fetch := &inflightFetch{
+				off:    tc.fetchOff,
+				length: int64(tc.held),
+				data:   whole[tc.fetchOff:],
+				done:   make(chan struct{}),
+			}
+
+			got, ok := fetch.slice(tc.off, tc.length)
+			if ok != tc.wantOK {
+				t.Fatalf("slice(%d, %d) ok = %v, want %v: %s", tc.off, tc.length, ok, tc.wantOK, tc.why)
+			}
+
+			if !ok {
+				if got != nil {
+					t.Errorf("slice returned %d bytes alongside ok=false; a caller that checks the bytes "+
+						"rather than the bool would use them", len(got))
+				}
+
+				return
+			}
+
+			if want := whole[tc.off : tc.off+tc.length]; !bytes.Equal(got, want) {
+				t.Errorf("slice(%d, %d) returned the wrong bytes: %s", tc.off, tc.length, tc.why)
+			}
+		})
+	}
+}
+
+// TestJoinAnswersOnlyForAFetchThatContainsTheWholeRange drives join directly, which is the only way it
+// is owned at all.
+//
+// A mutation established that. Replacing join's body with `return nil` changes nothing any assertion on
+// GET counts can see: fetch falls through to start, whose own coveringLocked finds the same leader and
+// serves the follower from the second window instead. So the join at the top of fetch is an
+// optimization — it saves registering and retiring a self that is about to be discarded — and its
+// removal is behaviourally invisible through fetch. Invisible is not the same as harmless: the self a
+// follower registers in that window advertises a range nobody is fetching, and unclaimedStart trims
+// prefetches against exactly that list.
+func TestJoinAnswersOnlyForAFetchThatContainsTheWholeRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		off     int64
+		length  int64
+		wantHit bool
+		why     string
+	}{
+		{
+			name: "a range strictly inside the fetch", off: 5120, length: 1024, wantHit: true,
+			why: "the ordinary follower",
+		},
+		{
+			name: "the fetch's own range", off: 4096, length: 4096, wantHit: true,
+			why: "a range contains itself, which is what makes two identical reads share one GET",
+		},
+		{
+			name: "a range starting one byte early", off: 4095, length: 16, wantHit: false,
+			why: "partial overlap is not containment: answering it would mean splicing two results",
+		},
+		{
+			name: "a range ending one byte late", off: 8180, length: 13, wantHit: false,
+			why: "the tail byte is not among the bytes in flight, and half of an answer is not one",
+		},
+		{
+			name: "a range entirely past the fetch", off: 16384, length: 1024, wantHit: false,
+			why: "nothing is fetching these bytes, so the caller must issue its own GET",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var fetches inflightFetches
+			leader, _ := fetches.start("obj.dat", 4096, 4096)
+
+			// A covering fetch under another key, so a hit can only have come from the right object.
+			fetches.start("other.dat", 0, 1<<20)
+
+			got := fetches.join("obj.dat", tc.off, tc.length)
+
+			switch {
+			case tc.wantHit && got != leader:
+				t.Errorf("join(%d, %d) returned %v, want the registered fetch: %s",
+					tc.off, tc.length, got, tc.why)
+			case !tc.wantHit && got != nil:
+				t.Errorf("join(%d, %d) answered with a fetch that does not hold every byte asked for. "+
+					"Its slice would be rejected downstream, but the caller has already waited on it: %s",
+					tc.off, tc.length, tc.why)
+			}
+		})
+	}
+}
+
+// TestFetchReturnsTheBackendsError covers the arm that reports a failed GET to the reader, and the
+// finish that has to happen first.
+//
+// The publish-before-return ordering is the property: a fetch that returned its error without retiring
+// itself would leave a completed entry advertised in the map, and the next follower to join it would
+// block on a done channel that is never closed.
+func TestFetchReturnsTheBackendsError(t *testing.T) {
+	t.Parallel()
+
+	f := newReadPathFixture(t)
+	f.srv.SeedRandom("denied.dat", 16<<10)
+
+	// 403/AccessDenied rather than the default 500: the SDK does not retry it, so the failure arrives
+	// once instead of after the retry budget.
+	f.srv.InjectFault(testaws.Fault{
+		Method:    "GET",
+		KeySuffix: "denied.dat",
+		Status:    403,
+		Code:      "AccessDenied",
+	})
+
+	if _, err := f.fs.fetch(t.Context(), "denied.dat", 0, 4096); err == nil {
+		t.Fatal("fetch reported success for a GET the endpoint refused; a read that returns no error " +
+			"and no bytes is a silent short read")
+	}
+
+	// The failed fetch must no longer be advertised, or the next caller waits on it forever.
+	//
+	// Fatal rather than Error, and the distinction is the whole test: the read below would join this
+	// leader and block on a done channel nothing closes. Continuing past a failed assertion here turns a
+	// clean failure into a ten-minute package timeout whose panic names a goroutine rather than a cause —
+	// which is what the first version of this test did to the mutation that moved `finish` after the
+	// error return.
+	if leader := f.fs.fetches.join("denied.dat", 0, 4096); leader != nil {
+		t.Fatal("a fetch that failed is still registered as in flight, so the next reader of this range " +
+			"joins it and blocks on a done channel nothing will close")
+	}
+
+	// And the path still works afterwards: the fault is spent, so this is a real GET.
+	if _, err := f.fs.fetch(t.Context(), "denied.dat", 0, 4096); err != nil {
+		t.Errorf("a read after a failed one: %v. The failure must not poison the range", err)
 	}
 }
