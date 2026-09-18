@@ -117,6 +117,72 @@ install_example_config() {
     echo "objectfs: edit it before mounting — the region and cache settings are the ones that matter"
 }
 
+# link_mount_helper registers the helper that makes `mount -t objectfs` and an /etc/fstab entry work.
+#
+# mount(8) resolves a filesystem type it does not know by exec'ing /sbin/mount.$TYPE. That path is
+# compiled into util-linux: it is not searched for on PATH, there is no configuration for it, and the
+# filename is the entire registration mechanism. So /sbin/mount.objectfs has to exist or an fstab entry
+# fails with "unknown filesystem type 'objectfs'" and nothing else.
+#
+# The binary is packaged to /usr/bin/mount.objectfs, because nfpm has a single bindir for every binary in
+# a package and /usr/bin is where `objectfs` must be. The link is what puts it where mount(8) looks.
+#
+# Made by this script rather than shipped as a packaged file, which is the reason this function exists at
+# all. On a usrmerged system /sbin is a symlink to /usr/sbin, and a .deb containing a path under an
+# aliased directory is dpkg's aliased-directory problem: dpkg records /sbin/mount.objectfs while the file
+# is really at /usr/sbin/mount.objectfs, and any later package shipping the unaliased path leaves dpkg
+# holding two records for one inode. A symlink created by a scriptlet is outside dpkg's file database, so
+# none of that arises.
+#
+# Creating it *at* /sbin also handles both layouts with one command and no test for which is in use: on a
+# usrmerged system the kernel resolves /sbin to /usr/sbin and the link lands there, which is where FHS
+# wants a mount helper; on a split system /sbin is a real directory and the link lands in it. Either way
+# it is the path mount(8) will exec.
+link_mount_helper() {
+    local target="/usr/bin/mount.objectfs"
+    local link="$ROOT/sbin/mount.objectfs"
+
+    if [ ! -x "$ROOT$target" ]; then
+        warn "$ROOT$target is missing, so 'mount -t objectfs' and /etc/fstab entries will not work"
+        echo "  This is a packaging problem rather than something to fix by hand; please report it." >&2
+        return 0
+    fi
+
+    if [ ! -d "$ROOT/sbin" ]; then
+        warn "$ROOT/sbin does not exist, so the mount helper could not be registered"
+        echo "  Fix: ln -s $target /sbin/mount.objectfs" >&2
+        return 0
+    fi
+
+    if [ -L "$link" ]; then
+        # Already ours, which is every upgrade. Compared rather than replaced so that a re-run is a
+        # no-op, and so that a link an operator repointed somewhere deliberately is reported instead of
+        # silently overwritten.
+        local current
+        current=$(readlink "$link" 2>/dev/null) || current=""
+
+        if [ "$current" = "$target" ]; then
+            return 0
+        fi
+
+        warn "/sbin/mount.objectfs is a symlink to $current, not to $target; leaving it alone"
+        echo "  Fix, if that is not deliberate: ln -sf $target /sbin/mount.objectfs" >&2
+        return 0
+    fi
+
+    if [ -e "$link" ]; then
+        warn "/sbin/mount.objectfs exists and is not a symlink; leaving it alone"
+        echo "  Fix, if it is stale: rm /sbin/mount.objectfs && ln -s $target /sbin/mount.objectfs" >&2
+        return 0
+    fi
+
+    if ! ln -s "$target" "$link" 2>/dev/null; then
+        warn "could not create /sbin/mount.objectfs, so /etc/fstab entries will not work"
+        echo "  Fix: ln -s $target /sbin/mount.objectfs" >&2
+        return 0
+    fi
+}
+
 # check_fuse_module reports on the FUSE prerequisites ObjectFS cannot supply for itself.
 #
 # Three separate things, and they fail for different reasons:
@@ -254,6 +320,7 @@ main() {
     ensure_dir "$ROOT/mnt/objectfs" 755
 
     install_example_config
+    link_mount_helper
 
     reload_systemd
 
@@ -266,6 +333,8 @@ main() {
     echo "objectfs:   2. objectfs mount s3://your-bucket /mnt/objectfs"
     echo "objectfs:   or, per instance: cp /etc/objectfs/config.yaml /etc/objectfs/<name>.yaml"
     echo "objectfs:                     systemctl enable --now objectfs@<name>.service"
+    echo "objectfs:   or, in /etc/fstab: s3://your-bucket /mnt/objectfs objectfs \\"
+    echo "objectfs:                        _netdev,config=/etc/objectfs/config.yaml 0 0"
     echo "objectfs: Docs: https://github.com/scttfrdmn/objectfs/tree/main/docs"
 }
 

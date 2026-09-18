@@ -118,6 +118,40 @@ builds:
   - release
   - netgo
 
+# The /etc/fstab mount helper (#136). Linux only, and for the same reason the packages build is:
+# mount(8)'s helper protocol is a util-linux thing, and there is no /sbin/mount.TYPE on macOS.
+#
+# Its own build rather than a second `main:` on the packages build, because goreleaser builds one binary
+# per build entry. Named `mount.objectfs` exactly, with the dot, because mount(8) does not search for a
+# helper — it exec's /sbin/mount.$TYPE, a path compiled into util-linux, so the filename *is* the
+# registration. scripts/postinstall.sh links /sbin/mount.objectfs to it; see the reasoning there for why
+# a scriptlet symlink rather than a packaged file under /sbin.
+#
+# Deliberately not in `archives:` below. A tarball install goes through scripts/install.sh, which knows
+# one binary and renames it as it installs; adding a second would need install.sh to learn about /sbin
+# too, which is a root-only operation it does not otherwise require. A tarball user who wants fstab
+# support can copy the binary and make the link, or set OBJECTFS_BINARY and run the helper from anywhere.
+- id: mount-helper
+  main: ./cmd/mount.objectfs
+  binary: mount.objectfs
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux
+  goarch:
+  - amd64
+  - arm64
+  - arm
+  goarm:
+  - "7"
+  flags:
+  - -trimpath
+  ldflags:
+  - -s -w
+  tags:
+  - release
+  - netgo
+
 archives:
 - id: objectfs
   # Only the platform-named build. Without this the `packages` build would be archived too, and the
@@ -162,10 +196,13 @@ checksum:
 # agree because there is one of them, and `make package-linux` calls goreleaser.
 nfpms:
 - id: objectfs
-  # The build whose binary is called `objectfs`. Naming the wrong one here is the defect described
-  # above the builds section, and it is invisible in a build log.
+  # The builds whose binaries are named for a command rather than for a platform. Naming the wrong one
+  # here is the defect described above the builds section, and it is invisible in a build log. The
+  # `archives` build must never appear: nfpm has one bindir for the whole package, so including it would
+  # put `/usr/bin/objectfs-linux-amd64` on PATH alongside the real one.
   ids:
   - packages
+  - mount-helper
   package_name: objectfs
   # Each format's own convention, which is not the same string in the two worlds:
   #

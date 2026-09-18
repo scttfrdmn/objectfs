@@ -6,6 +6,9 @@
 *.dylib
 /objectfs
 objectfs-*
+# `go build ./cmd/mount.objectfs/` names its output after the package directory, so the binary lands at
+# the repo root as `mount.objectfs` — which `objectfs-*` above does not match.
+/mount.objectfs
 
 # C SDK build artifacts
 sdks/c/tests/test_basic
