@@ -55,7 +55,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than being handed a truncated result, a follower declining to inherit a failed leader's error, and a
   table test driving `inflightFetch.slice`'s range arithmetic across both boundaries. (#438)
 
+- `BackendMetrics` gains `fanout_probes` and `fanout_probe_declines`: chunk-0 GETs whose response
+  headers were put to the fan-out probe, and how many of those declined the body because the object
+  was encoded. The ratio is the cost side of the change under Changed — every fan-out waits a round trip
+  for chunk 0's headers, and only the declines got anything for it, so a deployment where declines are
+  near zero is paying for nothing. They exist for the same reason `seekable_whole_fallbacks` does: a
+  decline is invisible from every other angle, since the read returns identical bytes at identical
+  speed either way. (#514)
+
+- `TestFanOutOnACompressedObjectProbesWithOneChunk` asserts the requests *not* made: chunk 1's range
+  never asked for, no GET covering the whole read as the rediscovery fetch did, at least one chunk body
+  declined, and a transferred total calibrated against the same read starting past the end of the
+  stored body rather than against a constant. That read is refused a range at a time, so it cannot
+  transfer a chunk byte even in principle and what it costs *is* the framed cost.
+
+  The declined body is asserted on the counter rather than on the wire because the byte count is not
+  portable, which a fixed budget hid and CI found: the same read measured 614 abandoned bytes on darwin
+  and all 1,048,576 of them on the Linux runner, whose loopback buffer accepted the whole chunk before
+  the client's close landed. Both declined the body; only one could see it. A fixed byte budget was
+  also measured too blunt before being discarded — with the decline removed, a `stored*3/4` budget
+  passes. (#514)
+
 ### Changed
+
+- **A large read of a compressed object no longer transfers most of the object to discover that it is
+  compressed.** A 2 MiB read at offset 0 of an 8 MiB object stored in 4,293,520 bytes transferred
+  4,221,321 of them — 98% — and then read the frames it actually needed anyway. It now transfers
+  1,074,275 of a 4,292,603-byte body, 25%, and lands within 51 bytes of what the same read costs when
+  it starts past the end of the stored body and so is served entirely from frames. Both cost three
+  GETs. (The two stored sizes differ because the fixture body is seeded on the object key.)
+
+  Two requests were being made to learn something already known. Every chunk of the fan-out launched
+  at once, so `parallel_read_concurrency * read_chunk_size` was in flight before any chunk's headers
+  came back to say the object was `Content-Encoding`'d and the fan-out was the wrong path; and the
+  abandoned fan-out reported only *that* the object was encoded, so a further ranged GET went out to
+  rediscover the seekable descriptor which the abandoned chunk's own response headers had already
+  carried.
+
+  Now chunk 0 goes out alone, its response headers are put to a probe, and the remaining chunks launch
+  only if that probe says the object can be read from ranges at all. On an encoded object chunk 0 also
+  declines its own body — those bytes are stored bytes the read cannot use — and hands its metadata to
+  the framed read, which is what removes the rediscovery GET.
+
+  The cost is one round trip, not one request: `GetObject` returns when the response headers arrive
+  and the body streams after, so the wait is for headers that a chunk 0 fetch was going to receive
+  regardless. It is not a HEAD. Neither of the two requests was a mistake when written — #228 chose
+  attempt-then-fall-back over HEAD-first precisely so that establishing whether an object is encoded
+  costs compressed objects instead of every large read, and at the time a compressed object was
+  already paying a whole-body fetch, which made the chunks free. #185 removed that fetch and left the
+  chunks as the entire cost. (#514)
 
 - `.coverage-floors` records two corrections to how a floor must be measured. The darwin/linux
   difference in `internal/fuse` is **not** a denominator difference — coverage counts statements, and

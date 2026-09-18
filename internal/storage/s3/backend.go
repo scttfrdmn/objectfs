@@ -842,7 +842,7 @@ func (b *Backend) getObjectRangeProbed(
 
 					// Counted here rather than at the probe's own definition, because this is where the
 					// verdict is acted on: a probe that returned false and a body that went untransferred
-					// are the same event, and one counter for both cannot drift from the behaviour.
+					// are the same event, and one counter for both cannot drift from the behavior.
 					b.metricsCollector.RecordFanOutProbe(declined)
 
 					if declined {
