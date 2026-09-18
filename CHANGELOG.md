@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-18
+
+Fan-out reads, fstab mounts, and a gate that can see what it is gating.
+
+The read path stops paying for its own optimism: a range read of a compressed object now probes the
+fan-out with one chunk instead of committing a full wave, so discovering that an object is not
+seekable costs one chunk rather than most of the object.
+
+An ObjectFS filesystem can now be mounted the way every other filesystem on the machine is. The Linux
+packages ship `mount.objectfs` and link it at `/sbin/mount.objectfs`, which is the path `mount(8)`
+compiles in and resolves an unknown `-t objectfs` to — so both `mount -t objectfs s3://bucket /mnt` and
+an `/etc/fstab` line work, and the `packaging` job now proves it by installing the deb and running
+`mount -t objectfs` against real util-linux rather than asserting the file exists.
+
+The rest is the gate, which turned out to have been checking less than it claimed in four separate
+ways. A pull request based on anything other than `main` ran **no jobs at all** and read as green
+because the checks never existed rather than because they passed. G115 was excluded from the linter, so
+twelve integer-conversion alerts nobody could see were hiding four real defects — one of which could
+record a tar entry's file mode as a different, entirely plausible mode. The `coverage` job's
+`internal/fuse` floor was being decided by runner load. And no job in any workflow declared
+`timeout-minutes`, so a hung one held the required checks for six hours. Each of those is now enforced
+by a test that walks the tree rather than by a list of the cases someone had already thought of.
+
 ### Fixed
 
 - **A tar entry could state one file mode and have a different, entirely plausible one recorded.**
@@ -6769,7 +6792,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/scttfrdmn/objectfs/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/scttfrdmn/objectfs/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/scttfrdmn/objectfs/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/scttfrdmn/objectfs/compare/v0.13.0...v0.14.0
