@@ -53,6 +53,7 @@ func TestGosecBaselineNamesFilesThatExist(t *testing.T) {
 	root := repoRoot(t)
 
 	entries := 0
+	cgoBaselined := false
 
 	for line := range strings.SplitSeq(gosecBaseline(t), "\n") {
 		line = strings.TrimSpace(line)
@@ -73,6 +74,10 @@ func TestGosecBaselineNamesFilesThatExist(t *testing.T) {
 
 		rule, file, count := fields[0], fields[1], fields[2]
 
+		if file == filepath.Join("sdks", "c", "main.go") {
+			cgoBaselined = true
+		}
+
 		if n, err := strconv.Atoi(count); err != nil || n < 1 {
 			t.Errorf(".github/gosec-baseline.txt gives %s %s a count of %q. It must be a positive "+
 				"integer — a zero-count entry accounts for nothing and should be deleted instead", rule, file, count)
@@ -86,14 +91,32 @@ func TestGosecBaselineNamesFilesThatExist(t *testing.T) {
 		}
 	}
 
-	// The gate is a diff against this file, so an empty baseline does not fail open: it would fail
-	// every run instead. What it would do is destroy the distinction the mechanism exists for, since
-	// the only way back to green is to re-add the twelve pre-existing findings, and the fast way to do
-	// that is to stop checking. Assert the file still has content.
-	if entries < 5 {
-		t.Fatalf("found %d parsable entries in .github/gosec-baseline.txt; there are twelve "+
-			"pre-existing G115 findings across eight files, so the format has changed or the file has "+
-			"been emptied", entries)
+	// The gate is a diff against this file, so an empty baseline does not fail open: it would fail every
+	// run instead. What an empty one would mean is that the format changed and every line stopped
+	// parsing, which reads as "all findings fixed" and is the one way this file can lie.
+	//
+	// This used to assert a floor of five entries, on the reasoning that twelve pre-existing findings
+	// across eight files could not honestly shrink below it. #525 shrank it to one: every finding that
+	// could take a `#nosec G115 -- <why>` took one, and two turned out to be defects and went away with
+	// the fix. So the floor was a count copied into a test, and it went stale exactly the way a version
+	// number in prose does.
+	//
+	// What is asserted instead is the structural claim, which cannot go stale: the file parses, and it
+	// still accounts for sdks/c/main.go. That entry is the one that can never move inline — cgo collapses
+	// the call and any nearby comment onto one synthetic position, so a `#nosec` directive in that file
+	// lands where gosec is not looking (#200). If it disappears from here, either those findings stopped
+	// reaching the gate or someone suppressed them somewhere that does not work.
+	if entries == 0 {
+		t.Fatal("no parsable entries in .github/gosec-baseline.txt. An empty baseline is not the same as " +
+			"no findings: every line failing to parse looks identical to every finding being fixed, and " +
+			"the gate would then report the whole file as fixed findings")
+	}
+
+	if !cgoBaselined {
+		t.Error(".github/gosec-baseline.txt no longer accounts for sdks/c/main.go. Its G115 conversions " +
+			"cannot be suppressed in the file itself — cgo puts the directive on a line gosec does not " +
+			"read (#200) — so this file is the only place they can be accounted for. If they were fixed, " +
+			"say so here and in sdks/c/main.go's header comment")
 	}
 }
 

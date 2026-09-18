@@ -119,6 +119,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a production file is reported by `lint`, and removing the `_test.go` rule brings the test findings
   back. (#525)
 
+- **`.github/gosec-baseline.txt` is down from twelve findings across eight files to three in one**, and
+  the ratchet is what forced it: every `#nosec` written above took its finding out of the standalone
+  gosec report too, the two conversions that turned out to be defects went away with the defects, and
+  `Security Scan` then failed on seven removed entries with a message saying to delete them in the same
+  commit. Which is the half of a baseline that usually goes unbuilt — a slot kept after its finding is
+  fixed is permanent headroom for the next conversion in that file.
+
+  What remains is `sdks/c/main.go`, whose three G115s no directive can reach: cgo collapses the call
+  and any comment near it onto one synthetic position, so a `#nosec` in that file lands on a line gosec
+  is not reading (#200). `internal/config/gosec_gate_test.go` asserted a floor of five entries, which
+  was a count copied into a test and went stale the moment this shrank; it now asserts the two things
+  that cannot go stale — that the file parses at all, and that it still accounts for the cgo file. (#525)
+
 - `.coverage-floors` records two corrections to how a floor must be measured. The darwin/linux
   difference in `internal/fuse` is **not** a denominator difference — coverage counts statements, and
   both platforms total 1140; the gap is seven blocks in `mount.go` and `xattr.go` that one platform
