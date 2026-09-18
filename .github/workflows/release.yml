@@ -64,6 +64,13 @@ jobs:
   # ci.yml's `labels` job a token that cannot list labels. That job checks its own output for the
   # skip that a token-less run produces and fails on it, which is the only reason this would be
   # caught rather than reported green.
+  # No `timeout-minutes` here, and it is the only job in this repository without one. Actions rejects
+  # the key on a job that calls a reusable workflow — the allowed set beside `uses:` is name, with,
+  # secrets, needs, if and permissions, and an eighth key fails the whole file before any job starts,
+  # so there is no log to read and nothing runs. Verified against actionlint, not recalled. The gate is
+  # bounded regardless: every job inside ci.yml carries its own, and this job is the sum of those.
+  # `TestEveryWorkflowJobHasATimeout` encodes the exemption, and checks that it is a `uses:` job with no
+  # `steps:` rather than a blanket skip.
   gate:
     uses: ./.github/workflows/ci.yml
     permissions:
@@ -101,6 +108,7 @@ jobs:
   artifacts:
     name: Build and Package
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: gate
     permissions:
       contents: read
@@ -249,6 +257,7 @@ jobs:
     name: Build and Push Docker Image
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -340,6 +349,7 @@ jobs:
   security-scan:
     name: Security Scan Release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: artifacts
     permissions:
       contents: read
@@ -393,6 +403,7 @@ jobs:
   publish:
     name: Publish Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # `artifacts` covers the packages as well as the tarballs, so this dependency gates both. A release
     # that attaches the tarballs and silently omits the packages is worse than one that fails: the page
     # looks complete, and the omission is only visible to someone who knew to expect a .deb. That used
