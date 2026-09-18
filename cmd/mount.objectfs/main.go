@@ -37,7 +37,8 @@
 // #136 specifies translations for `ro`, `uid=` and `gid=`. None of the three has anywhere to go:
 // `objectfs mount` has no --read-only flag, and ownership is not remappable — internal/fuse reports the
 // uid and gid of the process that made the request, falling back to the ones that ran the mount, with
-// no flag or config key that overrides either. Verified against the code, not assumed.
+// no flag or config key that overrides either. Verified against the code, not assumed. #532 is the
+// read-only mount; when it lands, `ro` becomes a translation and its refusal here goes away.
 //
 // They are refused rather than dropped. An operator who writes `ro` in fstab and gets a read-write
 // mount has been told something untrue by this program about the filesystem's most consequential
