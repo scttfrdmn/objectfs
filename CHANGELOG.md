@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pull request based on anything other than `main` ran no CI at all.** `ci.yml` and
+  `security.yml` both filtered their `pull_request` trigger on `branches: [main]`, so a stacked pull
+  request — one whose base is another feature branch — started none of their jobs: not `test`, not
+  `lint`, not `coverage`, not `Security Scan`, not one of the twelve `build-tags`/`cross-build` cells.
+  Nothing failed, which is what made it invisible. The checks never *existed*, so `gh pr checks`
+  returned a single row, `dependabot  skipping`, and the pull request read as green because nothing
+  was red. #511 was reviewed in that state.
+
+  The window also closes at precisely the moment it stops being useful: GitHub retargets a stacked
+  pull request to `main` when its parent merges, so CI first runs after review has already happened
+  against zero signal.
+
+  `security.yml` was not named in the report but had the same filter, and it matters more there —
+  `Security Scan` is a required status check on `main`, so the trigger being filtered out meant a
+  check that is supposed to be able to block a merge could not report at all. The `push` trigger keeps
+  its `branches: [main]` in both files; that filter is a different question with a correct answer,
+  which is to stop a feature-branch push from duplicating the pull request's own run.
+  (#512)
+
+### Added
+
+- `TestNoPullRequestTriggerFiltersItsBaseBranch` walks `.github/workflows/` and fails on a
+  `branches:` or `branches-ignore:` filter under `pull_request` or `pull_request_target`. The
+  directory is walked rather than enumerated because the next workflow to arrive with
+  `branches: [main]` copied out of a README is the case a hard-coded file list cannot see.
+
 ## [0.15.1] - 2026-09-17
 
 The 0.15.0 release built and never published.

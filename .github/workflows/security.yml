@@ -20,8 +20,11 @@ name: Security
 on:
   push:
     branches: [main]
+  # No `branches:` filter, for the reason ci.yml's header item 5 gives: a base filter means a pull
+  # request stacked on a feature branch runs none of these jobs and reads as green because the
+  # checks never exist. It matters more here than it looks — `Security Scan` is a required context
+  # on `main`, so the one filtered out was a check that is supposed to be able to block a merge.
   pull_request:
-    branches: [main]
   schedule:
     # Weekly security scans
   - cron: 0 2 * * 1
