@@ -1286,6 +1286,73 @@ func TestInflightFetchSliceReportsOnlyTheBytesItHolds(t *testing.T) {
 	}
 }
 
+// TestJoinAnswersOnlyForAFetchThatContainsTheWholeRange drives join directly, which is the only way it
+// is owned at all.
+//
+// A mutation established that. Replacing join's body with `return nil` changes nothing any assertion on
+// GET counts can see: fetch falls through to start, whose own coveringLocked finds the same leader and
+// serves the follower from the second window instead. So the join at the top of fetch is an
+// optimization — it saves registering and retiring a self that is about to be discarded — and its
+// removal is behaviourally invisible through fetch. Invisible is not the same as harmless: the self a
+// follower registers in that window advertises a range nobody is fetching, and unclaimedStart trims
+// prefetches against exactly that list.
+func TestJoinAnswersOnlyForAFetchThatContainsTheWholeRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		off     int64
+		length  int64
+		wantHit bool
+		why     string
+	}{
+		{
+			name: "a range strictly inside the fetch", off: 5120, length: 1024, wantHit: true,
+			why: "the ordinary follower",
+		},
+		{
+			name: "the fetch's own range", off: 4096, length: 4096, wantHit: true,
+			why: "a range contains itself, which is what makes two identical reads share one GET",
+		},
+		{
+			name: "a range starting one byte early", off: 4095, length: 16, wantHit: false,
+			why: "partial overlap is not containment: answering it would mean splicing two results",
+		},
+		{
+			name: "a range ending one byte late", off: 8180, length: 13, wantHit: false,
+			why:  "the tail byte is not among the bytes in flight, and half of an answer is not one",
+		},
+		{
+			name: "a range entirely past the fetch", off: 16384, length: 1024, wantHit: false,
+			why: "nothing is fetching these bytes, so the caller must issue its own GET",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var fetches inflightFetches
+			leader, _ := fetches.start("obj.dat", 4096, 4096)
+
+			// A covering fetch under another key, so a hit can only have come from the right object.
+			fetches.start("other.dat", 0, 1<<20)
+
+			got := fetches.join("obj.dat", tc.off, tc.length)
+
+			switch {
+			case tc.wantHit && got != leader:
+				t.Errorf("join(%d, %d) returned %v, want the registered fetch: %s",
+					tc.off, tc.length, got, tc.why)
+			case !tc.wantHit && got != nil:
+				t.Errorf("join(%d, %d) answered with a fetch that does not hold every byte asked for. "+
+					"Its slice would be rejected downstream, but the caller has already waited on it: %s",
+					tc.off, tc.length, tc.why)
+			}
+		})
+	}
+}
+
 // TestFetchReturnsTheBackendsError covers the arm that reports a failed GET to the reader, and the
 // finish that has to happen first.
 //
@@ -1313,8 +1380,14 @@ func TestFetchReturnsTheBackendsError(t *testing.T) {
 	}
 
 	// The failed fetch must no longer be advertised, or the next caller waits on it forever.
+	//
+	// Fatal rather than Error, and the distinction is the whole test: the read below would join this
+	// leader and block on a done channel nothing closes. Continuing past a failed assertion here turns a
+	// clean failure into a ten-minute package timeout whose panic names a goroutine rather than a cause —
+	// which is what the first version of this test did to the mutation that moved `finish` after the
+	// error return.
 	if leader := f.fs.fetches.join("denied.dat", 0, 4096); leader != nil {
-		t.Error("a fetch that failed is still registered as in flight, so the next reader of this range " +
+		t.Fatal("a fetch that failed is still registered as in flight, so the next reader of this range " +
 			"joins it and blocks on a done channel nothing will close")
 	}
 
