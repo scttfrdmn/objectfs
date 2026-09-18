@@ -157,12 +157,15 @@ cmd/objectfs             77
 # child-exited-first and timed-out paths, because what the helper waits on is the kernel's mount table
 # rather than the process.
 #
-# 85 rather than 93, and the gap is deliberate rather than slack: this number has to be CI's measurement
-# and the 93.2 is not one (#438). Two things here could plausibly differ on a linux runner — the darwin
-# and linux halves of the st_dev fallback, and the `os.Getuid() == 0` skips in the log-directory tests —
-# and a floor set from a local run is the mistake .coverage-floors was rewritten to stop making. Tighten
-# it once a `coverage` job has reported a number for this package.
-cmd/mount.objectfs       85
+# It opened at 85 while the 93.2 was the only number available, because a floor set from a local run is
+# the mistake this file was rewritten to stop making (#438) — and two things here could plausibly have
+# differed on a linux runner: the darwin and linux halves of the st_dev fallback, and the
+# `os.Getuid() == 0` skips in the log-directory tests. Neither did. The `coverage` job on #530 measured
+# 93.4, two tenths above the local figure rather than below it, so the floor is now set from CI's own
+# number with 1.4 points of headroom — enough to absorb a swing the size of the 0.7 that made
+# internal/fuse flake, and not the eight points 85 was holding in reserve for a difference that turned
+# out not to exist.
+cmd/mount.objectfs       92
 # internal/cache/redis goes 87 → 88 with the shared conformance suite (#178). The gain is small and
 # what it bought is not: the suite is the test that found Get answering a ten-byte request with two
 # bytes, which ten implementation-specific tests had missed because none of them asked for a range
