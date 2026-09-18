@@ -9,6 +9,7 @@ package s3_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -241,6 +242,219 @@ func TestFanOutOnACompressedObjectFallsBackAndStaysCorrect(t *testing.T) {
 				"body, including the abandoned fan-out chunks",
 				readSize, r.offset, ts.BytesRead(key), len(ts.GETs(key)), stored)
 		})
+	}
+}
+
+// TestFanOutOnACompressedObjectProbesWithOneChunk is #514: an abandoned fan-out must not have already
+// transferred the bytes seekable framing exists to avoid.
+//
+// The number the sibling test above logs is what this asserts. A 2 MiB read at offset 0 of an 8 MiB
+// object stored in 4,293,520 bytes used to transfer 4,221,321 of them — 98% — and then run the framed
+// read anyway. Two things added up to that, and both are requests made to learn something already
+// known:
+//
+//   - Every chunk was launched at once, so ParallelReadConcurrency × ReadChunkSize was in flight before
+//     any chunk's headers came back to say the object was encoded.
+//   - The abandoned fan-out reported only *that* the object was encoded, so GetObject then issued a
+//     ranged GET to discover the seekable descriptor — which the abandoned chunk's own response headers
+//     had already carried. That GET comes back encoded, so its bytes are stored bytes nobody uses.
+//
+// Neither was a mistake when written. #228 chose attempt-then-fall-back over HEAD-first so that
+// establishing whether an object is encoded costs compressed objects instead of every large read, and a
+// compressed object was already paying a whole-body fetch — the chunks were free. #185 removed that
+// fetch and made them the entire cost.
+//
+// So the assertions are about *requests not made*, not about latency: chunk 1's range is never asked
+// for, no GET covers the whole read as the discovery fetch did, chunk 0's body is declined once its
+// headers have answered the question, and the transferred total lands within one abandoned chunk of what
+// the framed read alone costs rather than near the stored body. Why the decline is asserted on a counter
+// while the rest are asserted on the wire is explained where it happens.
+//
+// The offsets are the sibling test's two, for the same reason: a read starting inside the stored body
+// learns the encoding from a response header, and one starting past its end gets nothing but 416s and
+// has to learn it from a HEAD. Only the first route has headers to hand back, so they are the two halves
+// of this fix and not one case twice.
+//
+//nolint:tparallel // the subtests share a request recorder and must run in order; see below
+func TestFanOutOnACompressedObjectProbesWithOneChunk(t *testing.T) {
+	t.Parallel()
+
+	ts := testaws.Start(t)
+	ts.RequireRangeGET()
+
+	const (
+		key        = "fanout/probe"
+		objectSize = 8 << 20
+		chunkSize  = 1 << 20
+		threshold  = 1 << 20
+		readSize   = 2 << 20
+	)
+
+	backend := ts.Backend(func(cfg *s3.Config) {
+		cfg.ParallelReadThreshold = threshold
+		cfg.ReadChunkSize = chunkSize
+		cfg.ParallelReadConcurrency = 4
+
+		cfg.Compression.Enabled = true
+		cfg.Compression.Algorithm = "zstd"
+		cfg.Compression.Level = 3
+		cfg.Compression.MinSize = "4KB"
+	})
+
+	ctx := context.Background()
+
+	body := semiCompressible(key, objectSize)
+	if err := backend.PutObject(ctx, key, body, nil); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	stored := ts.ObjectSize(key)
+
+	// Without framing the fallback is a whole-body fetch and the budget below is unmeetable by
+	// construction, so a fixture that stopped framing would fail this test as though the probe
+	// regressed. Asserted rather than assumed, for the same reason the sibling test asserts it.
+	if _, ok := ts.ObjectMetadata(key)[metaSeekableKey]; !ok {
+		t.Fatalf("the object carries no %s descriptor, so it was not framed and a whole-body fetch is "+
+			"the correct way to read it. Metadata: %v", metaSeekableKey, ts.ObjectMetadata(key))
+	}
+
+	// Ranges the fix is about. chunk1 is the one the old code had in flight before it knew anything;
+	// discovery is the ranged GET that used to follow the abandoned fan-out to re-learn the descriptor.
+	// Matching on the header text is exact — these are the strings getObjectRange builds.
+	chunk1 := fmt.Sprintf("bytes=%d-%d", chunkSize, 2*chunkSize-1)
+
+	transferred := map[int64]int64{}
+	declines := map[int64]int64{}
+
+	//nolint:paralleltest // shared request recorder; the cases reset and then assert on it, in order
+	for _, r := range []struct {
+		name   string
+		offset int64
+	}{
+		{"read starting inside the compressed body", 0},
+		{"read starting past the end of the compressed body", objectSize - readSize},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			if inside := r.offset < stored; inside != (r.offset == 0) {
+				t.Fatalf("offset %d against a %d-byte stored body is inside=%v; the compression ratio "+
+					"moved and these two cases are no longer the two routes this test names",
+					r.offset, stored, inside)
+			}
+
+			ts.ResetRequests()
+
+			got, err := backend.GetObject(ctx, key, r.offset, readSize)
+			if err != nil {
+				t.Fatalf("GetObject(%d, %d): %v", r.offset, readSize, err)
+			}
+
+			// First, because a cheaper read that returns the wrong bytes is not an improvement.
+			if want := body[r.offset : r.offset+readSize]; !bytes.Equal(got, want) {
+				t.Fatalf("a %d-byte read at offset %d returned bytes that do not match body[%d:%d]",
+					readSize, r.offset, r.offset, r.offset+readSize)
+			}
+
+			discovery := fmt.Sprintf("bytes=%d-%d", r.offset, r.offset+readSize-1)
+
+			for _, g := range ts.GETs(key) {
+				switch g.Range {
+				case chunk1:
+					t.Errorf("the fan-out requested chunk 1 (%s) on a compressed object.\nChunk 0's "+
+						"response headers are what settle whether this object can be read from ranges "+
+						"at all, so the remaining chunks must wait for them. Launching every chunk at "+
+						"once is #514: it transferred 98%% of the stored body before learning the "+
+						"fan-out was the wrong path.\nRequests: %s", chunk1, describe(ts.Requests()))
+
+				case discovery:
+					t.Errorf("a GET covered the whole requested range (%s) on a compressed object.\n"+
+						"That is the discovery fetch the abandoned fan-out used to need in order to "+
+						"find the seekable descriptor — which the abandoned chunk's own response "+
+						"already carried. It comes back encoded, so its bytes are stored bytes this "+
+						"read never uses.\nRequests: %s", discovery, describe(ts.Requests()))
+				}
+			}
+
+			transferred[r.offset] = ts.BytesRead(key)
+
+			// Cumulative over the test, not per-read: the collector has no reset and these cases run in
+			// order, so the assertions below are about which case moved it.
+			declines[r.offset] = backend.GetMetrics().FanOutProbeDeclines
+
+			t.Logf("%d bytes at offset %d transferred %d bytes over %d GETs against a %d-byte stored "+
+				"body, with %d chunk bodies declined so far",
+				readSize, r.offset, ts.BytesRead(key), len(ts.GETs(key)), stored, declines[r.offset])
+		})
+	}
+
+	// The third saving — chunk 0's own body going untransferred once its headers say the object is
+	// encoded — is asserted on the counter and not on the bytes, and that split is deliberate.
+	//
+	// It cannot be asserted on the bytes because the quantity is not deterministic. The recorder counts
+	// what the emulator *wrote* toward the client, and a client that closes a response body mid-stream
+	// does not stop a write already accepted by a socket buffer. The same read measured 614 abandoned
+	// bytes on darwin and all 1,048,576 of them on the Linux CI runner, whose loopback buffer swallowed
+	// the whole chunk before the close was noticed. Both runs declined the body; only one could see it.
+	//
+	// So the budget below tolerates a full chunk, and this counter is what keeps the decline itself
+	// honest. Removing the probe's verdict leaves it at zero on every platform.
+	if declines[0] < 1 {
+		t.Errorf("the read at offset 0 declined %d chunk bodies; it must decline at least one.\n"+
+			"Chunk 0's response headers said the object was Content-Encoding'd, which means its body is "+
+			"stored bytes this read cannot use — the framed path re-reads the frames it needs. Reading "+
+			"it anyway is a whole chunk transferred to learn nothing, and on a Linux runner it is the "+
+			"one saving of #514 that the byte count cannot see.\nMetrics: %+v", declines[0],
+			backend.GetMetrics())
+	}
+
+	// A read whose every chunk is refused cannot consult a probe at all, so it must not have moved the
+	// counter. This is what makes the assertion above specific rather than a count of "some probe
+	// somewhere declined": the two cases reach the framed path by different routes, and only the first
+	// one has headers to decline on.
+	if declines[objectSize-readSize] != declines[0] {
+		t.Errorf("the read past the end of the stored body took the declines from %d to %d. Every chunk "+
+			"of that read is refused with a 416, so no response headers exist for a probe to be asked "+
+			"about — it learns the encoding from a HEAD. A decline here means the probe is being "+
+			"consulted somewhere this test does not describe.\nMetrics: %+v",
+			declines[0], declines[objectSize-readSize], backend.GetMetrics())
+	}
+
+	// The byte assertion, and it is calibrated against the other read rather than against a constant.
+	//
+	// A fixed budget was tried first and is too blunt to be worth having. The framed read of 2 MiB costs
+	// about a quarter of the stored body here, so any budget loose enough to survive the compression
+	// ratio moving is also loose enough to hide a whole extra chunk. Verified by mutation rather than
+	// argued: with the probe's body-declining removed, a `stored*3/4` budget passes.
+	//
+	// The read past the end of the stored body is the calibration. Every chunk of it is refused with a
+	// 416, so it cannot transfer a chunk byte even in principle: what it transfers *is* the framed cost
+	// of a 2 MiB read of this object. The read at offset 0 must cost that plus, at worst, the one chunk
+	// it abandoned — because framing is the path both of them end up on. Anything beyond that is bytes
+	// moved before the read knew where it was going.
+	inside, insideOK := transferred[0]
+	pastEnd, pastEndOK := transferred[objectSize-readSize]
+
+	if !insideOK || !pastEndOK {
+		t.Fatalf("both reads have to have run for the comparison below to mean anything; measured %v",
+			transferred)
+	}
+
+	// One chunk for the abandoned body, plus a quarter of one for the two framed reads differing in how
+	// many frames they touch and in the 416 bodies the second one collects.
+	//
+	// Which makes this a backstop and not the primary gate, and worth being clear about: an abandoned
+	// chunk body and an extra chunk requested are the same 1 MiB, so no budget that tolerates the first
+	// can catch the second. The exact detectors are the two range cases above — they name the requests —
+	// and the decline counter. What is left for the bytes is everything this test did not think to
+	// enumerate, and in particular the regression that costs the most: a fall back to fetching the whole
+	// stored body, four times this budget.
+	if allowance := int64(chunkSize + chunkSize/4); inside > pastEnd+allowance {
+		t.Errorf("a %d-byte read at offset 0 transferred %d bytes; the same-sized read past the end of "+
+			"the %d-byte stored body transferred %d, and both are served by the framed path.\n"+
+			"The %d extra bytes are more than the one chunk this read may abandon, so they are the "+
+			"fan-out's: chunks launched before chunk 0's headers came back, or a discovery GET "+
+			"re-learning the descriptor those headers already carried. That is #514: the measured "+
+			"figure was 4,221,321 of a 4,293,520-byte body, 98%%.\nRequests: %s",
+			readSize, inside, stored, pastEnd, inside-pastEnd, describe(ts.Requests()))
 	}
 }
 
