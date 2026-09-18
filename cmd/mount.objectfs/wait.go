@@ -231,10 +231,15 @@ func deviceOf(path string) (uint64, error) {
 		return 0, fmt.Errorf("cannot stat %s: %w", path, err)
 	}
 
-	// #nosec G115 -- st.Dev is uint64 on linux and int32 on darwin, so this widens on one platform and
-	// converts on the other. Only ever compared against another value from this same function, so the
-	// representation is what matters and the value is not.
-	return uint64(st.Dev), nil
+	// The conversion is a no-op on linux, where st.Dev is already uint64, and a widening one on darwin,
+	// where it is int32 — so it cannot be written to satisfy both platforms at once, and which linter
+	// objects depends on which one the lint ran under. CI lints GOOS=linux and sees a redundant
+	// conversion; a darwin run sees a signed widening. Suppressing both is cheaper than a two-file
+	// platform split for one expression, and this value is only ever compared against another result of
+	// this same function, so its representation is what matters and its value is not.
+	//
+	// #nosec G115 -- signed widening on darwin; see above.
+	return uint64(st.Dev), nil //nolint:unconvert // a no-op on linux only; see above
 }
 
 // countMountinfoEntries counts the lines of a mountinfo file whose mount point is target.
