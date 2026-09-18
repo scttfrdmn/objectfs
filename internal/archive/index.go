@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"time"
 
@@ -87,6 +88,26 @@ func BuildIndexFromBytes(archiveKey string, format archivepkg.ArchiveFormat, dat
 		if name == "." {
 			// Skip the synthetic root entry produced by some tar implementations.
 			continue
+		}
+
+		// hdr.Mode is an int64 read from a 12-byte field of an archive this process did not write —
+		// octal, or GNU base-256 which can carry a negative — and ArchiveEntry.Mode is a uint32.
+		// Truncating is the defect and not the warning: 0x1_0000_0644 narrows to 0644, so a crafted
+		// archive gets to state one mode and have a different, entirely plausible one recorded, with
+		// nothing downstream able to tell. Integrity first: an entry whose mode cannot be recorded as
+		// what it says stops the index rather than being recorded as something else.
+		//
+		// The bound is representability, not the permission mask, and that is a deliberate choice
+		// against the stricter one. internal/vfs rejects a mode carrying bits outside 0o7777, but a tar
+		// mode field legitimately carries file-type bits: Apache Commons Compress writes 0100644 for a
+		// regular file, so masking here would reject archives from a mainstream, non-hostile producer.
+		// Inside [0, MaxUint32] the value is recorded exactly as the archive states it — this is a
+		// metadata surface reporting what an archive says, and no production path reads the field to
+		// make an access decision.
+		if hdr.Mode < 0 || hdr.Mode > math.MaxUint32 {
+			return nil, fmt.Errorf("BuildIndexFromBytes: archive %q: entry %q states mode %#o, which does "+
+				"not fit the 32 bits a mode is recorded in, so it cannot be recorded as stated: %w",
+				archiveKey, name, hdr.Mode, ErrMalformedEntry)
 		}
 
 		isDir := hdr.Typeflag == tar.TypeDir

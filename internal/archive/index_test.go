@@ -1,9 +1,14 @@
 package archive
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,4 +282,118 @@ func TestBuildIndex_HeadObjectFailureIsNonFatal(t *testing.T) {
 	if meta.Index == nil {
 		t.Fatal("Index is nil after non-fatal HeadObject failure")
 	}
+}
+
+// TestBuildIndexFromBytesRejectsAModeItCannotRecord covers the one G115 site of #525 that was a defect
+// rather than a warning, and the bound it settles on is the point of the table.
+//
+// hdr.Mode is an int64 read from an archive this process did not write; ArchiveEntry.Mode is a uint32.
+// The conversion between them used to be unchecked, so a mode outside 32 bits was recorded as a
+// different one — and a plausible one. 0x1_0000_0644 narrows to 0644 and -1 narrows to 0777 with every
+// special bit set: a crafted archive got to state one mode and have another presented, with nothing
+// downstream able to notice.
+//
+// Both of those are writable and readable by Go's own archive/tar in its default format, measured
+// rather than assumed — only the PAX writer refuses them — so this is reachable with a file, not a
+// hypothetical about some other tar implementation.
+//
+// The accepted rows are what stops the fix from being a stricter one. internal/vfs rejects a mode
+// carrying bits outside 0o7777 and that would be the obvious rule to copy here, but 0100644 is what
+// Apache Commons Compress writes for a regular file, so the strict rule rejects archives from a
+// mainstream producer. The bound is representability: inside it, recorded exactly as stated.
+func TestBuildIndexFromBytesRejectsAModeItCannotRecord(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		mode int64
+		want uint32 // only read when the entry is accepted
+		ok   bool
+	}{
+		{"an ordinary permission mode", 0o644, 0o644, true},
+		{"the file-type bits Apache Commons Compress writes", 0o100644, 0o100644, true},
+		{"the largest mode a uint32 can hold", math.MaxUint32, math.MaxUint32, true},
+		{"one more than that, which used to be recorded as 0644", math.MaxUint32 + 0o644 + 1, 0, false},
+		{"a negative mode, which used to be recorded as 0777 with every special bit", -1, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			data := tarGzWithMode(t, "f.txt", tc.mode)
+
+			meta, err := BuildIndexFromBytes("modes.tar.gz", archivepkg.FormatTarGzip, data)
+
+			if !tc.ok {
+				if err == nil {
+					entry, _ := meta.Index.GetEntry("f.txt")
+					t.Fatalf("an entry stating mode %#o (%d) was indexed as %#o. It does not fit the "+
+						"32 bits a mode is recorded in, so what was recorded is not what the archive "+
+						"says — which is the whole defect: the number that comes out is a valid-looking "+
+						"mode nobody can tell apart from a stated one", tc.mode, tc.mode, entry.Mode)
+				}
+
+				if !errors.Is(err, ErrMalformedEntry) {
+					t.Errorf("rejected with %v, which does not wrap ErrMalformedEntry. The sentinel is "+
+						"how a caller tells a header it cannot represent from a read or decompression "+
+						"failure, and a rejection for the right reason is not the same as a rejection",
+						err)
+				}
+
+				if !strings.Contains(err.Error(), "f.txt") {
+					t.Errorf("the rejection %q does not name the entry. An operator holding a rejected "+
+						"archive needs to know which of its entries to look at", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("mode %#o is representable in 32 bits and must be indexed as stated: %v",
+					tc.mode, err)
+			}
+
+			entry, ok := meta.Index.GetEntry("f.txt")
+			if !ok {
+				t.Fatalf("f.txt is absent from the index built from an archive containing it")
+			}
+
+			if entry.Mode != tc.want {
+				t.Errorf("mode %#o was recorded as %#o, want %#o", tc.mode, entry.Mode, tc.want)
+			}
+		})
+	}
+}
+
+// tarGzWithMode builds a one-entry tar.gz whose header states mode exactly.
+//
+// Not makeTarGz, which hardcodes 0644 and 0755: the mode is the subject here. The format is left
+// unset so archive/tar picks one that can encode the value — PAX cannot encode any of the
+// out-of-range rows, and asking for it would make the test fail at the fixture instead of at the
+// assertion.
+func tarGzWithMode(t *testing.T, name string, mode int64) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Typeflag: tar.TypeReg,
+		Mode:     mode,
+		ModTime:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("WriteHeader(mode %#o): %v", mode, err)
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar.Writer.Close: %v", err)
+	}
+
+	if err := gzw.Close(); err != nil {
+		t.Fatalf("gzip.Writer.Close: %v", err)
+	}
+
+	return buf.Bytes()
 }
