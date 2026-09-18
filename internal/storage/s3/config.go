@@ -419,6 +419,14 @@ type ReplicationPricing struct {
 // Parts smaller than 5 MB (except the final part) are rejected with EntityTooSmall.
 const s3MinPartSize = 5 * 1024 * 1024 // 5 MB
 
+// s3MaxParts is the highest part number S3 accepts. A part number outside 1..10000 is rejected with
+// InvalidArgument, and the rejection arrives per part — so an upload that needs more parts than this
+// fails after transferring the parts that did fit, having initiated an upload that must then be aborted.
+const s3MaxParts = 10000
+
+// s3MaxPartSize is the largest single part S3 accepts.
+const s3MaxPartSize = 5 * 1024 * 1024 * 1024 // 5 GiB
+
 // CalculateOptimalChunkSize calculates the optimal chunk size based on file size and network conditions
 func CalculateOptimalChunkSize(fileSize int64, multipartThreshold int64, baseChunkSize int64) int64 {
 	// If file is below multipart threshold, use full file as single chunk
@@ -449,6 +457,28 @@ func CalculateOptimalChunkSize(fileSize int64, multipartThreshold int64, baseChu
 	// Enforce S3 minimum part size: all non-last parts must be >= 5 MB.
 	if chunkSize < s3MinPartSize {
 		chunkSize = s3MinPartSize
+	}
+
+	// Enforce S3's 10,000-part ceiling, which the ladder above does not reach on its own: it tops out at
+	// eight times the configured base, so with the 16 MiB default the largest chunk is 128 MiB and the
+	// ceiling binds at 1.25 TiB — but the base is configuration, and at a 5 MiB base it binds at 400 GiB.
+	// Past that point every part number above 10,000 is rejected individually, after the upload has been
+	// initiated and the first 10,000 parts have been paid for and stored.
+	//
+	// Raising the chunk size is the fix rather than a rejection, because a larger part is exactly what S3
+	// wants for an object this size and nothing else about the upload has to change. It is done here, in
+	// the pure function, and not at the one call site, so that the invariant holds for whatever computes a
+	// part count from it — today putObjectMultipart, which holds the whole object in memory and so cannot
+	// reach 1.25 TiB, and tomorrow any streaming path, for which the ceiling is immediately live.
+	if minForPartCeiling := (fileSize + s3MaxParts - 1) / s3MaxParts; chunkSize < minForPartCeiling {
+		chunkSize = minForPartCeiling
+	}
+
+	// S3 rejects a part over 5 GiB. Only reachable above ~48.8 TiB, which is ten times S3's own
+	// single-object limit, so this is a floor under an impossible case and not a policy: an upload that
+	// needs it was going to be rejected by S3 for its size whatever part size it asked for.
+	if chunkSize > s3MaxPartSize {
+		chunkSize = s3MaxPartSize
 	}
 
 	return chunkSize

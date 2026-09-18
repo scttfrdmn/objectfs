@@ -111,6 +111,20 @@ func TestCalculateOptimalChunkSize(t *testing.T) {
 			fileSize:      500 * 1024 * 1024 * 1024,
 			expectedChunk: 128 * 1024 * 1024, // 128MB (8x base)
 		},
+		{
+			// The ladder tops out at 8x base = 128 MiB, which covers 10,000 parts up to 1.25 TiB exactly.
+			// At the boundary the ladder's own answer is still the right one.
+			name:          "at the 10,000-part ceiling (1.25TiB)",
+			fileSize:      s3MaxParts * 128 * 1024 * 1024,
+			expectedChunk: 128 * 1024 * 1024,
+		},
+		{
+			// One byte past it, the ladder's 128 MiB would need 10,001 parts, and part 10,001 is rejected
+			// by S3 after the first 10,000 have been uploaded and stored. The chunk size has to grow.
+			name:          "one byte past the ceiling",
+			fileSize:      s3MaxParts*128*1024*1024 + 1,
+			expectedChunk: 128*1024*1024 + 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -123,6 +137,69 @@ func TestCalculateOptimalChunkSize(t *testing.T) {
 					tt.fileSize, result, tt.expectedChunk)
 			}
 		})
+	}
+}
+
+// TestCalculateOptimalChunkSizeRespectsThePartCeiling asserts the property rather than a table of
+// arithmetic, because the table above can only restate the formula it is checking.
+//
+// The chunk size exists to be divided into the file, so the thing that has to hold is that the division
+// fits in the 10,000 part numbers S3 will accept. It did not: the size ladder tops out at eight times the
+// configured base, so the ceiling bound at 1.25 TiB with the 16 MiB default and at 400 GiB with a 5 MiB
+// base — and past it, part 10,001 is rejected individually, after the first 10,000 have been transferred,
+// billed, and left behind for an abort to clean up.
+//
+// Both a 5 MiB and a 128 MiB base are swept, because the base is configuration and it is the small one
+// that brings the ceiling within reach of a file a research user actually has.
+func TestCalculateOptimalChunkSizeRespectsThePartCeiling(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tib = int64(1024) * 1024 * 1024 * 1024
+		gib = int64(1024) * 1024 * 1024
+	)
+
+	for _, base := range []int64{5 * 1024 * 1024, 16 * 1024 * 1024, 128 * 1024 * 1024} {
+		for _, fileSize := range []int64{
+			// The small sizes are here for the 5 MB minimum rather than the part ceiling: with a 5 MiB
+			// base, a file under twice the threshold takes base/2 = 2.5 MiB, which S3 rejects for every
+			// part but the last. Without them the minimum clamp is asserted and never exercised.
+			40 * 1024 * 1024, 64 * 1024 * 1024, 512 * 1024 * 1024,
+			400 * gib, 400*gib + 1, 1 * tib, 1250 * gib, 1250*gib + 1, 2 * tib, 4 * tib, 5 * tib,
+		} {
+			chunk := CalculateOptimalChunkSize(fileSize, 32*1024*1024, base)
+
+			if parts := CalculatePartCount(fileSize, chunk); parts > s3MaxParts {
+				t.Errorf("a %d-byte file with a %d-byte base chunk got chunk size %d, which needs %d "+
+					"parts; S3 rejects every part number above %d, so this upload fails after "+
+					"transferring the first %d parts", fileSize, base, chunk, parts, s3MaxParts, s3MaxParts)
+			}
+
+			// The two S3 limits the chunk size sits between. Raising it to fit the part ceiling must not
+			// push it past the largest part S3 takes, and must never undercut the 5 MB minimum.
+			if chunk > s3MaxPartSize {
+				t.Errorf("a %d-byte file with a %d-byte base chunk got chunk size %d, above S3's %d-byte "+
+					"part limit", fileSize, base, chunk, int64(s3MaxPartSize))
+			}
+			if chunk < s3MinPartSize {
+				t.Errorf("a %d-byte file with a %d-byte base chunk got chunk size %d, below S3's %d-byte "+
+					"minimum for a non-final part", fileSize, base, chunk, int64(s3MinPartSize))
+			}
+		}
+	}
+
+	// Above 48.8 TiB the two limits genuinely conflict: 10,000 parts of the largest part S3 takes is all
+	// there is, so a larger file cannot be uploaded at any part size and S3 will reject it for its size
+	// whatever this returns. Asserted separately from the sweep for exactly that reason — demanding the
+	// part count fit here would be demanding the impossible. What must hold is that the answer stops at
+	// the part limit rather than sailing past it, since a part over 5 GiB is rejected on part 1 while an
+	// oversized object is rejected for being an oversized object.
+	for _, fileSize := range []int64{60 * tib, 100 * tib} {
+		if chunk := CalculateOptimalChunkSize(fileSize, 32*1024*1024, 16*1024*1024); chunk != s3MaxPartSize {
+			t.Errorf("a %d-byte file got chunk size %d; past the point where 10,000 maximum-size parts "+
+				"cannot cover the file, the answer has to stop at S3's %d-byte part limit, not exceed it",
+				fileSize, chunk, int64(s3MaxPartSize))
+		}
 	}
 }
 

@@ -19,20 +19,21 @@
 # Every path here must exist; internal/config/gosec_gate_test.go checks that, so an entry left behind
 # by a deleted or renamed file cannot sit here granting slack to nothing.
 #
-# All twelve are G115, integer conversion overflow, and all are `error` level — which is why this is a
-# baseline and not a severity threshold. There is no level to gate on that separates them from a new
-# finding, because gosec reports every G115 identically.
+# This file had eight entries and twelve findings until #525, and the ratchet is what emptied it: each
+# `#nosec G115 -- <why it is bounded>` written onto a conversion that was genuinely bounded took its
+# finding out of the report, the two conversions that turned out to be defects went away with the
+# defects, and the gate then failed on seven '-' lines and made this edit the same commit's problem.
+# What is left is the three that no directive can reach.
 #
 # sdks/c/main.go's three arrive with no path of their own: gosec analyses the cgo-generated
 # intermediate and emits an empty artifactLocation, which the "Fix Gosec SARIF format" step in
 # security.yml back-fills. See the long comment there for why that back-fill is sound. The gate reads
 # the SARIF *after* that step, so these are keyed by the real path like everything else.
+#
+# They are also the reason this file is not empty. A `#nosec` directive does not work in a cgo file at
+# all — cgo collapses the call and any comment near it onto one synthetic position, so the directive
+# lands on a line gosec is not looking at. sdks/c/main.go's header records that from #200, along with
+# the conversions themselves and the argument that each is bounded. The suppression for those three is
+# this line, and there is nowhere else it could go.
 
-G115 internal/archive/index.go 1
-G115 internal/cache/predictive.go 1
-G115 internal/difftest/program.go 1
-G115 internal/health/remediation.go 2
-G115 internal/storage/s3/backend.go 1
-G115 internal/storage/s3/multipart_upload.go 2
-G115 pkg/recovery/connection.go 1
 G115 sdks/c/main.go 3

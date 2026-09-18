@@ -186,6 +186,8 @@ func FillBytes(seed byte, n int) []byte {
 	out := make([]byte, n)
 	out[0] = seed
 	for i := 1; i < n; i++ {
+		// #nosec G115 -- the truncation is the operation. This mixes the index into a byte; keeping the
+		// high bits would mean not producing a byte. Every value of i is a valid input.
 		out[i] = seed ^ byte(i*31+i>>8)
 	}
 	return out

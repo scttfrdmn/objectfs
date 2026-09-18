@@ -3,9 +3,12 @@ package recovery
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	objerrors "github.com/scttfrdmn/objectfs/pkg/errors"
 )
 
 type mockConnection struct {
@@ -541,6 +544,71 @@ func TestConnectionPool_GetConnection(t *testing.T) {
 		if conn == nil {
 			t.Error("Expected non-nil connection")
 		}
+	}
+}
+
+// TestConnectionPool_GetConnectionOnEmptyPool pins #525's reachable half.
+//
+// gosec reported the int→uint32 conversion in GetConnection's round-robin, which needs more than four
+// billion managers before it can misrepresent anything. The `% 0` in the same expression needs none:
+// NewConnectionPool accepts size 0 without complaint — a pool size read from configuration is how that
+// happens — and the first GetConnection used to panic with an integer divide by zero, in the package
+// whose subject is surviving failures.
+//
+// The assertion is on which error comes back, not merely that one does. Answering an empty pool with
+// "no healthy connections available" — what falling through to the retry loop would produce, since it
+// has nothing to iterate — sends an operator to look at connection health when the pool was never
+// built. The distinction is the diagnosis.
+func TestConnectionPool_GetConnectionOnEmptyPool(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultConnectionConfig()
+	factory := func(ctx context.Context) (any, error) {
+		return &mockConnection{healthy: true}, nil
+	}
+	health := func(ctx context.Context, conn any) error {
+		return nil
+	}
+
+	pool := NewConnectionPool("empty-pool", 0, config, factory, health)
+
+	// Every one of these used to be a panic or is on the path to one; a pool built with size 0 has to be
+	// inert rather than fatal, so the other read-only accessors are swept here too.
+	if got := pool.HealthyCount(); got != 0 {
+		t.Errorf("HealthyCount() on an empty pool = %d, want 0", got)
+	}
+	if got := pool.GetStats(); len(got) != 0 {
+		t.Errorf("GetStats() on an empty pool returned %d entries, want 0", len(got))
+	}
+	if err := pool.ConnectAll(context.Background()); err != nil {
+		t.Errorf("ConnectAll() on an empty pool = %v, want nil: there is nothing to fail to connect", err)
+	}
+
+	conn, err := pool.GetConnection()
+	if err == nil {
+		t.Fatalf("GetConnection() on an empty pool returned (%v, nil); it must report that the pool "+
+			"holds nothing rather than hand back a connection it does not have", conn)
+	}
+	if conn != nil {
+		t.Errorf("GetConnection() returned a non-nil connection %v alongside its error", conn)
+	}
+
+	var ofsErr *objerrors.ObjectFSError
+	if !errors.As(err, &ofsErr) {
+		t.Fatalf("GetConnection() error %v is not an *ObjectFSError, so it carries no code for a "+
+			"caller to branch on", err)
+	}
+	if ofsErr.Code != objerrors.ErrCodeConnectionPool {
+		t.Errorf("GetConnection() error code = %q, want %q", ofsErr.Code, objerrors.ErrCodeConnectionPool)
+	}
+	if ofsErr.Component != "empty-pool" {
+		t.Errorf("GetConnection() error component = %q, want the pool's name %q",
+			ofsErr.Component, "empty-pool")
+	}
+	if !strings.Contains(ofsErr.Message, "no connections") {
+		t.Errorf("GetConnection() on an empty pool said %q. It has to say the pool is empty: "+
+			"%q is the retry loop's answer, and it points a reader at connection health instead",
+			ofsErr.Message, "no healthy connections available")
 	}
 }
 

@@ -9,3 +9,8 @@ import "errors"
 // ErrNotFound is returned when a requested path does not exist within an
 // archive.
 var ErrNotFound = errors.New("archive: entry not found")
+
+// ErrMalformedEntry is returned when a tar header states something that cannot be recorded as what it
+// says. Indexing stops: the archive was written by something this process does not control, and an
+// entry it cannot represent faithfully is not one to present with a guess substituted.
+var ErrMalformedEntry = errors.New("archive: malformed tar header")

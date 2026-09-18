@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -655,7 +656,7 @@ func (ap *AccessPredictor) updateModel() {
 		ap.model.mu.Lock()
 		// Update weights
 		for i, feature := range example.Features {
-			featureName := ap.getFeatureName(i)
+			featureName := featureName(i)
 			if _, exists := ap.model.weights[featureName]; !exists {
 				ap.model.weights[featureName] = 0.0
 			}
@@ -760,12 +761,32 @@ func (ap *AccessPredictor) createTrainingExamples() []TrainingExample {
 	return examples
 }
 
-func (ap *AccessPredictor) getFeatureName(index int) string {
-	names := []string{"size", "offset", "timestamp", "sequential", "frequency", "recency"}
-	if index < len(names) {
-		return names[index]
+// knownFeatureNames are the weight-map keys for the features the model is built around, in the order
+// createTrainingExamples emits them.
+//
+// One list, at package scope, because two copies of it were the real hazard here. getFeatureName named
+// the key a weight is *written* under and predict named the key it is *read* by, each from its own
+// literal; a list that drifted would have left training updating a weight prediction never looks at,
+// and nothing would report it. Only the last three names have no feature behind them yet.
+var knownFeatureNames = []string{"size", "offset", "timestamp", "sequential", "frequency", "recency"}
+
+// featureName is the weight-map key for the feature at index.
+//
+// strconv.Itoa, and this was the #525 finding that was wrong for a reason gosec did not mention.
+// `string(rune(index))` builds the Unicode codepoint numbered index, not its decimal text, so index 5
+// produced "feature_\x05" — a control character — where "feature_5" was plainly meant. gosec reported
+// only the int→rune overflow, which is the least of it: the name was garbage for every index the branch
+// could reach.
+//
+// Unreachable today, because createTrainingExamples emits three features and this list holds six. That
+// is exactly why it was worth fixing rather than suppressing: nothing fails now, and the trap springs on
+// whoever adds a seventh feature.
+func featureName(index int) string {
+	if index >= 0 && index < len(knownFeatureNames) {
+		return knownFeatureNames[index]
 	}
-	return "feature_" + string(rune(index))
+
+	return "feature_" + strconv.Itoa(index)
 }
 
 // ML Model Implementation
@@ -775,17 +796,11 @@ func (pm *PredictionModel) predict(features []float64) float64 {
 	defer pm.mu.RUnlock()
 
 	prediction := pm.bias
-	featureNames := []string{"size", "offset", "timestamp", "sequential", "frequency", "recency"}
 
 	for i, feature := range features {
-		var featureName string
-		if i < len(featureNames) {
-			featureName = featureNames[i]
-		} else {
-			featureName = "feature_" + string(rune(i))
-		}
-
-		if weight, exists := pm.weights[featureName]; exists {
+		// Through featureName rather than a local copy of the list: this reads the weight that
+		// updateModel wrote under the same index, so the two have to agree by construction.
+		if weight, exists := pm.weights[featureName(i)]; exists {
 			prediction += weight * feature
 		}
 	}

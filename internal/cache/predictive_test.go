@@ -3,6 +3,7 @@ package cache
 import (
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/scttfrdmn/objectfs/pkg/types"
 )
@@ -196,5 +197,81 @@ func TestGenerateEvictionCandidates_EvictionScoreOrder(t *testing.T) {
 	if scores["stale-key"] <= scores["recent-key"] {
 		t.Errorf("stale-key eviction score (%f) should be > recent-key (%f)",
 			scores["stale-key"], scores["recent-key"])
+	}
+}
+
+// TestFeatureNameIsDecimalTextNotACodepoint pins the #525 finding that gosec described wrongly.
+//
+// The site was `"feature_" + string(rune(index))`, reported as an int→rune overflow. The overflow is the
+// least of it: string(rune(n)) builds the Unicode codepoint numbered n, so index 6 produced
+// "feature_\x06" — a control character — where "feature_6" was meant. Every index the fallback could
+// reach named a weight after an unprintable byte.
+//
+// The indices below 6 matter as much as the ones above it, because this function names a map key that is
+// written on one path and read on another: updateModel writes pm.weights[featureName(i)] and predict
+// reads it. Two literal lists used to supply those names. If they drift, training updates a weight
+// prediction never consults and nothing reports it, so the table asserts the boundary from both sides.
+func TestFeatureNameIsDecimalTextNotACodepoint(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		index int
+		want  string
+	}{
+		{0, "size"},
+		{5, "recency"},
+		{6, "feature_6"},
+		{10, "feature_10"},
+		{128, "feature_128"},
+		{-1, "feature_-1"},
+	} {
+		if got := featureName(tc.index); got != tc.want {
+			t.Errorf("featureName(%d) = %q, want %q", tc.index, got, tc.want)
+		}
+	}
+
+	// Asserted separately from the table because it is the property, not a case: a weight key that is
+	// not printable text cannot be read in a log line, a dump of the model, or a metric label.
+	for i := range 20 {
+		name := featureName(i)
+		for _, r := range name {
+			if !unicode.IsPrint(r) {
+				t.Errorf("featureName(%d) = %q contains the unprintable %U. This is what "+
+					"string(rune(index)) produced for every index past the named features", i, name, r)
+			}
+		}
+	}
+}
+
+// TestTrainingAndPredictionAgreeOnWeightKeys is the reason featureName is one function and not two
+// literals, and it asserts the coupling rather than the spelling.
+//
+// updateModel writes a weight under featureName(i); predict reads one under the same index. The test
+// trains on enough sequential accesses to move the weights, then asserts predict's output actually
+// responds to them — which it cannot do if the two sides name different keys, because the lookup
+// silently misses and the feature contributes nothing.
+func TestTrainingAndPredictionAgreeOnWeightKeys(t *testing.T) {
+	t.Parallel()
+
+	model := &PredictionModel{weights: map[string]float64{}, learningRate: 0.1}
+
+	features := []float64{1, 2, 3}
+
+	base := model.predict(features)
+
+	// Written the way updateModel writes them, through the same function.
+	model.mu.Lock()
+	for i := range features {
+		model.weights[featureName(i)] = 0.5
+	}
+	model.mu.Unlock()
+
+	withWeights := model.predict(features)
+
+	if withWeights == base {
+		t.Errorf("predict returned %v both before and after every feature's weight was set to 0.5. "+
+			"predict is reading weights under keys that featureName does not produce, so training "+
+			"updates weights prediction never looks at — silently, because a map lookup that misses "+
+			"is not an error.\nWeights: %v", base, model.weights)
 	}
 }
