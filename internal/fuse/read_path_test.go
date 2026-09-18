@@ -1165,6 +1165,14 @@ func TestFetchIssuesItsOwnGetWhenTheLeaderCameUpShort(t *testing.T) {
 // TestFetchIssuesItsOwnGetWhenTheLeaderFailed pins the asymmetry stated on the fetches field: a
 // prefetch carries a 5-second deadline and a read carries none, so a read that inherited its leader's
 // error would be failed by a timeout that was never its own.
+//
+// The leader here holds a full result *and* an error, which fetchUncached never produces — it returns
+// nil data on failure. That is the point. With nil data the length check in slice rejects the leader on
+// its own, so `leader.err == nil` is redundant in production and a test using a realistic failed leader
+// passes whether the check is there or not: deleting it leaves the package green. Giving the leader bytes
+// it must not hand over is what makes the branch load-bearing, and the branch is worth owning because the
+// comment on the fetches field commits to it — if a leader ever does come back with partial data and an
+// error, the rule that a read does not inherit a prefetch's failure has to still hold.
 func TestFetchIssuesItsOwnGetWhenTheLeaderFailed(t *testing.T) {
 	t.Parallel()
 
@@ -1172,13 +1180,22 @@ func TestFetchIssuesItsOwnGetWhenTheLeaderFailed(t *testing.T) {
 	payload := f.srv.SeedRandom("failed-leader.dat", 64<<10)
 
 	leader, _ := f.fs.fetches.start("failed-leader.dat", 0, 64<<10)
+	leader.data = payload
 	leader.err = errors.New("context deadline exceeded")
 	close(leader.done)
+
+	before := len(f.srv.GETs("failed-leader.dat"))
 
 	got, err := f.fs.fetch(t.Context(), "failed-leader.dat", 2048, 1024)
 	if err != nil {
 		t.Fatalf("a read behind a failed leader inherited its error: %v. A prefetch's deadline is not "+
 			"the read's, and a read has none", err)
+	}
+
+	if after := len(f.srv.GETs("failed-leader.dat")); after == before {
+		t.Error("a read behind a failed leader took that leader's bytes instead of issuing its own GET. " +
+			"The leader reported an error, so what it holds is not an answer — a prefetch that timed out " +
+			"half way would otherwise be served to a reader as a complete result")
 	}
 
 	if want := payload[2048 : 2048+1024]; !bytes.Equal(got, want) {
