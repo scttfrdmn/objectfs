@@ -379,36 +379,53 @@ func TestThePackagedBinaryIsOnThePathAsObjectfs(t *testing.T) {
 	cfg := readGoreleaser(t)
 	nfpm := readNfpm(t)
 
-	if len(nfpm.IDs) != 1 {
-		t.Fatalf("%s's nfpms entry names %d builds in `ids:` (%v), and this test reads one. With no "+
-			"`ids:` at all goreleaser packages *every* build, which here means the package would take "+
-			"whichever of the two it saw first — and one of them names its binary for the platform.",
-			packagingFile, len(nfpm.IDs), nfpm.IDs)
+	if len(nfpm.IDs) == 0 {
+		t.Fatalf("%s's nfpms entry has no `ids:`. goreleaser then packages *every* build, and one of "+
+			"them names its binary for the platform — nfpm has a single bindir, so the package would "+
+			"put /usr/bin/objectfs-linux-amd64 on PATH beside the real command.", packagingFile)
 	}
 
-	var binary string
-	found := false
-
+	// Asserted as a property rather than as a count. This used to require exactly one id, on the
+	// reasoning that there were two builds and only one belonged in the package. #136 added a third,
+	// `mount-helper`, which does belong — so the count was a proxy that went stale the moment a
+	// legitimate build was added, while the thing it stood for did not change: every id must resolve to
+	// a build, no id may be the platform-named one, and exactly one must supply `objectfs`.
+	byID := make(map[string]string, len(cfg.Builds))
 	for _, b := range cfg.Builds {
-		if b.ID == nfpm.IDs[0] {
-			binary = strings.TrimSpace(b.Binary)
-			found = true
+		byID[b.ID] = strings.TrimSpace(b.Binary)
+	}
+
+	objectfsBuilds := 0
+
+	for _, id := range nfpm.IDs {
+		binary, found := byID[id]
+		if !found {
+			t.Errorf("%s's nfpms entry names build %q in `ids:`, and no build has that id. goreleaser "+
+				"fails on this, so it is caught either way — but it is caught here without a release.",
+				packagingFile, id)
+
+			continue
+		}
+
+		if binary == "objectfs" {
+			objectfsBuilds++
+		}
+
+		// A binary whose name carries a platform is the tarball build. install.sh renames it as it
+		// installs; a package cannot, because nfpm places the build's binary under one bindir verbatim.
+		if strings.Contains(binary, "{{") || strings.Contains(binary, ".Os") {
+			t.Errorf("%s packages build %q, whose binary name is the template %q. That is the tarball "+
+				"build, and nothing fails at package time: the package builds, installs, runs its "+
+				"scriptlets and exits 0, and then the command is /usr/bin/objectfs-linux-amd64.",
+				packagingFile, id, binary)
 		}
 	}
 
-	if !found {
-		t.Fatalf("%s's nfpms entry takes its binary from build %q, and no build has that id. "+
-			"goreleaser fails on this, so it is caught either way — but it is caught here without a "+
-			"release.", packagingFile, nfpm.IDs[0])
-	}
-
-	if binary != "objectfs" {
-		t.Errorf("%s packages build %q, whose binary is %q, so the package installs "+
-			"/usr/bin/%s.\nThat is not a command anyone types, and nothing fails at package time: the "+
-			"package builds, installs, runs its scriptlets and exits 0, and then `objectfs` is not "+
-			"found. configs/systemd/objectfs@.service, both modulefiles and scripts/postinstall.sh all "+
-			"invoke `objectfs` by that exact name.\nThe platform-named build is for the tarballs, which "+
-			"scripts/install.sh renames as it installs.", packagingFile, nfpm.IDs[0], binary, binary)
+	if objectfsBuilds != 1 {
+		t.Errorf("%s's nfpms `ids:` (%v) supply the binary `objectfs` %d times, want exactly once. "+
+			"configs/systemd/objectfs@.service, both modulefiles and scripts/postinstall.sh all invoke "+
+			"`objectfs` by that exact name, and nothing fails at package time if it is absent — the "+
+			"package installs and then `objectfs` is not found.", packagingFile, nfpm.IDs, objectfsBuilds)
 	}
 
 	// bindir unset means goreleaser's default, /usr/bin, which is what everything above expects. A
@@ -950,7 +967,33 @@ func stagedRoot(t *testing.T) string {
 		t.Fatalf("stage example.yaml: %v", err)
 	}
 
+	stageMountHelper(t, root)
+
 	return root
+}
+
+// stageMountHelper puts the other thing the package has installed by postinstall time: the mount helper
+// binary under /usr/bin, and the /sbin the scriptlet links it into.
+//
+// A stand-in file rather than the real binary, because what link_mount_helper tests is `-x` and nothing
+// runs it. /sbin is created empty because on a real system it always exists — as a directory on a split
+// layout, as a symlink to /usr/sbin on a usrmerged one — and the scriptlet's "no /sbin" branch is a
+// separate case with a test of its own.
+func stageMountHelper(t *testing.T, root string) {
+	t.Helper()
+
+	bin := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil { // #nosec G301 -- /usr/bin must be traversable; matches the packaging
+		t.Fatalf("mkdir %s: %v", bin, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(bin, "mount.objectfs"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { // #nosec G306 -- a packaged binary is world-executable
+		t.Fatalf("stage mount.objectfs: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, "sbin"), 0o755); err != nil { // #nosec G301 -- /sbin's real mode
+		t.Fatalf("mkdir %s/sbin: %v", root, err)
+	}
 }
 
 // treeState records the mode of every path under root, so two runs can be compared.
@@ -1250,6 +1293,334 @@ func TestPostinstallDetectsACommentedOutUserAllowOther(t *testing.T) {
 					gotWarn, tc.wantWarn, tc.fuseConf, run.stderr)
 			}
 		})
+	}
+}
+
+// mountHelperLink is the path postinstall.sh registers the helper at, under a scratch root.
+func mountHelperLink(root string) string {
+	return filepath.Join(root, "sbin", "mount.objectfs")
+}
+
+// TestPostinstallRegistersTheMountHelper is #136's registration step, run rather than reasoned about.
+//
+// mount(8) resolves an unknown `-t TYPE` by exec'ing /sbin/mount.TYPE. That path is compiled into
+// util-linux: it is not searched for on PATH and there is no configuration for it, so the link either
+// exists at exactly that name or every /etc/fstab entry fails with "unknown filesystem type 'objectfs'"
+// and nothing else. The binary itself is packaged to /usr/bin, because nfpm has one bindir per package and
+// /usr/bin is where `objectfs` must be — so the link is the whole mechanism, and it is made by a scriptlet
+// rather than shipped as a packaged file to stay out of dpkg's aliased-directory problem.
+//
+// The target is asserted as the *unprefixed* /usr/bin/mount.objectfs, not the scratch root's copy of it: a
+// link under OBJECTFS_ROOT still has to point where the path will be on the real filesystem, and a
+// scriptlet that interpolated ROOT into the target would produce a package that installs a link into
+// nowhere.
+func TestPostinstallRegistersTheMountHelper(t *testing.T) {
+	t.Parallel()
+
+	root := stagedRoot(t)
+
+	if run := runScript(t, "postinstall.sh", root, []string{"configure"}); run.exit != 0 {
+		t.Fatalf("exited %d\nstderr:\n%s", run.exit, run.stderr)
+	}
+
+	link := mountHelperLink(root)
+
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("/sbin/mount.objectfs is not a symlink after postinstall: %v\n"+
+			"Without it, `mount -t objectfs` and every /etc/fstab entry fail with mount(8)'s "+
+			"\"unknown filesystem type 'objectfs'\", which names nothing an operator can act on.", err)
+	}
+
+	if target != "/usr/bin/mount.objectfs" {
+		t.Errorf("/sbin/mount.objectfs points at %q, want \"/usr/bin/mount.objectfs\". A target carrying "+
+			"the scratch root would mean the packaged scriptlet interpolates its ROOT into the link, so "+
+			"the installed link would point at a path that does not exist.", target)
+	}
+
+	// A second run is every upgrade, and it must be silent as well as harmless. The link is compared
+	// rather than replaced precisely so that `ln -sf` is not run over a path an operator may have
+	// repointed — and a warning on every upgrade about a link the package itself made would train
+	// operators to ignore this script's stderr, which is where the checks that matter are printed.
+	second := runScript(t, "postinstall.sh", root, []string{"configure"})
+
+	if second.exit != 0 {
+		t.Fatalf("the second run exited %d\nstderr:\n%s", second.exit, second.stderr)
+	}
+
+	if strings.Contains(second.stderr, "mount.objectfs") {
+		t.Errorf("the second run warned about the link it created itself:\n%s", second.stderr)
+	}
+
+	if again, err := os.Readlink(link); err != nil || again != target {
+		t.Errorf("after the second run /sbin/mount.objectfs is %q (err %v), was %q", again, err, target)
+	}
+}
+
+// TestPostinstallLeavesAForeignMountHelperAlone is the same rule as the config file and the directory
+// modes, on the one path this scriptlet writes outside the package's own file list.
+//
+// The link is not in dpkg's or rpm's database, which is what makes it this script's responsibility on the
+// way in and preremove.sh's on the way out — and also what makes overwriting it unrecoverable: the package
+// manager holds no record of what was there before. So anything at /sbin/mount.objectfs that this package
+// did not create is reported and left, and the warning carries the command that would replace it.
+func TestPostinstallLeavesAForeignMountHelperAlone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// place puts something at /sbin/mount.objectfs before the scriptlet runs.
+		place func(t *testing.T, link string)
+		// want is the distinctive part of the warning, so a passing row cannot be a different refusal.
+		want string
+		// after is what the path must still be afterwards.
+		after func(t *testing.T, link string)
+	}{
+		{
+			name: "a symlink an operator repointed somewhere else",
+			place: func(t *testing.T, link string) {
+				t.Helper()
+
+				if err := os.Symlink("/opt/objectfs/bin/mount.objectfs", link); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+			want: "is a symlink to /opt/objectfs/bin/mount.objectfs",
+			after: func(t *testing.T, link string) {
+				t.Helper()
+
+				got, err := os.Readlink(link)
+				if err != nil {
+					t.Fatalf("the operator's symlink is gone: %v", err)
+				}
+
+				if got != "/opt/objectfs/bin/mount.objectfs" {
+					t.Errorf("the operator's symlink now points at %q", got)
+				}
+			},
+		},
+		{
+			name: "a real file, which is how another package would have shipped a helper",
+			place: func(t *testing.T, link string) {
+				t.Helper()
+
+				if err := os.WriteFile(link, []byte("#!/bin/sh\necho someone else's helper\n"), 0o755); err != nil { // #nosec G306 -- a mount helper is world-executable
+					t.Fatalf("write %s: %v", link, err)
+				}
+			},
+			want: "exists and is not a symlink",
+			after: func(t *testing.T, link string) {
+				t.Helper()
+
+				if got := readFile(t, link); !strings.Contains(got, "someone else's helper") {
+					t.Errorf("the existing file was replaced; it now holds:\n%s", got)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := stagedRoot(t)
+			link := mountHelperLink(root)
+
+			tc.place(t, link)
+
+			r := runScript(t, "postinstall.sh", root, []string{"configure"})
+
+			if r.exit != 0 {
+				t.Fatalf("exited %d\nstderr:\n%s", r.exit, r.stderr)
+			}
+
+			if !strings.Contains(r.stderr, tc.want) {
+				t.Errorf("no warning containing %q. Every wrong reason is still a refusal, so the "+
+					"message is what says which check fired.\nstderr:\n%s", tc.want, r.stderr)
+			}
+
+			if !strings.Contains(r.stderr, "mount.objectfs") {
+				t.Errorf("the warning does not name a remedy involving the helper.\nstderr:\n%s", r.stderr)
+			}
+
+			tc.after(t, link)
+		})
+	}
+}
+
+// TestPostinstallReportsAMissingMountHelperBinary is the packaging failure, not an operator one.
+//
+// If /usr/bin/mount.objectfs is absent then .goreleaser.yml's `nfpms.ids` has stopped including the
+// mount-helper build, and every fstab entry is broken in a package that installed cleanly. The scriptlet
+// still exits 0 — a half-configured package would block every subsequent apt operation, and this is not
+// worth that — so the warning is the only signal there is.
+func TestPostinstallReportsAMissingMountHelperBinary(t *testing.T) {
+	t.Parallel()
+
+	root := stagedRoot(t)
+
+	if err := os.Remove(filepath.Join(root, "usr", "bin", "mount.objectfs")); err != nil {
+		t.Fatalf("remove the staged helper: %v", err)
+	}
+
+	r := runScript(t, "postinstall.sh", root, []string{"configure"})
+
+	if r.exit != 0 {
+		t.Fatalf("exited %d; a missing helper is a warning, not a half-configured package\nstderr:\n%s",
+			r.exit, r.stderr)
+	}
+
+	if !strings.Contains(r.stderr, "is missing, so 'mount -t objectfs'") {
+		t.Errorf("no warning that the helper binary is absent. That is a packaging defect — `nfpms.ids` "+
+			"no longer naming the mount-helper build — and it is invisible in a build log.\nstderr:\n%s",
+			r.stderr)
+	}
+
+	if _, err := os.Lstat(mountHelperLink(root)); err == nil {
+		t.Error("a link was created to a binary that is not there. A dangling /sbin/mount.objectfs is " +
+			"worse than none: mount(8) reports its own \"no such file or directory\" against a helper " +
+			"path rather than \"unknown filesystem type\".")
+	}
+}
+
+// TestPostinstallHandlesAMissingSbin is the container and chroot case.
+//
+// /sbin exists on every real system, but a scratch root or a minimal image being prepared by hand may not
+// have one, and `ln -s` into a directory that is not there fails. The scriptlet reports it with the exact
+// command and carries on, because nothing else it does depends on the link.
+func TestPostinstallHandlesAMissingSbin(t *testing.T) {
+	t.Parallel()
+
+	root := stagedRoot(t)
+
+	if err := os.Remove(filepath.Join(root, "sbin")); err != nil {
+		t.Fatalf("remove the staged /sbin: %v", err)
+	}
+
+	r := runScript(t, "postinstall.sh", root, []string{"configure"})
+
+	if r.exit != 0 {
+		t.Fatalf("exited %d\nstderr:\n%s", r.exit, r.stderr)
+	}
+
+	if !strings.Contains(r.stderr, "does not exist, so the mount helper could not be registered") {
+		t.Errorf("no warning about the missing /sbin\nstderr:\n%s", r.stderr)
+	}
+
+	if !strings.Contains(r.stderr, "ln -s /usr/bin/mount.objectfs /sbin/mount.objectfs") {
+		t.Errorf("the warning does not carry the command that fixes it\nstderr:\n%s", r.stderr)
+	}
+}
+
+// TestPreremoveUnlinksTheMountHelper is the other half of the scriptlet-owned link.
+//
+// The package manager cannot remove it: it is not in dpkg's or rpm's file list, by design. Left behind
+// after the binary it points at is deleted, /sbin/mount.objectfs is a dangling link — and an fstab entry
+// that worked before the removal then fails at `mount -a` with mount(8)'s own "no such file or directory"
+// against a helper path, which says considerably less than "unknown filesystem type".
+//
+// Not on an upgrade, which is the second row. Removing the link in the outgoing prerm and re-creating it
+// in the incoming postinst would work, but it would leave a window in which an objectfs fstab entry is
+// unmountable, for no gain.
+func TestPreremoveUnlinksTheMountHelper(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		action   string
+		wantLink bool
+	}{
+		{name: "dpkg remove", action: "remove", wantLink: false},
+		{name: "dpkg purge", action: "purge", wantLink: false},
+		{name: "rpm last instance", action: "0", wantLink: false},
+		{name: "dpkg upgrade", action: "upgrade", wantLink: true},
+		{name: "rpm upgrade", action: "1", wantLink: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := rootWithMounts(t, "")
+			stageMountHelper(t, root)
+
+			link := mountHelperLink(root)
+			if err := os.Symlink("/usr/bin/mount.objectfs", link); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+
+			r := runScript(t, "preremove.sh", root, []string{tc.action})
+
+			if r.exit != 0 {
+				t.Fatalf("exited %d\nstdout:\n%s\nstderr:\n%s", r.exit, r.stdout, r.stderr)
+			}
+
+			_, err := os.Lstat(link)
+			gotLink := err == nil
+
+			if gotLink != tc.wantLink {
+				t.Errorf("/sbin/mount.objectfs present=%v after action %q, want %v\n"+
+					"stdout:\n%s\nstderr:\n%s", gotLink, tc.action, tc.wantLink, r.stdout, r.stderr)
+			}
+		})
+	}
+}
+
+// TestPreremoveLeavesAForeignMountHelperAlone applies the same rule on the way out as on the way in.
+//
+// A link somewhere else is something an operator repointed deliberately, and a removal that deleted it
+// would take out a working mount helper this package never owned.
+func TestPreremoveLeavesAForeignMountHelperAlone(t *testing.T) {
+	t.Parallel()
+
+	root := rootWithMounts(t, "")
+	stageMountHelper(t, root)
+
+	link := mountHelperLink(root)
+	if err := os.Symlink("/opt/objectfs/bin/mount.objectfs", link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	r := runScript(t, "preremove.sh", root, []string{"remove"})
+
+	if r.exit != 0 {
+		t.Fatalf("exited %d\nstdout:\n%s\nstderr:\n%s", r.exit, r.stdout, r.stderr)
+	}
+
+	got, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("the operator's symlink was removed: %v", err)
+	}
+
+	if got != "/opt/objectfs/bin/mount.objectfs" {
+		t.Errorf("/sbin/mount.objectfs now points at %q", got)
+	}
+
+	if !strings.Contains(r.stderr, "which this package did not create") {
+		t.Errorf("the removal was silent. Leaving the link is right; not saying so leaves an operator "+
+			"wondering whether the package took their helper with it.\nstderr:\n%s", r.stderr)
+	}
+}
+
+// TestPreremoveLeavesAMountHelperFileAlone is the non-symlink case, and it is the one where deleting
+// would be worst: a real file at /sbin/mount.objectfs came from somewhere with a file list of its own.
+func TestPreremoveLeavesAMountHelperFileAlone(t *testing.T) {
+	t.Parallel()
+
+	root := rootWithMounts(t, "")
+	stageMountHelper(t, root)
+
+	link := mountHelperLink(root)
+	if err := os.WriteFile(link, []byte("#!/bin/sh\necho someone else's helper\n"), 0o755); err != nil { // #nosec G306 -- a mount helper is world-executable
+		t.Fatalf("write %s: %v", link, err)
+	}
+
+	if r := runScript(t, "preremove.sh", root, []string{"remove"}); r.exit != 0 {
+		t.Fatalf("exited %d\nstdout:\n%s\nstderr:\n%s", r.exit, r.stdout, r.stderr)
+	}
+
+	if got := readFile(t, link); !strings.Contains(got, "someone else's helper") {
+		t.Errorf("the file at /sbin/mount.objectfs was removed or replaced; it now holds:\n%s", got)
 	}
 }
 

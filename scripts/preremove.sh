@@ -256,6 +256,42 @@ unmount_all() {
     return 1
 }
 
+# unlink_mount_helper removes the /sbin/mount.objectfs symlink scripts/postinstall.sh created.
+#
+# It has to be removed here because the package manager cannot: the link is not in dpkg's or rpm's file
+# list, by design — see the long comment on link_mount_helper for why a scriptlet makes it rather than the
+# package shipping it. Left behind, it is a dangling /sbin/mount.objectfs, and an fstab entry that was
+# working before the removal then fails at `mount -a` with mount(8)'s own "no such file or directory"
+# against a helper path, which is a considerably worse message than "unknown filesystem type".
+#
+# Only on a real removal. main returns before this on an upgrade, which is right: dpkg runs the outgoing
+# prerm before unpacking the new package, so removing the link here and re-creating it in the incoming
+# postinst would work — but it would also leave a window in which an `objectfs` fstab entry is
+# unmountable, for no gain.
+#
+# Only if it is a symlink, and only if it points where postinstall.sh would have pointed it. A real file
+# or a link somewhere else is something this package did not create, and the same rule applies on the way
+# out as on the way in.
+unlink_mount_helper() {
+    local target="/usr/bin/mount.objectfs"
+    local link="$ROOT/sbin/mount.objectfs"
+
+    if [ ! -L "$link" ]; then
+        return 0
+    fi
+
+    local current
+    current=$(readlink "$link" 2>/dev/null) || current=""
+
+    if [ "$current" != "$target" ]; then
+        warn "/sbin/mount.objectfs points at $current, which this package did not create; leaving it"
+        return 0
+    fi
+
+    rm -f "$link" 2>/dev/null ||
+        warn "could not remove /sbin/mount.objectfs; it will be a dangling link once the package is gone"
+}
+
 main() {
     if is_upgrade; then
         echo "objectfs: upgrade ($ACTION) — leaving running mounts and enabled units alone."
@@ -265,6 +301,7 @@ main() {
     fi
 
     stop_and_disable_units
+    unlink_mount_helper
 
     local status=0
     unmount_all || status=1

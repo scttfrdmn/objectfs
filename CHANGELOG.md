@@ -45,6 +45,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An `/etc/fstab` mount helper, so an ObjectFS filesystem can be mounted the way every other
+  filesystem on the machine is.** The Linux packages now ship `mount.objectfs` and link it at
+  `/sbin/mount.objectfs`, which makes both of these work:
+
+  ```text
+  mount -t objectfs s3://bucket /mnt/objectfs -o _netdev,config=/etc/objectfs/config.yaml
+  s3://bucket  /mnt/objectfs  objectfs  _netdev,config=/etc/objectfs/config.yaml  0 0
+  ```
+
+  `mount(8)` resolves a filesystem type it does not know by exec'ing `/sbin/mount.TYPE`. That path is
+  compiled into util-linux — not searched for on `PATH`, with no configuration for it — so the filename
+  *is* the registration, and there was previously nothing there: an fstab entry failed with `unknown
+  filesystem type 'objectfs'` and no other information. The binary is packaged to
+  `/usr/bin/mount.objectfs`, because nfpm has one `bindir` per package and `/usr/bin` is where
+  `objectfs` must be; `scripts/postinstall.sh` creates the link and `scripts/preremove.sh` removes it,
+  rather than the package shipping a file under `/sbin`, which on a usrmerged system is dpkg's
+  aliased-directory problem. Creating it *at* `/sbin` covers both layouts with one command, since the
+  kernel resolves `/sbin` to `/usr/sbin` where they are merged.
+
+  **The helper daemonizes and waits rather than exec'ing `objectfs mount`, and that is not an
+  optimisation.** `objectfs mount` blocks for the lifetime of the mount — its `--foreground` flag is
+  accepted and ignored — so a helper that exec'd it would hang `mount -a` forever, at boot, before
+  anything else in fstab was mounted. Instead it starts the mount in a session of its own (`setsid`, so
+  a `Ctrl-C` or a `SIGHUP` to whatever ran `mount` does not take the filesystem down with it), polls
+  `/proc/self/mountinfo` until a *new* entry names the mount point, and exits 0. Entries are counted
+  rather than tested for zero because mounts stack: "something is mounted here" would report a mount
+  the helper never made. Where there is no `/proc`, the fallback signal is the mount point's `st_dev`
+  changing.
+
+  The child's output goes to `/var/log/objectfs/mount-<mountpoint>.log`, and on failure the helper
+  relays the tail of what *this* attempt wrote — so a broken fstab entry says what `objectfs mount`
+  said, instead of `mount: exit status 32`. `-o mount-timeout=<duration>` raises the 60-second wait; a
+  mount that has not appeared by then is terminated (SIGTERM to the process group, then SIGKILL), since
+  reporting failure while the mount quietly came up a moment later would leave `mount -a` believing the
+  filesystem is absent and the kernel believing it is present, and the next `mount -a` would stack a
+  second one on top.
+
+  Options are translated from a table, and **anything not in the table is refused** rather than passed
+  through or dropped. `config=`, `cache-size=`, `log-level=`, `max-concurrency=` and `debug` become the
+  corresponding `objectfs mount` flags; `_netdev`, `auto`, `noauto`, `nofail`, `defaults`, `rw`,
+  `user`/`users`/`nouser`, `owner`, `group`, `comment=` and any `x-`/`X-` option are accepted and
+  ignored because `mount(8)` or systemd handles them; `-f` does a synchronous foreground run and `-n`
+  is ignored, as ObjectFS does not write `/etc/mtab`. `-s` downgrades an unrecognised option to a
+  warning, which is what `mount(8)`'s "sloppy" flag means — but it deliberately does not soften the
+  four options that are refused outright, because those are refused for a reason rather than for being
+  unknown:
+
+  - **`ro`.** There is no read-only mount in ObjectFS today — `objectfs mount` has no `--read-only`
+    flag and the mount is always read-write. Accepting `ro` and mounting read-write anyway would hand
+    an operator a filesystem that is writable when their fstab says it is not.
+  - **`uid=` / `gid=`.** ObjectFS does not remap ownership; files are owned by the caller. The
+    `DefaultUID`/`DefaultGID` fields exist on the FUSE config struct but nothing reaches them from
+    configuration, so honouring these would be a silent no-op on the option most likely to be added
+    for a shared mount.
+  - **`bind`.** `mount(8)` handles a bind mount itself and never reaches a helper; an entry that asks
+    a filesystem helper for one is a mistake in the fstab.
+
+  Each refusal names the remedy. Both of these are departures from what #136 specifies, and both were
+  re-verified against the current tree rather than assumed: the issue's `exec objectfs mount …
+  --foreground` would hang, and its `ro`, `uid=` and `gid=` translations have no flags to translate
+  into. (#136)
+
 - `TestNoPullRequestTriggerFiltersItsBaseBranch` walks `.github/workflows/` and fails on a
   `branches:` or `branches-ignore:` filter under `pull_request` or `pull_request_target`. The
   directory is walked rather than enumerated because the next workflow to arrive with
