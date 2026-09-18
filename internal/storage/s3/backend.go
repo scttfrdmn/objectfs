@@ -426,9 +426,14 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 		if !encoded && readSize > threshold {
 			// When the caller supplied a size there has been no HEAD, so the fan-out is attempted and
 			// abandoned if the object turns out to be encoded. That keeps the cost on compressed
-			// objects instead of adding a HEAD to every large read, and the cost is small: the
-			// abandoned chunks transferred at most the stored body, which the whole-object re-fetch
-			// below has to transfer anyway, plus some refusals for the ranges past its end.
+			// objects instead of adding a HEAD to every large read.
+			//
+			// What "the cost" is has changed twice. This comment used to say the abandoned chunks
+			// transferred at most the stored body, which the whole-object re-fetch below had to
+			// transfer anyway — true when #228 decided it, and false once #185 removed that re-fetch.
+			// The chunks then became the entire cost of reading a large compressed object, measured at
+			// 98% of the stored body. The fan-out now probes with chunk 0 alone and commits the rest
+			// only on its headers, so what an abandoned fan-out costs is one round trip.
 			data, parallelErr := b.parallelGetObject(ctx, key, offset, readSize)
 			if !stderr.Is(parallelErr, errFanOutOnEncodedObject) {
 				return data, parallelErr
@@ -436,6 +441,25 @@ func (b *Backend) GetObject(ctx context.Context, key string, offset, size int64)
 
 			b.logger.Debug("Abandoned the parallel read: the object is stored encoded",
 				"key", key, "offset", offset, "size", size)
+
+			// The response that ended the fan-out carried this object's user metadata, and that is
+			// where the seekable descriptor lives — so the framed path starts here rather than after
+			// the ranged GET below, which would spend a request and some stored bytes being told what
+			// is already in hand.
+			var enc *fanOutEncoded
+			if stderr.As(parallelErr, &enc) && len(enc.metadata) > 0 {
+				if framed, ok, framedErr := b.readFramed(
+					ctx, key, offset, size, enc.metadata, enc.contentEncoding,
+				); ok || framedErr != nil {
+					if framedErr != nil {
+						return nil, framedErr
+					}
+
+					b.costOptimizer.RecordAccess(key, int64(len(framed)))
+
+					return framed, nil
+				}
+			}
 		}
 	}
 
@@ -701,7 +725,35 @@ type objectRead struct {
 	// up, and the assembled buffer is a splice of two generations of the file that never existed on
 	// either side.
 	etag string
+
+	// bodySkipped reports that a headerProbe declined the body, so data is empty because it was never
+	// transferred rather than because the object holds nothing there.
+	//
+	// Nothing may treat an empty data with this set as content. It exists so a caller that asked a
+	// question of the headers can tell its answer apart from a zero-length range.
+	bodySkipped bool
 }
+
+// objectHeaders is what a GET's response said about an object, available as soon as the headers arrive
+// and before any of the body has transferred.
+type objectHeaders struct {
+	contentEncoding string
+	metadata        map[string]string
+	etag            string
+}
+
+// headerProbe inspects a GET's response headers before its body is transferred and reports whether the
+// body is still wanted. Returning false closes the response undrained and completes the read with
+// [objectRead.bodySkipped] set, no data, and no error.
+//
+// It exists for one caller — the parallel read's first chunk, which needs the object's Content-Encoding
+// to decide whether the fan-out is the right path at all, and needs it before the other chunks commit
+// to transferring bytes that a compressed object will not use (#514). The body of that chunk is itself
+// part of the waste, so declining it is the same decision one step further.
+//
+// A probe must not have side effects that assume it runs once: the retryer above it re-issues the GET
+// on a transient failure, and each attempt has its own headers.
+type headerProbe func(objectHeaders) bool
 
 // getObjectRange fetches a byte range of an object, or the whole object when size is not positive,
 // and reports the encoding, user metadata, and whole-object coverage S3 returned with it.
@@ -713,12 +765,24 @@ func (b *Backend) getObjectRange(
 	key string,
 	offset, size int64,
 ) (objectRead, error) {
+	return b.getObjectRangeProbed(ctx, key, offset, size, nil)
+}
+
+// getObjectRangeProbed is [Backend.getObjectRange] with an optional [headerProbe] that can answer from
+// the response headers and decline the body.
+func (b *Backend) getObjectRangeProbed(
+	ctx context.Context,
+	key string,
+	offset, size int64,
+	probe headerProbe,
+) (objectRead, error) {
 	var (
 		data            []byte
 		contentEncoding string
 		metadata        map[string]string
 		whole           bool
 		etag            string
+		bodySkipped     bool
 	)
 
 	var rangeHeader *string
@@ -738,6 +802,7 @@ func (b *Backend) getObjectRange(
 			// previous attempt's bytes in place, and the caller cannot tell a stale buffer from a
 			// fresh one (audit finding L24).
 			data, contentEncoding, metadata, whole, etag = nil, "", nil, false, ""
+			bodySkipped = false
 
 			input := &s3.GetObjectInput{
 				Bucket: aws.String(b.bucket),
@@ -759,6 +824,26 @@ func (b *Backend) getObjectRange(
 				contentEncoding = aws.ToString(result.ContentEncoding)
 				metadata = result.Metadata
 				etag = aws.ToString(result.ETag)
+
+				// The probe gets its answer here, where the headers are in hand and the body has not
+				// been touched, and can decline the body on the strength of it.
+				//
+				// Reported as a success rather than as an error, and that is the load-bearing part.
+				// Everything in this closure that returns non-nil is a read failure: it reaches the
+				// circuit breaker wrapping this call and the health tracker below. A routing decision
+				// is neither. Returning an error here would trip s3-get's breaker on every large read
+				// of a compressed object and take the component degraded on reads that all succeed.
+				if probe != nil && !probe(objectHeaders{
+					contentEncoding: contentEncoding,
+					metadata:        metadata,
+					etag:            etag,
+				}) {
+					bodySkipped = true
+
+					b.healthTracker.RecordSuccess("s3-reads")
+
+					return nil
+				}
 
 				body, readErr := io.ReadAll(result.Body)
 				if readErr != nil {
@@ -804,6 +889,7 @@ func (b *Backend) getObjectRange(
 		metadata:        metadata,
 		whole:           whole,
 		etag:            etag,
+		bodySkipped:     bodySkipped,
 	}, nil
 }
 
@@ -1978,6 +2064,19 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 
 	numChunks := (totalSize + chunkSize - 1) / chunkSize
 
+	// The caller gates on totalSize > ParallelReadThreshold > 0, so there is always a chunk 0. Checked
+	// rather than assumed, because the probe below launches that chunk unconditionally and a
+	// non-positive totalSize would have it request a range of negative length.
+	if numChunks < 1 {
+		return nil, errors.NewError(errors.ErrCodeValidationFailed,
+			"parallel read needs a positive size").
+			WithComponent("s3-backend").
+			WithOperation("GetObject").
+			WithContext("bucket", b.bucket).
+			WithContext("key", key).
+			WithDetail("requested_bytes", totalSize)
+	}
+
 	// errgroup gives the error half of what this needs: the first non-nil error wins and the rest are
 	// discarded. The cancellation half is deliberately *not* errgroup.WithContext's.
 	//
@@ -2044,15 +2143,15 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 	chunks := make([][]byte, numChunks)
 	etags := make([]string, numChunks)
 
-	for i := range numChunks {
-		group.Go(func() error {
+	fetchChunk := func(i int64, probe headerProbe) func() error {
+		return func() error {
 			start := offset + i*chunkSize
 			want := min(chunkSize, offset+totalSize-start)
 
 			// getObjectRange, not a bare GetObject: retry, circuit breaker, health tracking,
 			// metrics, and error translation all live in there, and duplicating any of them here is
 			// how they drifted apart in the first place.
-			read, err := b.getObjectRange(groupCtx, key, start, want)
+			read, err := b.getObjectRangeProbed(groupCtx, key, start, want, probe)
 
 			// A refused range is the same condition as a short one, reported differently because the
 			// chunk fell entirely past the end rather than partly. S3 clamps a range that straddles
@@ -2089,11 +2188,35 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 			// from ranges. Reported through the flag and by abandoning the siblings, and deliberately
 			// *not* as a finding — this is not a failure of the read, it is the wrong path for the
 			// object, and the caller has a correct path to take instead.
+			//
+			// This arm has to stay ahead of the length check below, because chunk 0's probe declines
+			// the body on exactly this condition: read.data is empty, and the length check would call
+			// that a shrinking object and record a corruption finding for it.
 			if read.contentEncoding != "" {
 				encoded.Store(true)
 				abandonSiblings(errReadAbandoned)
 
 				return errFanOutOnEncodedObject
+			}
+
+			// A body declined for any other reason would arrive here as a zero-length chunk, which the
+			// check below cannot tell from a truncated object. Nothing does that today — the only probe
+			// declines on the encoding settled above — so this is the assertion that keeps it that way
+			// rather than a path with a caller.
+			if read.bodySkipped {
+				missing := errors.NewError(errors.ErrCodeInternalError,
+					"parallel read chunk declined its own body without an encoding to justify it").
+					WithComponent("s3-backend").
+					WithOperation("GetObject").
+					WithContext("bucket", b.bucket).
+					WithContext("key", key).
+					WithDetail("chunk_offset", start).
+					WithDetail("chunk_bytes", want)
+
+				recordFinding(missing)
+				abandonSiblings(errReadAbandoned)
+
+				return missing
 			}
 
 			// S3 clamps a range that runs past the end of the object rather than refusing it, so a
@@ -2117,7 +2240,58 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 			etags[i] = read.etag
 
 			return nil
-		})
+		}
+	}
+
+	// Chunk 0 goes out alone, and the rest wait on its response *headers*.
+	//
+	// #514 is what this ordering fixes. Every chunk used to be launched at once, so by the time any of
+	// them saw a Content-Encoding, ParallelReadConcurrency × ReadChunkSize had already crossed the
+	// wire: measured at 4,221,321 bytes of a 4,293,520-byte stored body — 98% — for a 2 MiB read of an
+	// 8 MiB compressed object. Those are precisely the bytes seekable framing (#185) exists to avoid,
+	// and the framed read still ran afterwards, so the feature was buying close to nothing on the case
+	// it matters most for: a large read of a large compressed object.
+	//
+	// It was not a mistake when it was written. #228 chose attempt-then-fall-back over HEAD-first so
+	// that establishing whether an object is encoded costs compressed objects rather than every large
+	// read, and at the time a compressed object was already paying a whole-body fetch — so the
+	// abandoned chunks were genuinely free. Framing removed that fetch and left them as the whole cost.
+	//
+	// What this pays instead is one round trip of first-wave parallelism, before chunks 1..N-1 go out.
+	// Not a HEAD: chunk 0 is a chunk of the read itself, wanted whatever the answer turns out to be,
+	// which is the distinction TestFanOutOnAnUncompressedObjectCostsNoExtraHead exists to hold.
+	//
+	// A nil verdict means chunk 0 produced no headers at all, so it failed — a 416 for a read starting
+	// past the end of a compressed stored body is the routine way that happens. The rest are not
+	// launched in that case either: chunk 0 has already recorded its finding and abandoned the group,
+	// so every sibling would fetch a range of a read that is going to fail.
+	probed := make(chan *objectHeaders, 1)
+
+	var probeOnce sync.Once
+
+	publishHeaders := func(h *objectHeaders) { probeOnce.Do(func() { probed <- h }) }
+
+	group.Go(func() error {
+		// On the way out as well, so a chunk 0 that never reaches a response header cannot leave the
+		// fan-out below blocked on a verdict that is not coming. probeOnce makes it a no-op when the
+		// probe already published.
+		defer publishHeaders(nil)
+
+		return fetchChunk(0, func(h objectHeaders) bool {
+			publishHeaders(&h)
+
+			// Declining the body is the second half of the saving. On an encoded object these bytes
+			// are chunk 0's share of the waste above, and the headers already carry everything the
+			// fallback needs — the user metadata holds the seekable descriptor.
+			return h.contentEncoding == ""
+		})()
+	})
+
+	probeHeaders := <-probed
+	if probeHeaders != nil && probeHeaders.contentEncoding == "" {
+		for i := int64(1); i < numChunks; i++ {
+			group.Go(fetchChunk(i, nil))
+		}
 	}
 
 	if err := group.Wait(); err != nil {
@@ -2126,6 +2300,22 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 		// of the object being one indivisible frame — reporting any of those as corruption would turn
 		// a readable compressed object into a read error.
 		if encoded.Load() {
+			// The headers that ended the fan-out go back with the signal, so the caller can enter the
+			// framed path without a request to rediscover what chunk 0 was already told — the user
+			// metadata on that response is where the seekable descriptor lives.
+			//
+			// Only chunk 0's own headers, and only when chunk 0 is what saw the encoding. A later chunk
+			// seeing an encoding that chunk 0 did not means the object was overwritten mid-read, so the
+			// descriptor in hand describes a generation that is gone; handing it on would point the
+			// framed read at frame offsets from the wrong object. That case falls back to rediscovery,
+			// which is what every case did before this.
+			if probeHeaders != nil && probeHeaders.contentEncoding != "" {
+				return nil, &fanOutEncoded{
+					contentEncoding: probeHeaders.contentEncoding,
+					metadata:        probeHeaders.metadata,
+				}
+			}
+
 			return nil, errFanOutOnEncodedObject
 		}
 
@@ -2136,7 +2326,11 @@ func (b *Backend) parallelGetObject(ctx context.Context, key string, offset, tot
 		// only for reads that hit the ambiguity.
 		if unsatisfiable.Load() {
 			if info, headErr := b.HeadObject(ctx, key); headErr == nil && isCompressed(info.Metadata) {
-				return nil, errFanOutOnEncodedObject
+				// The HEAD is a fresh, authoritative read of the current generation's metadata, so its
+				// descriptor is safe to hand on in a way a stale chunk header would not be. No
+				// contentEncoding: HeadObject does not report it, and readFramed treats an empty hint
+				// as "unknown" rather than "unencoded" and resolves it from the index fetch.
+				return nil, &fanOutEncoded{metadata: info.Metadata}
 			}
 		}
 
@@ -2208,6 +2402,30 @@ var errReadAbandoned = fmt.Errorf("parallel read chunk abandoned after a sibling
 // read, and only compressed objects benefit. See the gate in [Backend.GetObject].
 var errFanOutOnEncodedObject = stderr.New(
 	"parallel read abandoned: the object is stored encoded and cannot be assembled from ranges")
+
+// fanOutEncoded is [errFanOutOnEncodedObject] carrying what the response that raised it already said
+// about the object.
+//
+// The point is the metadata. A compressed object's user metadata holds the seekable descriptor, and the
+// response that told the fan-out to stop carried it — so the framed path can start from what is in hand
+// instead of issuing a ranged GET whose only purpose is to be told the same thing again. That GET is not
+// free: it comes back encoded, which means it transfers stored bytes the caller will never use.
+//
+// It unwraps to the sentinel so every existing errors.Is check keeps working unchanged. Callers that
+// want the metadata use errors.As; callers that only want the routing decision need no change, and a
+// path that cannot vouch for the metadata returns the bare sentinel instead.
+type fanOutEncoded struct {
+	// contentEncoding may be empty when the encoding was established by a HEAD, which does not report
+	// it. Empty means "unknown" to readFramed, not "unencoded".
+	contentEncoding string
+
+	// metadata is the object's S3 user metadata, and is what this type exists to carry.
+	metadata map[string]string
+}
+
+func (e *fanOutEncoded) Error() string { return errFanOutOnEncodedObject.Error() }
+
+func (e *fanOutEncoded) Unwrap() error { return errFanOutOnEncodedObject }
 
 // shrunkMidRead is the error for a chunk of a parallel read whose range the object could not
 // satisfy, in either of the two forms that takes: fewer bytes than requested, or a refusal.
