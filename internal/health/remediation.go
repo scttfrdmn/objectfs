@@ -410,6 +410,9 @@ func (re *RemediationEngine) registerDefaultRules() {
 					runtime.GC()
 					debug.FreeOSMemory()
 					runtime.ReadMemStats(&memAfter)
+					// #nosec G115 -- HeapAlloc is bytes of live heap in this process; exceeding MaxInt64
+					// means an eight-exabyte heap. The difference is signed on purpose: allocation
+					// continues while the GC runs, so the heap can legitimately be larger afterwards.
 					slog.Info("health: memory_force_gc: after GC", "heap_alloc_bytes", memAfter.HeapAlloc, "freed_bytes", int64(memBefore.HeapAlloc)-int64(memAfter.HeapAlloc))
 					return nil
 				},

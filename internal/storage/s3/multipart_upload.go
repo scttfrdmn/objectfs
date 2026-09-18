@@ -95,9 +95,12 @@ func (b *Backend) uploadSinglePart(
 	err = b.retryer.DoWithContext(ctx, func(retryCtx context.Context) error {
 		return b.executeWithAccelerationFallback(retryCtx, "UploadPart", func(client *s3.Client) error {
 			result, uploadErr := client.UploadPart(retryCtx, &s3.UploadPartInput{
-				Bucket:        aws.String(b.bucket),
-				Key:           aws.String(key),
-				UploadId:      aws.String(uploadID),
+				Bucket:   aws.String(b.bucket),
+				Key:      aws.String(key),
+				UploadId: aws.String(uploadID),
+				// #nosec G115 -- partNum runs 1..CalculatePartCount(len(data), chunkSize), and
+				// CalculateOptimalChunkSize raises chunkSize until that count fits S3's 10,000-part
+				// ceiling. Bounded by construction, three orders of magnitude below int32.
 				PartNumber:    aws.Int32(int32(partNum)),
 				Body:          bytes.NewReader(partData),
 				ContentLength: aws.Int64(size),
@@ -158,6 +161,8 @@ func (b *Backend) uploadParts(
 			continue
 		}
 		completedParts = append(completedParts, s3types.CompletedPart{
+			// #nosec G115 -- r.partNumber is the pn this loop handed to uploadSinglePart, so it carries
+			// the same 1..10,000 bound; see the conversion there.
 			PartNumber: aws.Int32(int32(r.partNumber)),
 			ETag:       aws.String(r.etag),
 		})

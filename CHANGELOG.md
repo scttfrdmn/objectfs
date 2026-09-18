@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tar entry could state one file mode and have a different, entirely plausible one recorded.**
+  `BuildIndexFromBytes` narrowed `tar.Header.Mode` (an `int64` read from a 12-byte field of an archive
+  this process did not write) to the `uint32` an `ArchiveEntry` records. So mode `0x1_0000_0644`
+  narrowed to `0644` and `-1` to `0777` with every special bit, with nothing downstream able to tell
+  the difference. Go's own `archive/tar` writes and reads back both of those values in its default and
+  GNU formats — measured, not assumed — so producing such an archive takes no special tooling.
+
+  An entry whose mode cannot be recorded as what it says now stops the index with a new
+  `ErrMalformedEntry` rather than being recorded as something else. The bound is representability and
+  deliberately not the permission mask: a tar mode field legitimately carries file-type bits, and
+  Apache Commons Compress writes `0100644` for a regular file, so masking would reject archives from a
+  mainstream producer. (#525)
+
+- **The predictive cache named four of its six model weights after unprintable control characters, and
+  training wrote keys prediction never read.** The fallback in `getFeatureName` was `"feature_" +
+  string(rune(index))`, which builds the Unicode codepoint numbered `index` — so feature 6 was named
+  `"feature_\x06"`, not `"feature_6"`. Worse, the named-feature list existed twice, once in
+  `getFeatureName` and once inline in `PredictionModel.predict`, and the two disagreed past index 5.
+  `updateModel` wrote a weight under one spelling and `predict` looked one up under another; a map
+  lookup that misses is not an error, so the feature silently contributed nothing to the prediction and
+  training on it had no effect at all.
+
+  One `featureName` function now serves both sides, so they agree by construction, and the fallback
+  formats the index as decimal text. (#525)
+
+- **An empty connection pool panicked instead of returning an error.**
+  `recovery.ConnectionPool.GetConnection` computed its round-robin index as
+  `nextIndex.Add(1) % uint32(len(cp.managers))`, and `NewConnectionPool` accepts size 0 without
+  complaint — a pool size read from configuration is how that happens. The first `GetConnection` then
+  died with an integer divide by zero, in the package whose entire subject is surviving failures. It
+  now returns an `ErrCodeConnectionPool` error that says the pool holds no connections, which is a
+  different diagnosis from the "no healthy connections available" the retry loop reports. (#525)
+
+- **A multipart upload of a file past roughly 1.25 TiB asked S3 for part numbers it rejects.**
+  `CalculateOptimalChunkSize`'s size ladder tops out at eight times the configured base chunk, so with
+  the 16 MiB default the largest part is 128 MiB and 10,000 parts cover 1.25 TiB — but the base is
+  configuration, and at a 5 MiB base the ceiling binds at 400 GiB. Past it, every part number above
+  10,000 is rejected individually, after the first 10,000 have been transferred, billed, and left in
+  the bucket for an abort to clean up. The chunk size now grows to keep the part count inside S3's
+  ceiling, which is what S3 wants for an object that size anyway, and is capped at the 5 GiB maximum
+  part. Fixed in the pure function rather than at its one call site, so the invariant holds for
+  anything that computes a part count from it — today's in-memory path cannot reach 1.25 TiB, but a
+  streaming one would. (#525)
+
 - **A pull request based on anything other than `main` ran no CI at all.** `ci.yml` and
   `security.yml` both filtered their `pull_request` trigger on `branches: [main]`, so a stacked pull
   request — one whose base is another feature branch — started none of their jobs: not `test`, not
@@ -56,6 +100,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table test driving `inflightFetch.slice`'s range arithmetic across both boundaries. (#438)
 
 ### Changed
+
+- **gosec's G115 (integer overflow conversion) is no longer excluded from `golangci-lint`, so it can
+  block a merge.** It had been excluded globally, on the argument that it fires on every int64↔int
+  conversion in a filesystem where the surrounding code has already bounded the values. The other run
+  that had it — the standalone `gosec -fmt sarif` in `security.yml` — runs with `-no-fail` and reports
+  into code scanning, where nothing blocks anything. So no gate anywhere could fail on a G115.
+
+  Lifting it produced 40 findings: 33 in `_test.go`, where the conversion is the test building its own
+  input, and 7 in production, of which 4 were defects (all four are under Fixed above). Three of the
+  four were adjacent to what gosec described rather than the conversion itself — which is the argument
+  for reading a check that points *near* a defect, not for turning it off.
+
+  The 33 test findings are excluded by a `_test.go` path rule with the rationale attached, modelled on
+  the existing G404 rule. A production conversion is suppressed per-site with
+  `#nosec G115 -- <why it is bounded>`, which both gosec runs honor; five sites now carry one. Both
+  halves were verified by measurement rather than by reading the config: an unbounded conversion added
+  to a production file is reported by `lint`, and removing the `_test.go` rule brings the test findings
+  back. (#525)
 
 - `.coverage-floors` records two corrections to how a floor must be measured. The darwin/linux
   difference in `internal/fuse` is **not** a denominator difference — coverage counts statements, and

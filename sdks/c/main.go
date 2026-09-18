@@ -408,6 +408,10 @@ func objectfs_get(handle C.objectfs_client_t, key *C.char, dataOut *unsafe.Point
 		return C.OBJECTFS_OK
 	}
 
+	// G115 on both C.size_t(n) conversions here and on the one below. n is len(data) and the n == 0 case
+	// returned above, so it is in [1, MaxInt]; size_t is at least as wide as int on every platform Go
+	// builds a c-shared library for, so no value of n can narrow. No suppression directive — see the
+	// header comment for why one would not work here.
 	buf := C.malloc(C.size_t(n))
 	if buf == nil {
 		e.setErr(fmt.Errorf("out of memory allocating %d bytes", n))

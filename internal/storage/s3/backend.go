@@ -1795,6 +1795,9 @@ func (b *Backend) ListObjects(ctx context.Context, prefix string, limit int) ([]
 		// Lookup's existence probe passes limit 1 precisely to keep that page cheap.
 		if limit > 0 {
 			remaining := limit - len(objects)
+			// #nosec G115 -- bounded to 1..maxKeysPerRequest (1000). The upper side is the min; the lower
+			// side is the `len(objects) >= limit` return in the page loop below, which leaves this
+			// expression unreachable once the limit is met, so remaining is at least 1 here.
 			input.MaxKeys = aws.Int32(int32(min(remaining, maxKeysPerRequest)))
 		}
 

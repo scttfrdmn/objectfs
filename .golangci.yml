@@ -120,16 +120,25 @@ linters:
       excludes:
         # G104 duplicates errcheck.
         - G104
-        # G115 (integer conversion overflow) fires on every int64↔int in a filesystem, where the
-        # conversions are between an offset and a length that the surrounding code has already
-        # bounded. The one case where it mattered — sliceRange's offset+size overflowing int64 —
-        # was found by a fuzz target and is pinned by a corpus entry, which is the mechanism that
-        # can tell a real overflow from a conversion that cannot occur.
         #
-        # Excluded here and NOT in the standalone run, which is why s3/config.go:202's uint32
-        # narrowing was reported by neither for as long as it carried a //nolint: this exclusion hid
-        # it from lint, and the directive form hid it from the run that had it. It was a real defect.
-        - G115
+        # G115 is deliberately NOT listed here. It was, with the argument that it fires on every
+        # int64↔int conversion in a filesystem where the surrounding code has already bounded the
+        # values — and the note recorded, as a caveat, that the exclusion had hidden a real uint32
+        # narrowing in s3/config.go:202 for as long as that site carried a //nolint. That was not a
+        # caveat. It was the finding.
+        #
+        # Lifting it produced 40 findings and four production defects that no gate could see, because
+        # the only run that had G115 was the standalone gosec in security.yml, which runs with
+        # -no-fail and reports into code scanning where nothing blocks a merge (#525). Three of the
+        # four were adjacent to what gosec described rather than the conversion itself — a tar mode
+        # truncating 0x1_0000_0644 to 0644, a weight key built as string(rune(index)) instead of
+        # decimal text, and a `% len(managers)` that divided by zero on an empty connection pool. A
+        # check that points near a defect is worth reading; this is what a required gate is for.
+        #
+        # Suppress a site with `#nosec G115 -- <why the conversion is bounded>`. The one case where
+        # the overflow itself mattered — sliceRange's offset+size overflowing int64 — is pinned by a
+        # fuzz corpus entry, which stays the mechanism that tells a real overflow from an impossible
+        # one.
 
     staticcheck:
       checks:
@@ -208,6 +217,19 @@ linters:
       # suppression stops being read.
       - path: '_test\.go'
         text: 'G404'
+        linters:
+          - gosec
+
+      # G115 in a test is almost always the test building its own input: an index or a loop counter
+      # narrowed to make a byte, an offset, or a mode to feed the code under test. 33 of the 40
+      # findings that lifting the global G115 exclusion produced are that, and none of them can
+      # misbehave — a test that passed a value it did not mean would fail.
+      #
+      # By path and not per-site for the reason the G404 rule above gives, and scoped to tests rather
+      # than left global because the other 7 were in production code and 4 of them were defects.
+      # A production conversion gets `#nosec G115 -- <why it is bounded>` and has to argue for itself.
+      - path: '_test\.go'
+        text: 'G115'
         linters:
           - gosec
 
