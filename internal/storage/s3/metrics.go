@@ -35,6 +35,22 @@ type BackendMetrics struct {
 	SeekableWholeFallbacks     int64  `json:"seekable_whole_fallbacks"`      // Framed objects read whole anyway
 	SeekableLastFallbackReason string `json:"seekable_last_fallback_reason"` // Why the last fallback happened
 
+	// Fan-out probe metrics (#514).
+	//
+	// FanOutProbeDeclines is the count that matters, and it is the only evidence there is that the probe
+	// works. A decline is invisible from every other angle: the read returns the same bytes at the same
+	// speed either way, and the bytes it saves are bytes an abandoned response body would have carried —
+	// which the server may well have written into a socket buffer before noticing the client was gone, so
+	// they are not reliably countable even on the far side of the wire.
+	//
+	// FanOutProbes is the denominator, and the ratio is the cost side of the trade #514 made: every
+	// fan-out now waits one round trip for chunk 0's headers, and only the declines got anything for it.
+	// A deployment where declines are near zero is paying that round trip for nothing.
+	//
+	// Probes, not reads: the retryer re-issues a GET, and each attempt consults the probe again.
+	FanOutProbes        int64 `json:"fanout_probes"`         // Chunk-0 GETs whose headers were put to a probe
+	FanOutProbeDeclines int64 `json:"fanout_probe_declines"` // ... of those, the ones that declined the body
+
 	// Multipart upload metrics
 	MultipartUploads          int64         `json:"multipart_uploads"`           // Total multipart uploads initiated
 	MultipartUploadsParts     int64         `json:"multipart_uploads_parts"`     // Total parts uploaded
@@ -241,6 +257,21 @@ func (mc *MetricsCollector) RecordSeekableWholeFallback(reason string) {
 
 	mc.metrics.SeekableWholeFallbacks++
 	mc.metrics.SeekableLastFallbackReason = reason
+}
+
+// RecordFanOutProbe records a chunk-0 GET whose response headers were put to a probe, and whether the
+// probe declined the body on the strength of them.
+//
+// Both outcomes, from one call, because the interesting quantity is the ratio and a counter that only
+// moved on declines would make "the probe never fires" indistinguishable from "no read ever fanned out".
+func (mc *MetricsCollector) RecordFanOutProbe(declined bool) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.metrics.FanOutProbes++
+	if declined {
+		mc.metrics.FanOutProbeDeclines++
+	}
 }
 
 // RecordMultipartUploadStart records when a multipart upload is initiated
