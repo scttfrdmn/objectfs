@@ -25,10 +25,12 @@
 // not yet a mount, and reporting success at the moment of fork would make every failure look like a
 // success that broke immediately afterwards.
 //
-// The child's startup output is captured into an unlinked temporary file, which is relayed if the mount
-// fails and discarded with the inode if it succeeds. Without it a failed fstab mount reports nothing at
-// all, which sends an operator to check the bucket, the credentials and the network — none of which is
-// necessarily the problem.
+// The child's startup output goes to /var/log/objectfs/mount-<mountpoint>.log, and the tail of what this
+// attempt wrote is relayed onto stderr if the mount fails. Without it a failed fstab mount reports nothing
+// at all, which sends an operator to check the bucket, the credentials and the network — none of which is
+// necessarily the problem. A named file rather than a pipe or an unlinked temporary, because the child
+// keeps writing to it for the lifetime of the mount: a pipe would fill and block the filesystem on its own
+// log, and an unlinked file would grow where nobody could find it or rotate it.
 //
 // # Options it refuses, and why refusing is the point
 //
@@ -49,6 +51,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -56,6 +59,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -137,13 +141,47 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// validates the configuration and resolves both arguments without touching the mount point, which is
 	// the same promise, so this one runs in the foreground and relays its result directly.
 	if inv.fake {
-		cmd := exec.Command(binary, plan.argv...) // #nosec G204 -- binary is resolved by objectfsPath from
-		// a fixed set of paths and plan.argv is built by translate from the option table, never from an
-		// option's raw text.
+		// Under the same deadline as a real mount. `objectfs mount --dry-run` resolves the bucket, which
+		// means DNS and credentials, so it can hang for the same reasons — and a `mount -a -f` that hangs
+		// at boot is the failure this whole program is shaped to avoid, fake mount or not.
+		ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, binary, plan.argv...) // #nosec G204 -- binary is resolved by
+		// objectfsPath from a fixed set of paths and plan.argv is built by translate from the option table,
+		// never from an option's raw text.
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
 
+		// The deadline above is not self-enforcing, which a test found rather than a reading of the docs:
+		// with these three lines absent, a `mount -f` against a dry run that slept for 30 seconds took the
+		// whole 30 seconds despite a 300ms timeout.
+		//
+		// Two mechanisms were missing, and they are separate. CommandContext's default cancel signals only
+		// the direct child, so a grandchild survived; and stdout here is an io.Writer rather than an
+		// *os.File, so exec copies through a pipe and Wait blocks until every holder of the write end closes
+		// it — which the surviving grandchild did not do. Measured: 5.3 seconds for a 300ms deadline with
+		// the group kill removed, and 30 seconds with all three removed.
+		//
+		// So the kill goes to the process group, and WaitDelay bounds the wait for the pipe rather than
+		// trusting it to close. WaitDelay is the weaker of the two and it is not redundant: a descendant
+		// that called setsid is in no group this can signal, and then the delay is the only bound there is.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = terminateGrace
+
 		if err := cmd.Run(); err != nil {
+			// The deadline named, rather than the `signal: killed` a canceled CommandContext reports. That
+			// error says the child was killed and nothing about who killed it or why, which for the one
+			// failure an operator can act on — raise the timeout — is the least useful thing to print.
+			if ctx.Err() != nil {
+				emit(stderr, "mount.objectfs: %s did not finish checking %s on %s within %s\n",
+					binary, inv.device, inv.mountPoint, plan.timeout)
+				emit(stderr, "mount.objectfs: raise the wait with -o mount-timeout=<duration>\n")
+
+				return exitMountFailed
+			}
+
 			emit(stderr, "mount.objectfs: %s would not mount %s on %s: %v\n",
 				binary, inv.device, inv.mountPoint, err)
 
@@ -301,7 +339,7 @@ func parseArgs(args []string) (invocation, error) {
 func splitOptions(s string) []string {
 	var out []string
 
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}
@@ -550,6 +588,14 @@ func objectfsPath() (string, error) {
 }
 
 // executable reports why a path is not a runnable file, or nil.
+//
+// It is called on OBJECTFS_BINARY, which is an environment variable and so tainted from gosec's point of
+// view. Deciding whether an operator-supplied path is runnable is the whole job: refusing the taint would
+// mean refusing to check, and the alternative to checking is exec'ing it and reporting "cannot run" with no
+// reason. The caller of this program is already root and already choosing what mount(8) exec's, so a path
+// it can reach here is one it could have put at /sbin/mount.objectfs directly.
+//
+// #nosec G703 -- an operator-supplied path is the input; see above.
 func executable(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {

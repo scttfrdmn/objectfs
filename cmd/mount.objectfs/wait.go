@@ -40,10 +40,16 @@ func startAndWait(binary string, p plan, inv invocation, stderr io.Writer) int {
 	logFile, logName, offset := openMountLog(inv.mountPoint, stderr)
 	defer func() { _ = logFile.Close() }()
 
+	// exec.Command and not exec.CommandContext, which is the one place in this repository where that is
+	// deliberate. CommandContext kills the child when the context is done, and this child is the mount: it
+	// has to outlive this process by design, so there is no context whose lifetime it should share. The
+	// deadline that does apply is enforced below by signaling the process group, which stops the child
+	// without tying it to a context that ends when the helper exits.
+	//
 	// #nosec G204 -- binary is resolved by objectfsPath from a fixed set of paths, and p.argv is built by
 	// translate from optionTable: an option's value reaches this as one element of argv, never as shell
 	// text, and an option's name never reaches it at all.
-	cmd := exec.Command(binary, p.argv...)
+	cmd := exec.Command(binary, p.argv...) //nolint:noctx // the child must outlive this process; see above
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -122,7 +128,7 @@ func startAndWait(binary string, p plan, inv invocation, stderr io.Writer) int {
 //
 // The signal goes to the process group, negative pid, because Setsid made the child a group leader and
 // `objectfs mount` is not necessarily the only process in it — a fusermount3 helper it spawned holds the
-// /dev/fuse fd, and signalling only the parent can leave the mount point wedged.
+// /dev/fuse fd, and signaling only the parent can leave the mount point wedged.
 func terminate(cmd *exec.Cmd, waited <-chan error) {
 	pgid := -cmd.Process.Pid
 
@@ -142,8 +148,7 @@ func describeExit(err error) string {
 		return "exited successfully, which for a mount means it gave up before mounting"
 	}
 
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 		return fmt.Sprintf("exit status %d", exit.ExitCode())
 	}
 
@@ -360,9 +365,14 @@ func openMountLog(mountPoint string, stderr io.Writer) (*os.File, string, int64)
 
 	name := filepath.Join(dir, "mount-"+sanitizePath(mountPoint)+".log")
 
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o640) // #nosec G304 -- the
-	// directory is fixed and the basename is sanitizePath of the mount point, which is one path component
-	// with no separators.
+	// 0o640, the ordinary mode for a file under /var/log: written by the mount, which is normally root, and
+	// readable by the group an operator can be put in. 0600 would make every diagnostic this program exists
+	// to preserve reachable only through sudo, and the file holds `objectfs mount`'s startup output — not a
+	// credential, which comes from the AWS chain and is never echoed.
+	//
+	// #nosec G304,G302 -- the directory is fixed and the basename is sanitizePath of the mount point, which
+	// is one path component with no separators; the mode is /var/log's convention, above.
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o640)
 	if err != nil {
 		return discard(fmt.Sprintf("cannot write %s: %v", name, err))
 	}

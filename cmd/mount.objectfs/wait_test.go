@@ -188,6 +188,7 @@ func TestReadMountState(t *testing.T) {
 	})
 }
 
+//nolint:paralleltest // withMountinfo and withLogDir swap package-level variables
 func TestMountAppeared(t *testing.T) {
 	table := filepath.Join(t.TempDir(), "mountinfo")
 	mountPoint := t.TempDir()
@@ -226,6 +227,8 @@ func TestMountAppeared(t *testing.T) {
 // Mounting onto a path that is already a mount point is legal, so a helper that read "something is mounted
 // here" as success would report a mount it never made — and at boot, `mount -a` would record a filesystem
 // as present that nothing had mounted.
+//
+//nolint:paralleltest // withMountinfo and withLogDir swap package-level variables
 func TestMountAppearedIgnoresAMountThatWasAlreadyThere(t *testing.T) {
 	table := filepath.Join(t.TempDir(), "mountinfo")
 	mountPoint := t.TempDir()
@@ -252,6 +255,8 @@ func TestMountAppearedIgnoresAMountThatWasAlreadyThere(t *testing.T) {
 
 // TestMountAppearedFallsBackToTheDeviceNumber covers the path taken where there is no /proc: the mount
 // table is unreadable, so the signal is the mount point's st_dev changing.
+//
+//nolint:paralleltest // withMountinfo and withLogDir swap package-level variables
 func TestMountAppearedFallsBackToTheDeviceNumber(t *testing.T) {
 	mountPoint := t.TempDir()
 	withMountinfo(t, filepath.Join(t.TempDir(), "there-is-no-mount-table-here"))
@@ -279,6 +284,7 @@ func TestMountAppearedFallsBackToTheDeviceNumber(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // withMountinfo and withLogDir swap package-level variables
 func TestStartAndWait(t *testing.T) {
 	t.Run("the mount comes up", func(t *testing.T) {
 		table := filepath.Join(t.TempDir(), "mountinfo")
@@ -440,7 +446,9 @@ func TestStartAndWait(t *testing.T) {
 		withLogDir(t, t.TempDir())
 
 		notABinary := filepath.Join(t.TempDir(), "objectfs")
-		if err := os.WriteFile(notABinary, []byte("\x00\x01not a program"), 0o700); err != nil {
+		// Executable and not a program, which is the case being tested: the exec fails in the kernel
+		// rather than in the mode check, and that is the path that has to report something useful.
+		if err := os.WriteFile(notABinary, []byte("\x00\x01not a program"), 0o700); err != nil { // #nosec G306 -- deliberately executable; see above
 			t.Fatal(err)
 		}
 
@@ -483,6 +491,7 @@ func TestStartAndWait(t *testing.T) {
 	})
 }
 
+//nolint:paralleltest // withLogDir swaps a package-level variable, and one subtest calls t.Setenv
 func TestOpenMountLog(t *testing.T) {
 	t.Run("the offset skips a previous attempt's output", func(t *testing.T) {
 		logs := t.TempDir()
@@ -598,15 +607,18 @@ func unwritableDir(t *testing.T) string {
 	t.Helper()
 
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o500); err != nil {
+	// 0o500 is the whole fixture: readable and traversable, and not writable. G302 reads any mode above
+	// 0600 as a finding and has no way to know the bits that matter here are the ones it is objecting to.
+	if err := os.Chmod(dir, 0o500); err != nil { // #nosec G302 -- an unwritable directory is the fixture
 		t.Fatal(err)
 	}
 	// Restored so that t.TempDir's own cleanup can remove it.
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // #nosec G302 -- restores t.TempDir's own mode so cleanup can remove it
 
 	return dir
 }
 
+//nolint:paralleltest // withMountinfo and withLogDir swap package-level variables
 func TestRelayLogTruncatesToTheTail(t *testing.T) {
 	logs := t.TempDir()
 	withLogDir(t, logs)
@@ -703,9 +715,7 @@ func readPid(pidFile string) (int, bool) {
 }
 
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
+	first, _, _ := strings.Cut(s, "\n")
 
-	return s
+	return first
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -550,6 +551,8 @@ func TestObjectfsPath(t *testing.T) {
 //
 // OBJECTFS_BINARY points at a script that would fail loudly if it ran, so a refusal that leaked through to
 // the mount shows up as the wrong exit code rather than as a passing test.
+//
+//nolint:paralleltest // t.Setenv, which the testing package forbids alongside t.Parallel
 func TestRunRefusesBeforeForking(t *testing.T) {
 	t.Setenv("OBJECTFS_BINARY", fakeObjectfs(t, `echo "the mount should not have been attempted" >&2; exit 0`))
 
@@ -704,6 +707,77 @@ func TestRunFakeMount(t *testing.T) {
 		}
 	})
 
+	t.Run("a fake mount that hangs is bounded by mount-timeout", func(t *testing.T) {
+		// A dry run resolves the bucket, which means DNS and credentials, so it can hang for the same
+		// reasons a real mount can. `mount -a -f` at boot is where that matters: without the deadline this
+		// blocks the rest of fstab behind a check that mounts nothing.
+		t.Setenv("OBJECTFS_BINARY", fakeObjectfs(t, "sleep 30"))
+
+		start := time.Now()
+		code, _, stderr := runArgs(t, "s3://bucket", "/mnt/data", "-f", "-o", "mount-timeout=300ms")
+		elapsed := time.Since(start)
+
+		if code != exitMountFailed {
+			t.Errorf("exit code = %d, want %d; stderr: %s", code, exitMountFailed, stderr)
+		}
+		// Three seconds is ten times the timeout and still well under the WaitDelay that would bound this
+		// if the process group were not killed: with only WaitDelay, the surviving `sleep` holds the stdout
+		// pipe open and Wait returns after the full grace period instead of promptly.
+		if elapsed > 3*time.Second {
+			t.Errorf("took %s for a 300ms timeout, so the deadline did not apply", elapsed)
+		}
+
+		// The deadline named, not `signal: killed`. That is the one failure here an operator can act on,
+		// and the error a canceled CommandContext reports says nothing about who killed the child or why.
+		if !strings.Contains(stderr, "did not finish checking") {
+			t.Errorf("stderr = %q, want it to say the check ran out of time", stderr)
+		}
+		if !strings.Contains(stderr, "mount-timeout=") {
+			t.Errorf("stderr = %q, want it to name the option that raises the wait", stderr)
+		}
+		if strings.Contains(stderr, "would not mount") {
+			t.Errorf("stderr = %q, reported as a refusal rather than as a timeout: the dry run never "+
+				"answered, so nothing established that it would not mount", stderr)
+		}
+	})
+
+	t.Run("a descendant that escaped the process group is bounded by WaitDelay", func(t *testing.T) {
+		// The case the group kill cannot reach, and the reason WaitDelay is not redundant beside it. A
+		// descendant that called setsid is in no group the cancel can signal, and it holds the write end of
+		// the pipe exec copies stdout through — so without WaitDelay, Wait blocks on a process that has
+		// already outlived the deadline and the timeout is not a bound at all.
+		//
+		// python3 because setsid(2) needs a caller: setsid(1) is not on macOS, and `&` alone leaves the
+		// child in the same process group, which the cancel would then kill.
+		python, err := exec.LookPath("python3")
+		if err != nil {
+			t.Skipf("python3 is needed to put a descendant in its own session: %v", err)
+		}
+
+		t.Setenv("OBJECTFS_BINARY", fakeObjectfs(t, python+
+			` -c 'import os, time
+if os.fork() == 0:
+    os.setsid()
+    time.sleep(30)
+' &
+sleep 30`))
+
+		start := time.Now()
+		code, _, stderr := runArgs(t, "s3://bucket", "/mnt/data", "-f", "-o", "mount-timeout=300ms")
+		elapsed := time.Since(start)
+
+		if code != exitMountFailed {
+			t.Errorf("exit code = %d, want %d; stderr: %s", code, exitMountFailed, stderr)
+		}
+
+		// terminateGrace plus the deadline plus slack. The point is that it returns at all: with WaitDelay
+		// unset this waits the full 30 seconds for a process it cannot signal.
+		if bound := terminateGrace + 5*time.Second; elapsed > bound {
+			t.Errorf("took %s, want under %s. A descendant outside the process group held the stdout pipe "+
+				"open, so WaitDelay is the only thing that can bound the wait.", elapsed, bound)
+		}
+	})
+
 	t.Run("-v prints the command line it will run", func(t *testing.T) {
 		t.Setenv("OBJECTFS_BINARY", fakeObjectfs(t, "exit 0"))
 
@@ -719,7 +793,10 @@ func fakeObjectfs(t *testing.T, body string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "objectfs")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+	// 0o700, because the point of this file is that it runs. gosec's G306 wants 0600 or less for any
+	// WriteFile, which for a stand-in binary is the one mode that makes the test assert nothing: run
+	// would find the path unexecutable and refuse before ever reaching what is being tested.
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil { // #nosec G306 -- an executable stand-in in t.TempDir()
 		t.Fatalf("writing the fake objectfs: %v", err)
 	}
 

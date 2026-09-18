@@ -82,6 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem is absent and the kernel believing it is present, and the next `mount -a` would stack a
   second one on top.
 
+  **`mount -f` is under the same deadline**, because `objectfs mount --dry-run` resolves the bucket and
+  so can hang on DNS or credentials for the same reasons a real mount can — and a `mount -a -f` that
+  hangs at boot is the failure this program exists to avoid, fake mount or not. Enforcing that deadline
+  took three things rather than one, which a test found rather than a reading of the docs: with the
+  deadline alone, a `-o mount-timeout=300ms` against a dry run that slept for 30 seconds took the whole
+  30 seconds. `exec.CommandContext`'s cancel signals only the direct child, so a grandchild survived;
+  and because the helper's stdout is an `io.Writer` rather than an `*os.File`, `exec` copies through a
+  pipe and `Wait` blocks until every holder of the write end closes it, which the survivor did not do.
+  So the kill goes to the process group and `WaitDelay` bounds the wait for the pipe instead of trusting
+  it to close — `WaitDelay` is not redundant with the group kill, since a descendant that called
+  `setsid` is in no group the helper can signal, and both cases now have a test that fails without its
+  line. A timed-out `-f` names the deadline and the flag that raises it, rather than reporting the
+  `signal: killed` a canceled `CommandContext` produces, which says nothing about who killed the child
+  or why.
+
   Options are translated from a table, and **anything not in the table is refused** rather than passed
   through or dropped. `config=`, `cache-size=`, `log-level=`, `max-concurrency=` and `debug` become the
   corresponding `objectfs mount` flags; `_netdev`, `auto`, `noauto`, `nofail`, `defaults`, `rw`,
