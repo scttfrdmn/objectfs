@@ -269,6 +269,48 @@ func TestReadOnlyMountRefusesEveryModifyingOperation(t *testing.T) {
 	}
 }
 
+// TestEveryFUSEGateFiresOnItsOwn isolates the thirteen gates from the backstop underneath them.
+//
+// The test above cannot do this, and the reason is the redundancy it is testing. On a real read-only mount
+// both layers are armed, so FileHandle.Write returns EROFS whether its own gate is present or the vfs
+// backstop caught it — delete the gate at filesystem.go:1330 and that test stays green. Two layers that
+// each cover the other's absence are exactly what was wanted at runtime and exactly what makes a mutation
+// undetectable.
+//
+// So this runs with the FUSE gate armed and the write path writable, which is a configuration
+// internal/adapter cannot produce: any EROFS here came from the gate itself and from nowhere else. Between
+// this and [TestTheWriterBackstopHoldsWithoutTheFUSEGate], each layer is pinned without the other standing
+// in for it.
+func TestEveryFUSEGateFiresOnItsOwn(t *testing.T) {
+	t.Parallel()
+
+	const key = "protected.txt"
+
+	for _, op := range modifyingOperations {
+		t.Run(op.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSplitReadOnlyFixture(t, true, false)
+			f.seed(t, key, []byte("original contents"))
+
+			if f.fs.buffer.ReadOnly() {
+				t.Fatal("the fixture was supposed to leave the write path writable; with the backstop " +
+					"armed, this test cannot tell a present gate from a deleted one")
+			}
+
+			if errno := op.call(f, key); errno != syscall.EROFS {
+				t.Errorf("%s returned %v with only its own gate armed, want EROFS. The gate is missing or "+
+					"no longer reached; on a real mount the vfs backstop would hide that for the write "+
+					"path and hide nothing for Mkdir, Unlink, Rmdir or Rename", op.name, errno)
+			}
+
+			if got := f.writingRequests(); len(got) != 0 {
+				t.Errorf("%s sent %d modifying request(s) to the object store: %+v", op.name, len(got), got)
+			}
+		})
+	}
+}
+
 // TestWritableMountRefusesNoneOfThem is the non-vacuity guard, and it is not optional.
 //
 // Every wrong reason for a refusal is still a refusal. Mkdir on a mount with no write path returns an
