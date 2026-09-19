@@ -90,6 +90,7 @@ var cliFlags = map[string]bool{
 	"max-concurrency": true,
 	"foreground":      true,
 	"mount-point":     true,
+	"read-only":       true,
 
 	// cluster.go's FlagSet. A subcommand's flags are as real as mount's, and leaving them out reported
 	// `objectfs cluster status --json` as broken — see TestCLIFlagsMatchTheBinary, which now scans every

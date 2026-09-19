@@ -169,6 +169,7 @@ type mountFlags struct {
 	maxConcurrency int
 	dryRun         bool
 	debug          bool
+	readOnly       bool
 
 	// storageURI and mountArg are the positional arguments, either of which may be absent when the
 	// config file supplies it.
@@ -187,6 +188,8 @@ func newMountFlagSet(fs *flag.FlagSet, f *mountFlags) {
 	fs.IntVar(&f.maxConcurrency, "max-concurrency", 0, "Maximum concurrent operations")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "Validate the configuration and exit without mounting")
 	fs.BoolVar(&f.debug, "debug", false, "Enable debug logging (equivalent to --log-level DEBUG)")
+	fs.BoolVar(&f.readOnly, "read-only", false,
+		"Serve the bucket read-only: every modifying operation returns EROFS and nothing is written")
 }
 
 func runMount(args []string, stdout, stderr io.Writer) int {
@@ -290,6 +293,16 @@ func mountWithFlags(f *mountFlags, stdout, stderr io.Writer) int {
 		emit(stdout, "  cache size:      %s\n", cfg.Performance.CacheSize)
 		emit(stdout, "  max concurrency: %d\n", cfg.Performance.MaxConcurrency)
 
+		// Printed in both directions rather than only when read-only. This output is what a
+		// config-management run shows an operator to confirm the file says what they meant, and "the line
+		// is absent" is not a reading of "this mount can write to your bucket" that anyone should have to
+		// make.
+		access := "read-write"
+		if cfg.Mount.ReadOnly {
+			access = "read-only"
+		}
+		emit(stdout, "  access:          %s\n", access)
+
 		emitClusterDryRun(stdout, stderr, cfg)
 
 		return exitOK
@@ -340,7 +353,14 @@ func mountAndWait(storageURI, mountPoint string, cfg *config.Configuration, stdo
 		return exitFailure
 	}
 
-	emit(stdout, "objectfs %s mounted %s at %s\n", version, storageURI, mountPoint)
+	// A writable mount's line is unchanged; only a read-only one gains a suffix. Worth saying out loud on
+	// the mount itself and not just in the log, because read-only is the setting most likely to have come
+	// from an fstab entry nobody is watching the log of.
+	if cfg.Mount.ReadOnly {
+		emit(stdout, "objectfs %s mounted %s at %s (read-only)\n", version, storageURI, mountPoint)
+	} else {
+		emit(stdout, "objectfs %s mounted %s at %s\n", version, storageURI, mountPoint)
+	}
 
 	sig := <-sigChan
 	emit(stdout, "objectfs: received %v, unmounting %s\n", sig, mountPoint)
@@ -618,6 +638,17 @@ func applyCommandLineOverrides(cfg *config.Configuration, f *mountFlags) {
 
 	if f.maxConcurrency > 0 {
 		cfg.Performance.MaxConcurrency = f.maxConcurrency
+	}
+
+	// One-way, unlike the three above: --read-only can turn a writable mount read-only and there is no
+	// flag that does the reverse. That asymmetry is deliberate. A bool flag cannot distinguish "not
+	// given" from "given as false", so an unconditional assignment would make every invocation without
+	// the flag override a config file that said `read_only: true` — silently mounting writable the
+	// setting whose failure, as internal/fuse/platform.go puts it, "a user cannot detect until something
+	// has already been overwritten". So the flag may only make a mount safer than its configuration, and
+	// an operator who wants the other direction edits the file, where the change is visible and reviewed.
+	if f.readOnly {
+		cfg.Mount.ReadOnly = true
 	}
 
 	// Last, so that it wins over --log-level. The two together are contradictory and --debug is the

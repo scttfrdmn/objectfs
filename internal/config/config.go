@@ -191,6 +191,31 @@ type MountConfig struct {
 	// It is not defaulted to anything. A wrong mount point is not a mount that fails — it is a mount
 	// that succeeds somewhere the operator is not looking, over whatever was already there.
 	MountPoint string `yaml:"mount_point"`
+
+	// ReadOnly serves the bucket read-only: every operation that would modify it returns EROFS, and no
+	// byte is ever sent to the object store. `objectfs mount --read-only` sets it, and it is what
+	// `/sbin/mount.objectfs` translates an fstab entry's `ro` into.
+	//
+	// False, the zero value, is the writable mount every release through v0.16.0 provided, so a config
+	// file that does not mention this key describes the same mount it described before the key existed.
+	//
+	// It is in `mount` rather than in `fuse` deliberately, even though it reaches go-fuse's
+	// MountOptions.ReadOnly the way that block's three keys reach their fields. The `fuse` block is
+	// scoped to how the kernel is asked to cache and dispatch — settings whose whole effect is the
+	// kernel's behavior. This one's effect is mostly ObjectFS's own: internal/vfs refuses to create
+	// dirty state and internal/fuse returns EROFS from ten entry points, and those hold whether or not
+	// the kernel was told anything. Filing it under `fuse` would describe a guarantee as a dispatch
+	// flag, and an operator reading `fuse.read_only` would be right to wonder which layer enforces it.
+	//
+	// Enforced in three places on purpose, and the redundancy is the point rather than an oversight:
+	// internal/vfs so that "nothing is dirty" is a property of the layer that owns dirty state rather
+	// than a convention every caller observes; internal/fuse so that the errno is EROFS at the syscall
+	// the application made, which is what tells `cp` to stop; and the kernel's own `ro` so that the
+	// mount reports itself correctly to `mount(8)` and `statfs`. Any one of the three failing leaves the
+	// other two enforcing, which is the property [ReadOnly]'s predecessor lacked — see
+	// internal/fuse/platform.go, where ReadOnly was hardcoded to false and `read_only: true` therefore
+	// mounted a writable filesystem.
+	ReadOnly bool `yaml:"read_only"`
 }
 
 // PerformanceConfig represents performance-related settings.

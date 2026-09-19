@@ -253,13 +253,45 @@ func TestTranslate(t *testing.T) {
 			wantTimeout: defaultTimeout,
 		},
 
-		// The three #136 specifies and ObjectFS cannot honor. Each asserts a phrase only its own message
-		// has, so a refusal that fired for some other reason fails.
+		// ro, the third option #136 specified, is a translation as of #532. It was a refusal for as long
+		// as there was no read-only mount to translate it into.
 		{
-			name:    "ro is refused, naming the absent flag",
-			options: []string{"ro"},
-			wantErr: "no --read-only flag",
+			name:        "ro becomes --read-only",
+			options:     []string{"ro"},
+			wantArgv:    []string{"mount", "--read-only", "s3://bucket", "/mnt/data"},
+			wantTimeout: defaultTimeout,
 		},
+		{
+			// -s must not turn ro into a dropped option. It is "ignore options you do not recognize", and
+			// the hazard this guards has only changed shape: before #532 it was a refusal that -s might
+			// downgrade to a warning, and now it is a translation that -s might skip. Either way the
+			// failure is an fstab entry saying ro that mounts read-write in silence.
+			name:        "-s does not stop ro from reaching the flag",
+			options:     []string{"ro"},
+			sloppy:      true,
+			wantArgv:    []string{"mount", "--read-only", "s3://bucket", "/mnt/data"},
+			wantTimeout: defaultTimeout,
+		},
+		{
+			// An entry naming both is a mistake, and this pins which way it resolves: read-only, whichever
+			// order they appear in. mount(8) would let the last one win; this helper does not, because the
+			// two outcomes are not equally bad. Read-only where the operator meant read-write is a mount
+			// that refuses a write they then notice; read-write where they meant read-only is bytes
+			// overwritten in a bucket they had asked to protect.
+			name:        "ro wins over rw regardless of order",
+			options:     []string{"rw", "ro"},
+			wantArgv:    []string{"mount", "--read-only", "s3://bucket", "/mnt/data"},
+			wantTimeout: defaultTimeout,
+		},
+		{
+			name:        "ro wins over a later rw too",
+			options:     []string{"ro", "rw"},
+			wantArgv:    []string{"mount", "--read-only", "s3://bucket", "/mnt/data"},
+			wantTimeout: defaultTimeout,
+		},
+
+		// The two #136 specifies and ObjectFS still cannot honor. Each asserts a phrase only its own
+		// message has, so a refusal that fired for some other reason fails.
 		{
 			name:    "uid is refused, naming the absent remapping",
 			options: []string{"uid=1000"},
@@ -269,14 +301,6 @@ func TestTranslate(t *testing.T) {
 			name:    "gid is refused",
 			options: []string{"gid=1000"},
 			wantErr: "the gid of the",
-		},
-		{
-			// -s is "ignore options you do not recognize", which is not "ignore options you recognize and
-			// cannot honor". If this ever passes, an fstab entry saying ro mounts read-write in silence.
-			name:    "-s does not make ro acceptable",
-			options: []string{"ro"},
-			sloppy:  true,
-			wantErr: "no --read-only flag",
 		},
 		{
 			name:    "bind is refused",
@@ -416,8 +440,8 @@ func TestTranslateRefusalsNameTheRemedy(t *testing.T) {
 //
 // An entry naming a flag objectfs does not have would translate cleanly, pass every test above, and fail
 // at the moment of mounting with objectfs's own "flag provided but not defined" — inside a detached child,
-// relayed through a log file, at boot. The five names here are newMountFlagSet's; if a flag is renamed
-// there, this is what says so.
+// relayed through a log file, at boot. The names here are newMountFlagSet's; if a flag is renamed there,
+// this is what says so. No count in that sentence on purpose: it said "five" while listing eight.
 func TestOptionTableFlagsExist(t *testing.T) {
 	t.Parallel()
 
@@ -426,6 +450,7 @@ func TestOptionTableFlagsExist(t *testing.T) {
 	mountFlags := map[string]bool{
 		"--config": true, "--foreground": true, "--mount-point": true, "--log-level": true,
 		"--cache-size": true, "--max-concurrency": true, "--dry-run": true, "--debug": true,
+		"--read-only": true,
 	}
 
 	for name, opt := range optionTable {
@@ -565,11 +590,9 @@ func TestRunRefusesBeforeForking(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{
-			name:    "ro",
-			args:    []string{"s3://bucket", "/tmp", "-o", "ro"},
-			wantErr: "no --read-only flag",
-		},
+		// No `ro` case here as of #532. It is a translation now, so it reaches a mount by design and
+		// belongs in TestTranslate rather than among the refusals — and leaving it here would have this
+		// test assert that a supported option is rejected.
 		{
 			name:    "uid",
 			args:    []string{"s3://bucket", "/tmp", "-o", "uid=1000"},

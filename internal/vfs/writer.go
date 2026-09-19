@@ -58,6 +58,9 @@ type Writer struct {
 	// paths is a trivial byte count and a million live nodes.
 	maxNodes int
 
+	// readOnly refuses every operation that would create dirty state. See [Writer.mutatingNode].
+	readOnly bool
+
 	mu    sync.Mutex
 	nodes map[string]*Node
 }
@@ -80,6 +83,20 @@ type WriterOptions struct {
 
 	// MaxBuffers caps how many keys may hold pending writes at once. Zero means unbounded.
 	MaxBuffers int
+
+	// ReadOnly makes the writer refuse every operation that would create dirty state, returning
+	// [ErrReadOnly], which internal/fuse maps to EROFS.
+	//
+	// It is here rather than only in internal/fuse because a read-only mount that is enforced once per
+	// entry point is enforced by whoever remembered. internal/fuse has ten such places — Mkdir, Create,
+	// Unlink, Rmdir, Rename, Write, Setattr and the four xattr calls — and the eleventh is the one
+	// nobody adds a check to. This is the layer where dirty state is created, so it is the layer where
+	// "nothing is dirty" can be a property rather than a convention.
+	//
+	// A field on the constructor's options, not an argument to each call: a per-call flag can be passed
+	// correctly nine times and omitted once, and there is no operation whose read-only-ness varies
+	// within the lifetime of a mount.
+	ReadOnly bool
 }
 
 // NewWriter returns a Writer flushing through backend, with no resource bounds.
@@ -123,12 +140,16 @@ func NewWriterWithOptions(ctx context.Context, backend types.Backend, opts Write
 		ctx:       ctx,
 		maxMemory: opts.MaxMemory,
 		maxNodes:  opts.MaxBuffers,
+		readOnly:  opts.ReadOnly,
 		nodes:     make(map[string]*Node),
 	}, nil
 }
 
 // MaxMemory returns the writer's dirty-byte ceiling, or 0 if it is unbounded.
 func (w *Writer) MaxMemory() int64 { return w.maxMemory }
+
+// ReadOnly reports whether this writer refuses to create dirty state.
+func (w *Writer) ReadOnly() bool { return w.readOnly }
 
 // Write buffers a write of data at offset for key. It implements [types.WriteBuffer].
 //
@@ -162,7 +183,7 @@ func (w *Writer) WriteContext(ctx context.Context, key string, offset int64, dat
 		return err
 	}
 
-	n, err := w.node(ctx, key)
+	n, err := w.mutatingNode(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -336,7 +357,7 @@ func (w *Writer) Truncate(ctx context.Context, key string, size int64) error {
 		return fmt.Errorf("%w: empty key", ErrInvalid)
 	}
 
-	n, err := w.node(ctx, key)
+	n, err := w.mutatingNode(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -355,7 +376,7 @@ func (w *Writer) SetAttr(ctx context.Context, key string, mode, uid, gid bool, f
 		return fmt.Errorf("%w: empty key", ErrInvalid)
 	}
 
-	n, err := w.node(ctx, key)
+	n, err := w.mutatingNode(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -380,7 +401,7 @@ func (w *Writer) SetXattr(ctx context.Context, key, name string, value []byte) e
 			ErrInvalid, name)
 	}
 
-	n, err := w.node(ctx, key)
+	n, err := w.mutatingNode(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -394,7 +415,7 @@ func (w *Writer) RemoveXattr(ctx context.Context, key, name string) error {
 		return fmt.Errorf("%w: empty key", ErrInvalid)
 	}
 
-	n, err := w.node(ctx, key)
+	n, err := w.mutatingNode(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -757,7 +778,33 @@ func (w *Writer) Close() error {
 	return nil
 }
 
+// mutatingNode is [Writer.node] for a caller that is about to create dirty state, and it is the one
+// place a read-only writer refuses.
+//
+// The split exists because [Writer.node] is not a write-only chokepoint: [Writer.ReadAt] and
+// [Writer.FileSize] call it too, to overlay pending writes on a read and to report a size that includes
+// them. Gating node itself would make every read on a read-only mount return EROFS, which is the
+// opposite of the feature. So the five methods that can make a node dirty — Write, Truncate, SetAttr,
+// SetXattr, RemoveXattr — come through here, and the two that only consult one call node directly.
+//
+// Adding a sixth mutating method and calling node from it is therefore the mistake this naming exists to
+// make visible, and TestEveryMutatingWriterMethodRefusesWhenReadOnly is what notices.
+//
+// The refusal is before the node is created, not before the mutation is applied. A node in w.nodes is
+// state a Flush would walk and a Count would report, and a read-only mount that accumulated nodes it
+// refused to write would be indistinguishable, from the outside, from one that was buffering.
+func (w *Writer) mutatingNode(ctx context.Context, key string) (*Node, error) {
+	if w.readOnly {
+		return nil, fmt.Errorf("%w: %q", ErrReadOnly, key)
+	}
+
+	return w.node(ctx, key)
+}
+
 // node returns the [Node] for key, creating it from the object's stored attributes on first use.
+//
+// Callers that intend to mutate the node must use [Writer.mutatingNode] instead; this one is reached
+// directly only by the read paths.
 //
 // The stored state is fetched once per key, not per write: the size is what read-modify-write splices
 // against, and [Node] tracks it from there. Refetching would also reintroduce a race, since the size

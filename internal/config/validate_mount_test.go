@@ -71,6 +71,47 @@ func TestMountBlockIsOptional(t *testing.T) {
 	}
 }
 
+// TestMountReadOnlyReachesTheConfigurationFromAFile is #532's load-path test, and the claim it makes is
+// narrower than it looks.
+//
+// The loader decodes strictly, so before this key existed a config file saying `read_only: true` was
+// *rejected* as an unknown key — which was, perversely, the safest thing the old code did. The dangerous
+// version is the one where the key parses and reaches nothing, and that is what internal/fuse/mount.go's
+// `yaml:"read_only"` tag looked like it provided: nothing in the tree ever YAML-unmarshals into
+// internal/fuse, so that tag has never decoded a byte. This test is about the struct an operator's file
+// actually lands in.
+func TestMountReadOnlyReachesTheConfigurationFromAFile(t *testing.T) {
+	t.Parallel()
+
+	const doc = `mount:
+  uri: s3://research-data/lab/2026
+  mount_point: /mnt/objectfs/research-data
+  read_only: true
+`
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := NewDefault()
+	if err := cfg.LoadFromFile(path); err != nil {
+		t.Fatalf("a config file asking for a read-only mount was rejected: %v", err)
+	}
+
+	if !cfg.Mount.ReadOnly {
+		t.Error("mount.read_only: true did not reach Mount.ReadOnly. The failure mode is not an error " +
+			"an operator sees — it is a bucket they asked to protect, mounted writable")
+	}
+
+	// And the absent key is the writable mount every release through v0.16.0 provided, so a file written
+	// before this key existed describes the same mount it described then.
+	if NewDefault().Mount.ReadOnly {
+		t.Error("NewDefault() sets mount.read_only, which would make a config file that never mentions " +
+			"the key mount read-only")
+	}
+}
+
 func TestValidateRejectsAnUnusableMountBlock(t *testing.T) {
 	t.Parallel()
 
