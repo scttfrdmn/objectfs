@@ -203,7 +203,7 @@ type MountConfig struct {
 	// MountOptions.ReadOnly the way that block's three keys reach their fields. The `fuse` block is
 	// scoped to how the kernel is asked to cache and dispatch — settings whose whole effect is the
 	// kernel's behavior. This one's effect is mostly ObjectFS's own: internal/vfs refuses to create
-	// dirty state and internal/fuse returns EROFS from ten entry points, and those hold whether or not
+	// dirty state and internal/fuse returns EROFS from thirteen entry points, and those hold whether or not
 	// the kernel was told anything. Filing it under `fuse` would describe a guarantee as a dispatch
 	// flag, and an operator reading `fuse.read_only` would be right to wonder which layer enforces it.
 	//

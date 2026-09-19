@@ -776,7 +776,7 @@ func TestMountReadOnlyReachesBothEnforcingLayers(t *testing.T) {
 			}
 			if mountOpts.ReadOnly != readOnly {
 				t.Errorf("mount.read_only=%t produced MountOptions.ReadOnly=%t. This is the exact gap "+
-					"#532 closed: with it false, internal/fuse's ten EROFS gates and mount.go's `ro` "+
+					"#532 closed: with it false, internal/fuse's thirteen EROFS gates and mount.go's `ro` "+
 					"option are all unreachable and the mount accepts writes",
 					readOnly, mountOpts.ReadOnly)
 			}

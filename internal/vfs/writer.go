@@ -88,13 +88,14 @@ type WriterOptions struct {
 	// [ErrReadOnly], which internal/fuse maps to EROFS.
 	//
 	// It is here rather than only in internal/fuse because a read-only mount that is enforced once per
-	// entry point is enforced by whoever remembered. internal/fuse has ten such places — Mkdir, Create,
-	// Unlink, Rmdir, Rename, Write, Setattr and the four xattr calls — and the eleventh is the one
-	// nobody adds a check to. This is the layer where dirty state is created, so it is the layer where
-	// "nothing is dirty" can be a property rather than a convention.
+	// entry point is enforced by whoever remembered. internal/fuse has thirteen such places — Mkdir,
+	// Create, Unlink, Rmdir, Rename, Open, Write, Setattr on a file and on a directory, and Setxattr and
+	// Removexattr on each — and the fourteenth is the one nobody adds a check to. This is the layer where
+	// dirty state is created, so it is the layer where "nothing is dirty" can be a property rather than a
+	// convention.
 	//
 	// A field on the constructor's options, not an argument to each call: a per-call flag can be passed
-	// correctly nine times and omitted once, and there is no operation whose read-only-ness varies
+	// correctly twelve times and omitted once, and there is no operation whose read-only-ness varies
 	// within the lifetime of a mount.
 	ReadOnly bool
 }

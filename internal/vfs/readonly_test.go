@@ -11,9 +11,9 @@ import (
 
 // The tests in this file pin the write path's half of the read-only mount (#532).
 //
-// internal/fuse enforces read-only too, from ten entry points, and that is where the EROFS an
-// application sees comes from. This layer exists because ten entry points are enforced by whoever
-// remembered: the eleventh is the one nobody adds a check to, and the consequence is not a wrong errno
+// internal/fuse enforces read-only too, from thirteen entry points, and that is where the EROFS an
+// application sees comes from. This layer exists because thirteen entry points are enforced by whoever
+// remembered: the fourteenth is the one nobody adds a check to, and the consequence is not a wrong errno
 // but a byte written to a bucket the operator asked to protect.
 //
 // The mutation these must catch is the one that sat in the tree through v0.16.0: every EROFS gate
