@@ -67,7 +67,7 @@ func TestEveryBuildTagIsGated(t *testing.T) {
 			"below without checking anything")
 	}
 
-	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	workflow := workflowSource(t, "ci.yml")
 
 	gated := matrixTags(t, workflow)
 	if len(gated) == 0 {
@@ -107,7 +107,7 @@ func TestGatedTagsStillExist(t *testing.T) {
 		inTree[tag] = true
 	}
 
-	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	workflow := workflowSource(t, "ci.yml")
 
 	for tag := range matrixTags(t, workflow) {
 		if !inTree[tag] {
