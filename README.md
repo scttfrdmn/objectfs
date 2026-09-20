@@ -495,6 +495,19 @@ Both arguments to `mount` are optional when the configuration file supplies them
 `--mount-point /mnt/objectfs/%i --foreground` and names the bucket in the per-instance config file,
 since `systemctl start objectfs@research-data` gives the unit only its instance name.
 
+`objectfs mount --read-only` serves the bucket read-only, and `mount.read_only: true` in the config
+file does the same. Every operation that would modify the bucket fails with `EROFS`, which is the
+errno `cp` and `tar` stop on, and nothing is written: enforcement is in the write path, at each FUSE
+entry point, and in the `ro` option the kernel is given, so a gap in any one of the three leaves the
+other two refusing. An `/etc/fstab` entry gets it from `-o ro`, which `/sbin/mount.objectfs`
+translates to this flag.
+
+The flag only goes one way: it can make a mount read-only, and there is no flag that makes a
+configured read-only mount writable. A boolean flag cannot tell "not given" from "given as false", so
+the reverse direction would mean every invocation without the flag overrode a config file that asked
+for read-only — and that is a setting whose failure nobody notices until something has been
+overwritten. Removing it is an edit to the config file, where the change is visible.
+
 Exit codes: `0` succeeded, `1` the command was right and the operation failed, `2` the command line
 was wrong and nothing was attempted.
 

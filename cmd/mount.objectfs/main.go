@@ -34,16 +34,21 @@
 //
 // # Options it refuses, and why refusing is the point
 //
-// #136 specifies translations for `ro`, `uid=` and `gid=`. None of the three has anywhere to go:
-// `objectfs mount` has no --read-only flag, and ownership is not remappable — internal/fuse reports the
-// uid and gid of the process that made the request, falling back to the ones that ran the mount, with
-// no flag or config key that overrides either. Verified against the code, not assumed. #532 is the
-// read-only mount; when it lands, `ro` becomes a translation and its refusal here goes away.
+// #136 specified translations for `ro`, `uid=` and `gid=`. `ro` is one as of #532: it becomes
+// `objectfs mount --read-only`, and the refusal that used to be here is gone.
 //
-// They are refused rather than dropped. An operator who writes `ro` in fstab and gets a read-write
-// mount has been told something untrue by this program about the filesystem's most consequential
-// property, and the same goes for ownership. A mount that does not come up is a problem an operator can
-// see; a mount that came up meaning something other than what the entry says is one they cannot.
+// `uid=` and `gid=` are still refused, and not for want of a flag to map them to — ownership is not
+// remappable at all. internal/fuse reports the uid and gid of the process that made the request, falling
+// back to the ones that ran the mount, with no flag or config key that overrides either. Verified
+// against the code, not assumed.
+//
+// They are refused rather than dropped, and `ro`'s history is why that rule is worth keeping for the two
+// that remain. Through v0.16.0 this program refused `ro` because the mount was always writable; had it
+// dropped the option instead, every operator who wrote `ro` in fstab would have been told something
+// untrue by this program about the filesystem's most consequential property, and would have found out
+// when something was already overwritten. The same goes for ownership. A mount that does not come up is
+// a problem an operator can see; a mount that came up meaning something other than what the entry says
+// is one they cannot.
 //
 // Everything not in optionTable is refused too, by the same reasoning generalized: an option this
 // program has not been taught about is one whose effect it cannot promise. `-s` (sloppy) downgrades that
@@ -385,7 +390,7 @@ type option struct {
 
 // optionTable is every option this helper knows. Anything absent is refused — see the package comment.
 var optionTable = map[string]option{
-	// The five that reach `objectfs mount`. Each is a flag that exists; newMountFlagSet in
+	// The six that reach `objectfs mount`. Each is a flag that exists; newMountFlagSet in
 	// cmd/objectfs/main.go is the list, and an entry here for a flag that does not exist would fail at
 	// the point of mounting with objectfs's own "flag provided but not defined".
 	"config":          {kind: kindValue, flag: "--config"},
@@ -411,14 +416,23 @@ var optionTable = map[string]option{
 	"comment":  {kind: kindIgnore}, // an fstab comment, with a value
 	"bind":     {kind: kindRefuse, why: "a bind mount does not go through a filesystem's mount helper"},
 
-	// rw is the only mode ObjectFS has, so accepting it is a true statement rather than a dropped one.
-	// Its opposite is immediately below, and the asymmetry is the whole point.
+	// rw is the default, so accepting it is a true statement rather than a dropped one. ro is a real
+	// translation as of #532 — it was a kindRefuse through v0.16.0, when the mount was always writable —
+	// and the two are no longer asymmetric.
+	//
+	// ro is deliberately *not* `{kind: kindIgnore}` even though `rw` is. The difference is which way the
+	// mistake falls: dropping `rw` leaves a writable mount, which is what the entry asked for, while
+	// dropping `ro` would leave a writable mount where the entry asked for read-only. So `rw` can be a
+	// no-op and `ro` has to reach a flag.
+	//
+	// That asymmetry also decides `-o ro,rw`, which is an entry an operator did not mean to write either
+	// way: `ro` wins, whichever order the two appear in, because `rw` contributes nothing and `ro`
+	// appends a flag. mount(8) would let the last one win. This does not, and the reason is that the two
+	// outcomes are not equally bad — read-only where they meant read-write is a write that gets refused
+	// and noticed, read-write where they meant read-only is bytes overwritten in a bucket they asked to
+	// protect. Pinned by TestTranslate rather than left to fall out of the table.
 	"rw": {kind: kindIgnore},
-
-	"ro": {kind: kindRefuse, why: "ObjectFS has no read-only mode: `objectfs mount` has no " +
-		"--read-only flag and the mount is always read-write. Refused rather than dropped, because a " +
-		"mount that came up read-write where the entry asked for read-only is worse than one that did " +
-		"not come up at all. Remove `ro` to mount read-write"},
+	"ro": {kind: kindBool, flag: "--read-only"},
 
 	"uid": {kind: kindRefuse, why: "ObjectFS does not remap ownership. A file reports the uid of the " +
 		"process that created it, and anything the kernel did not attribute reports the uid that ran " +

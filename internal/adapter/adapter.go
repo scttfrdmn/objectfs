@@ -942,12 +942,22 @@ func (a *Adapter) buildReadAheadConfig() *fuse.ReadAheadConfig {
 // use case behind it. Debug is false rather than mapped to global.log_level: go-fuse's Debug logs
 // every FUSE request and reply, which is a different thing from an application log level and would
 // make DEBUG unusable for anything else.
+//
+// ReadOnly is the one field not from the `fuse` section, and the exception is deliberate rather than
+// untidy — `mount.read_only` is a guarantee about the mount, not a request about kernel dispatch, and
+// [config.MountConfig.ReadOnly] records why it is filed there. It is mapped here because this is the
+// only production construction of a [fuse.MountOptions]: through v0.16.0 every layer below this line
+// enforced read-only correctly and nothing ever set the field, so a complete implementation sat in the
+// tree with no way to reach it (#532). That is the same defect class as #180, which is what the rest of
+// this comment is about, and it is why the assertion on this mapping is the one that matters.
 func (a *Adapter) buildMountOptions() *fuse.MountOptions {
 	return &fuse.MountOptions{
 		FSName:   "objectfs",
 		Subtype:  "s3",
 		MaxWrite: 128 * 1024,
 		Debug:    false,
+
+		ReadOnly: a.config.Mount.ReadOnly,
 
 		// The three settings the `fuse` section carries — the first FUSE block any loader has read.
 		// DirectIO and KeepCache travel further, to fuse.Config, because they are returned from every
@@ -1032,6 +1042,11 @@ func (a *Adapter) buildWriterOptions() vfs.WriterOptions {
 		MaxMemory: a.sizeOrDefault("write_buffer.max_memory",
 			a.config.WriteBuffer.MaxMemory, defaultWriteBufferMemory),
 		MaxBuffers: a.config.WriteBuffer.MaxBuffers,
+
+		// From `mount`, not `write_buffer`, because it is not a bound on the write path — it is the
+		// absence of one. See [config.MountConfig.ReadOnly] for why the same flag is enforced here and
+		// in internal/fuse rather than in one of them.
+		ReadOnly: a.config.Mount.ReadOnly,
 	}
 }
 

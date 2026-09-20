@@ -702,4 +702,37 @@ func TestApplyCommandLineOverrides(t *testing.T) {
 			t.Errorf("max concurrency = %d, want the file's 42", cfg.Performance.MaxConcurrency)
 		}
 	})
+
+	t.Run("--read-only reaches the configuration", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := config.NewDefault()
+		applyCommandLineOverrides(cfg, &mountFlags{readOnly: true})
+
+		if !cfg.Mount.ReadOnly {
+			t.Error("--read-only was parsed and did not reach Mount.ReadOnly, so the mount it produces " +
+				"accepts writes. That is #532's defect exactly, one layer up: a flag whose whole purpose " +
+				"is refusing writes, present on the command line and connected to nothing")
+		}
+	})
+
+	// The asymmetry is the decision worth pinning: the three flags above overwrite the file in both
+	// directions, and this one only ever makes a mount safer.
+	t.Run("--read-only is one-way", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := config.NewDefault()
+		cfg.Mount.ReadOnly = true
+
+		// An invocation with no --read-only. A bool flag cannot distinguish that from --read-only=false,
+		// so an unconditional assignment here would silently mount writable a bucket the config file asked
+		// to protect — and unlike a wrong log level, nobody finds out until something is overwritten.
+		applyCommandLineOverrides(cfg, &mountFlags{})
+
+		if !cfg.Mount.ReadOnly {
+			t.Error("an invocation without --read-only cleared the file's read_only: true. The override " +
+				"must be one-way; making a read-only mount writable is an edit to the config file, where " +
+				"it is visible")
+		}
+	})
 }

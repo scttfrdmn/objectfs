@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A read-only mount, which the filesystem has had the enforcement for since v0.11.0 and no way to
+  turn on.** `objectfs mount --read-only`, `mount.read_only: true` in the config file, and `-o ro` in
+  an `/etc/fstab` entry all serve the bucket read-only: every operation that would modify it fails
+  with `EROFS`, and the object store receives nothing. (#532)
+
+  The part that was missing is the part that made it dangerous. `internal/fuse` returned `EROFS` from
+  thirteen entry points, `mount.go` appended the kernel's own `ro` option, and `platform.go` copied
+  `MountOptions.ReadOnly` into the go-fuse config — and nothing in the tree ever set
+  `MountOptions.ReadOnly`. `internal/config` had no `read_only` key at all, so a config file asking for
+  one was rejected as unknown, and `internal/fuse`'s own `yaml:"read_only"` tag has never decoded a
+  byte because nothing unmarshals into that package. A complete implementation, tested, unreachable.
+  That is the same defect `internal/fuse/platform.go` records in the past tense about its predecessor
+  and the same class as #180's nine `MountOptions` fields that named real capabilities and reached
+  nothing.
+
+  Enforced in three layers now, and the redundancy is the design rather than belt-and-braces:
+  `internal/vfs` refuses to create dirty state at all, so "nothing is dirty" is a property of the layer
+  that owns dirty state instead of a convention every caller observes; `internal/fuse` returns `EROFS`
+  at the syscall the application made, because that specific errno is what tells `cp` and `tar` to stop
+  where `EACCES` sends an operator looking through bucket policies; and the kernel is given `ro` so the
+  mount reports itself correctly to `mount(8)` and `statfs`. A test deliberately builds the
+  configuration the program cannot produce — the write path read-only, the FUSE gate off — to show the
+  backstop holds when an entry point forgets, which is the failure mode any "check it at each entry
+  point" design has.
+
+  Proven at the endpoint, not by errno. The tests run against a real in-process S3 endpoint over real
+  HTTP and assert its request log contains no PUT, POST or DELETE at all, across every key — because an
+  errno is a claim ObjectFS makes about itself, and through v0.16.0 every one of those thirteen errno
+  gates was correct on a mount that accepted writes anyway. A companion test asserts that *no* operation
+  returns `EROFS` on a writable mount, since several of them legitimately fail for other reasons and a
+  refusal for the wrong reason is still a refusal.
+
+  `--read-only` only goes one way: it can make a mount read-only, and no flag makes a configured
+  read-only mount writable. A boolean flag cannot distinguish "absent" from "given as false", so the
+  reverse would have every plain `objectfs mount` silently override a config file that said
+  `read_only: true`. For the same reason `/sbin/mount.objectfs` lets `ro` win over `rw` whichever order
+  they appear in, where `mount(8)` would let the last one win: read-only where the operator meant
+  read-write is a write that gets refused and noticed, and the other direction is bytes overwritten in
+  a bucket they asked to protect.
+
 ## [0.16.0] - 2026-09-18
 
 Fan-out reads, fstab mounts, and a gate that can see what it is gating.

@@ -738,3 +738,79 @@ func TestFUSEZeroValueIsTheDefault(t *testing.T) {
 			got)
 	}
 }
+
+// TestMountReadOnlyReachesBothEnforcingLayers is #532's mapping assertion, and it is the one the
+// mutation check targets.
+//
+// Through v0.16.0 the read-only mount was complete except for this: internal/fuse returned EROFS from ten
+// entry points, mount.go appended the kernel's `ro`, and platform.go copied MountOptions.ReadOnly into the
+// go-fuse config — and nothing in the tree ever set MountOptions.ReadOnly. buildMountOptions set six
+// fields and not that one, internal/config had no read_only key at all, and `read_only:` in a config file
+// was rejected as unknown by UnmarshalStrict. Every layer tested green; the mount was writable.
+//
+// So the assertion is not "the field is mapped" but "one config key reaches both enforcing layers". Either
+// one alone is a mount that is read-only by one convention: vfs alone refuses to create dirty state but
+// gives the application EIO instead of EROFS, and fuse alone is ten checks that the eleventh entry point
+// will not have.
+func TestMountReadOnlyReachesBothEnforcingLayers(t *testing.T) {
+	t.Parallel()
+
+	for _, readOnly := range []bool{true, false} {
+		name := "read_only: false"
+		if readOnly {
+			name = "read_only: true"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := createTestConfig()
+			cfg.Mount.ReadOnly = readOnly
+
+			a := &Adapter{config: cfg}
+
+			// internal/fuse: the errno the application sees, plus the kernel's own `ro`.
+			mountOpts := a.buildMountOptions()
+			if mountOpts == nil {
+				t.Fatal("buildMountOptions returned nil")
+			}
+			if mountOpts.ReadOnly != readOnly {
+				t.Errorf("mount.read_only=%t produced MountOptions.ReadOnly=%t. This is the exact gap "+
+					"#532 closed: with it false, internal/fuse's thirteen EROFS gates and mount.go's `ro` "+
+					"option are all unreachable and the mount accepts writes",
+					readOnly, mountOpts.ReadOnly)
+			}
+
+			// internal/vfs: the layer that owns dirty state, so that "nothing is dirty" is a property
+			// rather than a convention every FUSE entry point observes.
+			if got := a.buildWriterOptions().ReadOnly; got != readOnly {
+				t.Errorf("mount.read_only=%t produced WriterOptions.ReadOnly=%t. Without this, the only "+
+					"thing standing between a write and the bucket is internal/fuse remembering",
+					readOnly, got)
+			}
+		})
+	}
+}
+
+// TestDefaultConfigMountsWritable pins the compatibility half.
+//
+// read_only has no entry in NewDefault for the same reason the `fuse` section has none: false is both the
+// zero value and the behavior every release through v0.16.0 provided. A config file written before this
+// key existed must still describe a writable mount, and a default that drifted to read-only would break
+// every existing deployment in the safest-looking possible way.
+func TestDefaultConfigMountsWritable(t *testing.T) {
+	t.Parallel()
+
+	a := &Adapter{config: config.NewDefault()}
+
+	if a.config.Mount.ReadOnly {
+		t.Error("NewDefault() sets mount.read_only, which would make every existing config file's mount " +
+			"read-only on upgrade")
+	}
+	if opts := a.buildMountOptions(); opts != nil && opts.ReadOnly {
+		t.Error("the default configuration produces MountOptions.ReadOnly=true")
+	}
+	if a.buildWriterOptions().ReadOnly {
+		t.Error("the default configuration produces WriterOptions.ReadOnly=true")
+	}
+}
