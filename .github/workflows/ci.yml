@@ -948,8 +948,21 @@ jobs:
         # darwin asymmetry legal, and it makes *any* asymmetry legal — so a mount-helper build whose
         # goarch list drifts out of step with the archives' would now be accepted by goreleaser
         # without a word, and this loop is the only thing that would notice.
+        #
+        # A herestring, not `tar -tzf "$t" | grep -qx …`. Under the `set -o pipefail` above, `grep -q`
+        # exits at its first match, so tar is killed by SIGPIPE if it still has a member name to write,
+        # and pipefail promotes that to a failed pipeline because the match *succeeded*. This loop was
+        # written that way and was green anyway, for a reason that is luck rather than design: it matches
+        # mount.objectfs, which tar happens to list last, so there was nothing left to write. Reorder
+        # the archive members and it starts reporting a correct tarball as broken.
+        #
+        # release.yml's sibling check was the same shape and matched the *first* name, and it failed on
+        # v0.17.0 — the first tag whose tarballs have a second member — reporting a missing binary and
+        # then printing that binary's name one line later. Measured: a two-member archive with a 25MB
+        # first member exits 141 on a first-name match and 0 on a last-name match. Fixed in both places
+        # rather than only where it showed.
         for t in dist/objectfs-linux-*.tar.gz; do
-          if ! tar -tzf "$t" | grep -qx 'mount\.objectfs'; then
+          if ! grep -qFx 'mount.objectfs' <<<"$(tar -tzf "$t")"; then
             echo "::error::$t has no mount.objectfs. allow_different_binary_count makes a missing"\
               "binary legal rather than fatal, so only this check catches it." >&2
             exit 1
