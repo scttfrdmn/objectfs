@@ -179,8 +179,15 @@ jobs:
       fail-fast: false
       matrix:
         # fuse_mount carries the tests that need a real kernel mount — whether the kernel
-        # re-reads under direct I/O, whether it keeps pages across open(2). ubuntu-latest has no
-        # /dev/fuse, so they cannot run here; they are compiled here.
+        # re-reads under direct I/O, whether it keeps pages across open(2). They are compiled here
+        # and not run here, and the reason this comment used to give was wrong: it said
+        # "ubuntu-latest has no /dev/fuse". It has one. The packaging job below measured it —
+        # `crw-rw-rw- 1 root root 10, 229 /dev/fuse`, fusermount3 3.14.0, /etc/fuse.conf present,
+        # none of them installed by that job. Whether the suite *passes* on this runner is a
+        # separate and still-unmeasured question, tracked in #543; it goes through fusermount3's
+        # setuid path as a non-root `go test` and it counts kernel READ requests, which is a
+        # property of the runner's kernel. So it stays compiled-only until someone has run it and
+        # read the result, rather than on the strength of a claim nobody probed.
         # s3compat carries the conditional-write compatibility suite: it needs a MinIO, Ceph RGW or
         # Wasabi endpoint in OBJECTFS_COMPAT_ENDPOINT and skips without one. Its findings are what
         # docs/design/conditional-write-compatibility.md records, and two of that matrix's rows were
@@ -824,7 +831,7 @@ jobs:
         systemd-analyze verify /etc/systemd/system/objectfs@example.service
 
   # ---------------------------------------------------------------------------------------------
-  # packaging — the deb and the rpm are built, installed, and removed, on a real dpkg.
+  # packaging — the deb and the rpm are built, installed, and removed, on a real dpkg and a real rpm.
   #
   # Its own job for the reason systemd-unit is: what it checks cannot be checked by `go test`. The
   # Go tests in internal/config/packaging_test.go read .goreleaser.yml's `nfpms:` section against the
@@ -835,13 +842,19 @@ jobs:
   # #207's diagnosis was that scripts/preremove.sh could never run, because a pre-removal hook is
   # invokable only by a package manager and there was no packaging in the tree. So the check that
   # matters is a package manager invoking it. `apt-get remove` with a mount absent is the passing
-  # path; the failure path (a mount that will not unmount, where the script refuses) is covered by
-  # the Go tests, because creating a busy FUSE mount on a runner needs /dev/fuse and a bucket.
+  # path; the failure path — a mount that will not unmount, where the script refuses — is covered by
+  # the Go tests. The reason given here for that used to be that "creating a busy FUSE mount on a
+  # runner needs /dev/fuse and a bucket", and neither half holds: this runner has /dev/fuse (see the
+  # read-only mount step below, which measured it) and testaws is a bucket without one. So that path
+  # is exercisable here and simply is not exercised yet — a gap, stated as a gap.
   #
-  # dpkg only. There is no rpm on ubuntu-latest and installing one gives a database with no
-  # distribution behind it, so `rpm -i` would fail on unrelated dependency resolution rather than
-  # on anything about this package. All three rpms are still *built* here — nfpm's rpm writer is where
-  # a malformed spec would surface — and `rpm -qp` under a container is the follow-on worth having.
+  # Both formats, since #149. The deb is installed by dpkg on the runner; the rpm is installed by rpm
+  # in a rockylinux container, in the last step. This comment used to say "dpkg only", on the grounds
+  # that "installing rpm on ubuntu-latest gives a database with no distribution behind it, so `rpm -i`
+  # would fail on unrelated dependency resolution" — which is true of an rpm *on Ubuntu* and is why the
+  # container is the answer rather than `apt-get install rpm`. It also proposed `rpm -qp` as the
+  # follow-on; `rpm -qp` reads a header without running a scriptlet, and the scriptlets were the whole
+  # exposure, so the step does a real install and a real erase instead.
   #
   # `make package-linux` is goreleaser now, so this job builds the tarballs as well as the packages and
   # takes about thirty seconds longer than the nfpm loop it replaces. That is the cost of the property
@@ -1045,6 +1058,254 @@ jobs:
         if [ "$rc" != "1" ]; then
           echo "::error::the helper exited $rc rather than 1 for an unrecognized option. 1 is" \
             "mount(8)'s code for a bad invocation; 32 would mean it attempted the mount anyway."
+          exit 1
+        fi
+
+    # The first time anything in this repository has had a filesystem mounted and read a byte through
+    # it (#149). Every step above proves the chain as far as mount(8) *finding* the helper; this one
+    # proves the helper, `objectfs mount`, go-fuse, the kernel and the S3 backend all agree, which is
+    # a claim no test in this repository can make. `internal/fuse`'s tests call into the binding, and
+    # the binding was never the part in doubt.
+    #
+    # Read-only, per #532, and that is what makes it cheap rather than a compromise: nothing to flush,
+    # no dirty range to reconcile, and a failure cannot leave a half-written object in a bucket. The
+    # refused write below turns the read-only half into an assertion rather than an omission.
+    #
+    # On the runner rather than in a container, which is a deliberate departure from #149's body. That
+    # body prescribes a container with `--device /dev/fuse --cap-add SYS_ADMIN`, and passing /dev/fuse
+    # through presupposes the host already has it — so a container does not sidestep the question of
+    # whether ubuntu-latest has the device, it only adds a second place for the answer to be no. The
+    # deb is installed on the runner at this point, so mounting here exercises the *installed*
+    # /sbin/mount.objectfs, which is #136's subject and the stronger end to end of the two.
+    - name: A read-only mount completes and a file's bytes survive the round trip
+      run: |
+        # /dev/fuse, measured and reported rather than assumed either way, and this is the probe that
+        # settled it. The build-tags matrix at the top of this file used to assert "ubuntu-latest has no
+        # /dev/fuse" — a plain claim, never an observation, and false: the device is there, mode
+        # crw-rw-rw-, major 10 minor 229, alongside fusermount3 3.14.0 and /etc/fuse.conf. Both comments
+        # are corrected and #543 carries what follows from it.
+        #
+        # The check stays, because the runner image is not a constant: ubuntu-latest migrates to Ubuntu
+        # 26 from 2026-10-19, and a device that arrived without being promised can leave the same way.
+        # Reported first so that a mount failure four screens down is not the place anyone has to work
+        # out that the device was missing.
+        if [ ! -c /dev/fuse ]; then
+          lsmod | grep -i fuse || echo "(no fuse module loaded)"
+          echo "::error::/dev/fuse is not a character device on this runner, so no FUSE mount can be" \
+            "established here. A container does not help — \`--device /dev/fuse\` passes through a" \
+            "device the host must already have. Either load the module in a step before this one or" \
+            "move this step to a runner that has it."
+          exit 1
+        fi
+        ls -l /dev/fuse
+        fusermount3 --version
+
+        # The endpoint is substrate, at the version this module already depends on: read out of go.mod
+        # rather than pinned here, and deliberately not `@latest`. That makes the endpoint this mount
+        # is proven against the same code `internal/testaws` runs in-process, so a disagreement between
+        # the two cannot be a version difference — and Dependabot moves both at once, because there is
+        # only one version to move.
+        SUBSTRATE_VERSION=$(go list -m -f '{{ .Version }}' github.com/scttfrdmn/substrate)
+        echo "substrate $SUBSTRATE_VERSION"
+        go install github.com/scttfrdmn/substrate/cmd/substrate@"$SUBSTRATE_VERSION"
+
+        "$(go env GOPATH)/bin/substrate" server --address 127.0.0.1:4566 >/tmp/substrate.log 2>&1 &
+
+        # Polled on /ready, which substrate serves for exactly this. Bounded, so an endpoint that never
+        # starts is reported as itself rather than reaching the mount and surfacing as an S3 connection
+        # error with the real cause two steps back.
+        ready=""
+        for _ in $(seq 1 60); do
+          if curl -sf http://127.0.0.1:4566/ready >/dev/null; then ready=yes; break; fi
+          sleep 0.5
+        done
+        if [ -z "$ready" ]; then
+          cat /tmp/substrate.log
+          echo "::error::substrate did not answer /ready on 127.0.0.1:4566 within 30s, so there is no" \
+            "endpoint to mount against. Its log is above."
+          exit 1
+        fi
+
+        # substrate's built-in emulator credentials, which are public constants in that project and the
+        # same pair internal/testaws uses. There is no live credential anywhere on this path and no
+        # secret is read.
+        export AWS_ACCESS_KEY_ID=test
+        export AWS_SECRET_ACCESS_KEY=test
+        export AWS_REGION=us-east-1
+        export AWS_EC2_METADATA_DISABLED=true
+
+        ENDPOINT=http://127.0.0.1:4566
+
+        aws --endpoint-url "$ENDPOINT" s3 mb s3://objectfs-ci
+
+        # Two objects, and the second one is not decoration. A 21-byte file is answered by a single
+        # GetObject and proves only that the read path exists; 1 MiB spans more than one read request,
+        # so it is the one that can fail on offsets, on a short read, or on the cache assembling ranges
+        # in the wrong order. Under a prefix, too, so the directory tree is synthesised rather than flat
+        # — `sub/` is not a key that exists, and the mount has to invent it.
+        printf 'hello through a read-only objectfs mount\n' >/tmp/ci-small.txt
+        head -c 1048576 /dev/urandom >/tmp/ci-large.bin
+        aws --endpoint-url "$ENDPOINT" s3 cp /tmp/ci-small.txt s3://objectfs-ci/small.txt
+        aws --endpoint-url "$ENDPOINT" s3 cp /tmp/ci-large.bin s3://objectfs-ci/sub/large.bin
+
+        # The bucket's contents, before anything mounts it. Compared again at the end; see there for
+        # what this does and does not prove.
+        inventory() {
+          aws --endpoint-url "$ENDPOINT" s3api list-objects-v2 --bucket objectfs-ci \
+            --query 'sort_by(Contents,&Key)[].[Key,Size,ETag]' --output text
+        }
+        inventory >/tmp/ci-bucket-before.txt
+        cat /tmp/ci-bucket-before.txt
+
+        # Credentials for root, in root's own AWS config rather than in this shell's environment, and
+        # that is the realistic arrangement rather than a workaround for sudo. `sudo` resets the
+        # environment, and an /etc/fstab entry has no environment at all — it is `mount -a` at boot, as
+        # root, with whatever the AWS default credential chain can find on disk. So a machine where an
+        # fstab objectfs line works is exactly a machine where root has credentials on disk, and that
+        # is what is being set up. internal/storage/s3's config carries no credential keys of its own;
+        # the chain is the only way in, which is why this is the thing to get right.
+        sudo install -d -m 0700 /root/.aws
+        printf '[default]\naws_access_key_id = test\naws_secret_access_key = test\n' \
+          | sudo tee /root/.aws/credentials >/dev/null
+        sudo chmod 0600 /root/.aws/credentials
+
+        # Written line by line rather than from a heredoc, because a heredoc inside a YAML block scalar
+        # carries this file's indentation into the document it writes, and an indented root mapping is
+        # not the same YAML. `force_path_style`, because substrate serves bucket-in-path and there is no
+        # DNS for objectfs-ci.127.0.0.1. Metrics and health checks off: both would bind a port and
+        # start a background loop that this mount has no use for.
+        sudo install -d -m 0755 /etc/objectfs
+        printf '%s\n' \
+          'storage:' \
+          '  s3:' \
+          '    endpoint: http://127.0.0.1:4566' \
+          '    region: us-east-1' \
+          '    force_path_style: true' \
+          'monitoring:' \
+          '  metrics:' \
+          '    enabled: false' \
+          '  health_checks:' \
+          '    enabled: false' \
+          | sudo tee /etc/objectfs/ci.yaml >/dev/null
+        cat /etc/objectfs/ci.yaml
+
+        sudo mkdir -p /mnt/objectfs-ro
+
+        # The whole point, in one line: mount(8), the type, the installed helper, and the two options an
+        # /etc/fstab entry would carry. `-o ro` is a translation rather than a refusal only since #532 —
+        # before it, cmd/mount.objectfs returned "ObjectFS has no read-only mode" for exactly this.
+        #
+        # `-v` asks the helper to name the child's pid and the startup log it wrote, which is what makes
+        # a failure here diagnosable; it relays the tail of that log itself when the mount does not come
+        # up, so the reason lands in this step's output rather than in a file nobody fetches.
+        sudo mount -v -t objectfs s3://objectfs-ci /mnt/objectfs-ro -o ro,config=/etc/objectfs/ci.yaml
+
+        # Unconditionally, not just on failure: a mount that comes up and then misbehaves is the case
+        # where this log is worth the four lines, and by then the step has already passed the point
+        # where the helper would have relayed it.
+        sudo tail -n 40 /var/log/objectfs/mount-*.log || true
+
+        # The kernel's own record, which is a different claim from "the command exited 0". The helper
+        # returns once the mount point looks live, so this is what says the kernel agrees.
+        entry=$(grep ' /mnt/objectfs-ro ' /proc/mounts || true)
+        echo "$entry"
+        if [ -z "$entry" ]; then
+          echo "::error::\`mount -t objectfs -o ro\` exited 0 but /proc/mounts has no entry for" \
+            "/mnt/objectfs-ro, so the helper's readiness poll and the kernel disagree about whether" \
+            "anything is mounted. See cmd/mount.objectfs/wait.go's mountAppeared."
+          exit 1
+        fi
+
+        # `ro` in the kernel's option list, and this is the assertion that `-o ro` reached the kernel
+        # rather than only the process. internal/fuse/mount.go appends "ro" to the FUSE mount options
+        # when Options.ReadOnly is set; without that line the filesystem would enforce read-only in
+        # userspace while the kernel believed the mount was writable, which is the half-wired state
+        # #532 found the whole feature in.
+        opts=$(printf '%s\n' "$entry" | awk '{print $4}')
+        case ",$opts," in
+        *,ro,*) ;;
+        *)
+          echo "::error::the kernel recorded this mount's options as $opts, which does not include" \
+            "ro. -o ro reached the process but not the mount syscall, so the kernel will let a write" \
+            "through to a filesystem that then has to refuse it itself."
+          exit 1
+          ;;
+        esac
+
+        # As root, because the mount carries no allow_other: a FUSE mount is visible only to the uid
+        # that created it, and mount(8) created this one under sudo.
+        sudo ls -la /mnt/objectfs-ro
+        sudo ls -la /mnt/objectfs-ro/sub
+
+        # The bytes. `cmp`, not a hash of a hash: what is being compared is the file the aws CLI put in
+        # the bucket against the same file read back through the kernel, FUSE, the vfs layer, the cache
+        # and the S3 backend.
+        sudo cmp /tmp/ci-small.txt /mnt/objectfs-ro/small.txt
+        sudo cmp /tmp/ci-large.bin /mnt/objectfs-ro/sub/large.bin
+
+        # And the size through stat(2), separately, because a read that returns the right bytes while
+        # the attribute path reports a wrong length is a state tools notice and `cmp` does not: `wc -c`
+        # trusts the read, `ls -l` trusts the attribute.
+        if [ "$(sudo stat -c %s /mnt/objectfs-ro/sub/large.bin)" != "1048576" ]; then
+          echo "::error::stat(2) reports $(sudo stat -c %s /mnt/objectfs-ro/sub/large.bin) bytes for a" \
+            "1048576-byte object whose contents read back correctly, so the attribute path and the read" \
+            "path disagree."
+          exit 1
+        fi
+
+        # #532's guarantee, observed through the kernel for the first time. Asserted on the errno rather
+        # than on the failure, because every way a mount can be broken is also a failed write — a mount
+        # with no backend at all would refuse this too — and EROFS is the one answer that means the
+        # read-only gate is what did the refusing.
+        set +e
+        out=$(sudo sh -c 'echo nope >/mnt/objectfs-ro/written-by-ci.txt' 2>&1)
+        rc=$?
+        set -e
+        echo "$out"
+
+        if [ "$rc" = "0" ]; then
+          echo "::error::a write to a filesystem mounted with -o ro succeeded. The read-only mount is" \
+            "the feature #532 shipped and this is the only check that observes it end to end."
+          exit 1
+        fi
+        if ! printf '%s\n' "$out" | grep -qi 'read-only file system'; then
+          echo "::error::the write was refused with something other than EROFS, so this step cannot" \
+            "tell the read-only gate from a broken mount. Output was: $out"
+          exit 1
+        fi
+        sudo test ! -e /mnt/objectfs-ro/written-by-ci.txt
+
+        sudo umount /mnt/objectfs-ro
+
+        if grep -q ' /mnt/objectfs-ro ' /proc/mounts; then
+          grep ' /mnt/objectfs-ro ' /proc/mounts
+          echo "::error::umount exited 0 and the mount is still in /proc/mounts."
+          exit 1
+        fi
+
+        # And the directory underneath is empty again. A mount point that still lists the bucket's
+        # entries after umount would mean the tree had been written to the underlying directory rather
+        # than served from the mount — which is the failure that looks most like success.
+        if [ -n "$(sudo ls -A /mnt/objectfs-ro)" ]; then
+          sudo ls -la /mnt/objectfs-ro
+          echo "::error::/mnt/objectfs-ro is not empty after umount, so something wrote into the" \
+            "directory the mount was covering."
+          exit 1
+        fi
+
+        # The endpoint-side half of the read-only claim: the kernel refused the write above, and this
+        # says nothing else reached S3 either — no zero-length object from a create, no rewrite from a
+        # Setattr, nothing from the cache flushing.
+        #
+        # Key, size and ETag, so it is content and not a timestamp. Weaker than the proof
+        # internal/difftest makes with testaws' in-process request recorder, which counts the PUTs, and
+        # it is what the standalone `substrate server` can answer today: it serves /health, /ready and
+        # /_substrate/reset, and no request log over HTTP. Filed as scttfrdmn/substrate#1237 so this can
+        # become a PUT count rather than an inference from state.
+        inventory >/tmp/ci-bucket-after.txt
+        if ! diff -u /tmp/ci-bucket-before.txt /tmp/ci-bucket-after.txt; then
+          echo "::error::the bucket's contents changed across a read-only mount. The kernel refused the" \
+            "one write this step attempts, so whatever moved was written by objectfs itself."
           exit 1
         fi
 
@@ -1266,6 +1527,114 @@ jobs:
         # The consequence to know: removing objectfs and reinstalling it keeps the old config,
         # because postinstall.sh copies only when the file is absent.
         test -f /etc/objectfs/config.yaml
+
+    # The other package format, end to end, and the other half of #149. Until this step
+    # scripts/postinstall.sh and scripts/preremove.sh had been run by dpkg and by the Go tests against
+    # a scratch root, and by nothing else — so every rpm this project has ever published shipped
+    # scriptlets no rpm had executed. All three rpms are *built* above, which is where a malformed
+    # header would surface, and building is not installing.
+    #
+    # That matters because rpm and dpkg call the same script with different arguments and in a
+    # different order: postinstall.sh reads dpkg's "configure" and rpm's instance count of 1, and
+    # preremove.sh reads dpkg's "remove"/"upgrade" and rpm's 0/1. internal/config drives both spellings
+    # against a staged root through OBJECTFS_ROOT, which covers the branches; what it cannot see is
+    # whether a real rpm agrees with what those tests assume it passes.
+    #
+    # Last in the job on purpose. It is the one step whose subject is entirely inside a container, so it
+    # depends on nothing the runner's own install/remove sequence left behind and disturbs nothing.
+    - name: The rpm installs and removes under a real rpm, and its scriptlets agree with the deb's
+      run: |
+        # A container, because there is no rpm on ubuntu-latest and the reasoning this step inherits
+        # from #149 is right about why installing one is worse than nothing: an rpm database with no
+        # distribution behind it fails on dependency resolution rather than on anything about this
+        # package. Rocky is a real RHEL-compatible userspace with a real rpm and a real /bin/sh, and it
+        # is what the HPC sites this project is built for actually run.
+        #
+        # rockylinux/rockylinux:9, not the `rockylinux:9` #149's body names, and measured on Docker Hub
+        # rather than assumed: library/rockylinux:9 was last pushed 2024-05-30 and is the deprecated
+        # location, while rockylinux/rockylinux:9 — where the project moved — was pushed 2026-06-12.
+        # Same distribution, the copy that is still maintained.
+        #
+        # Not digest-pinned, unlike every `uses:` in this file, and the difference is what the thing can
+        # reach. An action runs with this repository's GITHUB_TOKEN; this container gets no token, no
+        # secrets, no checkout and dist/ read-only, so a moved tag could not act on the repository. A
+        # digest would also have nothing to update it — Dependabot reads Dockerfiles and compose files,
+        # not a `docker run` inside a workflow — so it would be a pin with no mechanism to notice it had
+        # gone stale, which is the failure mode the `uses:` pins exist to avoid.
+        #
+        # `docker run` rather than a job-level `container:`, for the reason the install-script job gives
+        # below: the checkout and the goreleaser build have to happen on the runner.
+        docker run --rm -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9 bash -euo pipefail -c '
+          rpm=$(ls /dist/objectfs-*.x86_64.rpm)
+          echo "installing $rpm"
+
+          # -i and not -U: a first install, which is the invocation that runs postinstall with an
+          # instance count of 1. The rpm declares fuse3 as a Recommends rather than a Requires — see
+          # .goreleaser.yml for why — and plain rpm does not act on weak dependencies, so this needs
+          # neither a repository nor --nodeps.
+          rpm -i --verbose "$rpm"
+          rpm -q --queryformat "installed %{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\n" objectfs
+
+          # The same filesystem facts the deb path asserts above, in the same order, so the two cannot
+          # drift without one of them going red.
+          test -f /etc/objectfs/config.yaml
+          test -f /usr/lib/systemd/system/objectfs@.service
+          test -f /usr/share/objectfs/configs/example.yaml
+          objectfs version
+
+          [ "$(stat -c %a /etc/objectfs/config.yaml)" = "600" ]
+
+          test -x /usr/bin/mount.objectfs
+          test -L /sbin/mount.objectfs
+          [ "$(readlink /sbin/mount.objectfs)" = "/usr/bin/mount.objectfs" ]
+          test -x /sbin/mount.objectfs
+
+          # The version, out of the filename with rpm`s separator translated back, and the divergence is
+          # real rather than a quirk to paper over. nfpm rewrites the *package version* for rpm, where a
+          # hyphen is illegal and `~` is the prerelease separator, so 0.16.1-next becomes 0.16.1~next and
+          # %{VERSION} reports the tilde — while the modulefile destinations come from goreleaser`s own
+          # .Version template and keep the hyphen. Building this path out of %{VERSION} would look
+          # obviously correct and fail here for nobody`s bug.
+          V=$(basename "$rpm" | sed "s/^objectfs-//; s/-1[.]x86_64[.]rpm$//" | tr "~" "-")
+          echo "packaged version: $V"
+          test -f "/usr/share/modulefiles/objectfs/$V.lua"
+          test -f "/usr/share/modulefiles/objectfs/$V"
+
+          # rpm -e, which runs preremove.sh with an instance count of 0 where dpkg passes "remove". The
+          # container has no systemd, and the scriptlet already handles that: it skips the unit work when
+          # systemctl is absent or /run/systemd/system does not exist.
+          rpm -e objectfs
+
+          test ! -f /usr/bin/objectfs
+          test ! -f /usr/bin/mount.objectfs
+          test ! -f /usr/lib/systemd/system/objectfs@.service
+          test ! -f /usr/share/objectfs/configs/example.yaml
+
+          # The symlink rpm does not own, for the same reason dpkg does not: postinstall.sh creates it so
+          # the package contains no path under an aliased directory, which leaves preremove.sh as the
+          # only thing that can take it away. A dangling /sbin/mount.TYPE is worse than a leftover file,
+          # because `mount -t objectfs` would then fail with an exec error on a machine where nothing
+          # named objectfs is installed. This is also the stronger test of the two: /sbin is a symlink to
+          # /usr/sbin here, which is the aliased-directory case the reasoning is about.
+          if [ -e /sbin/mount.objectfs ] || [ -L /sbin/mount.objectfs ]; then
+            ls -l /sbin/mount.objectfs || true
+            echo "::error::/sbin/mount.objectfs survived rpm -e, dangling. scripts/preremove.sh unlinks" \
+              "it only when it is a symlink to /usr/bin/mount.objectfs; see unlink_mount_helper."
+            exit 1
+          fi
+
+          if find /usr/share/modulefiles/objectfs -type f 2>/dev/null | grep .; then
+            echo "::error::a modulefile survived rpm -e, so \`module avail\` would still list objectfs" \
+              "after the package is gone."
+            exit 1
+          fi
+
+          # And the config survives, the same asymmetry the deb has and for the same reason: it is
+          # created by the scriptlet rather than shipped, so no package manager owns it and no removal
+          # path deletes it.
+          test -f /etc/objectfs/config.yaml
+          echo "rpm install and removal complete"
+        '
 
   # ---------------------------------------------------------------------------------------------
   # modulefiles — configs/modules/ under real Lmod and real TCL Modules.
