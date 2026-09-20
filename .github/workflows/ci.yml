@@ -179,8 +179,15 @@ jobs:
       fail-fast: false
       matrix:
         # fuse_mount carries the tests that need a real kernel mount — whether the kernel
-        # re-reads under direct I/O, whether it keeps pages across open(2). ubuntu-latest has no
-        # /dev/fuse, so they cannot run here; they are compiled here.
+        # re-reads under direct I/O, whether it keeps pages across open(2). They are compiled here
+        # and not run here, and the reason this comment used to give was wrong: it said
+        # "ubuntu-latest has no /dev/fuse". It has one. The packaging job below measured it —
+        # `crw-rw-rw- 1 root root 10, 229 /dev/fuse`, fusermount3 3.14.0, /etc/fuse.conf present,
+        # none of them installed by that job. Whether the suite *passes* on this runner is a
+        # separate and still-unmeasured question, tracked in #543; it goes through fusermount3's
+        # setuid path as a non-root `go test` and it counts kernel READ requests, which is a
+        # property of the runner's kernel. So it stays compiled-only until someone has run it and
+        # read the result, rather than on the strength of a claim nobody probed.
         # s3compat carries the conditional-write compatibility suite: it needs a MinIO, Ceph RGW or
         # Wasabi endpoint in OBJECTFS_COMPAT_ENDPOINT and skips without one. Its findings are what
         # docs/design/conditional-write-compatibility.md records, and two of that matrix's rows were
@@ -824,7 +831,7 @@ jobs:
         systemd-analyze verify /etc/systemd/system/objectfs@example.service
 
   # ---------------------------------------------------------------------------------------------
-  # packaging — the deb and the rpm are built, installed, and removed, on a real dpkg.
+  # packaging — the deb and the rpm are built, installed, and removed, on a real dpkg and a real rpm.
   #
   # Its own job for the reason systemd-unit is: what it checks cannot be checked by `go test`. The
   # Go tests in internal/config/packaging_test.go read .goreleaser.yml's `nfpms:` section against the
@@ -835,13 +842,19 @@ jobs:
   # #207's diagnosis was that scripts/preremove.sh could never run, because a pre-removal hook is
   # invokable only by a package manager and there was no packaging in the tree. So the check that
   # matters is a package manager invoking it. `apt-get remove` with a mount absent is the passing
-  # path; the failure path (a mount that will not unmount, where the script refuses) is covered by
-  # the Go tests, because creating a busy FUSE mount on a runner needs /dev/fuse and a bucket.
+  # path; the failure path — a mount that will not unmount, where the script refuses — is covered by
+  # the Go tests. The reason given here for that used to be that "creating a busy FUSE mount on a
+  # runner needs /dev/fuse and a bucket", and neither half holds: this runner has /dev/fuse (see the
+  # read-only mount step below, which measured it) and testaws is a bucket without one. So that path
+  # is exercisable here and simply is not exercised yet — a gap, stated as a gap.
   #
-  # dpkg only. There is no rpm on ubuntu-latest and installing one gives a database with no
-  # distribution behind it, so `rpm -i` would fail on unrelated dependency resolution rather than
-  # on anything about this package. All three rpms are still *built* here — nfpm's rpm writer is where
-  # a malformed spec would surface — and `rpm -qp` under a container is the follow-on worth having.
+  # Both formats, since #149. The deb is installed by dpkg on the runner; the rpm is installed by rpm
+  # in a rockylinux container, in the last step. This comment used to say "dpkg only", on the grounds
+  # that "installing rpm on ubuntu-latest gives a database with no distribution behind it, so `rpm -i`
+  # would fail on unrelated dependency resolution" — which is true of an rpm *on Ubuntu* and is why the
+  # container is the answer rather than `apt-get install rpm`. It also proposed `rpm -qp` as the
+  # follow-on; `rpm -qp` reads a header without running a scriptlet, and the scriptlets were the whole
+  # exposure, so the step does a real install and a real erase instead.
   #
   # `make package-linux` is goreleaser now, so this job builds the tarballs as well as the packages and
   # takes about thirty seconds longer than the nfpm loop it replaces. That is the cost of the property
@@ -1002,11 +1015,16 @@ jobs:
     # /sbin/mount.objectfs, which is #136's subject and the stronger end to end of the two.
     - name: A read-only mount completes and a file's bytes survive the round trip
       run: |
-        # /dev/fuse, measured and reported rather than assumed either way. The build-tags matrix at the
-        # top of this file carries the comment "ubuntu-latest has no /dev/fuse", which is a plain claim
-        # and not an observation, and this step is the first thing in the repository in a position to
-        # settle it. Reported first so that a mount failure four screens down is not the place anyone
-        # has to work out that the device was missing.
+        # /dev/fuse, measured and reported rather than assumed either way, and this is the probe that
+        # settled it. The build-tags matrix at the top of this file used to assert "ubuntu-latest has no
+        # /dev/fuse" — a plain claim, never an observation, and false: the device is there, mode
+        # crw-rw-rw-, major 10 minor 229, alongside fusermount3 3.14.0 and /etc/fuse.conf. Both comments
+        # are corrected and #543 carries what follows from it.
+        #
+        # The check stays, because the runner image is not a constant: ubuntu-latest migrates to Ubuntu
+        # 26 from 2026-10-19, and a device that arrived without being promised can leave the same way.
+        # Reported first so that a mount failure four screens down is not the place anyone has to work
+        # out that the device was missing.
         if [ ! -c /dev/fuse ]; then
           lsmod | grep -i fuse || echo "(no fuse module loaded)"
           echo "::error::/dev/fuse is not a character device on this runner, so no FUSE mount can be" \

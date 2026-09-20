@@ -10,10 +10,25 @@ package fuse
 // bytes it already has, and no amount of inspecting OpenOut can show that. This file reads the same
 // offset twice through a real mount and counts how many READ requests arrive.
 //
-// Behind the fuse_mount build tag, and therefore run by nothing by default, because it needs
-// /dev/fuse — absent on GitHub's ubuntu-latest runners and absent on a macOS host without macFUSE.
-// That is a real coverage gap and it is stated rather than papered over: CI gates the seams, and this
-// runs where a kernel is available. `make test-fuse-mount` is the entry point.
+// Behind the fuse_mount build tag, and therefore run by nothing by default. That is a real coverage
+// gap and it is stated rather than papered over: CI gates the seams, and this runs where a kernel is
+// available. `make test-fuse-mount` is the entry point.
+//
+// The reason this comment used to give for the gap was **false**, and worth recording as such. It said
+// /dev/fuse is "absent on GitHub's ubuntu-latest runners". It is present: `crw-rw-rw- 1 root root
+// 10, 229`, with fusermount3 3.14.0 and /etc/fuse.conf, measured on 2026-09-20 by ci.yml's packaging
+// job and none of it installed by that job. Nothing else here needs a runner's permission either —
+// liveMount below starts testaws, the in-process substrate endpoint, so there is no bucket, no
+// credential and no network on this path. macOS without macFUSE remains a genuine absence.
+//
+// What is still unknown is whether this suite *passes* there, which is #543: the mount would be made
+// by a non-root `go test` through fusermount3's setuid path rather than as root, and the assertions
+// count kernel READ requests, which is a property of the kernel version rather than of objectfs. So
+// the tag stays until someone has run it and read the answer.
+//
+// The transferable part: an unprobed claim that justifies not running a test is the most expensive
+// kind, because it removes the thing that would have contradicted it. This one survived as long as it
+// did by being plausible.
 //
 // A test skipping itself for want of a device would be worse than a build tag: it would report success.
 
