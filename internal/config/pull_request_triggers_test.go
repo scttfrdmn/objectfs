@@ -31,6 +31,16 @@ func TestNoPullRequestTriggerFiltersItsBaseBranch(t *testing.T) {
 
 	triggers := 0
 
+	// Counted apart from `triggers`, because the shape this gate wants is the one that is hardest to
+	// see. `pull_request:` with no body unmarshals to a nil mapping, so a lookup that reports presence
+	// as "I got a mapping back" drops exactly the correct files and keeps the filtered ones — and a
+	// single `triggers == 0` floor does not notice, because the filtered ones are still counted.
+	//
+	// Measured, not reasoned about: collapsing triggerSection's two return values into `cfg != nil` took
+	// this test from 3 triggers to 1, and it passed. The 2 it lost were ci.yml's and security.yml's, the
+	// two files that had #512.
+	unfiltered := 0
+
 	for _, wf := range workflows {
 		if len(wf.File.On) == 0 {
 			t.Errorf("%s declares no `on:` section, or it is not a mapping. Every workflow needs a "+
@@ -52,6 +62,10 @@ func TestNoPullRequestTriggerFiltersItsBaseBranch(t *testing.T) {
 				continue
 			}
 			triggers++
+
+			if cfg == nil {
+				unfiltered++
+			}
 
 			for _, key := range []string{"branches", "branches-ignore"} {
 				filter, found := cfg[key]
@@ -79,5 +93,15 @@ func TestNoPullRequestTriggerFiltersItsBaseBranch(t *testing.T) {
 			"true, which is why workflowFile.On is a tagged struct field — and this test now passes "+
 			"vacuously", len(workflows))
 	}
-	t.Logf("checked %d pull-request triggers across %d workflow files", triggers, len(workflows))
+
+	if unfiltered == 0 {
+		t.Fatalf("found %d pull-request trigger(s) across %d workflow files and not one of them was an "+
+			"empty `pull_request:`. That is the shape this gate wants, and both ci.yml and security.yml "+
+			"have it, so zero means triggerSection has stopped reporting a nil mapping as present — which "+
+			"silently exempts every correct file and leaves the check running only on the ones that "+
+			"already carry a filter", triggers, len(workflows))
+	}
+
+	t.Logf("checked %d pull-request triggers across %d workflow files, %d of them unfiltered",
+		triggers, len(workflows), unfiltered)
 }
