@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The release tarballs carry `mount.objectfs`, and `scripts/install.sh` installs, registers and
+  removes it.** Until now the `/etc/fstab` mount helper reached a machine if and only if the operator
+  installed a `.deb` or an `.rpm`: the `mount-helper` build existed and was named only by `nfpms.ids`.
+  That excluded the population the feature is most useful to — this project's documented install path is
+  a tarball into `~/.local`, because its users are frequently on a shared login node with no root at
+  all. The three Linux tarballs now carry the helper beside the binary, and `install.sh` puts it in
+  `--prefix/bin` and links `/sbin/mount.objectfs` to it. (#533)
+
+  Registering it needs root, and **the obvious way to get root here is a local privilege escalation**,
+  so the script refuses rather than warns. `mount(8)` exec's `/sbin/mount.objectfs` as root; a link from
+  there into a directory whose owner is not root lets that owner replace the binary and run code as root
+  the next time anyone mounts anything — and `sudo ./install.sh` with the default `~/.local` prefix is
+  exactly that shape, which is also the most likely way someone arrives at it, since "registering needs
+  root" reads as an instruction to re-run the installer under `sudo`. Both the helper and its directory
+  must be root-owned. A non-root install still installs the helper and prints the single `ln -s` left to
+  do; `--prefix /usr/local` under `sudo` is the registered system-wide form; `--no-mount-helper` skips
+  it.
+
+  **`--uninstall`, which this script has never had.** `scripts/preremove.sh` unlinks the helper on
+  package removal and the tarball path had no counterpart, so a tarball install left behind the one
+  thing an operator cannot clean up by deleting a directory — and left dangling, `/sbin/mount.objectfs`
+  makes an `/etc/fstab` entry that worked before fail at `mount -a` with `mount(8)`'s own "no such file
+  or directory" against a helper path, which says considerably less than "unknown filesystem type". It
+  refuses while an ObjectFS filesystem is still mounted and names the `objectfs unmount` for each,
+  because deleting the server binary under a live FUSE mount hangs every read against the mount point
+  until someone unmounts it by hand. Caches and configuration are named rather than removed.
+
+  Two measured facts are worth recording, because both were reasoned about wrongly first. goreleaser
+  groups archive members by **target**, not by build, so adding the helper to `archives.ids` puts it in
+  the three Linux tarballs and nothing in the two darwin ones, with no asset renamed — and it then
+  refuses the entire release, building *nothing*, unless `allow_different_binary_count: true` says the
+  asymmetry is deliberate. It is: there is no `/sbin/mount.TYPE` on macOS, so a darwin `mount.objectfs`
+  would have nothing to register it with.
+
+  The issue asked for **one shared shell function** instead of a second copy of the registration logic,
+  on the correct reasoning that two copies drift. There is nothing for the three consumers to share one
+  through: `install.sh` is fetched over HTTPS and piped into `bash`, so it has no library beside it on
+  disk and fetching one would mean running an unverified second script inside an installer whose whole
+  header is about why the download path is not trusted; and `dpkg` runs `prerm` with the package's own
+  files in whatever state a `--force` left them, so a scriptlet whose unlink silently no-ops because a
+  sourced file was already gone leaves exactly the dangling link that function exists to prevent. The
+  drift is guarded by a test instead — `internal/config/mount_helper_test.go` runs **both copies**
+  through one table of cases (nothing there, our own link, a foreign symlink, a real file, no `/sbin`,
+  no helper binary) and asserts they reach the same outcome. That is stronger than the shared function
+  would have been, because a shared function is exercised once by whichever caller a test drives and
+  these are exercised twice.
+
 - **A read-only mount, which the filesystem has had the enforcement for since v0.11.0 and no way to
   turn on.** `objectfs mount --read-only`, `mount.read_only: true` in the config file, and `-o ro` in
   an `/etc/fstab` entry all serve the bucket read-only: every operation that would modify it fails

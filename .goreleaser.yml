@@ -82,7 +82,7 @@ builds:
   # guard against overflow overflowed. ci.yml's cross-build matrix carries linux/arm and linux/386
   # cells so a 32-bit break is a red pull request rather than a platform quietly leaving the matrix.
   goarm:
-  - "7"
+  - '7'
   ignore:
   # No 32-bit ARM macOS has ever existed.
   - goos: darwin
@@ -109,7 +109,7 @@ builds:
   - arm64
   - arm
   goarm:
-  - "7"
+  - '7'
   flags:
   - -trimpath
   ldflags:
@@ -127,10 +127,15 @@ builds:
 # registration. scripts/postinstall.sh links /sbin/mount.objectfs to it; see the reasoning there for why
 # a scriptlet symlink rather than a packaged file under /sbin.
 #
-# Deliberately not in `archives:` below. A tarball install goes through scripts/install.sh, which knows
-# one binary and renames it as it installs; adding a second would need install.sh to learn about /sbin
-# too, which is a root-only operation it does not otherwise require. A tarball user who wants fstab
-# support can copy the binary and make the link, or set OBJECTFS_BINARY and run the helper from anywhere.
+# In `archives:` below as of #533, and it was deliberately left out before that. The argument for leaving
+# it out was that an archive *member* named `mount.objectfs` is inert — registration is the file being at
+# `/sbin/mount.objectfs`, which only an installer can arrange — so shipping it in the tarball without
+# teaching scripts/install.sh to make the link would have added a binary that does nothing. That is still
+# true, and the conclusion drawn from it was wrong: it meant the only way to get an fstab mount was to
+# install a package, on a project whose default install path is a tarball into ~/.local because its users
+# frequently have no root. install.sh now installs the helper and registers it when it can, so the member
+# is no longer inert. The archive is per *target*, so the darwin tarballs are unchanged: this build is
+# linux-only and there is nothing to add to them.
 - id: mount-helper
   main: ./cmd/mount.objectfs
   binary: mount.objectfs
@@ -143,7 +148,7 @@ builds:
   - arm64
   - arm
   goarm:
-  - "7"
+  - '7'
   flags:
   - -trimpath
   ldflags:
@@ -154,17 +159,38 @@ builds:
 
 archives:
 - id: objectfs
-  # Only the platform-named build. Without this the `packages` build would be archived too, and the
-  # release would carry a second set of five tarballs whose name_template collides with the first.
+  # The platform-named build and the mount helper, and emphatically **not** `packages`. Without this list
+  # the `packages` build would be archived too, and the release would carry a second set of five tarballs
+  # whose name_template collides with the first.
+  #
+  # `mount-helper` joined it for #533. goreleaser groups archive members by *target*, not by build, so this
+  # adds `mount.objectfs` to the three linux tarballs and nothing to the two darwin ones — measured, with
+  # `goreleaser release --snapshot`, because "one archive per target holding every build that matched it"
+  # is the behaviour the whole change rests on and the alternative (a second, colliding set of archives,
+  # as `packages` would produce) is what the line above exists to prevent.
   ids:
   - archives
+  - mount-helper
+  # Because of the line above, and not optional: without it `goreleaser release` fails outright with
+  # "archive has different count of binaries for each platform, which may cause your users confusion"
+  # and builds nothing. That check is right to exist and wrong here. The asymmetry is the point — three
+  # linux tarballs hold two binaries and two darwin tarballs hold one — because mount(8)'s helper
+  # protocol is util-linux's and there is no /sbin/mount.TYPE on macOS, so a darwin `mount.objectfs`
+  # would be a binary with nothing to register it with.
+  #
+  # The confusion goreleaser is warning about is real in the general case, which is why install.sh says
+  # so out loud rather than staying silent: on Linux, a tarball with no helper in it gets a note naming
+  # the release that started carrying one, and on darwin it gets nothing, because there is nothing to
+  # say. See install_mount_helper.
+  allow_different_binary_count: true
   formats: [tar.gz]
   # `objectfs-linux-amd64.tar.gz`, matching what install.sh fetches and what every previous release
   # published. goreleaser's default template is `{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}`,
   # which would silently rename every asset and break the installer for every platform at once.
   name_template: >-
     objectfs-{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
-  # One file in the archive, the binary, which is what every previous release shipped.
+  # No *extra* files. The binaries the `ids:` above name are placed regardless of this key; what it
+  # controls is documentation and the like, and there is none.
   #
   # `none*` is a glob that matches nothing, and it is goreleaser's documented way to say "no extra
   # files" — **not** `files: []`. An empty list reads as unset and the defaulter fills it in, which
@@ -214,7 +240,7 @@ nfpms:
   # both, which produced `objectfs_0.14.0_linux_amd64.rpm` — a Go-flavored name on an rpm, where
   # `amd64` is not the architecture rpm calls it and `_linux_` appears in no rpm anywhere. The
   # published assets keep the names nfpm was already giving them.
-  file_name_template: "{{ .ConventionalFileName }}"
+  file_name_template: '{{ .ConventionalFileName }}'
   formats:
   - deb
   - rpm
@@ -231,7 +257,7 @@ nfpms:
     which tools are known not to.
   section: utils
   priority: optional
-  release: "1"
+  release: '1'
   # Recommends rather than Depends, because a mount needs fuse3 and everything else objectfs does —
   # `objectfs config`, `objectfs version`, the cost estimator — does not. A hard dependency would
   # make the package uninstallable on a machine where FUSE is deliberately absent, and
@@ -331,4 +357,4 @@ release:
   disable: true
 
 snapshot:
-  version_template: "{{ incpatch .Version }}-next"
+  version_template: '{{ incpatch .Version }}-next'

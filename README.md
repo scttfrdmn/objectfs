@@ -345,6 +345,20 @@ downloading anything if the machine lacks a tool it needs, naming all of them at
 because two of the three container images this is tested against are missing something
 (`ubuntu:24.04` ships neither `curl` nor `wget`, `opensuse/leap:15.6` ships neither `tar` nor `gzip`).
 
+On Linux it also installs `mount.objectfs`, the helper that makes `mount -t objectfs` and an
+`/etc/fstab` entry work, and registers it at `/sbin/mount.objectfs` — that exact path, because `mount(8)`
+resolves an unknown `-t TYPE` by exec'ing `/sbin/mount.$TYPE` rather than searching `PATH`. Registering
+needs root, so a normal install prints the one `ln -s` left to run instead of failing. **Do not run the
+whole script under `sudo` to get the link**: the default prefix is `~/.local`, `mount(8)` exec's that
+path as root, and a root-created link into a directory you own would let you run code as root — the
+script refuses to create it and says so. For a registered system-wide install, use
+`sudo ./install.sh --prefix /usr/local`, and `--no-mount-helper` skips the helper entirely.
+
+`--uninstall` removes what it installed under `--prefix`, plus the symlink if it is still pointing at
+this install's helper. It refuses while an ObjectFS filesystem is mounted, naming the `objectfs unmount`
+for each, because deleting the binary under a live FUSE mount hangs every read against the mount point.
+Caches and configuration are left alone and named.
+
 ### Debian, Ubuntu, RHEL, Fedora, openSUSE: the packages
 
 A `.deb` and a `.rpm` for both architectures are attached to every
