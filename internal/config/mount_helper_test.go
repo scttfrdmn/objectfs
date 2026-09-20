@@ -493,16 +493,33 @@ func TestBothUninstallPathsUnlinkTheHelperTheSameWay(t *testing.T) {
 func TestBothScriptsAgreeOnWhatAMountedObjectfsLooksLike(t *testing.T) {
 	t.Parallel()
 
-	// One line per form the kernel can record, plus two that must not match. The non-matching rows are
-	// the non-vacuity guard: a function that printed every line of /proc/mounts would satisfy the three
-	// positive rows and nothing else in this test.
+	// One row per form the kernel can record, plus two that must not match. The non-matching rows are
+	// the non-vacuity guard: a function that printed every line of /proc/mounts would satisfy every
+	// positive row and nothing else here.
+	//
+	// /mnt/renamed is the row that makes the first `case` arm load-bearing, and it is here because the
+	// obvious fixture did not. With `objectfs` as the device on every ObjectFS row, all three arms agree
+	// on all three rows — deleting the whole `fuse.objectfs |` alternative changed no outcome, measured by
+	// mutation — because the third arm's `[ "$device" = "objectfs" ]` already covers them. A device that is
+	// *not* objectfs with an fstype that is literally fuse.objectfs can only be matched by the first arm.
+	//
+	// `| fuse.s3` is the one alternative this fixture still cannot isolate, and the reason is worth
+	// recording rather than papering over with a row that asserts a rule nobody has decided.
+	// internal/adapter.buildMountOptions hardcodes `FSName: "objectfs"` — the operator-facing key was
+	// removed by #180 for lack of a reader — so every mount ObjectFS can currently produce has
+	// device=objectfs and is caught by the third arm regardless. Making it isolable means asserting that
+	// *any* fuse.s3 mount is ObjectFS whatever its device, and that is a claim about other people's
+	// software: `-o subtype=s3` is not reserved, and treating a stranger's mount as ours would make
+	// `--uninstall` refuse over a filesystem it has nothing to do with. Narrowing the union instead is a
+	// change to a shipped scriptlet's matching rule and belongs in its own issue, not in #533.
 	const mounts = "objectfs /mnt/plain fuse.objectfs rw,nosuid,nodev 0 0\n" +
+		"notobjectfs /mnt/renamed fuse.objectfs rw,nosuid,nodev 0 0\n" +
 		"objectfs /mnt/subtype fuse.s3 rw,nosuid,nodev 0 0\n" +
 		"objectfs /mnt/device fuse.somethingelse rw,nosuid,nodev 0 0\n" +
 		"sshfs /mnt/other fuse.sshfs rw,nosuid,nodev 0 0\n" +
 		"/dev/sda1 / ext4 rw,relatime 0 0\n"
 
-	want := []string{"/mnt/plain", "/mnt/subtype", "/mnt/device"}
+	want := []string{"/mnt/plain", "/mnt/renamed", "/mnt/subtype", "/mnt/device"}
 
 	runners := []struct {
 		name string
