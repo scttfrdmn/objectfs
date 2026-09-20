@@ -645,7 +645,7 @@ func TestPackageVersionComesFromTheVersionConstant(t *testing.T) {
 	// release_packages_test.go because it is this file's invariant: with the Makefile out of the chain,
 	// a tag that disagrees with the constant is a release whose assets are all named for a version the
 	// binary inside them denies.
-	release := readFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
+	release := workflowSource(t, "release.yml")
 
 	if !strings.Contains(release, "cmd/objectfs/main.go") {
 		t.Error("release.yml never reads cmd/objectfs/main.go. goreleaser names every asset, and " +
@@ -928,7 +928,7 @@ func TestTheGoreleaserVersionIsPinnedToOneValueEverywhere(t *testing.T) {
 	// read the latter and found v2.12.2 in ci.yml — golangci-lint's pin, under golangci-lint-action —
 	// which is a real pin of a real tool and has nothing to do with this one.
 	for _, workflow := range []string{"ci.yml", "release.yml"} {
-		body := withoutComments(readFile(t, filepath.Join(root, ".github", "workflows", workflow)))
+		body := withoutComments(workflowSource(t, workflow))
 
 		steps := stepsUsing(body, "goreleaser/goreleaser-action")
 		if len(steps) == 0 {

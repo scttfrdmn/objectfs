@@ -52,24 +52,10 @@ func releaseChecksumConsumers(t *testing.T) []checksumFile {
 
 	// Walked rather than enumerated for the workflows, because a new workflow is exactly the thing
 	// most likely to arrive with a fresh `sha256sum -c`, and an enumerated list only ever checks the
-	// files that existed when it was written.
-	dir := filepath.Join(root, ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
-	}
-	workflows := 0
-	for _, e := range entries {
-		if e.IsDir() || (!strings.HasSuffix(e.Name(), ".yml") && !strings.HasSuffix(e.Name(), ".yaml")) {
-			continue
-		}
-		workflows++
-		add(filepath.Join(".github", "workflows", e.Name()))
-	}
-	// Five exist today. Below four this has stopped looking at what it claims to.
-	if workflows < 4 {
-		t.Fatalf("found %d workflow files in %s, expected at least 4 — this test is not looking at "+
-			"what it claims to", workflows, dir)
+	// files that existed when it was written. The walk and its floor are readWorkflowTexts' (#504);
+	// this file used to carry its own copy of both.
+	for _, wf := range readWorkflowTexts(t) {
+		out = append(out, checksumFile{path: wf.Path, body: wf.Body})
 	}
 
 	add(filepath.Join("scripts", "install.sh"))

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -30,15 +29,13 @@ import (
 func TestEveryReleasePlatformIsCompiledInCI(t *testing.T) {
 	t.Parallel()
 
-	root := repoRoot(t)
-
 	shipped := releasePlatforms(t)
 	if len(shipped) == 0 {
 		t.Fatal("read no platforms out of .goreleaser.yml's archive build — the build may have been " +
 			"renamed, and an empty set satisfies the assertion below without checking anything")
 	}
 
-	compiled := crossBuildPlatforms(t, readFile(t, filepath.Join(root, ".github", "workflows", "ci.yml")))
+	compiled := crossBuildPlatforms(t, workflowSource(t, "ci.yml"))
 	if len(compiled) == 0 {
 		t.Fatal("read no platforms out of ci.yml's cross-build matrix — same problem as above, in " +
 			"the direction that makes this test vacuously pass")
@@ -79,11 +76,9 @@ func TestThirtyTwoBitIsStillInTheCrossBuildMatrix(t *testing.T) {
 	// listing architectures it does not target would let an unrelated cell satisfy the check.
 	thirtyTwoBit := map[string]bool{"arm": true, "386": true}
 
-	root := repoRoot(t)
-
 	var found []string
 
-	for p := range crossBuildPlatforms(t, readFile(t, filepath.Join(root, ".github", "workflows", "ci.yml"))) {
+	for p := range crossBuildPlatforms(t, workflowSource(t, "ci.yml")) {
 		if arch := strings.SplitN(p, "/", 2); len(arch) == 2 && thirtyTwoBit[arch[1]] {
 			found = append(found, p)
 		}
