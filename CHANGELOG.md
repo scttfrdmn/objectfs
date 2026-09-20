@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.17.0] - 2026-09-19
+## [0.17.1] - 2026-09-20
+
+The 0.17.0 release built and never published, for the second time in three releases, and again because
+a gate was wrong rather than an artifact.
+
+**0.17.0 has no downloadable binaries.** It is a valid module version — `go get
+github.com/scttfrdmn/objectfs@v0.17.0` resolves and always will — but there is no release page and no
+tarball, deb or rpm carrying it. Everything 0.17.0 added is in 0.17.1; this is the release to install.
+
+### Fixed
+
+- **`release.yml`'s asset inventory reported a correct tarball as broken.** The step that checks every
+  published asset failed with "`dist/objectfs-linux-amd64.tar.gz` does not contain a file named
+  `objectfs-linux-amd64`", and then printed `objectfs-linux-amd64` on the following line as part of its
+  own diagnostic. The archive was right.
+
+  ```bash
+  tar -tzf "$tgz" | grep -qx "objectfs-$platform" || fail    # under `set -o pipefail`
+  ```
+
+  `grep -q` exits at its first match. If tar still has a member name to write it is killed by SIGPIPE,
+  and `pipefail` promotes that to a failed pipeline **because the match succeeded**. What decides it is
+  whether any member follows the one that matched — not buffering, which was the first guess and was
+  wrong. Measured against a two-member archive whose first member is 25MB: matching the first name exits
+  141, matching the last name exits 0. Through 0.16.0 these tarballs held exactly one member, so nothing
+  followed the match and tar was already finished; 0.17.0 was the first tag where `mount.objectfs` (#533)
+  came after it.
+
+  `ci.yml` had the same line and was green throughout, for the mirror-image reason: it matches
+  `mount.objectfs`, which tar lists last. Reordering the archive members would have started it failing on
+  a correct tarball. Both now read the listing once and match it with a herestring, which has no writer
+  process to signal. That is also why no pull request could have caught this: one fact, checked in two
+  places, written two different ways, and the copy that only ever runs on a tag was the wrong one.
+
+- **The release job now asserts the mount helper in both directions** — present in the three Linux
+  tarballs, absent from the two darwin ones. #533 added the helper and `allow_different_binary_count:
+  true` to permit the asymmetry, and that setting makes every *other* asymmetry equally legal, so a
+  helper that stopped being built, or started being built for a platform with no
+  `/sbin/mount.$TYPE` protocol, would have been silence rather than a build failure.
+
+## [0.17.0] - 2026-09-19 — built, never published; no release assets, see 0.17.1
 
 ### Added
 
@@ -6883,7 +6923,8 @@ of them is fixed in 0.10.1 above; upgrade rather than pinning here.
 - Secure credential handling with AWS IAM integration
 - Comprehensive audit logging for all operations
 
-[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/objectfs/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/scttfrdmn/objectfs/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/scttfrdmn/objectfs/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/scttfrdmn/objectfs/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/scttfrdmn/objectfs/compare/v0.15.0...v0.15.1
