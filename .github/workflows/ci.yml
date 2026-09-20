@@ -914,6 +914,70 @@ jobs:
     - name: Build every artifact, including the deb and the rpm
       run: make package-linux
 
+    # #533. The archive *members* are everything the tarball install path has to work with, and the
+    # only thing that knows them is goreleaser. internal/config/packaging_test.go asserts
+    # .goreleaser.yml *says* to archive the mount-helper build — it cannot say whether goreleaser did,
+    # and the mechanism it depends on is not documented behaviour anyone should assume across an
+    # upgrade: goreleaser groups archive members by *target* rather than by build, which is why naming
+    # a second build in one `archives[].ids` entry lands a second binary inside the existing
+    # per-platform tarballs instead of producing a second colliding set of them.
+    #
+    # The member names are measured, not derived. The two builds template their `binary:` differently,
+    # so a linux tarball holds `mount.objectfs` and `objectfs-linux-amd64` — the helper unsuffixed
+    # because mount(8) resolves `/sbin/mount.$TYPE` by exact filename, the main binary suffixed
+    # because that is what scripts/install.sh looks up (`$work/$PROGRAM-$platform`). Asserting the
+    # exact set rather than a grep is deliberate: a stray CHANGELOG/LICENSE/README trio is what
+    # `files: - none*` exists to prevent, and `files: []` silently reads as *unset* and puts them back.
+    - name: The tarballs carry the mount helper, and only where the helper exists
+      run: |
+        set -euo pipefail
+
+        members() { tar -tzf "$1" | LC_ALL=C sort | paste -sd, -; }
+
+        linux="$(members dist/objectfs-linux-amd64.tar.gz)"
+        echo "linux-amd64: $linux"
+        if [ "$linux" != "mount.objectfs,objectfs-linux-amd64" ]; then
+          echo "::error::objectfs-linux-amd64.tar.gz holds [$linux], expected"\
+            "[mount.objectfs,objectfs-linux-amd64]. An extra member is usually the defaulter putting"\
+            "CHANGELOG/LICENSE/README back; a missing mount.objectfs means the archive no longer"\
+            "carries the helper and the tarball install path has silently regressed to pre-#533." >&2
+          exit 1
+        fi
+
+        # Every linux tarball, not just amd64. `allow_different_binary_count: true` is what makes the
+        # darwin asymmetry legal, and it makes *any* asymmetry legal — so a mount-helper build whose
+        # goarch list drifts out of step with the archives' would now be accepted by goreleaser
+        # without a word, and this loop is the only thing that would notice.
+        for t in dist/objectfs-linux-*.tar.gz; do
+          if ! tar -tzf "$t" | grep -qx 'mount\.objectfs'; then
+            echo "::error::$t has no mount.objectfs. allow_different_binary_count makes a missing"\
+              "binary legal rather than fatal, so only this check catches it." >&2
+            exit 1
+          fi
+        done
+
+        # darwin must be unchanged. The mount-helper build is linux-only because this is the
+        # /sbin/mount.$TYPE protocol; an extra member here would ship a binary nothing can register,
+        # so this is the assertion that fails if that build's `goos:` ever widens by accident.
+        for t in dist/objectfs-darwin-*.tar.gz; do
+          got="$(members "$t")"
+          echo "$(basename "$t"): $got"
+          if [ "$got" != "objectfs-$(basename "$t" .tar.gz | sed 's/^objectfs-//')" ]; then
+            echo "::error::$t holds [$got], expected only its own objectfs binary. darwin has no"\
+              "mount(8) helper protocol of this shape." >&2
+            exit 1
+          fi
+        done
+
+        # Non-vacuity. Five tarballs is what `make package-linux`'s own comment promises; a glob that
+        # matched nothing would satisfy both loops above in silence.
+        count="$(ls dist/*.tar.gz | wc -l | tr -d ' ')"
+        [ "$count" -eq 5 ] || {
+          echo "::error::found $count tarballs in dist/, expected 5. The loops above iterate over"\
+            "globs, so a naming change makes them pass on nothing." >&2
+          exit 1
+        }
+
     - name: Install the deb, and let the postinstall scriptlet run
       run: |
         # apt-get update first: installing a local .deb still resolves Recommends (fuse3) against

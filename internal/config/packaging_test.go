@@ -53,6 +53,10 @@ type goreleaserConfig struct {
 		ID           string   `yaml:"id"`
 		IDs          []string `yaml:"ids"`
 		NameTemplate string   `yaml:"name_template"`
+		// AllowDifferentBinaryCount is not a preference. goreleaser refuses the whole release when the
+		// per-platform binary count differs, so with more than one build archived and this key absent
+		// nothing at all is built. See TestTheArchiveCarriesTheMountHelper.
+		AllowDifferentBinaryCount bool `yaml:"allow_different_binary_count"`
 	} `yaml:"archives"`
 	Nfpms []nfpmConfig `yaml:"nfpms"`
 }
@@ -264,12 +268,17 @@ func goreleaserTargets(t *testing.T, buildID string) []goreleaserTarget {
 // {{.Arch}}` — is a different convention entirely.
 //
 // The archive's name and the archived binary's name are two independent templates that have to be the
-// same string, and this asserts both. `wrap_in_directory: false` means the tarball holds exactly one
-// file, and install.sh extracts it and then looks up `objectfs-linux-amd64` by name before renaming it
-// to `objectfs` — a rename it does because a user cannot invoke the platform-named binary. So a build
-// whose `binary:` drifts from the archive's `name_template` produces a tarball that downloads,
-// verifies its checksum and then dies on "does not contain objectfs-linux-amd64". Mutating one of the
-// two templates and leaving the other passed every test in this package before this half existed.
+// same string, and this asserts both. `wrap_in_directory: false` means the tarball's members sit at its
+// root with no directory above them, and install.sh extracts and then looks up `objectfs-linux-amd64`
+// by name before renaming it to `objectfs` — a rename it does because a user cannot invoke the
+// platform-named binary. So a build whose `binary:` drifts from the archive's `name_template` produces a
+// tarball that downloads, verifies its checksum and then dies on "does not contain
+// objectfs-linux-amd64". Mutating one of the two templates and leaving the other passed every test in
+// this package before this half existed.
+//
+// Members, plural, since #533: the three Linux tarballs also carry `mount.objectfs`. That does not
+// affect the lookup — install.sh asks for one exact name and ignores its neighbors — and it is what
+// TestTheArchiveCarriesTheMountHelper is about.
 func TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes(t *testing.T) {
 	t.Parallel()
 
@@ -304,7 +313,7 @@ func TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes(t *testing.T) {
 
 	if got := strings.TrimSpace(archived.Binary); got != archiveNameTemplate {
 		t.Errorf("%s's \"archives\" build names its binary\n\t%s\nand the archive it goes into is named"+
-			"\n\t%s\n\nThose have to be the same string. The tarball holds one file and no directory, and "+
+			"\n\t%s\n\nThose have to be the same string. The tarball has no directory in it, and "+
 			"scripts/install.sh extracts it and then looks that exact name up before renaming it to "+
 			"objectfs — so a release built this way downloads, passes its checksum, and dies on \"does "+
 			"not contain objectfs-<platform>\" on every platform at once. goreleaser has no rename step "+
@@ -636,7 +645,7 @@ func TestPackageVersionComesFromTheVersionConstant(t *testing.T) {
 	// release_packages_test.go because it is this file's invariant: with the Makefile out of the chain,
 	// a tag that disagrees with the constant is a release whose assets are all named for a version the
 	// binary inside them denies.
-	release := readFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
+	release := workflowSource(t, "release.yml")
 
 	if !strings.Contains(release, "cmd/objectfs/main.go") {
 		t.Error("release.yml never reads cmd/objectfs/main.go. goreleaser names every asset, and " +
@@ -919,7 +928,7 @@ func TestTheGoreleaserVersionIsPinnedToOneValueEverywhere(t *testing.T) {
 	// read the latter and found v2.12.2 in ci.yml — golangci-lint's pin, under golangci-lint-action —
 	// which is a real pin of a real tool and has nothing to do with this one.
 	for _, workflow := range []string{"ci.yml", "release.yml"} {
-		body := withoutComments(readFile(t, filepath.Join(root, ".github", "workflows", workflow)))
+		body := withoutComments(workflowSource(t, workflow))
 
 		steps := stepsUsing(body, "goreleaser/goreleaser-action")
 		if len(steps) == 0 {

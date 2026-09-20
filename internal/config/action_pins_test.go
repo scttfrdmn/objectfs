@@ -1,8 +1,6 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -27,7 +25,10 @@ import (
 // with an unpinned action — so the walk carries a floor instead, and fails if it finds implausibly
 // few files.
 //
-//nolint:gocognit // one walk with four named failure modes; splitting it would hide the floor
+// The `//nolint:gocognit` that used to sit here is gone, and it was dead twice over: gocognit is not
+// in .golangci.yml's enabled set and nothing else in the repository runs it, and the nesting its
+// explanation defended — "splitting it would hide the floor" — went with the directory walk when that
+// moved to readWorkflowTexts, which owns the floor now.
 func TestEveryActionIsPinnedToASha(t *testing.T) {
 	t.Parallel()
 
@@ -40,32 +41,15 @@ func TestEveryActionIsPinnedToASha(t *testing.T) {
 	// happen to share its prefix today.
 	pinned := regexp.MustCompile(`^[^@\s]+@[0-9a-f]{40}$`)
 
-	dir := filepath.Join(repoRoot(t), ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
-	}
+	// The walk, and its floor, are readWorkflowTexts' (#504). This file used to carry its own copy of
+	// both, including its own `const minWorkflowFiles = 4` and its own comment about the five files that
+	// exist — one of four such copies.
+	workflows := readWorkflowTexts(t)
 
-	// The floor. Five workflow files exist today; below four, this test has stopped looking at the
-	// thing it claims to check and should say so rather than pass.
-	const minWorkflowFiles = 4
-
-	files := 0
 	references := 0
-	for _, e := range entries {
-		if e.IsDir() || (!strings.HasSuffix(e.Name(), ".yml") && !strings.HasSuffix(e.Name(), ".yaml")) {
-			continue
-		}
-		files++
 
-		path := filepath.Join(dir, e.Name())
-		body, err := os.ReadFile(path) // #nosec G304 -- a directory entry from .github/workflows
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		lines := strings.Split(string(body), "\n")
-
-		for i, line := range lines {
+	for _, wf := range workflows {
+		for i, line := range strings.Split(wf.Body, "\n") {
 			m := uses.FindStringSubmatch(line)
 			if m == nil {
 				continue
@@ -83,7 +67,7 @@ func TestEveryActionIsPinnedToASha(t *testing.T) {
 				t.Errorf("%s:%d: %s is not pinned to a 40-character commit sha\n"+
 					"\tuse `uses: <action>@<sha> # <version>`; resolve the sha with\n"+
 					"\t`gh api repos/<owner>/<repo>/git/ref/tags/<tag> -q .object.sha`",
-					e.Name(), i+1, ref)
+					wf.Name, i+1, ref)
 				continue
 			}
 
@@ -93,18 +77,14 @@ func TestEveryActionIsPinnedToASha(t *testing.T) {
 			if !strings.Contains(line, "# ") {
 				t.Errorf("%s:%d: %s is pinned but carries no version comment; "+
 					"append `# vX.Y.Z` naming the release the sha is",
-					e.Name(), i+1, ref)
+					wf.Name, i+1, ref)
 			}
 		}
 	}
 
-	if files < minWorkflowFiles {
-		t.Fatalf("found %d workflow files in %s, expected at least %d — this test is not looking "+
-			"at what it claims to", files, dir, minWorkflowFiles)
-	}
 	if references == 0 {
 		t.Fatalf("found no third-party action references across %d workflow files; the `uses:` "+
-			"pattern has stopped matching and this test now passes vacuously", files)
+			"pattern has stopped matching and this test now passes vacuously", len(workflows))
 	}
-	t.Logf("checked %d third-party action references across %d workflow files", references, files)
+	t.Logf("checked %d third-party action references across %d workflow files", references, len(workflows))
 }

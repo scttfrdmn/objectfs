@@ -34,11 +34,25 @@
 # Everything is staged in a temporary directory and moved into place at the end, so a failure at
 # any point leaves no half-installed binary. An interrupted install that leaves `objectfs` on PATH
 # as a truncated file is worse than one that leaves nothing.
+#
+# Two things this does besides installing one binary, both added by #533:
+#
+#   - the /etc/fstab mount helper. Releases from v0.17.0 carry `mount.objectfs` in the Linux tarballs,
+#     and this installs it beside `objectfs` and registers it at /sbin/mount.objectfs when it safely
+#     can. See link_mount_helper for what "safely" rules out, which is more than it looks.
+#   - `--uninstall`. There was no counterpart to scripts/preremove.sh, so a tarball install left the
+#     symlink behind with nothing to remove it.
 
 set -euo pipefail
 
 readonly REPO="scttfrdmn/objectfs"
 readonly PROGRAM="objectfs"
+
+# The mount helper's filename is its registration. mount(8) resolves an unknown `-t TYPE` by exec'ing
+# /sbin/mount.$TYPE — a path compiled into util-linux, not searched for on PATH and not configurable —
+# so this string appears in .goreleaser.yml's `mount-helper` build, in scripts/postinstall.sh, in
+# scripts/preremove.sh and here, and all four have to spell it identically.
+readonly HELPER="mount.objectfs"
 
 # The default prefix is ~/.local, not /usr/local, and that is a deliberate reversal of the usual
 # installer convention. This project's users are frequently on a shared login node where they have
@@ -54,6 +68,25 @@ PREFIX="${PREFIX:-$HOME/.local}"
 VERSION="${VERSION:-}"
 
 DRY_RUN=0
+
+# Whether to install the /etc/fstab mount helper beside the binary. On by default, because a tarball
+# install that silently lacks it is the gap #533 is about; `--no-mount-helper` is for an install into a
+# prefix that is only ever going to be used interactively.
+MOUNT_HELPER=1
+
+# --uninstall. A mode of this script rather than a second script, because the thing that has to be
+# undone is the /sbin symlink *this* script created, and the rule for when not to touch it is written
+# once, here, next to the rule for when to create it.
+UNINSTALL=0
+
+# OBJECTFS_ROOT prefixes /sbin, and nothing else.
+#
+# Empty everywhere a user runs this. It is the same seam scripts/postinstall.sh and
+# scripts/preremove.sh read, for the same reason: internal/config's tests drive the real file against a
+# scratch root rather than a copy of it with the paths rewritten, which is the failure mode where a
+# test agrees with itself and the shipped artifact is never checked. The prefix needs no equivalent —
+# --prefix already points anywhere.
+ROOT="${OBJECTFS_ROOT:-}"
 
 # say prints progress to stderr, not stdout.
 #
@@ -78,7 +111,9 @@ Usage: install.sh [options]
 Options:
   --version VERSION   Release to install, with or without a leading v (default: latest)
   --prefix PATH       Install under PATH/bin (default: ~/.local)
-  --dry-run           Report what would happen; download and verify nothing
+  --no-mount-helper   Do not install mount.objectfs or register /sbin/mount.objectfs
+  --uninstall         Remove what this script installed under --prefix, and its /sbin symlink
+  --dry-run           Report what would happen; download, verify and remove nothing
   -h, --help          This message
 
 Environment:
@@ -89,6 +124,11 @@ Environment:
 The checksum is always verified and there is no option to skip it. Note what that does and does
 not establish: the .sha256 travels the same channel as the tarball, so a mismatch means corruption
 or a tampered mirror, not necessarily an authentic release.
+
+The Linux tarballs also carry mount.objectfs, the helper that makes `mount -t objectfs` and an
+/etc/fstab entry work. Registering it means creating /sbin/mount.objectfs, which needs root and is
+refused when the binary it would point at is not root-owned — mount(8) exec's that path as root. A
+non-root install still installs the helper and prints the one command left to run.
 EOF
 }
 
@@ -110,6 +150,14 @@ while [ $# -gt 0 ]; do
             ;;
         --prefix=*)
             PREFIX="${1#--prefix=}"
+            shift
+            ;;
+        --no-mount-helper)
+            MOUNT_HELPER=0
+            shift
+            ;;
+        --uninstall)
+            UNINSTALL=1
             shift
             ;;
         --dry-run)
@@ -335,8 +383,349 @@ sha256_of() {
     fi
 }
 
+# ----------------------------------------------------------------------------------------------------
+# The /etc/fstab mount helper (#533).
+#
+# Everything below is a second implementation of scripts/postinstall.sh's link_mount_helper and
+# scripts/preremove.sh's unlink_mount_helper, and that is a deliberate choice rather than an oversight,
+# so it is worth saying why the obvious alternative is not available.
+#
+# The issue asks for one shared shell function, on the correct reasoning that a second copy is how two
+# implementations drift. There is nothing for this file to share it *through*. It is fetched over HTTPS
+# and piped straight into bash — that is its documented invocation and the acceptance criterion of the
+# issue that created it — so there is no library beside it on disk, and downloading one would mean
+# fetching and running a second script that nothing has verified, inside an installer whose entire
+# header is about why the download path is not trusted. The package scriptlets cannot source it either:
+# dpkg copies maintainer scripts into /var/lib/dpkg/info and runs prerm while the package's own files
+# are in whatever state a `--force` left them, and a scriptlet whose unlink step silently no-ops because
+# a library file was already gone leaves exactly the dangling /sbin/mount.objectfs that function exists
+# to prevent.
+#
+# So the drift is guarded by a test instead of by a file: internal/config/mount_helper_test.go runs this
+# copy and the scriptlet's through one shared table of cases — nothing there, our own link, a foreign
+# link, a real file, no /sbin — and asserts both reach the same outcome. That is stronger than a shared
+# function would have been, because a shared function is exercised once and these are exercised twice.
+# ----------------------------------------------------------------------------------------------------
+
+# may_register decides whether this machine is one where /sbin/mount.objectfs may be created, printing
+# the reason it is not. Returns 0 to proceed.
+#
+# The ownership half is a security property, not tidiness. mount(8) exec's /sbin/mount.objectfs **as
+# root**, so a symlink from there into a directory whose owner is not root lets that owner replace the
+# binary and run code as root the next time anybody mounts anything. `sudo ./install.sh` with the
+# default prefix is precisely that shape — a root-created link into $HOME/.local/bin — and it is the
+# most likely way someone reaches this code, which is why it is refused rather than warned about.
+#
+# `-O` is "owned by the effective uid"; the effective uid is 0 by the time it is evaluated, so it asks
+# whether root owns the path. Both the binary and its directory, because a root-owned file inside a
+# directory someone else owns can be swapped out by replacing the directory entry.
+may_register() {
+    local target="$1"
+
+    # Under a scratch root there is neither a real /sbin to protect nor a root to protect it from, and
+    # the tests that drive the conservatism rules below run unprivileged. The two checks skipped here
+    # are about the real filesystem and are asserted directly instead.
+    if [ -n "$ROOT" ]; then
+        return 0
+    fi
+
+    if [ "$(id -u)" != 0 ]; then
+        say "note: not root, so /sbin/$HELPER was not created and /etc/fstab entries do not work yet."
+        say "  To register it: sudo ln -s $target /sbin/$HELPER"
+
+        return 1
+    fi
+
+    if [ ! -O "$target" ] || [ ! -O "$(dirname "$target")" ]; then
+        say "note: $target is not owned by root, so /sbin/$HELPER was not created."
+        say "  mount(8) runs /sbin/$HELPER as root, and a link from there into a directory its owner can"
+        say "  write would let that owner run code as root. Refusing rather than creating it."
+        say "  For a registered system-wide install: sudo ./install.sh --prefix /usr/local"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# link_mount_helper registers the helper at /sbin/mount.objectfs.
+#
+# mount(8) resolves a filesystem type it does not know by exec'ing /sbin/mount.$TYPE. That path is
+# compiled into util-linux: it is not searched for on PATH, there is no configuration for it, and the
+# filename is the entire registration mechanism. So an installed mount.objectfs that is not *at*
+# /sbin/mount.objectfs does nothing at all, and an fstab entry fails with "unknown filesystem type
+# 'objectfs'" and nothing else.
+#
+# Every branch returns 0. Failing to register a helper is not a reason to fail an install that has
+# already put a working `objectfs` on PATH, and the mount command is where a missing helper should be
+# complained about, with the mount point in hand. Same posture as scripts/postinstall.sh, for the same
+# reason its header gives.
+link_mount_helper() {
+    local target="$1"
+    local link="$ROOT/sbin/$HELPER"
+
+    if [ ! -x "$target" ]; then
+        say "note: $target is not there, so 'mount -t objectfs' and /etc/fstab entries will not work"
+
+        return 0
+    fi
+
+    if ! may_register "$target"; then
+        return 0
+    fi
+
+    if [ ! -d "$ROOT/sbin" ]; then
+        say "note: /sbin does not exist, so the mount helper could not be registered"
+        say "  Fix: ln -s $target /sbin/$HELPER"
+
+        return 0
+    fi
+
+    if [ -L "$link" ]; then
+        # Already ours, which is every re-run. Compared rather than replaced with `ln -sf`, so that a
+        # link an operator repointed deliberately — or one a package install made, pointing at
+        # /usr/bin/mount.objectfs — is reported instead of silently overwritten.
+        local current
+        current=$(readlink "$link" 2>/dev/null) || current=""
+
+        if [ "$current" = "$target" ]; then
+            return 0
+        fi
+
+        say "note: /sbin/$HELPER is a symlink to $current, not to $target; leaving it alone"
+        say "  Fix, if that is not deliberate: ln -sf $target /sbin/$HELPER"
+
+        return 0
+    fi
+
+    if [ -e "$link" ]; then
+        say "note: /sbin/$HELPER exists and is not a symlink; leaving it alone"
+        say "  Fix, if it is stale: rm /sbin/$HELPER && ln -s $target /sbin/$HELPER"
+
+        return 0
+    fi
+
+    if ! ln -s "$target" "$link" 2>/dev/null; then
+        say "note: could not create /sbin/$HELPER, so /etc/fstab entries will not work"
+        say "  Fix: ln -s $target /sbin/$HELPER"
+
+        return 0
+    fi
+
+    say "registered /sbin/$HELPER -> $target"
+}
+
+# unlink_mount_helper removes the symlink link_mount_helper created, and only that one.
+#
+# Only if it is a symlink, and only if it points where this script would have pointed it. A real file,
+# or a link to /usr/bin/mount.objectfs that a .deb or .rpm created, is something this script did not
+# make — and on a machine with both a package and a tarball install, removing the package's link would
+# break an fstab entry that has nothing to do with the prefix being uninstalled. Same rule on the way
+# out as on the way in.
+#
+# Left behind wrongly, the link is a dangling /sbin/mount.objectfs, and an fstab entry that worked
+# before the uninstall then fails at `mount -a` with mount(8)'s own "no such file or directory" against
+# a helper path — a considerably worse message than "unknown filesystem type".
+unlink_mount_helper() {
+    local target="$1"
+    local link="$ROOT/sbin/$HELPER"
+
+    if [ ! -L "$link" ]; then
+        return 0
+    fi
+
+    local current
+    current=$(readlink "$link" 2>/dev/null) || current=""
+
+    if [ "$current" != "$target" ]; then
+        say "note: /sbin/$HELPER points at $current, which this script did not create; leaving it"
+
+        return 0
+    fi
+
+    if rm -f "$link" 2>/dev/null; then
+        say "removed /sbin/$HELPER"
+    else
+        say "note: could not remove /sbin/$HELPER, so it is now a dangling link"
+        say "  Fix: sudo rm /sbin/$HELPER"
+    fi
+}
+
+# install_mount_helper puts the helper beside the binary and registers it.
+#
+# Absent from the archive is not a failure on darwin and is worth saying on Linux, so the two are
+# distinguished. .goreleaser.yml builds mount.objectfs for linux only — mount(8)'s helper protocol is
+# util-linux's and there is no /sbin/mount.TYPE on macOS — and releases before v0.17.0 carried it in no
+# tarball at all, which is what a Linux user installing an older version is seeing.
+install_mount_helper() {
+    local work="$1" platform="$2"
+    local src="$work/$HELPER"
+    local dst="$PREFIX/bin/$HELPER"
+
+    if [ "$MOUNT_HELPER" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ ! -f "$src" ]; then
+        case "$platform" in
+            linux-*)
+                say "note: this tarball carries no $HELPER, so 'mount -t objectfs' and /etc/fstab"
+                say "  entries will not work. Releases from v0.17.0 carry it; earlier ones ship it only"
+                say "  in the .deb and .rpm."
+                ;;
+        esac
+
+        return 0
+    fi
+
+    chmod 0755 "$src"
+
+    if command -v install > /dev/null 2>&1; then
+        install -m 0755 "$src" "$dst" || {
+            say "note: could not install $dst, so /etc/fstab entries will not work"
+
+            return 0
+        }
+    else
+        cp -f "$src" "$dst" || {
+            say "note: could not install $dst, so /etc/fstab entries will not work"
+
+            return 0
+        }
+        chmod 0755 "$dst"
+    fi
+
+    say "installed $dst"
+
+    link_mount_helper "$dst"
+}
+
+# live_mounts prints the mount point of every live ObjectFS filesystem, one per line.
+#
+# Read from /proc/mounts rather than from `mount`, whose output is prose ("objectfs on /mnt/x type
+# fuse.objectfs (rw,...)") and differs between util-linux versions.
+#
+# The match is on three things, and the obvious single one never fires. internal/fuse sets Subtype "s3"
+# alongside FSName "objectfs", so the kernel records the type as `fuse.s3` with a device of `objectfs` —
+# a grep for `fuse.objectfs` alone matched nothing on a real mount, which is a defect
+# scripts/preremove.sh shipped with for several releases and this copy must not reintroduce.
+# internal/config/mount_helper_test.go asserts both scripts still match all three.
+live_mounts() {
+    local mounts="$ROOT/proc/mounts"
+    local device point fstype
+
+    if [ ! -r "$mounts" ]; then
+        return 0
+    fi
+
+    while read -r device point fstype _; do
+        case "$fstype" in
+            fuse.objectfs | fuse.s3) ;;
+            fuse.*)
+                [ "$device" = "objectfs" ] || continue
+                ;;
+            *) continue ;;
+        esac
+
+        # /proc/mounts escapes space, tab, newline and backslash in octal. \040 is the one that occurs
+        # in practice, and a mount point with a space in it printed raw would be split by the caller.
+        printf '%b\n' "${point//\\040/\\0040}"
+    done < "$mounts"
+}
+
+# uninstall removes what this script installed under --prefix, plus the /sbin symlink.
+#
+# This is the one path here that fails rather than warning, and the reason is the same one
+# scripts/preremove.sh gives for being the only scriptlet that does not exit 0 unconditionally. A FUSE
+# filesystem whose server binary has been deleted hangs every read against it — `ls` on the mount point
+# blocks in the kernel — and the way out is a manual fusermount -u by someone who first has to work out
+# that is what happened. `objectfs unmount` is also the only unmount path that reports which methods it
+# tried and what is holding the mount open, and it is still installed right up until this function
+# deletes it. So a live mount stops the uninstall and names the command.
+#
+# What it does not remove: caches, configuration, and anything under a path it did not create. An
+# uninstaller that deletes a cache directory nobody asked it to delete is the failure preremove.sh
+# prints the same paragraph to avoid.
+uninstall() {
+    local binary="$PREFIX/bin/$PROGRAM"
+    local helper="$PREFIX/bin/$HELPER"
+
+    say "uninstalling from $PREFIX/bin"
+
+    local -a live=()
+    local point
+
+    while read -r point; do
+        [ -n "$point" ] || continue
+        live+=("$point")
+    done < <(live_mounts)
+
+    if [ "${#live[@]}" -gt 0 ]; then
+        say "these ObjectFS filesystems are still mounted:"
+
+        for point in "${live[@]}"; do
+            say "  - $point"
+        done
+
+        say "Unmount them first. Deleting the binary under a live mount hangs every read against the"
+        say "mount point, including 'ls', until someone unmounts it by hand:"
+
+        for point in "${live[@]}"; do
+            say "  $PROGRAM unmount $point"
+        done
+
+        die "nothing was removed"
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  would remove: $binary"
+        say "  would remove: $helper"
+        say "  would remove: /sbin/$HELPER, if it is a symlink to $helper"
+        say "dry run, so nothing was removed"
+
+        return 0
+    fi
+
+    # Before the binaries, not after. The link's "is it ours" test reads the target path, not the file,
+    # so the order does not matter for correctness — but a failure partway through leaves a dangling
+    # link if the link goes second, and leaves an unregistered helper if it goes first. The second is
+    # the recoverable one.
+    unlink_mount_helper "$helper"
+
+    local removed=0 path
+
+    for path in "$helper" "$binary"; do
+        if [ ! -e "$path" ]; then
+            continue
+        fi
+
+        if rm -f "$path" 2>/dev/null; then
+            say "removed $path"
+            removed=$((removed + 1))
+        else
+            say "note: could not remove $path"
+        fi
+    done
+
+    if [ "$removed" -eq 0 ]; then
+        say "nothing to remove under $PREFIX/bin; was it installed with a different --prefix?"
+    fi
+
+    say "not removed, because this script did not create them: /etc/objectfs, /var/cache/objectfs,"
+    say "  ~/.cache/objectfs. Delete them by hand to remove every trace."
+}
+
 main() {
     local platform tag asset base
+
+    # Ahead of preflight, because an uninstall downloads nothing, unpacks nothing and verifies nothing:
+    # it needs neither a downloader, nor tar, nor a digest tool. Refusing to remove a binary because the
+    # machine has no curl would be a check firing on a path it knows nothing about.
+    if [ "$UNINSTALL" -eq 1 ]; then
+        uninstall
+
+        return 0
+    fi
 
     # Before the platform check, because a missing tar is a fact about this machine that does not
     # depend on which release exists, and before the dry run for a reason worth stating: the point
@@ -417,9 +806,14 @@ first two."
 
     say "checksum verified"
 
-    # The tarball holds one file, named for the platform — objectfs-linux-amd64, not objectfs — so
-    # the extract and the rename are separate steps and the destination name is spelled out. A
+    # The main binary in the tarball is named for the platform — objectfs-linux-amd64, not objectfs —
+    # so the extract and the rename are separate steps and the destination name is spelled out. A
     # `tar -x` straight into the prefix would install a binary the user cannot invoke by name.
+    #
+    # It is no longer the only member. The Linux tarballs also carry `mount.objectfs`, whose name is
+    # already the one it has to be installed under, so it is handled separately by install_mount_helper
+    # rather than renamed. Which member exists is read from the extracted directory and not inferred
+    # from the platform — an older release's tarball carries only the binary.
     tar -xzf "$work/$asset" -C "$work" \
         || die "could not extract $asset. The download passed its checksum, so this is a tar that cannot read the archive rather than a corrupt file"
 
@@ -442,6 +836,10 @@ first two."
     fi
 
     say "installed $PREFIX/bin/$PROGRAM"
+
+    # After the main binary and before the PATH note, so that a failure to register the helper cannot
+    # prevent the thing a user came for from being reported as installed.
+    install_mount_helper "$work" "$platform"
 
     # And say so when it is not reachable. An installer that succeeds and leaves the user with
     # "command not found" has produced the same experience as one that failed, minus the
@@ -467,4 +865,17 @@ first two."
     say "next: objectfs mount s3://your-bucket /mnt/point   (see https://github.com/$REPO#quick-start)"
 }
 
-main "$@"
+# OBJECTFS_INSTALL_SOURCE_ONLY makes this file sourceable, so that internal/config's tests can call
+# link_mount_helper, unlink_mount_helper, live_mounts and may_register directly.
+#
+# It exists because those four are a second copy of logic scripts/postinstall.sh and
+# scripts/preremove.sh also carry — see the banner above may_register for why there is no shared file
+# to source — and the guard against the two drifting is running both through one table of cases. There
+# is no way to reach this script's copy through `main`: the link is made after a download, a checksum
+# and an extract, none of which a unit test can or should perform.
+#
+# Empty for every user, and the variable is read rather than the invocation being restructured for the
+# same reason OBJECTFS_ROOT is: the test then exercises this exact file rather than a copy of it.
+if [ -z "${OBJECTFS_INSTALL_SOURCE_ONLY:-}" ]; then
+    main "$@"
+fi

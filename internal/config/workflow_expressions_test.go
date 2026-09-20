@@ -1,8 +1,6 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,12 +30,11 @@ import (
 func TestWorkflowExpressionsAreValid(t *testing.T) {
 	t.Parallel()
 
-	dir := filepath.Join(repoRoot(t), ".github", "workflows")
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("could not read %s: %v", dir, err)
-	}
+	// The walk is readWorkflowTexts' (#504). The copy this replaces filtered on
+	// `filepath.Ext(name) != ".yml"`, so a `.yaml` workflow would have been silently exempt from this
+	// gate while the other three walks in this package checked it — and a skipped file looks like a
+	// clean one.
+	workflows := readWorkflowTexts(t)
 
 	// The contexts and functions a workflow expression can start from. An expression naming none of
 	// these is not necessarily wrong — a negation, `format(...)`, a literal string — so a leading
@@ -57,19 +54,13 @@ func TestWorkflowExpressionsAreValid(t *testing.T) {
 
 	checked := 0
 
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yml" {
-			continue
-		}
-
-		workflow := readFile(t, filepath.Join(dir, entry.Name()))
-
-		for i, after := range strings.Split(workflow, "${{")[1:] {
+	for _, wf := range workflows {
+		for i, after := range strings.Split(wf.Body, "${{")[1:] {
 			// An unclosed opener is its own failure and not this test's: it would be the last fragment
 			// with no `}}` anywhere in it, and there is nothing to judge as an expression.
 			raw, closed := stringsCutBefore(after, "}}")
 			if !closed {
-				t.Errorf("%s has a `${{` that is never closed (occurrence %d)", entry.Name(), i+1)
+				t.Errorf("%s has a `${{` that is never closed (occurrence %d)", wf.Name, i+1)
 
 				continue
 			}
@@ -84,7 +75,7 @@ func TestWorkflowExpressionsAreValid(t *testing.T) {
 				t.Errorf("%s has an empty `${{ }}` expression (occurrence %d). Actions parses it "+
 					"whether it is in a comment or not, and an empty one fails the whole file — no job "+
 					"starts and the run says only \"likely failed because of a workflow file issue\"",
-					entry.Name(), i+1)
+					wf.Name, i+1)
 
 				continue
 			}
@@ -96,7 +87,7 @@ func TestWorkflowExpressionsAreValid(t *testing.T) {
 				t.Errorf("%s has `${{ %s }}`, which contains a wildcard. There is no globbing in a "+
 					"workflow expression; if this is prose describing a family of values, do not write it "+
 					"inside braces — Actions interpolates comments too, and an unparseable expression "+
-					"fails the file before any job starts", entry.Name(), expr)
+					"fails the file before any job starts", wf.Name, expr)
 
 				continue
 			}
@@ -105,7 +96,7 @@ func TestWorkflowExpressionsAreValid(t *testing.T) {
 				!hasAnyPrefix(expr, contexts) {
 				t.Errorf("%s has `${{ %s }}`, which starts from no known context or function. If it is "+
 					"a real expression, name the context; if it is prose, take it out of the braces",
-					entry.Name(), expr)
+					wf.Name, expr)
 			}
 		}
 	}

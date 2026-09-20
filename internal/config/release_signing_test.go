@@ -5,8 +5,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v2"
 )
 
 // The release is signed, keylessly, and the signature is verified by the run that made it.
@@ -38,29 +36,15 @@ import (
 // the other to nothing.
 const signingStepName = "Checksum every asset and sign the list, keylessly"
 
-// signingWorkflow is the slice of workflow syntax these tests need: the per-job `permissions:` block.
-//
-// A local parse rather than a shared one, so this file stands alone against `main` and can merge in
-// either order relative to the gate change (#500), which adds its own `workflowFile` for a different
-// purpose. Once both have landed the two should share one parser; see the follow-up issue.
-type signingWorkflow struct {
-	Jobs map[string]struct {
-		Permissions map[string]string `yaml:"permissions"`
-		Env         map[string]string `yaml:"env"`
-	} `yaml:"jobs"`
-}
-
 // publishJob returns release.yml's `publish` job.
-func publishJob(t *testing.T) struct {
-	Permissions map[string]string `yaml:"permissions"`
-	Env         map[string]string `yaml:"env"`
-} {
+//
+// This file used to carry its own `signingWorkflow` struct for the two keys below, with a comment
+// saying it was local so the file could merge in either order relative to #500's `workflowFile` and
+// that the two should converge once both had landed. Both landed; this is that convergence (#504).
+func publishJob(t *testing.T) workflowJobDef {
 	t.Helper()
 
-	var wf signingWorkflow
-	if err := yaml.Unmarshal([]byte(releaseWorkflowSource(t)), &wf); err != nil {
-		t.Fatalf("parsing .github/workflows/release.yml: %v", err)
-	}
+	wf := readWorkflow(t, "release.yml")
 
 	job, ok := wf.Jobs["publish"]
 	if !ok {
@@ -74,7 +58,7 @@ func publishJob(t *testing.T) struct {
 func releaseWorkflowSource(t *testing.T) string {
 	t.Helper()
 
-	return readFile(t, filepath.Join(repoRoot(t), ".github", "workflows", "release.yml"))
+	return workflowSource(t, "release.yml")
 }
 
 // TestPublishCanMintAnOIDCToken asserts the permission keyless signing depends on.
@@ -304,18 +288,6 @@ func TestCosignInstallerIsPinnedToAnExactVersion(t *testing.T) {
 	}
 }
 
-// cutStep returns the body of the named workflow step, from its `- name:` line to the next one.
-func cutStep(source, name string) (string, bool) {
-	idx := strings.Index(source, "- name: "+name)
-	if idx < 0 {
-		return "", false
-	}
-
-	rest := source[idx+len("- name: "+name):]
-
-	if next := strings.Index(rest, "\n    - name: "); next >= 0 {
-		rest = rest[:next]
-	}
-
-	return rest, true
-}
+// cutStep moved to workflow_test.go alongside the one workflow parser (#504), with the measurement
+// that justifies it: `cosign verify-blob` appears twice in release.yml and only one of them runs, so
+// a mutation deleting the executed one passed an assertion that searched the whole file.

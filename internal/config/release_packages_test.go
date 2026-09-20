@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,8 +37,7 @@ import (
 func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	t.Parallel()
 
-	root := repoRoot(t)
-	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
+	workflow := workflowSource(t, "release.yml")
 
 	// Comments are stripped before any of this, and that is not a detail. The first version of these two
 	// checks ran strings.Contains over the whole file and both survived mutation: deleting the `run: make
@@ -123,9 +123,16 @@ func TestReleaseAttachesTheLinuxPackages(t *testing.T) {
 	// merged: one job now produces every tarball, every package and every checksum, so there is no
 	// longer a packaging job that can fail while the tarball job succeeds. That merge removed a failure
 	// mode and this assertion is what stops the remaining one.
-	needs := needsList(t, workflow, "Publish Release")
-	if !strings.Contains(needs, "artifacts") {
-		t.Errorf("the Publish Release job's `needs` is %q and does not include artifacts, so a "+
+	//
+	// Read out of the parsed `needs:` rather than out of its text, so membership is membership. The line
+	// scan this replaces asked `strings.Contains(needs, "artifacts")` of the raw
+	// `[artifacts, docker-build-push, security-scan]`, which a job named `artifacts-summary` would have
+	// satisfied while the real dependency was gone.
+	_, publish := jobNamed(t, readWorkflow(t, "release.yml"), "Publish Release")
+
+	needs := needsOf(publish)
+	if !slices.Contains(needs, "artifacts") {
+		t.Errorf("the Publish Release job's `needs` is %v and does not include artifacts, so a "+
 			"packaging failure would publish a release with no assets at all \u2014 the notes are built from "+
 			"CHANGELOG.md and do not need the build to have run. A release that looks complete and is "+
 			"not is harder to notice than one that failed", needs)
@@ -251,83 +258,9 @@ func withoutComments(workflow string) string {
 	return strings.Join(kept, "\n")
 }
 
-// jobStep returns the body of the step whose `- name:` is stepName, up to the next step.
-//
-// So an assertion can be made about one step rather than about the file. Checking the whole workflow
-// for a path is how the .deb upload check first passed with no upload at all — the summary step's glob
-// satisfied it.
-func jobStep(t *testing.T, workflow, stepName string) string {
-	t.Helper()
-
-	var (
-		body   []string
-		inStep bool
-	)
-
-	for line := range strings.SplitSeq(workflow, "\n") {
-		trimmed := strings.TrimSpace(line)
-
-		if trimmed == "- name: "+stepName {
-			inStep = true
-
-			continue
-		}
-
-		if !inStep {
-			continue
-		}
-
-		// The next step ends this one.
-		if strings.HasPrefix(trimmed, "- name: ") {
-			break
-		}
-
-		body = append(body, line)
-	}
-
-	if !inStep {
-		t.Fatalf("found no step named %q in release.yml. If it was renamed, point this test at the new "+
-			"name — a gate that cannot find its subject passes for the wrong reason", stepName)
-	}
-
-	return strings.Join(body, "\n")
-}
-
-// needsList returns the `needs:` line belonging to the job whose `name:` is jobName.
-//
-// A line scan rather than a YAML parse, matching how release_platforms_test.go reads the build matrix:
-// this package has no YAML dependency for workflow files, and the shape being read is one line.
-func needsList(t *testing.T, workflow, jobName string) string {
-	t.Helper()
-
-	inJob := false
-
-	for line := range strings.SplitSeq(workflow, "\n") {
-		trimmed := strings.TrimSpace(line)
-
-		if trimmed == "name: "+jobName {
-			inJob = true
-
-			continue
-		}
-
-		if !inJob {
-			continue
-		}
-
-		if after, found := strings.CutPrefix(trimmed, "needs:"); found {
-			return strings.TrimSpace(after)
-		}
-
-		// A `steps:` key means this job's header is over and it declared no needs.
-		if trimmed == "steps:" {
-			break
-		}
-	}
-
-	t.Fatalf("found no `needs:` for the job named %q in release.yml. If the job was renamed, point this "+
-		"test at the new name — a gate that cannot find its subject passes for the wrong reason",
-		jobName)
-
-	return ""
-}
+// jobStep, and the `needs:` reader this file used to carry, live in workflow_test.go — the one parser
+// for .github/workflows (#504). The local `needsList` was a line scan whose comment said "this package
+// has no YAML dependency for workflow files", which stopped being true when release_gate_test.go
+// arrived; it read the first `needs:` under a matching `name:` and returned it as raw text, so
+// `needs: [artifacts, docker-build-push]` was checked by substring. The parsed form is `needsOf`, and
+// a substring check over a dependency list is one that `needs: [artifacts-summary]` would satisfy.

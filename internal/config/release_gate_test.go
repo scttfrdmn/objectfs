@@ -1,13 +1,10 @@
 package config
 
 import (
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v2"
 )
 
 // The release gate and the CI gate must be the same gate.
@@ -40,69 +37,9 @@ import (
 // that tag points at, not main's.
 const gateCallPath = "./.github/workflows/ci.yml"
 
-// workflowFile is the subset of workflow syntax these tests reason about.
-//
-// `On` is tagged `yaml:"on"` and that is load-bearing with yaml.v2, which implements YAML 1.1:
-// a bare `on` key parses as the boolean true, so unmarshalling into a map gives a `true` key and
-// no `"on"` key at all. Struct field matching resolves it; a map would not. Measured, not assumed.
-type workflowFile struct {
-	Name        string                    `yaml:"name"`
-	On          map[string]any            `yaml:"on"`
-	Permissions map[string]string         `yaml:"permissions"`
-	Jobs        map[string]workflowJobDef `yaml:"jobs"`
-}
-
-// workflowJobDef is one job. `Needs` is a string or a list of strings in the schema, so it is held
-// as an interface and normalised by needsOf.
-type workflowJobDef struct {
-	Name        string            `yaml:"name"`
-	Uses        string            `yaml:"uses"`
-	Needs       any               `yaml:"needs"`
-	Permissions map[string]string `yaml:"permissions"`
-}
-
-// needsOf normalises a job's `needs:` into a slice. The schema allows a bare string for the
-// single-dependency case, and treating that as absent would make every gated-by-one-job chain look
-// like a root.
-func needsOf(job workflowJobDef) []string {
-	switch v := job.Needs.(type) {
-	case nil:
-		return nil
-	case string:
-		return []string{v}
-	case []any:
-		out := make([]string, 0, len(v))
-
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-
-		return out
-	default:
-		return nil
-	}
-}
-
-// readWorkflow parses one file under .github/workflows.
-func readWorkflow(t *testing.T, name string) workflowFile {
-	t.Helper()
-
-	path := filepath.Join(repoRoot(t), ".github", "workflows", name)
-
-	var wf workflowFile
-	if err := yaml.Unmarshal([]byte(readFile(t, path)), &wf); err != nil {
-		t.Fatalf("parsing .github/workflows/%s: %v", name, err)
-	}
-
-	if len(wf.Jobs) == 0 {
-		t.Fatalf(".github/workflows/%s parsed with zero jobs. Either the file moved or the parse is "+
-			"wrong, and a test that inspects nothing passes", name)
-	}
-
-	return wf
-}
+// workflowFile, workflowJobDef, needsOf and readWorkflow live in workflow_test.go, which is the one
+// parser for .github/workflows (#504). They were defined here, and the copies that grew beside them
+// each had to rediscover that yaml.v2 reads `on` as the boolean `true` — see that file's comment.
 
 // TestCIWorkflowIsReusable asserts ci.yml can be called by another workflow.
 func TestCIWorkflowIsReusable(t *testing.T) {
