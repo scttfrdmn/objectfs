@@ -221,14 +221,66 @@ jobs:
           tgz="dist/objectfs-$platform.tar.gz"
           test -f "$tgz" || { echo "::error::expected $tgz, and it is not there"; ls -l dist; exit 1; }
 
-          # And the platform-named binary inside it, which is the other half of install.sh's contract:
-          # it extracts, looks for exactly this name, and dies with "the release layout has changed
-          # and this script needs updating" if it is absent. Checked here because the failure is
-          # otherwise found by a user rather than by a run.
-          tar -tzf "$tgz" | grep -qx "objectfs-$platform" || {
+          # The listing is read once into a variable and matched with a herestring, and that is
+          # load-bearing rather than tidiness. This check used to be `tar -tzf "$tgz" | grep -qx …`,
+          # which is wrong under the `set -o pipefail` at the top of this step, and wrong in the
+          # direction that reports a correct artifact as broken: `grep -q` exits at its first match, so
+          # if tar has anything left to write it is killed by SIGPIPE, and pipefail promotes that to a
+          # failed pipeline *because the match succeeded*. It fired on v0.17.0 — `tar: stdout: write
+          # error`, then this step's own diagnostic printing the very name it had just reported missing.
+          #
+          # What decides it is whether any member follows the one that matched, which is why it looked
+          # correct for five releases. Measured, in a container, against a two-member archive whose
+          # first member is 25MB: matching the first name exits 141 (SIGPIPE), matching the last name
+          # passes. Through v0.16.0 these tarballs had exactly one member, so nothing followed the match
+          # and tar was already done; #533 added mount.objectfs after it. ci.yml's sibling check had the
+          # same shape and stayed green for the mirror-image reason — it matches mount.objectfs, which
+          # tar lists last. Both are fixed, not just the one that showed.
+          #
+          # A herestring has no writer process to signal, so grep's early exit cannot be mistaken for a
+          # failure. Keeping the listing also means the diagnostic below prints what was actually
+          # examined rather than re-running tar and hoping it says the same thing.
+          listing=$(tar -tzf "$tgz")
+
+          # The platform-named binary, which is the other half of install.sh's contract: it extracts,
+          # looks for exactly this name, and dies with "the release layout has changed and this script
+          # needs updating" if it is absent. Checked here because the failure is otherwise found by a
+          # user rather than by a run.
+          grep -qFx "objectfs-$platform" <<<"$listing" || {
             echo "::error::$tgz does not contain a file named objectfs-$platform"
             echo "scripts/install.sh looks that name up after extracting and refuses to guess."
-            tar -tzf "$tgz"
+            printf '%s\n' "$listing"
+            exit 1
+          }
+
+          # The mount helper, asserted in both directions. #533 put it in the three Linux tarballs and
+          # deliberately not in the two darwin ones — there is no /sbin/mount.$TYPE protocol on macOS,
+          # so a darwin copy would be a binary nothing can register — and goreleaser only permits that
+          # asymmetry because `allow_different_binary_count: true` says it is intended. That setting
+          # makes *every* asymmetry legal, so a missing helper is silence rather than a build failure:
+          # install.sh's registration step would install nothing and report success.
+          #
+          # ci.yml's packaging job asserts the same thing against a snapshot build, which is why this
+          # gate's own breakage reached a tag with CI green — two checks of one fact, written
+          # differently, and only the one that does not run on a pull request was wrong. They are still
+          # two, because the snapshot ci.yml builds is not the artifact this job publishes; what has
+          # changed is that both are now written the way that cannot pass or fail for the wrong reason.
+          case $platform in
+            linux-*) want=present ;;
+            *) want=absent ;;
+          esac
+
+          got=absent
+          if grep -qFx 'mount.objectfs' <<<"$listing"; then
+            got=present
+          fi
+
+          [ "$got" = "$want" ] || {
+            echo "::error::$tgz has mount.objectfs $got, expected $want"
+            echo "Linux tarballs carry the helper since #533; darwin ones must not, because mount(8)"
+            echo "has no /sbin/mount.\$TYPE protocol there. allow_different_binary_count makes both"
+            echo "mistakes legal as far as goreleaser is concerned, so this is the only gate on it."
+            printf '%s\n' "$listing"
             exit 1
           }
         done
