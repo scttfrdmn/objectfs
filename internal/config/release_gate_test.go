@@ -247,6 +247,33 @@ var requiredCheckSuffix = regexp.MustCompile(` \(.*\)$`)
 // job, whose `name:` is `Security Scan`. It is a job name and not the SARIF-derived check the
 // scanner also produces, deliberately — a SARIF check does not report on `push: main`, so only a
 // job name can be required. Do not "tidy" this by pointing it at the scanner's check.
+//
+// This list held twenty of the thirty-nine configured names until it was diffed against the API,
+// and nothing had gone stale to make it wrong — it was written when there were twenty and never
+// grew, so nineteen required contexts had no guard at all. Every one of the nineteen is a check
+// added since: `build-tags (s3compat)`, `deploy-manifests`, `docs-site`, all ten `fuzz-smoke`
+// cells, all three `install-script` rows, `labels`, `sdk-metrics` and `systemd-unit`. A
+// half-populated list is worse than an empty one, because the test passing reads as the whole set
+// being covered.
+//
+// **Re-diff it rather than appending to it** when a job is added to the gate:
+//
+//	gh api repos/scttfrdmn/objectfs/branches/main/protection/required_status_checks/contexts -q '.[]' | sort
+//
+// The list is still transcribed rather than fetched, for the reason above: fetching would make the
+// test pass on a tree whose local rename is exactly what it exists to catch, since the API returns
+// the configured name either way.
+//
+// One residual gap, stated because it is live rather than theoretical.
+// TestRequiredChecksStillHaveAJobToReportThem strips the ` (...)` suffix before matching, so it
+// checks that the *base job* still exists and cannot see a matrix **cell** being renamed. Three of
+// these names embed things that move: `install-script (opensuse/leap:15.6, tar, zypper -q -n
+// install tar gzip)` carries a container image tag *and* a package-manager command line, so
+// bumping Leap to 16 or editing those zypper flags silently orphans a required context while this
+// test stays green. `modulefiles` already solved this for itself — it sets an explicit `name:` so
+// its contexts do not carry an absolute interpreter path a distro can move — and `install-script`
+// should do the same. It is not done here because renaming a required check means changing branch
+// protection, which is a repository setting and not this repository's to change from code.
 var requiredChecks = []string{
 	"test",
 	"lint",
@@ -262,11 +289,30 @@ var requiredChecks = []string{
 	"build-tags (e2e)",
 	"build-tags (integration)",
 	"build-tags (fuse_mount)",
+	"build-tags (s3compat)",
 	"cross-build (linux, 386)",
 	"cross-build (linux, arm, 7)",
 	"modulefiles (lmod)",
 	"modulefiles (tcl-modules)",
 	"packaging",
+	"deploy-manifests",
+	"docs-site",
+	"labels",
+	"sdk-metrics",
+	"systemd-unit",
+	"fuzz-smoke (./internal/adapter, FuzzConfigConstructsBackend)",
+	"fuzz-smoke (./internal/awsname, FuzzValidateRegion)",
+	"fuzz-smoke (./internal/coord, FuzzNewConfig)",
+	"fuzz-smoke (./internal/difftest, FuzzOperationSequence)",
+	"fuzz-smoke (./internal/storage/s3, FuzzGetObjectRange)",
+	"fuzz-smoke (./internal/storage/s3, FuzzRoundTrip)",
+	"fuzz-smoke (./internal/storage/s3, FuzzSliceRange)",
+	"fuzz-smoke (./internal/vfs, FuzzAttrFromMetadata)",
+	"fuzz-smoke (./internal/vfs, FuzzExtentList)",
+	"fuzz-smoke (./internal/vfs, FuzzNodeLifecycle)",
+	"install-script (opensuse/leap:15.6, tar, zypper -q -n install tar gzip)",
+	"install-script (rockylinux:9)",
+	"install-script (ubuntu:24.04, curl or wget, apt-get update -qq && apt-get install -y -qq wget)",
 	"Security Scan",
 }
 
