@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,68 @@ func triggerSection(wf workflowFile, event string) (map[any]any, bool) {
 	cfg, _ := spec.(map[any]any)
 
 	return cfg, true
+}
+
+// workflowStep is one step of a job, reduced to the three fields tests ask about.
+//
+// A step is not given a struct on workflowJobDef itself, because `Steps any` is load-bearing there
+// for a presence check — see its comment. This is the accessor that knows the shape instead, in the
+// spirit of #504: one place that understands yaml.v2's `map[any]any`, rather than a fifth
+// hand-rolled walk in the test that happens to need it.
+type workflowStep struct {
+	Name string
+	Run  string
+	Env  map[string]string
+}
+
+// jobSteps returns a job's steps.
+//
+// A job with `uses:` has no steps and gives an empty slice rather than an error: that is a legal
+// job, so a caller iterating over every job should skip it, not fail on it. Callers that need a
+// floor should assert one, for the reason so many tests in this package say out loud — an assertion
+// over an empty list reports success having checked nothing.
+func jobSteps(job workflowJobDef) []workflowStep {
+	raw, ok := job.Steps.([]any)
+	if !ok {
+		return nil
+	}
+
+	out := make([]workflowStep, 0, len(raw))
+
+	for _, entry := range raw {
+		fields, ok := entry.(map[any]any)
+		if !ok {
+			continue
+		}
+
+		step := workflowStep{Env: map[string]string{}}
+
+		if name, ok := fields["name"].(string); ok {
+			step.Name = name
+		}
+
+		if run, ok := fields["run"].(string); ok {
+			step.Run = run
+		}
+
+		// Values are stringified rather than type-asserted to string. A step env value can be a
+		// number or a bool in YAML — `FOO: 1` is an int — and an assertion that drops those would
+		// report the key as absent, which is the opposite of what a presence check is for.
+		if env, ok := fields["env"].(map[any]any); ok {
+			for key, value := range env {
+				name, ok := key.(string)
+				if !ok {
+					continue
+				}
+
+				step.Env[name] = fmt.Sprintf("%v", value)
+			}
+		}
+
+		out = append(out, step)
+	}
+
+	return out
 }
 
 // readWorkflow parses one file under .github/workflows by name.
