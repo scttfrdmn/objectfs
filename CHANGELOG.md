@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`bucket` and `kms_key_id` accepted control characters, and were refused later by something less
+  informative.** `ValidateBucketName` forbade control bytes by enumerating six of them
+  (`\t\n\r\v\f\x00`) under a comment that claimed the whole category, so `\x06` and every other C0
+  byte passed and produced an unparseable endpoint URL. `ValidateKMSKeyID` had no control-character
+  check at all — a raw CRLF inside an ARN's region or account field validated clean, because the ARN
+  pattern only required those fields to contain no colon. Both are now rejected by category at config
+  load, where the message names the character and the field.
+
+  This is not a header-injection fix and is not described as one: `net/http` refuses every one of these
+  values at send time with `invalid header field value`, verified by execution, so nothing was ever
+  injectable. What was wrong is where the refusal happened — an opaque transport error on the first
+  encrypted write, from a mount that had started successfully, instead of a named error at load.
+
+  Both were found by `FuzzValidateBucketName` and `FuzzValidateKMSKeyID` in **1 and 6 seconds** the
+  first time either was run with a fuzzing budget rather than its seed corpus. Neither is in CI's
+  `fuzz-smoke` matrix; twelve of the repository's twenty-two targets are not, which is filed as #565.
+  The counterexamples are committed, and a mutation check confirmed that reverting either fix fails a
+  named test — for the KMS one, the new counterexample is the *only* test that catches it.
+
 ## [0.17.1] - 2026-09-20
 
 The 0.17.0 release built and never published, for the second time in three releases, and again because
