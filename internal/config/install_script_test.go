@@ -476,3 +476,140 @@ func caseTargets(script, opener string) []string {
 
 	return targets
 }
+
+// TestInstallScriptJobAuthenticatesEveryRunThatDownloads couples the install-script job to the token
+// branch scripts/install.sh already has.
+//
+// resolve_latest uses GITHUB_TOKEN when it is set and its comment says exactly who for:
+// "Unauthenticated API calls are rate limited by IP, which is fine for a person and not fine for CI
+// on a shared runner." The job on the far side of that sentence never passed it. So the capability
+// was built, documented as being for this job, and unreachable from it — the same shape as a
+// MountOptions field that nothing sets, and it failed the same way: silently, until the shared
+// runner's sixty-an-hour ran out and PR #571 got `curl: (22) The requested URL returned error: 403`
+// from api.github.com on a diff that touched two Go files in internal/awsname.
+//
+// Retrying is not the alternative and the script says so at two call sites: curl does not retry a
+// 403, wget_retry_flags excludes it deliberately because it is an authorization answer rather than a
+// transient one, and the primary rate limit resets up to an hour out — longer than the job's
+// timeout. Authenticated is 5,000 an hour against 60.
+//
+// Asserted here rather than left to the job, because the job cannot catch it: an unauthenticated run
+// passes whenever the quota happens not to be exhausted, which is most of the time. A check that is
+// only wrong under load is one nobody reads as wrong.
+func TestInstallScriptJobAuthenticatesEveryRunThatDownloads(t *testing.T) {
+	t.Parallel()
+
+	const job = "install-script"
+
+	def, ok := readWorkflow(t, "ci.yml").Jobs[job]
+	if !ok {
+		t.Fatalf("ci.yml has no %q job. If it was renamed, note that three required status checks "+
+			"are named after it — see requiredChecks in release_gate_test.go", job)
+	}
+
+	steps := jobSteps(def)
+	if len(steps) == 0 {
+		t.Fatalf("the %q job parsed with no steps, so everything below would pass having checked "+
+			"nothing", job)
+	}
+
+	// A step that asserts the install *succeeded* is a step that downloaded, which is a step that
+	// called the API. Keyed on the assertions rather than on the step's name, because a name is prose
+	// and these two are the checks that would have to be deleted for the step to stop needing a token.
+	downloads := 0
+
+	for _, step := range steps {
+		code := withoutComments(step.Run)
+
+		assertsSuccess := strings.Contains(code, `grep -q "EXIT=0"`) ||
+			strings.Contains(code, "grep -q SAME")
+		if !assertsSuccess {
+			continue
+		}
+
+		downloads++
+
+		if _, ok := step.Env["GITHUB_TOKEN"]; !ok {
+			t.Errorf("step %q of the %q job installs from a release but sets no GITHUB_TOKEN in its "+
+				"env. resolve_latest in scripts/install.sh uses the token when it is present, and "+
+				"without it the call to api.github.com is rate limited by the shared runner's IP at "+
+				"60 an hour — which is a 403 this job reports as \"install.sh did not succeed\", "+
+				"blaming the script for a quota", step.Name, job)
+		}
+
+		if !strings.Contains(code, "-e GITHUB_TOKEN") {
+			t.Errorf("step %q of the %q job runs install.sh in a container without passing "+
+				"`-e GITHUB_TOKEN` to docker run. Setting the variable on the step is not enough: "+
+				"the script runs inside the container, and a container does not inherit the "+
+				"runner's environment", step.Name, job)
+		}
+	}
+
+	// A floor, because every assertion above is inside a filter. If the two `grep` strings are ever
+	// reworded, this loop matches nothing and the test passes having checked no step at all — which
+	// is the failure mode the vacuous SAME comparison in this very job had before it was fixed.
+	const wantDownloadSteps = 2
+
+	if downloads != wantDownloadSteps {
+		t.Errorf("found %d steps in the %q job that assert a successful install, expected %d (the "+
+			"one that installs and the one that installs twice). If a step was added or the "+
+			"assertions were reworded, update this test rather than the count — the filter above is "+
+			"what decides whether anything is checked at all", downloads, job, wantDownloadSteps)
+	}
+}
+
+// TestWorkflowsNeverForwardAnUnsetEnvironmentVariableToAContainer pins the half of the fix that is
+// easy to write and impossible to see.
+//
+// `docker run -e FOO` with no `=` forwards FOO from the caller's environment, and when FOO is not
+// set there it forwards *nothing* — no error, no warning, an unset variable inside the container.
+// So the `-e` and the step's `env:` are one change in two places, and the half that is missing is
+// the half that produces the original symptom with the fix apparently applied.
+func TestWorkflowsNeverForwardAnUnsetEnvironmentVariableToAContainer(t *testing.T) {
+	t.Parallel()
+
+	// `-e NAME` with no `=`. The `=` form carries its own value and needs nothing from the step.
+	forward := regexp.MustCompile(`-e ([A-Z_][A-Z0-9_]*)(?:\s|\\|$)`)
+
+	checked := 0
+
+	// Walked, not enumerated, for the reason readWorkflowTexts gives: the workflow that arrives with
+	// this mistake is by definition one nobody added to a list.
+	for _, text := range readWorkflowTexts(t) {
+		file := text.Name
+		wf := readWorkflow(t, file)
+
+		for id, def := range wf.Jobs {
+			for _, step := range jobSteps(def) {
+				for _, m := range forward.FindAllStringSubmatch(withoutComments(step.Run), -1) {
+					name := m[1]
+					checked++
+
+					if _, ok := step.Env[name]; ok {
+						continue
+					}
+
+					if _, ok := wf.Env[name]; ok {
+						continue
+					}
+
+					if _, ok := def.Env[name]; ok {
+						continue
+					}
+
+					t.Errorf("%s: step %q of job %q passes `-e %s` to a container, but %s is not set "+
+						"in the step's env, the job's env, or the workflow's env. That form forwards "+
+						"the variable from the runner's environment, so it forwards nothing here and "+
+						"the container sees it unset — with no error to say so",
+						file, step.Name, id, name, name)
+				}
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Error("found no `-e NAME` container forwarding in any workflow, so this test checked " +
+			"nothing. The install-script job has two; if the pattern above stopped matching them, " +
+			"fix the pattern rather than deleting the test")
+	}
+}

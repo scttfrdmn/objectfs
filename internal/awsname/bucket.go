@@ -29,14 +29,33 @@ const (
 // feature the endpoint does not have.
 var bucketNameReservedSuffixes = []string{"-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"}
 
-// bucketNameForbiddenBytes are the characters that cannot appear in a name this code will put into a URL.
+// bucketNameForbiddenBytes are the URL-significant characters that cannot appear in a name this code
+// will put into a URL.
 //
 // The name is interpolated into a hostname for virtual-hosted addressing and into a path for path-style,
 // so each of these would not produce a rejected request — it would produce a request somewhere else, or a
 // malformed one, at a layer with no idea the name came from an operator's config file. A slash ends the
 // authority; a colon starts a port; an at-sign starts userinfo; a question mark or hash starts a query or
-// fragment; whitespace and control bytes break the request line.
-const bucketNameForbiddenBytes = "/\\:@?#[]%& \t\n\r\v\f\x00"
+// fragment; a space breaks the request line.
+//
+// Control bytes are NOT in this list, deliberately. They used to be — as `\t\n\r\v\f\x00`, five of the
+// thirty-three that exist — and that is the bug this constant is the site of. The comment above it
+// claimed "whitespace and control bytes", a category; the string enumerated a handful, and the gap
+// between the two was invisible because both readings accept every name anyone tries by hand.
+// FuzzValidateBucketName found `"00\x06"` in **under one second** the first time it was ever run with a
+// budget, which is the tell: a defect a fuzzer reaches that fast was never guarded, only described.
+// Control bytes are now rejected by category in isControlByte below, so this list holds only characters
+// whose problem is their meaning in a URL rather than their being unprintable.
+const bucketNameForbiddenBytes = "/\\:@?#[]%& "
+
+// isControlByte reports whether r is a C0 control character or DEL.
+//
+// By category, never by enumeration — see bucketNameForbiddenBytes for what enumerating cost. The range
+// is ASCII-only because the callers check `r > 127` separately and reject it, so a Unicode control
+// character cannot reach a name that gets this far.
+func isControlByte(r rune) bool {
+	return r < 0x20 || r == 0x7f
+}
 
 // ValidateBucketName reports whether name is one ObjectFS can mount.
 //
@@ -81,7 +100,13 @@ func ValidateBucketName(name string) error {
 			"rather than fail", name, name[i], i)
 	}
 
-	for _, r := range name {
+	for i, r := range name {
+		if isControlByte(r) {
+			return fmt.Errorf("bucket name %q contains the control character %q at position %d, which "+
+				"cannot appear in a bucket name — the name goes into a URL, so this would address "+
+				"something other than the bucket rather than fail", name, r, i)
+		}
+
 		if r > 127 {
 			return fmt.Errorf("bucket name %q contains the non-ASCII character %q; S3 bucket names are "+
 				"ASCII, and a name that looks right can differ from the one that was typed — a Cyrillic "+
