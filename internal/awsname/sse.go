@@ -158,6 +158,33 @@ func ValidateKMSKeyID(id string) error {
 			len(id), maxKMSKeyIDLength)
 	}
 
+	// Control characters, before the patterns, because none of the patterns excluded them and this value
+	// is interpolated into the x-amz-server-side-encryption-aws-kms-key-id request header.
+	//
+	// The ARN arm was the hole: kmsARNPattern's region and account fields accepted any bytes that were not
+	// a colon, so `arn:0:kms:0:\r\n:key/<uuid>` validated clean. Measured, not reasoned about —
+	// FuzzValidateKMSKeyID found \x1e in six seconds the first time it ran with a budget, and a raw CRLF
+	// passes the unfixed validator too.
+	//
+	// This is not a header-injection fix, and claiming it would be would be worse than not making it.
+	// net/http rejects every one of these at send time with `invalid header field value` — verified by
+	// executing it against an httptest server for \r\n, \x1e and \x06, all three refused before a byte
+	// left the process. So the outer layer already fails closed and nothing was ever injectable. What was
+	// wrong is *where* the refusal happened: an opaque transport error on the first encrypted PUT, from a
+	// mount that started successfully, instead of a named config error at load. That is the same reasoning
+	// ValidateBucketName's doc comment gives for existing at all, and the trailing-whitespace check ten
+	// lines above is the same idea applied to a neighboring cause.
+	//
+	// TrimSpace above does not cover this: it only looks at the ends, and only at Unicode space. An
+	// interior \x1e is neither.
+	for i, r := range id {
+		if isControlByte(r) {
+			return fmt.Errorf("kms_key_id %q contains the control character %q at position %d; this value "+
+				"goes into a request header, so it would fail as an unreadable transport error on the "+
+				"first encrypted write rather than here", id, r, i)
+		}
+	}
+
 	switch {
 	case strings.HasPrefix(id, kmsARNPrefix):
 		return validateKMSARN(id)
