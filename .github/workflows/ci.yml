@@ -20,12 +20,17 @@ name: CI
 #
 #  1. **Do not extract these jobs into a separate `gate.yml`.** That is the obvious shape and it
 #     would orphan every required status check on `main`. A `workflow_call` job reports its checks
-#     as `<caller-job-id> / <called-job-id>`, not `<called-job-id>`. Twenty check names are
-#     required on `main` — `test`, `lint`, `coverage`, `config-examples`, `packaging`, the six
-#     `build-tags (...)` cells, the six `cross-build (...)` cells, the two `modulefiles (...)`
-#     cells and `Security Scan` — and every one of them is pinned as a literal string in branch
-#     protection. Moving these jobs into a file that `ci.yml` then calls would rename all
-#     nineteen of the ones defined here to `gate / test`, `gate / lint` and so on: the required
+#     as `<caller-job-id> / <called-job-id>`, not `<called-job-id>`. Every required check name is
+#     pinned as a literal string in branch protection, and all but one of them is a job in this
+#     file — `requiredChecks` in `internal/config/release_gate_test.go` is the transcription, and
+#     the list is there rather than here for the reason the version constant is in one place: this
+#     comment used to enumerate the set and say "Twenty", and by the time anyone diffed it against
+#     the API the real count was thirty-nine, with ten `fuzz-smoke` cells and three
+#     `install-script` rows among the nineteen it did not mention. A count restated beside the
+#     thing it counts has no way to be told it is stale — which is the mistake the paragraph above
+#     owns up to about the word "four", made straight-faced here about a bigger number.
+#     Moving these jobs into a file that `ci.yml` then calls would rename every one of them to
+#     `gate / test`, `gate / lint` and so on: the required
 #     names would never report again and every pull request would block forever, with no failing
 #     check to point at. Making *this* file the reusable one instead keeps every check name
 #     byte-identical on push and pull_request, because on those events this is still the top-level
@@ -1864,6 +1869,23 @@ jobs:
         IMAGE: ${{ matrix.image }}
         MISSING: ${{ matrix.missing }}
         INSTALL: ${{ matrix.install }}
+        # resolve_latest reads this and uses it when it is set, and its comment says why in as many
+        # words: "Unauthenticated API calls are rate limited by IP, which is fine for a person and
+        # not fine for CI on a shared runner." The script has had that branch since the fix that
+        # added it. Nothing passed it. So the capability existed, was documented as being *for this
+        # job*, and was unreachable from it — and the job failed on PR #571 with
+        # `curl: (22) The requested URL returned error: 403` from api.github.com, on a diff that
+        # touched two Go files in internal/awsname.
+        #
+        # Retrying was already tried and is not the fix. `--retry 3` has been on that curl all along;
+        # curl does not retry a 403, deliberately, and wget_retry_flags excludes it for the reason
+        # written there — it is an authorization answer, not a transient one. Nor would retrying help
+        # if it did: the primary rate limit resets up to an hour out, which is longer than this job's
+        # 15-minute timeout. An authenticated call gets 5,000 requests an hour against 60 for the
+        # shared runner IP, which is the difference between a flake and a gate.
+        #
+        # `contents: read` at the workflow level is all this needs — it reads one public release.
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
 
@@ -1907,7 +1929,12 @@ jobs:
         # and not one of the three messages below, all of which were unreachable on exactly the runs
         # they were written for. A job whose assertions can only be read when they pass is reporting
         # the same non-answer this job exists to reject.
-        out=$(docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
+        # `-e GITHUB_TOKEN` only on the runs that download. The two refusal runs above deliberately do
+        # not get it: preflight exits before resolve_latest is called — confirmed from the failing log,
+        # where the opensuse refusal printed the missing-tar list and `EXIT=1` with no curl output at
+        # all — so a token there would be an environment variable in a container that never makes a
+        # request.
+        out=$(docker run --rm -e GITHUB_TOKEN -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
           bash -c "$prep /install.sh --prefix /opt/ofs 2>&1; echo \"EXIT=\$?\"; /opt/ofs/bin/objectfs --version" || true)
         echo "$out"
 
@@ -1933,18 +1960,36 @@ jobs:
       env:
         IMAGE: ${{ matrix.image }}
         INSTALL: ${{ matrix.install }}
+        # Same reason as the step above: this one installs twice, so it makes two API calls and is
+        # rate limited by IP without a token.
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
 
         prep=""
         [ -n "$INSTALL" ] && prep="$INSTALL >/dev/null 2>&1;"
 
-        out=$(docker run --rm -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
+        out=$(docker run --rm -e GITHUB_TOKEN -v "$PWD/scripts/install.sh":/install.sh:ro "$IMAGE" \
           bash -c "$prep \
             /install.sh --prefix /opt/ofs >/dev/null 2>&1; a=\$(sha256sum /opt/ofs/bin/objectfs | cut -d' ' -f1); \
             /install.sh --prefix /opt/ofs >/dev/null 2>&1; b=\$(sha256sum /opt/ofs/bin/objectfs | cut -d' ' -f1); \
             echo \"a=\$a b=\$b\"; [ \"\$a\" = \"\$b\" ] && echo SAME || echo DIFFERENT")
         echo "$out"
+
+        # The digests are checked for being digests before they are compared, and that ordering is the
+        # whole point. Both installs are silenced to /dev/null, so when they fail there is no binary,
+        # `sha256sum` prints nothing to stdout, and `a` and `b` are both the empty string — which are
+        # equal, so the step echoed SAME and passed. This assertion was green for every possible
+        # failure of the thing it exists to test, including the 403 that took the step above down.
+        #
+        # Two empty digests is also the *only* way a and b differ from real ones here, so matching them
+        # against the shape of a SHA-256 is enough; there is no need to know the expected value, which
+        # changes with every release.
+        grep -qE "^a=[0-9a-f]{64} b=[0-9a-f]{64}$" <<<"$out" || {
+          echo "::error::the two runs of install.sh on $IMAGE did not both leave a binary to hash." \
+            "An empty digest means the install failed, not that it was idempotent — and two empty" \
+            "digests compare equal, which is how this assertion used to pass on total failure."
+          exit 1; }
 
         grep -q SAME <<<"$out" || {
           echo "::error::two runs of install.sh on $IMAGE left different binaries."; exit 1; }
