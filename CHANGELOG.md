@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **README's "Not implemented" table, and the log lines behind two of its refusals, cited closed
+  issues as tracking open gaps.** Directory `chmod`/`chown` and directory extended attributes pointed
+  at #165 and #167, which implemented those operations for files and were closed as completed. Both
+  gaps are real and unchanged; they are now tracked by #588 and #589, and the `issue=` field in the
+  `ENOTSUP` warnings says so too. A check in CI now fails when either place cites a closed issue.
+
 - **`bucket` and `kms_key_id` accepted control characters, and were refused later by something less
   informative.** `ValidateBucketName` forbade control bytes by enumerating six of them
   (`\t\n\r\v\f\x00`) under a comment that claimed the whole category, so `\x06` and every other C0
