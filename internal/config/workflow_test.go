@@ -81,6 +81,17 @@ type workflowJobDef struct {
 	// as errors rather than as findings.
 	RunsOn any `yaml:"runs-on"`
 
+	// Strategy holds only a matrix's `include:` rows, which are what name a cell. Other matrix keys
+	// (`goos: [...]`) are axes that yaml.v2 ignores here because the parse is non-strict. A matrix
+	// built from an expression would fail to unmarshal into this struct; no workflow has one, and
+	// parseWorkflow's fatal error is the right outcome if one ever arrives, since a test that reads
+	// cells could not see them.
+	Strategy struct {
+		Matrix struct {
+			Include []map[string]any `yaml:"include"`
+		} `yaml:"matrix"`
+	} `yaml:"strategy"`
+
 	// Steps distinguishes a reusable-workflow caller from a job that merely also has `uses:` on a
 	// step. Held as `any` and tested for nil rather than as a slice, so presence is presence.
 	//

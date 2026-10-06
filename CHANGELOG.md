@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bucket` still accepted punctuation no bucket name has ever contained.** After the control-character
+  fix, `ValidateBucketName` refused the URL characters it listed (`/\:@?#[]%&` and space) and accepted
+  everything else, so a backtick, `"`, `<`, `>`, `^`, `{`, `|`, `}`, `!`, `$`, `'`, `(`, `)`, `*`, `+`,
+  `,`, `;`, `=` and `~` all passed — the first CI fuzz run of the target found the backtick in 0.07s.
+  The check is now an allow-list: letters of either case, digits, `.`, `-` and `_`, which is the widest
+  set S3 has ever permitted. Legacy names with uppercase letters or underscores are still accepted, as
+  before.
+
 - **README's "Not implemented" table, and the log lines behind two of its refusals, cited closed
   issues as tracking open gaps.** Directory `chmod`/`chown` and directory extended attributes pointed
   at #165 and #167, which implemented those operations for files and were closed as completed. Both

@@ -143,6 +143,26 @@ func TestValidateBucketName(t *testing.T) {
 			why:     "breaks the request line; the AWS CLI refuses it in parameter validation before sending",
 		},
 		{
+			name:    "a backtick",
+			bucket:  "research`data",
+			wantErr: "cannot appear in a bucket name",
+			why: "found by FuzzValidateBucketName the first time CI fuzzed it (#565). The old deny-list " +
+				"named the URL characters someone thought of, and this was not one of them",
+		},
+		{
+			name:    "a pipe",
+			bucket:  "research|data",
+			wantErr: "cannot appear in a bucket name",
+			why:     "one of the characters the deny-list also missed; pinned so the allow-list's reach is named",
+		},
+		{
+			name:    "a tilde",
+			bucket:  "research~data",
+			wantErr: "cannot appear in a bucket name",
+			why: "unreserved in a URL path, so it would not even fail to parse: it would address a bucket " +
+				"no S3 rule has ever allowed to exist",
+		},
+		{
 			name:    "a NUL byte",
 			bucket:  "research\x00data",
 			wantErr: "cannot appear in a bucket name",
