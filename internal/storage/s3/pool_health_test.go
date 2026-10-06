@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,9 +121,16 @@ func TestTestConnection_ProbesTheConfiguredBucket(t *testing.T) {
 		t.Fatal("testConnection reported unhealthy against an endpoint answering 200")
 	}
 
+	// One trailing slash is trimmed before comparing, because whether the SDK sends it is a
+	// serialization detail rather than the property under test. smithy-go v1.28.2 changed it — "JoinPath
+	// keeps a trailing slash when the added path is a slash" — and HeadBucket's path template is `/`,
+	// so the same probe went from `HEAD /the-pools-bucket` to `HEAD /the-pools-bucket/`, and an exact
+	// match turned a dependency bump red. Both address the bucket in path-style. What the trim must not
+	// do is let through the two requests this test exists to reject: ListBuckets is `GET /`, and a
+	// HeadBucket on an empty name is `HEAD /`, which trims to `HEAD ` and still fails.
 	select {
 	case got := <-seen:
-		if want := "HEAD /the-pools-bucket"; got != want {
+		if want := "HEAD /the-pools-bucket"; strings.TrimSuffix(got, "/") != want {
 			t.Errorf("probe request = %q, want %q: ListBuckets asks about the account, which is a "+
 				"different permission and says nothing about the bucket in use", got, want)
 		}
