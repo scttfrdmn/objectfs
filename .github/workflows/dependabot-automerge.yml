@@ -25,6 +25,15 @@ name: Dependabot Auto-Merge
 #      command. This only became visible once (1) and (4) were fixed and the step started
 #      executing at all instead of being skipped. See the note on the step below.
 #
+# And a sixth, found after all five were fixed, because it only exists once auto-merge works: every
+# commit this workflow merged reached `main` with **no CI run on it** — no ci.yml, no Security Scan.
+# GitHub does not create workflow runs for events made with the workflow's own GITHUB_TOKEN (a guard
+# against recursion), and when `--auto` fires, the merge is attributed to whichever token armed it.
+# #555, #564, #577 and #582 all landed that way; every merge a person made in the same window has a
+# push run. It read as green because `main`'s status is its latest *run*, which was the last human
+# merge. See #584. That is why the merge step uses AUTOMERGE_TOKEN and not GITHUB_TOKEN — do not
+# "simplify" it back; `internal/config/dependabot_automerge_test.go` fails if you do.
+#
 # The pattern is the lesson: a fix that "should have worked" and didn't usually means a second cause,
 # not a wrong diagnosis. Four of these five were confirmed only by watching a real Dependabot PR.
 #
@@ -89,11 +98,18 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'automerge') &&
         (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
          steps.metadata.outputs.update-type == 'version-update:semver-minor')
+      # A fine-grained token scoped to this repository with Contents, Pull requests and Workflows
+      # read/write. Workflows is not optional: Dependabot bumps the actions pinned in this directory,
+      # and GitHub refuses to merge a change under `.github/workflows/` for a token without it.
+      #
+      # No fallback to GITHUB_TOKEN when the secret is missing, deliberately. A fallback keeps
+      # auto-merge working by quietly reopening #584, and "it still merges" is exactly what made that
+      # gap invisible the first time. An empty token fails this step red on the PR, where it is seen.
       run: |
         gh pr merge --auto --squash "$PR_URL"
       env:
         PR_URL: ${{ github.event.pull_request.html_url }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
 
     - name: Comment on major version updates
       if: steps.metadata.outputs.update-type == 'version-update:semver-major'
