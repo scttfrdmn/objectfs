@@ -29,24 +29,35 @@ const (
 // feature the endpoint does not have.
 var bucketNameReservedSuffixes = []string{"-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"}
 
-// bucketNameForbiddenBytes are the URL-significant characters that cannot appear in a name this code
-// will put into a URL.
+// isBucketNameChar reports whether r can appear in a bucket name: an ASCII letter of either case, a
+// digit, '.', '-' or '_'.
 //
-// The name is interpolated into a hostname for virtual-hosted addressing and into a path for path-style,
-// so each of these would not produce a rejected request — it would produce a request somewhere else, or a
-// malformed one, at a layer with no idea the name came from an operator's config file. A slash ends the
-// authority; a colon starts a port; an at-sign starts userinfo; a question mark or hash starts a query or
-// fragment; a space breaks the request line.
+// An allow-list, and it replaces a deny-list that was the site of two defects. That list,
+// bucketNameForbiddenBytes, named the URL-significant characters someone thought of — `/\:@?#[]%&` and
+// space — under a comment explaining why each one breaks a URL. It was right about every character it
+// named and silent about the rest. The first hole was control bytes: the list enumerated five of
+// thirty-three, FuzzValidateBucketName found `"00\x06"` in under a second, and #571 closed it by adding a
+// second enumerated category. The second was a backtick: the name 00 followed by one went into a hostname that
+// net/url refuses, found in 0.07s the first time CI fuzzed the target at all (#565). Neither list was
+// wrong about anything it said; a deny-list is wrong about everything it does not say, and the
+// characters it does not say are the ones nobody tries by hand — `"<>^{|}!$'()*+,;=~` and a backtick
+// were all still accepted.
 //
-// Control bytes are NOT in this list, deliberately. They used to be — as `\t\n\r\v\f\x00`, five of the
-// thirty-three that exist — and that is the bug this constant is the site of. The comment above it
-// claimed "whitespace and control bytes", a category; the string enumerated a handful, and the gap
-// between the two was invisible because both readings accept every name anyone tries by hand.
-// FuzzValidateBucketName found `"00\x06"` in **under one second** the first time it was ever run with a
-// budget, which is the tell: a defect a fuzzer reaches that fast was never guarded, only described.
-// Control bytes are now rejected by category in isControlByte below, so this list holds only characters
-// whose problem is their meaning in a URL rather than their being unprintable.
-const bucketNameForbiddenBytes = "/\\:@?#[]%& "
+// So the rule is now what a bucket name can be, and that set is small and known. The widest S3 has ever
+// allowed is the legacy us-east-1 rule, which added uppercase letters and underscores to today's
+// lowercase, digits, dots and hyphens. ValidateBucketName deliberately accepts legacy names, because
+// buckets carrying them exist and S3 serves them — see its comment — so this admits exactly that set.
+// No character outside it has ever named a bucket, so refusing it cannot refuse a bucket that exists.
+func isBucketNameChar(r rune) bool {
+	switch {
+	case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+		return true
+	case r == '.' || r == '-' || r == '_':
+		return true
+	default:
+		return false
+	}
+}
 
 // isControlByte reports whether r is a C0 control character or DEL.
 //
@@ -94,12 +105,6 @@ func ValidateBucketName(name string) error {
 			name, len(name), unit, bucketNameMin, bucketNameMax)
 	}
 
-	if i := strings.IndexAny(name, bucketNameForbiddenBytes); i >= 0 {
-		return fmt.Errorf("bucket name %q contains %q at position %d, which cannot appear in a bucket "+
-			"name — the name goes into a URL, so this would address something other than the bucket "+
-			"rather than fail", name, name[i], i)
-	}
-
 	for i, r := range name {
 		if isControlByte(r) {
 			return fmt.Errorf("bucket name %q contains the control character %q at position %d, which "+
@@ -111,6 +116,15 @@ func ValidateBucketName(name string) error {
 			return fmt.Errorf("bucket name %q contains the non-ASCII character %q; S3 bucket names are "+
 				"ASCII, and a name that looks right can differ from the one that was typed — a Cyrillic "+
 				"с and a Latin c are two characters", name, r)
+		}
+
+		// After the two cases above, which keep their own messages because each says something the
+		// operator would not otherwise see: a control byte and a lookalike letter are both invisible.
+		if !isBucketNameChar(r) {
+			return fmt.Errorf("bucket name %q contains %q at position %d, which cannot appear in a bucket "+
+				"name: a bucket name is letters, digits, '.', '-' and '_'. The name goes into a URL, so "+
+				"this would address something other than the bucket, or fail to parse, rather than be "+
+				"refused by S3", name, r, i)
 		}
 	}
 
