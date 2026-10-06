@@ -117,7 +117,7 @@ jobs:
   # entries, so an arrangement that keeps the property is free to change.
   artifacts:
     name: Build and Package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: gate
     permissions:
@@ -318,7 +318,7 @@ jobs:
   docker-build-push:
     name: Build and Push Docker Image
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -410,7 +410,7 @@ jobs:
   # gate on the release — was accidental, and this resolves it toward gating rather than away.
   security-scan:
     name: Security Scan Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: artifacts
     permissions:
@@ -464,7 +464,7 @@ jobs:
   # Publish the release, last, from artifacts that already exist.
   publish:
     name: Publish Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # `artifacts` covers the packages as well as the tarballs, so this dependency gates both. A release
     # that attaches the tarballs and silently omits the packages is worse than one that fails: the page
