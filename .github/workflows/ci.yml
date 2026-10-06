@@ -134,7 +134,7 @@ jobs:
   # gate skipped the tests covering the subsystem where every proven data-loss defect lived.
   # ---------------------------------------------------------------------------------------------
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -178,7 +178,7 @@ jobs:
   # can be trusted rather than merely hoped to be current.
   # ---------------------------------------------------------------------------------------------
   build-tags:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -222,7 +222,7 @@ jobs:
   # justified in a diff. Packages absent from the list have no floor yet.
   # ---------------------------------------------------------------------------------------------
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -269,7 +269,7 @@ jobs:
   # be drawn down deliberately. The whole-repo number is reported below so it stays visible.
   # ---------------------------------------------------------------------------------------------
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -334,7 +334,7 @@ jobs:
   # match would look like coverage.
   #
   # GOMEMLIMIT is the reason this job stopped dying, and the value is not arbitrary. `go test
-  # -fuzz` runs one worker *process* per CPU — four on ubuntu-latest — and each is an independent
+  # -fuzz` runs one worker *process* per CPU — four on the ubuntu-24.04 runner — and each is an independent
   # Go runtime that sizes its heap against the whole machine's memory, because none of them knows
   # the other three exist. FuzzOperationSequence allocates hard (every iteration is a real
   # read-modify-write over a real HTTP endpoint), so four workers reached 6 GB of mostly-garbage
@@ -363,7 +363,7 @@ jobs:
   # alone, and the reasoning for each tolerated shape is in its header.
   # ---------------------------------------------------------------------------------------------
   fuzz-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       GOMEMLIMIT: 768MiB
@@ -423,7 +423,7 @@ jobs:
   # under CGO_ENABLED=0 for any target (#200 covers that surface separately).
   # ---------------------------------------------------------------------------------------------
   cross-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -481,7 +481,7 @@ jobs:
   # no mount: they read one committed file. There is nothing here for a flake to come from.
   # ---------------------------------------------------------------------------------------------
   sdk-metrics:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -652,7 +652,7 @@ jobs:
   # see, it cannot hold.
   # ---------------------------------------------------------------------------------------------
   docs-site:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -689,7 +689,7 @@ jobs:
   # `# /etc/objectfs/config.yaml` is a file a user will copy too.
   # ---------------------------------------------------------------------------------------------
   config-examples:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -735,7 +735,7 @@ jobs:
   # runner, and it is worth having as its own job rather than as a half-measure here.
   # ---------------------------------------------------------------------------------------------
   deploy-manifests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -806,7 +806,7 @@ jobs:
   # whose ExecStart, ExecStop, and ReadWritePaths all still contain an unexpanded specifier.
   # ---------------------------------------------------------------------------------------------
   systemd-unit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -867,7 +867,7 @@ jobs:
   # reading the same config, so a packaging change cannot be green here and broken on a tag.
   # ---------------------------------------------------------------------------------------------
   packaging:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1103,8 +1103,9 @@ jobs:
         # crw-rw-rw-, major 10 minor 229, alongside fusermount3 3.14.0 and /etc/fuse.conf. Both comments
         # are corrected and #543 carries what follows from it.
         #
-        # The check stays, because the runner image is not a constant: ubuntu-latest migrates to Ubuntu
-        # 26 from 2026-10-19, and a device that arrived without being promised can leave the same way.
+        # The check stays, because the runner image is not a constant. Every job is pinned to
+        # ubuntu-24.04 (#544), so the image now moves only on a deliberate bump — but it does move, and
+        # a device that arrived without being promised can leave the same way on the next one.
         # Reported first so that a mount failure four screens down is not the place anyone has to work
         # out that the device was missing.
         if [ ! -c /dev/fuse ]; then
@@ -1562,7 +1563,7 @@ jobs:
     # depends on nothing the runner's own install/remove sequence left behind and disturbs nothing.
     - name: The rpm installs and removes under a real rpm, and its scriptlets agree with the deb's
       run: |
-        # A container, because there is no rpm on ubuntu-latest and the reasoning this step inherits
+        # A container, because there is no rpm on the ubuntu-24.04 runner and the reasoning this step inherits
         # from #149 is right about why installing one is worse than nothing: an rpm database with no
         # distribution behind it fails on dependency resolution rather than on anything about this
         # package. Rocky is a real RHEL-compatible userspace with a real rpm and a real /bin/sh, and it
@@ -1693,7 +1694,7 @@ jobs:
     # modulecmd.tcl, the renamed check would never report and every PR would block on a context that
     # can no longer arrive. The system is the part of the identity that is stable.
     name: modulefiles (${{ matrix.system }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       # Both legs run to completion. A failure under Lmod says nothing about TCL and the reviewer
@@ -1774,7 +1775,7 @@ jobs:
   # the exact `- name:` form of each.
   # ---------------------------------------------------------------------------------------------
   labels:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1839,7 +1840,7 @@ jobs:
   # that resolves the latest release through the API on a machine without curl.
   # ---------------------------------------------------------------------------------------------
   install-script:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false

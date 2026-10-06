@@ -76,6 +76,11 @@ type workflowJobDef struct {
 	// the first two together as 0.
 	TimeoutMinutes any `yaml:"timeout-minutes"`
 
+	// RunsOn is `any` because the schema allows a label, a list of labels, or a group mapping. Only
+	// the first is a single, reviewable image, and a string field would make the other two unmarshal
+	// as errors rather than as findings.
+	RunsOn any `yaml:"runs-on"`
+
 	// Steps distinguishes a reusable-workflow caller from a job that merely also has `uses:` on a
 	// step. Held as `any` and tested for nil rather than as a slice, so presence is presence.
 	//
