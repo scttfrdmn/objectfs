@@ -92,7 +92,7 @@ func TestFuzzSmokeCoversEveryFuzzTarget(t *testing.T) {
 
 		// A row without both keys is reported as itself. Counting it as a cell with an empty package
 		// was this test's first bug: renaming `pkg:` in every row reported all 22 targets "missing",
-		// which is the right colour for the wrong reason, and the reason is what someone acts on.
+		// which is the right color for the wrong reason, and the reason is what someone acts on.
 		if pkg == "" || target == "" {
 			t.Errorf("ci.yml's fuzz-smoke matrix has a row without both `pkg` and `target`: %v. "+
 				"fuzz-smoke.sh is called with those two keys, so this cell fuzzes nothing", row)
