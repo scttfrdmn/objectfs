@@ -120,7 +120,7 @@ func markdownSection(doc, heading string) (string, bool) {
 		in   bool
 	)
 
-	for _, line := range strings.Split(doc, "\n") {
+	for line := range strings.SplitSeq(doc, "\n") {
 		if strings.TrimSpace(line) == heading {
 			in = true
 
