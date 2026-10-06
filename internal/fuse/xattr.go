@@ -417,7 +417,7 @@ func (n *DirectoryNode) Setxattr(ctx context.Context, attr string, data []byte, 
 
 	slog.Warn("extended attributes on a directory are not implemented; refusing rather than reporting a "+
 		"change that would not be visible on the next getfattr",
-		"path", n.key(), "attr", attr, "issue", 167)
+		"path", n.key(), "attr", attr, "issue", 589)
 
 	return syscall.ENOTSUP
 }

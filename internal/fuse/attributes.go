@@ -431,7 +431,7 @@ func (n *DirectoryNode) Setattr(
 	if modeOK || uidOK || gidOK {
 		slog.Warn("chmod and chown of a directory are not implemented; refusing rather than reporting "+
 			"a change that would not be visible on the next stat",
-			"path", n.key(), "issue", 165)
+			"path", n.key(), "issue", 588)
 
 		return syscall.ENOTSUP
 	}
