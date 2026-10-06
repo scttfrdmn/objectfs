@@ -134,7 +134,7 @@ jobs:
   # gate skipped the tests covering the subsystem where every proven data-loss defect lived.
   # ---------------------------------------------------------------------------------------------
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -178,7 +178,7 @@ jobs:
   # can be trusted rather than merely hoped to be current.
   # ---------------------------------------------------------------------------------------------
   build-tags:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -222,7 +222,7 @@ jobs:
   # justified in a diff. Packages absent from the list have no floor yet.
   # ---------------------------------------------------------------------------------------------
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -269,7 +269,7 @@ jobs:
   # be drawn down deliberately. The whole-repo number is reported below so it stays visible.
   # ---------------------------------------------------------------------------------------------
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -363,7 +363,7 @@ jobs:
   # alone, and the reasoning for each tolerated shape is in its header.
   # ---------------------------------------------------------------------------------------------
   fuzz-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
       GOMEMLIMIT: 768MiB
@@ -423,7 +423,7 @@ jobs:
   # under CGO_ENABLED=0 for any target (#200 covers that surface separately).
   # ---------------------------------------------------------------------------------------------
   cross-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -481,7 +481,7 @@ jobs:
   # no mount: they read one committed file. There is nothing here for a flake to come from.
   # ---------------------------------------------------------------------------------------------
   sdk-metrics:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -652,7 +652,7 @@ jobs:
   # see, it cannot hold.
   # ---------------------------------------------------------------------------------------------
   docs-site:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -689,7 +689,7 @@ jobs:
   # `# /etc/objectfs/config.yaml` is a file a user will copy too.
   # ---------------------------------------------------------------------------------------------
   config-examples:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -735,7 +735,7 @@ jobs:
   # runner, and it is worth having as its own job rather than as a half-measure here.
   # ---------------------------------------------------------------------------------------------
   deploy-manifests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -806,7 +806,7 @@ jobs:
   # whose ExecStart, ExecStop, and ReadWritePaths all still contain an unexpanded specifier.
   # ---------------------------------------------------------------------------------------------
   systemd-unit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -867,7 +867,7 @@ jobs:
   # reading the same config, so a packaging change cannot be green here and broken on a tag.
   # ---------------------------------------------------------------------------------------------
   packaging:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1693,7 +1693,7 @@ jobs:
     # modulecmd.tcl, the renamed check would never report and every PR would block on a context that
     # can no longer arrive. The system is the part of the identity that is stable.
     name: modulefiles (${{ matrix.system }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     strategy:
       # Both legs run to completion. A failure under Lmod says nothing about TCL and the reviewer
@@ -1774,7 +1774,7 @@ jobs:
   # the exact `- name:` form of each.
   # ---------------------------------------------------------------------------------------------
   labels:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1839,7 +1839,7 @@ jobs:
   # that resolves the latest release through the API on a machine without curl.
   # ---------------------------------------------------------------------------------------------
   install-script:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
