@@ -234,9 +234,9 @@ These fail, and the failure is the correct answer rather than a missing feature.
 
 | Operation | Current behaviour | Tracked |
 |---|---|---|
-| `chmod` / `chown` on a **directory** | **`ENOTSUP`** — the marker object could carry the metadata, but `Getattr` does not read it back, so accepting the call would report a mode the next `stat` contradicts | [#165](https://github.com/scttfrdmn/objectfs/issues/165) |
+| `chmod` / `chown` on a **directory** | **`ENOTSUP`** — the marker object could carry the metadata, but `Getattr` does not read it back, so accepting the call would report a mode the next `stat` contradicts | [#588](https://github.com/scttfrdmn/objectfs/issues/588) |
 | Symlinks (`symlink`, `readlink`) | **`ENOTSUP`** | No `NodeSymlinker`/`NodeReadlinker` |
-| Extended attributes on a **directory** | `setxattr` is **`ENOTSUP`**; `getxattr` and `removexattr` report the attribute missing (**`ENODATA`** on Linux, **`ENOATTR`** on macOS); `listxattr` succeeds with an empty list. A directory that exists only because objects share a prefix has no object to hold an attribute, so accepting the call would store it for some directories and discard it for others. The empty listing keeps `cp -a`, `rsync -X`, and `ls -@` from erroring per directory | [#167](https://github.com/scttfrdmn/objectfs/issues/167) |
+| Extended attributes on a **directory** | `setxattr` is **`ENOTSUP`**; `getxattr` and `removexattr` report the attribute missing (**`ENODATA`** on Linux, **`ENOATTR`** on macOS); `listxattr` succeeds with an empty list. A directory that exists only because objects share a prefix has no object to hold an attribute, so accepting the call would store it for some directories and discard it for others. The empty listing keeps `cp -a`, `rsync -X`, and `ls -@` from erroring per directory | [#589](https://github.com/scttfrdmn/objectfs/issues/589) |
 | `security.*` and `system.*` extended attributes | **`ENOTSUP`** — refused deliberately, on files as well as directories. Object metadata is writable by anyone with bucket write access, so an attribute the kernel acts on cannot be stored here. See [Extended attributes](#extended-attributes) | |
 | `mknod` (devices, FIFOs, sockets) | **`ENOTSUP`** | |
 | `fallocate` | **`ENOTSUP`** | |

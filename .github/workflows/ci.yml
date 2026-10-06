@@ -1797,7 +1797,7 @@ jobs:
       run: |
         set -o pipefail
         go test ./internal/config/ -v \
-          -run 'TestLabelsYAMLIsWellFormed|TestLabelsYAMLMatchesTheRepository|TestDependabotLabelsAreDefined|TestSyncLabelsScriptCanParseTheFile' \
+          -run 'TestLabelsYAMLIsWellFormed|TestLabelsYAMLMatchesTheRepository|TestDependabotLabelsAreDefined|TestSyncLabelsScriptCanParseTheFile|TestTrackedGapCitations' \
           2>&1 | tee labels.log
 
         if grep -q 'SKIP.*TestLabelsYAMLMatchesTheRepository' labels.log; then
@@ -1806,6 +1806,18 @@ jobs:
             "failure, not a pass."
           exit 1
         fi
+
+        # The tracked-gap gate (#567) rides this job because it needs the same thing: an issues:read
+        # token and gh. Same trap, so the same check — its API half skipping is a failure here.
+        if grep -q 'SKIP.*TestTrackedGapCitationsAreOpen' labels.log; then
+          echo "::error::the tracked-gap check skipped instead of running, so no README or log" \
+            "citation was compared against its issue's state. gh could not reach the API."
+          exit 1
+        fi
+        grep -q -- '--- PASS: TestTrackedGapCitationsAreOpen' labels.log || {
+          echo "::error::TestTrackedGapCitationsAreOpen did not report PASS. If it was renamed, update" \
+            "the -run pattern above; a gate the pattern no longer selects passes by not running."
+          exit 1; }
 
   # ---------------------------------------------------------------------------------------------
   # install-script — scripts/install.sh in the distributions it claims to support.
