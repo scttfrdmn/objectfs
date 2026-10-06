@@ -381,6 +381,25 @@ jobs:
         - {pkg: ./internal/storage/s3, target: FuzzGetObjectRange}
         - {pkg: ./internal/awsname, target: FuzzValidateRegion}
         - {pkg: ./internal/coord, target: FuzzNewConfig}
+        # The twelve below were in the tree and not in this list, so CI ran only their seed corpus as
+        # unit tests and never mutated an input (#565). A 180s campaign over them found two real
+        # defects in 1s and 7s — ValidateBucketName and ValidateKMSKeyID accepting control
+        # characters, fixed in #571 — so at this budget CI would have failed on the commit that
+        # introduced each. FuzzWholeObjectResponse is the one to have been uncomfortable about: it
+        # decides whether the SHA-256 gate runs at all. TestFuzzSmokeCoversEveryFuzzTarget in
+        # internal/config now fails when a target exists in the tree and not here.
+        - {pkg: ./internal/storage/s3, target: FuzzWholeObjectResponse}
+        - {pkg: ./internal/compression, target: FuzzFramedRangeRead}
+        - {pkg: ./internal/cache, target: FuzzChunkAssembly}
+        - {pkg: ./internal/vfs, target: FuzzXattrEncodingRoundTrip}
+        - {pkg: ./pkg/utils, target: FuzzValidatePath}
+        - {pkg: ./pkg/utils, target: FuzzParseBytes}
+        - {pkg: ./internal/distributed/hashring, target: FuzzLookupIsStable}
+        - {pkg: ./internal/awsname, target: FuzzValidateBucketName}
+        - {pkg: ./internal/awsname, target: FuzzParseStorageURI}
+        - {pkg: ./internal/awsname, target: FuzzValidateSSEMode}
+        - {pkg: ./internal/awsname, target: FuzzValidateKMSKeyID}
+        - {pkg: ./internal/awsname, target: FuzzValidateStorageClass}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
