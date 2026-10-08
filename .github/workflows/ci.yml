@@ -206,7 +206,10 @@ jobs:
         fi
         echo "tag-only tests:"; sed 's/^/  /' live.txt
 
-        go test -race -v -tags=fuse_mount -run "^($(paste -sd'|' live.txt))\$" ./internal/fuse/ 2>&1 | tee fuse.log
+        # -timeout well under the job's, so a hang ends in go test's goroutine dump rather than in a
+        # cancellation that prints nothing. The first run of this job hung on an EBUSY unmount after
+        # its failures and was cancelled at ten minutes with no trace of why.
+        go test -race -v -timeout 5m -tags=fuse_mount -run "^($(paste -sd'|' live.txt))\$" ./internal/fuse/ 2>&1 | tee fuse.log
 
         missing=0
         while read -r name; do

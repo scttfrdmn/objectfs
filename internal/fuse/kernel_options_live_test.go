@@ -202,9 +202,23 @@ func TestKeepCacheSurvivesReopen(t *testing.T) {
 			if err != nil {
 				t.Fatalf("first open: %v", err)
 			}
+
+			// Closed on the failure path too. It used to be closed only after a successful read, so a
+			// failing read left the descriptor open, the cleanup's unmount failed with EBUSY, and the
+			// job sat on a mount it could not release until its timeout canceled it — ten minutes to
+			// report a failure that took 0.3 s to happen (#543's first CI run).
+			closedFirst := false
+			defer func() {
+				if !closedFirst {
+					_ = first.Close()
+				}
+			}()
+
 			if _, err := first.ReadAt(buf, 0); err != nil {
 				t.Fatalf("first read: %v", err)
 			}
+
+			closedFirst = true
 			if err := first.Close(); err != nil {
 				t.Fatalf("first close: %v", err)
 			}

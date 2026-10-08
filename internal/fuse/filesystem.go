@@ -368,6 +368,12 @@ func NewFileSystem(ctx context.Context, backend types.Backend, cache types.Cache
 		}
 	}
 
+	// A nil cache means no cache, and is made to mean that here rather than at every use. See noCache
+	// for what the nil used to do to the first read.
+	if cache == nil {
+		cache = noCache{}
+	}
+
 	filesystem := &FileSystem{
 		backend:     backend,
 		cache:       cache,
