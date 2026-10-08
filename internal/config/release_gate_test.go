@@ -300,6 +300,7 @@ var requiredChecks = []string{
 	"labels",
 	"sdk-metrics",
 	"systemd-unit",
+	"fuse-mount",
 	"fuzz-smoke (./internal/adapter, FuzzConfigConstructsBackend)",
 	"fuzz-smoke (./internal/awsname, FuzzValidateRegion)",
 	"fuzz-smoke (./internal/coord, FuzzNewConfig)",
