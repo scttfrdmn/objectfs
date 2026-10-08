@@ -10,21 +10,22 @@ package fuse
 // bytes it already has, and no amount of inspecting OpenOut can show that. This file reads the same
 // offset twice through a real mount and counts how many READ requests arrive.
 //
-// Behind the fuse_mount build tag, and therefore run by nothing by default. That is a real coverage
-// gap and it is stated rather than papered over: CI gates the seams, and this runs where a kernel is
-// available. `make test-fuse-mount` is the entry point.
+// Behind the fuse_mount build tag, because it needs /dev/fuse and macOS without macFUSE has none. It
+// was run by nothing for as long as a comment said GitHub's runner lacked the device too; the runner has
+// one (`crw-rw-rw- 1 root root 10, 229`, fusermount3 3.14.0), and ci.yml's fuse-mount job now runs every
+// test in this file against a real mount. `make test-fuse-mount` is the local entry point. Nothing else
+// is needed: liveMount starts testaws, the in-process substrate endpoint, so there is no bucket, no
+// credential and no network on this path.
 //
-// The reason this comment used to give for the gap was **false**, and worth recording as such. It said
-// /dev/fuse is "absent on GitHub's ubuntu-latest runners". It is present: `crw-rw-rw- 1 root root
-// 10, 229`, with fusermount3 3.14.0 and /etc/fuse.conf, measured on 2026-09-20 by ci.yml's packaging
-// job and none of it installed by that job. Nothing else here needs a runner's permission either —
-// liveMount below starts testaws, the in-process substrate endpoint, so there is no bucket, no
-// credential and no network on this path. macOS without macFUSE remains a genuine absence.
-//
-// What is still unknown is whether this suite *passes* there, which is #543: the mount would be made
-// by a non-root `go test` through fusermount3's setuid path rather than as root, and the assertions
-// count kernel READ requests, which is a property of the kernel version rather than of objectfs. So
-// the tag stays until someone has run it and read the answer.
+// What the first run found, recorded because it is the artifact #543 asked for. It did not reach the
+// property under test at all: every first read(2) returned EIO, from a nil-pointer panic in
+// FileHandle.Read that go-fuse recovers and answers as EIO. liveMount passes a nil cache, and the data
+// path did not handle one; NewFileSystem now substitutes noCache. With that fixed, all four subtests
+// pass on ubuntu-24.04 (kernel 6.17.0-1022-azure), through fusermount3's setuid path as a non-root
+// `go test`. The suite was then shown to fail when it should: with openFlags() sending no flags, the
+// direct-I/O case saw 1 READ where it requires at least 2, and the keep-cache case saw 1 where it
+// requires 0, while both "without" cases still passed. That is #180's defect class, a flag accepted
+// and never reaching the kernel, and no other test in the repository can see it.
 //
 // The transferable part: an unprobed claim that justifies not running a test is the most expensive
 // kind, because it removes the thing that would have contradicted it. This one survived as long as it

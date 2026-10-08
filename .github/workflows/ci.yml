@@ -250,14 +250,8 @@ jobs:
       matrix:
         # fuse_mount carries the tests that need a real kernel mount — whether the kernel
         # re-reads under direct I/O, whether it keeps pages across open(2). They are compiled here
-        # and not run here, and the reason this comment used to give was wrong: it said
-        # "ubuntu-latest has no /dev/fuse". It has one. The packaging job below measured it —
-        # `crw-rw-rw- 1 root root 10, 229 /dev/fuse`, fusermount3 3.14.0, /etc/fuse.conf present,
-        # none of them installed by that job. Whether the suite *passes* on this runner is a
-        # separate and still-unmeasured question, tracked in #543; it goes through fusermount3's
-        # setuid path as a non-root `go test` and it counts kernel READ requests, which is a
-        # property of the runner's kernel. So it stays compiled-only until someone has run it and
-        # read the result, rather than on the strength of a claim nobody probed.
+        # and *run* by the fuse-mount job above. They were compiled-only for as long as this comment
+        # said "ubuntu-latest has no /dev/fuse", which was never measured and was false (#543).
         # s3compat carries the conditional-write compatibility suite: it needs a MinIO, Ceph RGW or
         # Wasabi endpoint in OBJECTFS_COMPAT_ENDPOINT and skips without one. Its findings are what
         # docs/design/conditional-write-compatibility.md records, and two of that matrix's rows were
