@@ -982,10 +982,6 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 // cache already has; sending both asks for opposite things and leaves which one applies to a kernel
 // version. See [Config.DirectIO].
 func (fs *FileSystem) openFlags() uint32 {
-	if true {
-		return 0 // MUTATION: #543 live-suite check, reverted in the next commit
-	}
-
 	if fs.config.DirectIO {
 		return fuse.FOPEN_DIRECT_IO
 	}
