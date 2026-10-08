@@ -378,7 +378,7 @@ test-release-check: test test-aws
 # tag nothing compiles is how four of them came to carry broken code — issue #240.
 test-fuse-mount:
 	@echo "$(COLOR_BLUE)Running kernel-observable FUSE tests (requires /dev/fuse)...$(COLOR_RESET)"
-	@go test -race -tags=fuse_mount -run 'TestDirectIO|TestKeepCache' ./internal/fuse/
+	@go test -race -tags=fuse_mount ./internal/fuse/
 
 # Third-party POSIX conformance, via pjdfstest. ON DEMAND ONLY — no CI job runs this, and none can:
 # it needs /dev/fuse, real AWS credentials and a real bucket, and this repository has no scheduled
@@ -386,9 +386,10 @@ test-fuse-mount:
 # bucket and a role, which is a decision with a cost attached — issue #352.
 #
 # Said out loud here and in the script's header because the failure mode of an unrun conformance suite
-# is that it reads as a passing one. `make test-fuse-mount` above is the same situation for the same
-# reason, and internal/difftest is what does run: a differential oracle over an operation sequence
-# this repository chose, which is a weaker claim than a suite nobody here wrote.
+# is that it reads as a passing one. internal/difftest is what does run: a differential oracle over an
+# operation sequence this repository chose, which is a weaker claim than a suite nobody here wrote.
+# (`make test-fuse-mount` above used to be named here as the same situation. It no longer is: ci.yml's
+# fuse-mount job runs it on every PR, because it needs /dev/fuse and nothing else (#543).)
 #
 # Requires: pjdfstest in PATH, OBJECTFS_TEST_BUCKET set. `build` runs first via the prerequisite.
 # ObjectFS is not POSIX-compliant, so a clean run is not the goal — README.md's supported-operations
