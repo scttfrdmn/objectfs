@@ -156,6 +156,68 @@ jobs:
       run: go test -race -timeout 20m ./...
 
   # ---------------------------------------------------------------------------------------------
+  # fuse-mount — the kernel's half of the direct-I/O and keep-cache contracts, through a real mount.
+  #
+  # internal/fuse/kernel_options_live_test.go reads one offset twice through a real FUSE mount and
+  # counts the READ requests that arrive. It is the only test that observes what the *kernel* does
+  # with FOPEN_DIRECT_IO and FOPEN_KEEP_CACHE; kernel_options_test.go can show the flags are sent,
+  # not that they change anything. It sat behind the fuse_mount tag, run by nothing, because a
+  # comment said the runner had no /dev/fuse. The runner has one (#543), and the suite needs
+  # nothing else: liveMount starts the in-process substrate endpoint, so there is no bucket, no
+  # credential and no network here.
+  #
+  # The mount is made by a non-root `go test`, so it goes through fusermount3's setuid path, not
+  # the root path the packaging job's mount uses.
+  # ---------------------------------------------------------------------------------------------
+  fuse-mount:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+      # Reported, not assumed. The suite fails rather than skips without the device, so this is
+      # here to put the answer at the top of the log instead of four screens into a mount error.
+    - name: The runner has a FUSE device and fusermount3
+      run: |
+        ls -l /dev/fuse
+        fusermount3 --version
+        uname -r
+
+      # The tests that exist only under the tag are found with `go test -list` rather than named
+      # here, and each must report PASS. A build-tag suite has a way to pass that an ordinary one does
+      # not: if the tag stops selecting the file, `go test` compiles nothing extra, runs the untagged
+      # tests, and exits 0. Requiring a PASS for every tag-only test turns that into a failure, and a
+      # live test added to the file later is covered without editing this step.
+    - name: Every fuse_mount test runs against a real mount, and passes
+      run: |
+        set -o pipefail
+        go test -tags=fuse_mount -list . ./internal/fuse/ | grep '^Test' | sort > tagged.txt
+        go test -list . ./internal/fuse/ | grep '^Test' | sort > untagged.txt
+        comm -23 tagged.txt untagged.txt > live.txt
+        if [ ! -s live.txt ]; then
+          echo "::error::-tags=fuse_mount selects no test that the untagged build lacks, so this job" \
+            "would run nothing it exists to run. The tag or the file's //go:build line has changed."
+          exit 1
+        fi
+        echo "tag-only tests:"; sed 's/^/  /' live.txt
+
+        go test -race -v -tags=fuse_mount -run "^($(paste -sd'|' live.txt))\$" ./internal/fuse/ 2>&1 | tee fuse.log
+
+        missing=0
+        while read -r name; do
+          if ! grep -q -- "^--- PASS: $name " fuse.log; then
+            echo "::error::$name did not report PASS against the real mount."
+            missing=1
+          fi
+        done < live.txt
+        exit $missing
+
+  # ---------------------------------------------------------------------------------------------
   # build-tags — compile every build tag in the repo.
   #
   # A build tag is invisible to `go build ./...`, `go vet ./...`, and `go test ./...`: the files
