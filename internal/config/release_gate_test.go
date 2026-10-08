@@ -53,8 +53,8 @@ func TestCIWorkflowIsReusable(t *testing.T) {
 			"v0.14.0 shipped in: it was published without `test`, `lint`, `coverage`, `fuzz-smoke`, " +
 			"`packaging`, `modulefiles`, `install-script` or `labels` ever having run.\n" +
 			"Restore `workflow_call:` under `on:`. Do not instead move these jobs into a separate " +
-			"gate.yml — that renames every check to `<caller> / <job>` and orphans all nineteen " +
-			"required checks that are pinned to the bare names.")
+			"gate.yml — that renames every check to `<caller> / <job>` and orphans every " +
+			"required check pinned to a bare name; see requiredChecks for the set.")
 	}
 
 	// The triggers that keep the check names unchanged. If ci.yml stopped being the top-level
@@ -310,6 +310,18 @@ var requiredChecks = []string{
 	"fuzz-smoke (./internal/vfs, FuzzAttrFromMetadata)",
 	"fuzz-smoke (./internal/vfs, FuzzExtentList)",
 	"fuzz-smoke (./internal/vfs, FuzzNodeLifecycle)",
+	"fuzz-smoke (./internal/storage/s3, FuzzWholeObjectResponse)",
+	"fuzz-smoke (./internal/compression, FuzzFramedRangeRead)",
+	"fuzz-smoke (./internal/cache, FuzzChunkAssembly)",
+	"fuzz-smoke (./internal/vfs, FuzzXattrEncodingRoundTrip)",
+	"fuzz-smoke (./pkg/utils, FuzzValidatePath)",
+	"fuzz-smoke (./pkg/utils, FuzzParseBytes)",
+	"fuzz-smoke (./internal/distributed/hashring, FuzzLookupIsStable)",
+	"fuzz-smoke (./internal/awsname, FuzzValidateBucketName)",
+	"fuzz-smoke (./internal/awsname, FuzzParseStorageURI)",
+	"fuzz-smoke (./internal/awsname, FuzzValidateSSEMode)",
+	"fuzz-smoke (./internal/awsname, FuzzValidateKMSKeyID)",
+	"fuzz-smoke (./internal/awsname, FuzzValidateStorageClass)",
 	"install-script (opensuse/leap:15.6, tar, zypper -q -n install tar gzip)",
 	"install-script (rockylinux:9)",
 	"install-script (ubuntu:24.04, curl or wget, apt-get update -qq && apt-get install -y -qq wget)",
