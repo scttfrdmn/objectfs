@@ -221,7 +221,7 @@ jobs:
         exit $missing
 
   # ---------------------------------------------------------------------------------------------
-  # tagged-suite — the build-tagged suites that need nothing, run on every PR.
+  # tagged-suite — the build-tagged suites CI can supply everything for, run on every PR.
   #
   # `build-tags` below vets every tag and runs none. For these two that was never a choice someone
   # made: they need no credential, bucket, device or network — measured with every AWS credential
@@ -239,6 +239,9 @@ jobs:
   # SKIP. These suites need nothing, so a skip means one has quietly started depending on something,
   # and a skipped test reports success.
   #
+  # s3compat joined after both: it needs an S3-compatible endpoint, and a MinIO server built and
+  # started in its cell is one. Its first run against MinIO was 4/4 with no skips, matching the design doc's row.
+  #
   # `name:` is set so each required context is `tagged-suite (<tag>)` and nothing else.
   # TestEveryTestTagIsExecuted in internal/config fails when a test-file build tag is executed by no
   # job, so a new hermetic tag either joins this matrix or is exempted there with an issue.
@@ -250,7 +253,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tag: [e2e, distributed]
+        tag: [e2e, distributed, s3compat]
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -258,6 +261,36 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # s3compat runs against a real S3-compatible store, not an emulator: the suite exists because the
+      # compatibility matrix in docs/design/conditional-write-compatibility.md cannot be kept by reading,
+      # and two of its rows were wrong in a direction that mattered when they were documentation reads.
+      # MinIO is the row CI can automate.
+      #
+      # Built from source at a pinned module version, not pulled as an image. This step first pulled
+      # `minio/minio` by digest, and the pull was refused: that repository no longer exists on Docker
+      # Hub (404), and Quay's copy needs authentication. MinIO's community edition is distributed as
+      # source only. The digest had come from an image podman had cached on a developer machine since
+      # 2025-09-07, so "measured locally first" had measured something CI could not get. A pseudo-version
+      # pins the store exactly as a digest did, and the build takes under a minute. The keys are
+      # throwaway: the server lives for this job and listens on localhost.
+    - name: Build and start MinIO for the s3compat suite
+      if: matrix.tag == 's3compat'
+      env:
+        MINIO_VERSION: v0.0.0-20260212201848-7aac2a2c5b7c
+      run: |
+        GOBIN="$RUNNER_TEMP/minio-bin" go install "github.com/minio/minio@${MINIO_VERSION}"
+        mkdir -p "$RUNNER_TEMP/minio-data"
+        MINIO_ROOT_USER=objectfs MINIO_ROOT_PASSWORD=objectfs123 \
+          nohup "$RUNNER_TEMP/minio-bin/minio" server "$RUNNER_TEMP/minio-data" \
+          --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 > "$RUNNER_TEMP/minio.log" 2>&1 &
+        for i in $(seq 1 30); do
+          curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null && { echo "MinIO ready after ${i}s"; exit 0; }
+          sleep 1
+        done
+        cat "$RUNNER_TEMP/minio.log"
+        echo "::error::MinIO did not become ready in 30s, so the s3compat suite has no endpoint to verify."
+        exit 1
 
       # Credentials denied rather than absent, so a suite that started reaching for ambient AWS
       # access fails here instead of passing on a developer's machine. A runner has none to find, but
@@ -268,6 +301,11 @@ jobs:
         AWS_EC2_METADATA_DISABLED: "true"
         AWS_CONFIG_FILE: /dev/null
         AWS_SHARED_CREDENTIALS_FILE: /dev/null
+        # Read only by the s3compat suite, and only meaningful in its cell, where the step above
+        # started the endpoint. Without an endpoint that suite skips, and this step fails on a skip.
+        OBJECTFS_COMPAT_ENDPOINT: ${{ matrix.tag == 's3compat' && 'http://127.0.0.1:9000' || '' }}
+        OBJECTFS_COMPAT_ACCESS_KEY: objectfs
+        OBJECTFS_COMPAT_SECRET_KEY: objectfs123
       run: |
         set -o pipefail
 

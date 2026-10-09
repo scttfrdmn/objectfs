@@ -31,8 +31,6 @@ var executedTagsExempt = map[string]string{
 	// Real AWS plus OBJECTFS_TEST_BUCKET, and it skips without one, so its job must also assert that
 	// it ran.
 	"aws_s3": "#570",
-	// A MinIO, Ceph RGW or Wasabi endpoint.
-	"s3compat": "#570",
 	// Not hermetic in the sense that matters: a timing result on a shared runner is noise, not signal.
 	"benchmark": "#568",
 }
