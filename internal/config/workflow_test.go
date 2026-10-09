@@ -89,6 +89,10 @@ type workflowJobDef struct {
 	Strategy struct {
 		Matrix struct {
 			Include []map[string]any `yaml:"include"`
+
+			// Tag is the `tag:` axis, which build-tags and tagged-suite use to name one cell per
+			// build tag.
+			Tag []string `yaml:"tag"`
 		} `yaml:"matrix"`
 	} `yaml:"strategy"`
 
