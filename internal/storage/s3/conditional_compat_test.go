@@ -17,10 +17,14 @@ package s3_test
 // agrees; the whole point here is the endpoint. testaws remains right for #282's own unit tests, and
 // the hermetic suite in conditional_test.go is not replaced by this one.
 //
-// Run against a local MinIO:
+// Run against a local MinIO, built from source. MinIO's community edition no longer publishes images:
+// `minio/minio` is gone from Docker Hub, so the `podman run minio/minio` this used to give works only
+// where an old copy is already cached. The version is the one ci.yml's tagged-suite (s3compat) cell
+// builds:
 //
-//	podman run -d --rm -p 9111:9000 -e MINIO_ROOT_USER=objectfs -e MINIO_ROOT_PASSWORD=objectfs123 \
-//	  minio/minio server /data
+//	GOBIN=/tmp/minio-bin go install github.com/minio/minio@v0.0.0-20260212201848-7aac2a2c5b7c
+//	MINIO_ROOT_USER=objectfs MINIO_ROOT_PASSWORD=objectfs123 \
+//	  /tmp/minio-bin/minio server /tmp/minio-data --address 127.0.0.1:9111 &
 //	OBJECTFS_COMPAT_ENDPOINT=http://127.0.0.1:9111 \
 //	  OBJECTFS_COMPAT_ACCESS_KEY=objectfs OBJECTFS_COMPAT_SECRET_KEY=objectfs123 \
 //	  go test -race -tags=s3compat -v -count=1 ./internal/storage/s3/
