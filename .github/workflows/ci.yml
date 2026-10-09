@@ -239,8 +239,8 @@ jobs:
   # SKIP. These suites need nothing, so a skip means one has quietly started depending on something,
   # and a skipped test reports success.
   #
-  # s3compat joined after both: it needs an S3-compatible endpoint, and a MinIO container started in
-  # its cell is one. Its first run against MinIO was 4/4 with no skips, matching the design doc's row.
+  # s3compat joined after both: it needs an S3-compatible endpoint, and a MinIO server built and
+  # started in its cell is one. Its first run against MinIO was 4/4 with no skips, matching the design doc's row.
   #
   # `name:` is set so each required context is `tagged-suite (<tag>)` and nothing else.
   # TestEveryTestTagIsExecuted in internal/config fails when a test-file build tag is executed by no
@@ -265,22 +265,30 @@ jobs:
       # s3compat runs against a real S3-compatible store, not an emulator: the suite exists because the
       # compatibility matrix in docs/design/conditional-write-compatibility.md cannot be kept by reading,
       # and two of its rows were wrong in a direction that mattered when they were documentation reads.
-      # MinIO is the row CI can automate. Started in a step rather than `services:`, because a service
-      # container takes no command and MinIO needs `server /data`. Pinned by digest, so the store being
-      # verified changes in a reviewed commit rather than whenever `latest` moves. The keys are
-      # throwaway: the container lives for this job and listens on localhost.
-    - name: Start MinIO for the s3compat suite
+      # MinIO is the row CI can automate.
+      #
+      # Built from source at a pinned module version, not pulled as an image. This step first pulled
+      # `minio/minio` by digest, and the pull was refused: that repository no longer exists on Docker
+      # Hub (404), and Quay's copy needs authentication. MinIO's community edition is distributed as
+      # source only. The digest had come from an image podman had cached on a developer machine since
+      # 2025-09-07, so "measured locally first" had measured something CI could not get. A pseudo-version
+      # pins the store exactly as a digest did, and the build takes under a minute. The keys are
+      # throwaway: the server lives for this job and listens on localhost.
+    - name: Build and start MinIO for the s3compat suite
       if: matrix.tag == 's3compat'
+      env:
+        MINIO_VERSION: v0.0.0-20260212201848-7aac2a2c5b7c
       run: |
-        docker run -d --name minio -p 9000:9000 \
-          -e MINIO_ROOT_USER=objectfs -e MINIO_ROOT_PASSWORD=objectfs123 \
-          docker.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
-          server /data
+        GOBIN="$RUNNER_TEMP/minio-bin" go install "github.com/minio/minio@${MINIO_VERSION}"
+        mkdir -p "$RUNNER_TEMP/minio-data"
+        MINIO_ROOT_USER=objectfs MINIO_ROOT_PASSWORD=objectfs123 \
+          nohup "$RUNNER_TEMP/minio-bin/minio" server "$RUNNER_TEMP/minio-data" \
+          --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 > "$RUNNER_TEMP/minio.log" 2>&1 &
         for i in $(seq 1 30); do
           curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null && { echo "MinIO ready after ${i}s"; exit 0; }
           sleep 1
         done
-        docker logs minio
+        cat "$RUNNER_TEMP/minio.log"
         echo "::error::MinIO did not become ready in 30s, so the s3compat suite has no endpoint to verify."
         exit 1
 
