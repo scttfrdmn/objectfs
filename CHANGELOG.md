@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Built with Go 1.26.9 and `golang.org/x/net` v0.60.0**, up from go1.26.6 and v0.58.0, for eight
+  advisories `govulncheck` reports as reachable from ObjectFS's code: GO-2026-6617 (HTTP/2 HPACK encoder
+  race), GO-2026-6613 and GO-2026-6605 (HTTP/1 CONNECT desynchronization, server and client),
+  GO-2026-6612 and GO-2026-6611 (HTTP/2 flow-control refund and window-change CPU exhaustion),
+  GO-2026-6610 (HTTP/2 transport accepting malformed framing headers), GO-2026-6608 (MIME header memory
+  limit bypass in `net/textproto`) and GO-2026-6607 (malformed ECH extension references in `crypto/tls`).
+  ObjectFS is an S3 client and serves no HTTP/2 publicly, but its metrics and health endpoints use
+  `net/http`, and every request it makes goes through the client side of the same packages.
+
 ### Fixed
 
 - **`bucket` still accepted punctuation no bucket name has ever contained.** After the control-character
