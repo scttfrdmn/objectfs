@@ -66,6 +66,10 @@ func TestClusterManager_BasicOperations(t *testing.T) {
 
 	// Create cluster configuration
 	config := &distributed.ClusterConfig{
+		// Consensus is opt-in since #401, which left it in the tree because this suite drives elections
+		// deliberately — and then never turned it on here, because nothing ran this suite. Every leadership
+		// assertion below waited on an engine that was never started (#570).
+		EnableConsensus:   true,
 		NodeID:            "test-node-1",
 		SecretFile:        writeClusterSecret(t),
 		ListenAddr:        "127.0.0.1:18080",
@@ -259,6 +263,10 @@ func TestConsensusEngine_LeaderElection(t *testing.T) {
 	defer cancel()
 
 	config := &distributed.ClusterConfig{
+		// Consensus is opt-in since #401, which left it in the tree because this suite drives elections
+		// deliberately — and then never turned it on here, because nothing ran this suite. Every leadership
+		// assertion below waited on an engine that was never started (#570).
+		EnableConsensus:   true,
 		NodeID:            "consensus-test-1",
 		SecretFile:        writeClusterSecret(t),
 		ElectionTimeout:   time.Second,
@@ -520,6 +528,10 @@ func TestMultiNodeCluster(t *testing.T) {
 	// Create and start multiple cluster nodes
 	for i := 0; i < nodeCount; i++ {
 		config := &distributed.ClusterConfig{
+			// Consensus is opt-in since #401, which left it in the tree because this suite drives elections
+			// deliberately — and then never turned it on here, because nothing ran this suite. Every leadership
+			// assertion below waited on an engine that was never started (#570).
+			EnableConsensus:   true,
 			NodeID:            fmt.Sprintf("multi-node-%d", i),
 			SecretFile:        secretFile,
 			ListenAddr:        fmt.Sprintf("127.0.0.1:1808%d", i),

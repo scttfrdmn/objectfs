@@ -67,13 +67,20 @@ func (s *E2ETestSuite) TestAdapterValidation() {
 
 	// Test invalid storage URI
 	_, err := adapter.New(s.ctx, "invalid://bucket", "/tmp/test", s.config)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported storage scheme")
+	require.Error(t, err)
+
+	// What the message must carry, not how it is worded. These two assertions used to pin the exact
+	// phrasing ("unsupported storage scheme", "bucket name"), and the messages were rewritten to say
+	// more — which scheme, and what is supported instead — while this suite was compiled and never run
+	// (#570). It went red on its first execution for an improvement. The property is that the operator
+	// is told which part of their URI is wrong.
+	assert.Contains(t, err.Error(), `"invalid"`, "the error should name the scheme it rejected")
+	assert.Contains(t, err.Error(), "s3://", "the error should name the scheme that is supported")
 
 	// Test empty bucket name
 	_, err = adapter.New(s.ctx, "s3://", "/tmp/test", s.config)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "bucket name")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no bucket", "the error should say the URI names no bucket")
 
 	// Test invalid configuration
 	invalidConfig := &config.Configuration{}
@@ -197,7 +204,10 @@ func (s *E2ETestSuite) TestVersionAndBuildInfo() {
 	out, err = exec.CommandContext(s.ctx, bin, "--version").CombinedOutput()
 	require.NoError(t, err, "running --version: %s", out)
 
-	require.Equal(t, "ObjectFS version "+declared+"\n", string(out),
+	// Lowercase since the subcommands change (e8750eb), and deliberately: it is the binary's name,
+	// and ci.yml's install checks and README's `awk '{print $3}'` both read this exact shape. This
+	// assertion still expected "ObjectFS" because nothing had run it since (#570).
+	require.Equal(t, "objectfs version "+declared+"\n", string(out),
 		"the binary reports a different version than the constant it is built from")
 
 	t.Logf("✅ binary reports version %s, matching cmd/objectfs/main.go", declared)

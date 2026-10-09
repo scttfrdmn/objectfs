@@ -221,6 +221,96 @@ jobs:
         exit $missing
 
   # ---------------------------------------------------------------------------------------------
+  # tagged-suite — the build-tagged suites that need nothing, run on every PR.
+  #
+  # `build-tags` below vets every tag and runs none. For these two that was never a choice someone
+  # made: they need no credential, bucket, device or network — measured with every AWS credential
+  # path denied, not just unset — and were simply never run. So they rotted the way #240's tags did,
+  # only without a compiler to notice (#570). The first execution of each was red:
+  #
+  #   - e2e: three assertions still expected pre-improvement wording ("unsupported storage scheme",
+  #     "ObjectFS version") the code had since replaced with better messages.
+  #   - distributed: every leadership assertion waited on a consensus engine that #401 made opt-in,
+  #     keeping it "because the -tags=distributed suite drives elections deliberately" — and then
+  #     nothing here turned it on.
+  #
+  # Same discovery as fuse-mount: the tests that exist only under the tag, found with `go test
+  # -list`, each required to report PASS. And one rule fuse-mount does not need: no tag-only test may
+  # SKIP. These suites need nothing, so a skip means one has quietly started depending on something,
+  # and a skipped test reports success.
+  #
+  # `name:` is set so each required context is `tagged-suite (<tag>)` and nothing else.
+  # TestEveryTestTagIsExecuted in internal/config fails when a test-file build tag is executed by no
+  # job, so a new hermetic tag either joins this matrix or is exempted there with an issue.
+  # ---------------------------------------------------------------------------------------------
+  tagged-suite:
+    name: tagged-suite (${{ matrix.tag }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [e2e, distributed]
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+      # Credentials denied rather than absent, so a suite that started reaching for ambient AWS
+      # access fails here instead of passing on a developer's machine. A runner has none to find, but
+      # the denial is what makes "hermetic" a property this job asserts rather than one it inherits.
+    - name: Every ${{ matrix.tag }} test runs hermetically, and passes without skipping
+      env:
+        TAG: ${{ matrix.tag }}
+        AWS_EC2_METADATA_DISABLED: "true"
+        AWS_CONFIG_FILE: /dev/null
+        AWS_SHARED_CREDENTIALS_FILE: /dev/null
+      run: |
+        set -o pipefail
+
+        # The packages holding a file whose //go:build names this tag. Found, not listed. Each path is
+        # forced to `./dir`: BSD grep prints `tests/x_test.go` where GNU prints `./tests/x_test.go`, and
+        # a bare `tests` is read by go as a standard-library import path, so -list finds nothing and
+        # the tag-only set comes out empty. Caught by running this step on macOS before CI did.
+        pkgs=$(grep -rlE --include='*_test.go' "^//go:build .*\b${TAG}\b" . | xargs -n1 dirname | sed 's|^\./||; s|^|./|' | sort -u)
+        if [ -z "$pkgs" ]; then
+          echo "::error::no _test.go file names the ${TAG} build tag, so this cell has nothing to run."
+          exit 1
+        fi
+
+        : > live.txt
+        for p in $pkgs; do
+          go test -tags="$TAG" -list . "$p" | grep '^Test' | sort > tagged.txt
+          go test -list . "$p" | grep '^Test' | sort > untagged.txt
+          comm -23 tagged.txt untagged.txt >> live.txt
+        done
+        if [ ! -s live.txt ]; then
+          echo "::error::-tags=${TAG} selects no test the untagged build lacks, in: $pkgs."
+          exit 1
+        fi
+        echo "tag-only tests:"; sed 's/^/  /' live.txt
+
+        go test -race -v -timeout 8m -tags="$TAG" -run "^($(paste -sd'|' live.txt))\$" $pkgs 2>&1 | tee suite.log
+
+        failed=0
+        while read -r name; do
+          if ! grep -q -- "^--- PASS: $name " suite.log; then
+            echo "::error::$name did not report PASS."
+            failed=1
+          fi
+        done < live.txt
+        if grep -q -- '--- SKIP' suite.log; then
+          grep -- '--- SKIP' suite.log
+          echo "::error::a ${TAG} test skipped. This suite needs nothing, so a skip means it has" \
+            "started depending on something this job does not provide — and a skip reports success."
+          failed=1
+        fi
+        exit $failed
+
+  # ---------------------------------------------------------------------------------------------
   # build-tags — compile every build tag in the repo.
   #
   # A build tag is invisible to `go build ./...`, `go vet ./...`, and `go test ./...`: the files
