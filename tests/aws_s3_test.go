@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -33,21 +35,26 @@ type AWSS3TestSuite struct {
 	bucket  string
 	region  string
 	profile string
+
+	// ownBucket is true when the suite created bucket itself and so must remove it.
+	ownBucket bool
 }
 
+// TestAWSS3Integration runs the suite against real S3.
+//
+// It used to skip unless OBJECTFS_TEST_BUCKET named an existing bucket, and to force the shared-config
+// profile "aws" when AWS_PROFILE was unset. Together those made it impossible to run anywhere but one
+// laptop — under OIDC there is no profile file, so LoadDefaultConfig failed — and the skip reported
+// success wherever it could not run, which is the state #570 found every build-tagged suite in. Now a
+// profile is used only when one is named, and without OBJECTFS_TEST_BUCKET the suite creates its own
+// bucket and removes it, the way the integration suite's liveBucket does. The bucket name starts with
+// objectfs-live- because that is the whole of what the CI role may touch (deploy/aws/ci-live-s3).
 func TestAWSS3Integration(t *testing.T) {
-	// Ensure we have the required AWS profile and test bucket
 	profile := os.Getenv("AWS_PROFILE")
-	if profile == "" {
-		profile = "aws" // Default to 'aws' profile
-	}
-
 	bucket := os.Getenv("OBJECTFS_TEST_BUCKET")
-	if bucket == "" {
-		t.Skip("Skipping AWS S3 tests - OBJECTFS_TEST_BUCKET not set")
-	}
 
-	t.Logf("Running AWS S3 tests with profile '%s' in us-west-2 against bucket '%s'", profile, bucket)
+	t.Logf("Running AWS S3 tests in us-west-2 (profile %q, bucket %q; empty means default chain / create one)",
+		profile, bucket)
 
 	suite.Run(t, &AWSS3TestSuite{
 		bucket:  bucket,
@@ -59,14 +66,31 @@ func TestAWSS3Integration(t *testing.T) {
 func (s *AWSS3TestSuite) SetupSuite() {
 	s.ctx = context.Background()
 
-	// Load AWS config with specific profile and region
-	cfg, err := config.LoadDefaultConfig(s.ctx,
-		config.WithSharedConfigProfile(s.profile),
-		config.WithRegion(s.region),
-	)
+	opts := []func(*config.LoadOptions) error{config.WithRegion(s.region)}
+	if s.profile != "" {
+		opts = append(opts, config.WithSharedConfigProfile(s.profile))
+	}
+
+	cfg, err := config.LoadDefaultConfig(s.ctx, opts...)
 	require.NoError(s.T(), err, "Failed to load AWS config")
 
 	s.client = s3.NewFromConfig(cfg)
+
+	if s.bucket == "" {
+		// 63 is S3's limit; "objectfs-live-awss3-" plus nine digits stays well inside it.
+		s.bucket = fmt.Sprintf("objectfs-live-awss3-%09d", time.Now().UnixNano()%1e9)
+
+		_, err = s.client.CreateBucket(s.ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(s.bucket),
+			CreateBucketConfiguration: &s3types.CreateBucketConfiguration{
+				LocationConstraint: s3types.BucketLocationConstraint(s.region),
+			},
+		})
+		require.NoError(s.T(), err, "creating suite bucket %s", s.bucket)
+
+		s.ownBucket = true
+		s.T().Logf("created suite bucket %s", s.bucket)
+	}
 
 	// Verify bucket exists and we have access
 	_, err = s.client.HeadBucket(s.ctx, &s3.HeadBucketInput{
@@ -91,6 +115,44 @@ func (s *AWSS3TestSuite) SetupSuite() {
 func (s *AWSS3TestSuite) TearDownSuite() {
 	if s.backend != nil {
 		s.backend.Close()
+	}
+
+	if s.ownBucket {
+		s.removeSuiteBucket()
+	}
+}
+
+// removeSuiteBucket empties and deletes a bucket this suite created, multipart uploads included.
+//
+// A context of its own, because the suite's may be the thing that was canceled, and a bucket left
+// behind costs money and accumulates in an account nobody is watching.
+func (s *AWSS3TestSuite) removeSuiteBucket() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	uploads, err := s.client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(s.bucket)})
+	if err == nil {
+		for _, u := range uploads.Uploads {
+			_, _ = s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+				Bucket: aws.String(s.bucket), Key: u.Key, UploadId: u.UploadId,
+			})
+		}
+	}
+
+	pages := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{Bucket: aws.String(s.bucket)})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			break
+		}
+
+		for _, obj := range page.Contents {
+			_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: obj.Key})
+		}
+	}
+
+	if _, err := s.client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(s.bucket)}); err != nil {
+		s.T().Errorf("deleting suite bucket %s: %v — it is left behind and must be removed by hand", s.bucket, err)
 	}
 }
 
@@ -710,8 +772,14 @@ func (s *AWSS3TestSuite) TestZSTDCompression() {
 	require.NoError(t, err)
 	assert.Equal(t, data[100:300], partial, "partial read after ZSTD decompression")
 
-	// Confirm the object is NOT readable as raw bytes from a plain backend
-	// (i.e. verify it was actually stored compressed).
+	// A backend with compression *off* must read the object as its original bytes. Decoding follows the
+	// object's Content-Encoding, not the reader's config, and it has to: a mount that turned compression
+	// off would otherwise read every file it had written while it was on as compressed garbage.
+	//
+	// This assertion used to be the opposite — NotEqual, "should be compressed, not plain text" — and
+	// was false the first time anything ran it (#570): the plain backend decoded the object, correctly,
+	// and the test called that a failure. Proving the bytes are stored compressed is the raw S3 client's
+	// job, below, for the reason its comment gives.
 	plainBackend, err := s3backend.NewBackend(s.ctx, s.bucket, &s3backend.Config{
 		Region: s.region, MaxRetries: 1,
 	})
@@ -720,7 +788,7 @@ func (s *AWSS3TestSuite) TestZSTDCompression() {
 
 	raw, err := plainBackend.GetObject(s.ctx, key, 0, 0)
 	require.NoError(t, err)
-	assert.NotEqual(t, data, raw, "object stored on S3 should be compressed, not plain text")
+	assert.Equal(t, data, raw, "a backend with compression off must decode a compressed object by its Content-Encoding")
 
 	// HeadObject must report the UNCOMPRESSED size. Reporting the compressed
 	// ContentLength here is what made the kernel truncate every read of a
