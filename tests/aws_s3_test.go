@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -346,7 +347,7 @@ func (s *AWSS3TestSuite) TestBatchOperations() {
 func (s *AWSS3TestSuite) TestPerformanceBenchmark() {
 	t := s.T()
 
-	// Test various file sizes to evaluate CargoShip performance
+	// Test various file sizes
 	sizes := []struct {
 		name string
 		size int
@@ -358,7 +359,7 @@ func (s *AWSS3TestSuite) TestPerformanceBenchmark() {
 		{"10MB", 10 * 1024 * 1024},
 	}
 
-	t.Logf("🚀 Performance Benchmark with CargoShip Optimization")
+	t.Logf("🚀 Performance Benchmark")
 	t.Logf("Network: 10Gbps local, 5Gbps+ internet | Target: 800 MB/s")
 	t.Logf("%-10s | %-15s | %-15s | %-15s | %-15s", "Size", "Upload Time", "Upload MB/s", "Download Time", "Download MB/s")
 	t.Logf("-----------|-----------------|-----------------|-----------------|------------------")
@@ -408,68 +409,64 @@ func (s *AWSS3TestSuite) TestPerformanceBenchmark() {
 func (s *AWSS3TestSuite) TestRealLocalData() {
 	t := s.T()
 
-	t.Logf("📁 Testing with Real Local Data")
-	t.Logf("Network: 10Gbps local → 5Gbps+ internet | CargoShip optimization enabled")
+	t.Logf("📁 Testing with real files of mixed types")
 
-	// Search paths for real data files
-	searchPaths := []string{
-		os.ExpandEnv("$HOME/Downloads"),
-		os.ExpandEnv("$HOME/src"),
-		"/Volumes/Public/genomics_training", // Keep genomics as backup
-	}
+	// Real files, from this repository's own checkout.
+	//
+	// This used to walk $HOME/Downloads, $HOME/src and /Volumes/Public/genomics_training for PDFs,
+	// spreadsheets, VCFs and the like, and upload what it found to S3. So running the suite on a
+	// developer's machine copied their personal files to a bucket, without anyone choosing that. And
+	// on a machine without those directories — a CI runner — it found nothing and skipped, which is
+	// how it went unnoticed: the first run with skips refused (#570) is what surfaced it. The property
+	// under test is that real, varied content survives a round trip and a range read byte for byte,
+	// and the repository has that in every checkout: Go, Markdown, YAML, JSON, shell and text, one of
+	// each, identical on every machine and nobody's private data. Arbitrary binary content is the
+	// random-byte subtests' job (TestLargeFileUpload, TestMultipartUpload); this one is about files.
+	root := repoRootForTest(t)
 
-	var testFiles []string
+	exts := map[string]bool{".go": true, ".md": true, ".json": true, ".yml": true, ".yaml": true,
+		".txt": true, ".sh": true}
 
-	// Find interesting files from local directories
-	for _, searchPath := range searchPaths {
-		if _, err := os.Stat(searchPath); os.IsNotExist(err) {
-			continue // Skip if path doesn't exist
+	byExt := map[string]string{}
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
 
-		err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil // Skip errors
-			}
-
-			// Skip hidden files, cache, and system directories
-			if strings.Contains(path, "/.") || strings.Contains(path, "@Recycle") ||
-				strings.Contains(path, "node_modules") || strings.Contains(path, ".git") ||
-				strings.Contains(path, "__pycache__") || strings.Contains(path, "venv") {
-				return nil
-			}
-
-			// Look for various file types with reasonable sizes (1KB - 50MB)
-			if info.Size() > 1024 && info.Size() < 50*1024*1024 {
-				ext := strings.ToLower(filepath.Ext(info.Name()))
-				if ext == ".pdf" || ext == ".xlsx" || ext == ".xls" ||
-					ext == ".json" || ext == ".go" || ext == ".py" ||
-					ext == ".md" || ext == ".txt" || ext == ".csv" ||
-					ext == ".vcf" || strings.HasSuffix(info.Name(), ".vcf.gz") {
-					testFiles = append(testFiles, path)
-				}
-			}
-
-			// Limit to first 5 files for testing
-			if len(testFiles) >= 5 {
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", "testdata":
 				return filepath.SkipDir
 			}
 
 			return nil
-		})
-
-		if err != nil {
-			continue // Skip paths with errors
 		}
 
-		// Stop searching if we found enough files
-		if len(testFiles) >= 3 {
-			break
+		ext := strings.ToLower(filepath.Ext(path))
+		if !exts[ext] || byExt[ext] != "" {
+			return nil
 		}
+
+		if info, err := d.Info(); err == nil && info.Size() > 1024 && info.Size() < 50*1024*1024 {
+			byExt[ext] = path
+		}
+
+		return nil
+	})
+	require.NoError(t, err, "walking the repository for test files")
+
+	var testFiles []string
+	for _, path := range byExt {
+		testFiles = append(testFiles, path)
 	}
 
-	if len(testFiles) == 0 {
-		t.Skip("No suitable local files found for testing")
-	}
+	sort.Strings(testFiles)
+
+	// A floor, not a skip. The repository is always present, so finding too few means this walk is
+	// broken, and a test that skips on a broken setup reports success.
+	require.GreaterOrEqual(t, len(testFiles), 3,
+		"found %d files of distinct types in the repository; the walk from %s is not finding them", len(testFiles), root)
 
 	t.Logf("Found %d local files for testing", len(testFiles))
 
@@ -494,7 +491,7 @@ func (s *AWSS3TestSuite) TestRealLocalData() {
 		ext := strings.ToLower(filepath.Ext(fileName))
 		t.Logf("\n📁 File %d: %s (%s, %.2f MB)", i+1, fileName, ext, float64(fileSize)/(1024*1024))
 
-		// Test upload with CargoShip optimization
+		// Upload
 		key := fmt.Sprintf("objectfs-test/realdata/%s", fileName)
 
 		start := time.Now()
@@ -559,7 +556,7 @@ func (s *AWSS3TestSuite) TestRealLocalData() {
 func (s *AWSS3TestSuite) TestHighThroughputStress() {
 	t := s.T()
 
-	t.Logf("🔥 High-Throughput Stress Test with CargoShip")
+	t.Logf("🔥 High-Throughput Stress Test")
 	t.Logf("Network: 10Gbps local → 5Gbps+ internet | Target: Approach 800 MB/s")
 
 	// Create larger test files (50MB, 100MB, 200MB)
@@ -899,6 +896,24 @@ func (s *AWSS3TestSuite) TestCompressedObjectSizeReporting() {
 }
 
 // Helper function
+// repoRootForTest walks up from the working directory to the directory holding go.mod.
+func repoRootForTest(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		require.NotEqual(t, parent, dir, "no go.mod above the working directory")
+		dir = parent
+	}
+}
+
 func strPtr(s string) *string {
 	return &s
 }
