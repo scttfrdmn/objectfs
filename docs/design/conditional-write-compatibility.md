@@ -34,7 +34,7 @@ indistinguishable until it matters.
 | Endpoint | Version | How |
 |---|---|---|
 | AWS S3 | `us-west-2`, 2026-08-08 | the real service; each test creates its own bucket and removes it |
-| MinIO | `RELEASE.2025-09-07T16-13-09Z` (commit `07c3a429bfed433e49018cb0f78a52145d4bedeb`) | container, local |
+| MinIO | `RELEASE.2025-09-07T16-13-09Z` (commit `07c3a429bfed433e49018cb0f78a52145d4bedeb`) when first probed; **kept verified on every PR** at source `github.com/minio/minio@v0.0.0-20260212201848-7aac2a2c5b7c` | first a container, local. Now built from that source by ci.yml's `tagged-suite (s3compat)` and by `deploy/docker/minio.Dockerfile`, because MinIO no longer publishes images (#599, #600). Both builds measured identically to the release on every cell |
 | Ceph RGW | `19.2.0 squid` (commit `16063ff2022298c9300e49a547a16ffda59baf13`) | `quay.io/ceph/demo`, local |
 | RustFS | `1.0.0-beta.12` (revision `8601179c3989d131fb68fa311fd517fe281270fe`, image digest `sha256:186743df6fdf85c1f10ce246bbee5fb22f1d35c3ec1a73fc9058c560c5f6b505`) | `docker.io/rustfs/rustfs`, local |
 | Wasabi | unversioned — `s3.wasabisys.com` (`us-east-1`), probed 2026-08-08. The service returns no `Server` header and publishes no build identifier, so this row is dated rather than versioned | the real service, an account's own credentials; each test creates its own bucket and removes it |
@@ -208,7 +208,7 @@ where the failure is loud.
 | If you run | Then |
 |---|---|
 | **AWS S3** | Coordination features work. This is the reference implementation. |
-| **MinIO** ≥ `RELEASE.2025-09-07` | Coordination features work. Enforcement is real, verified here rather than assumed — but it is an extension of the S3 API, not a contract, so the version above is part of the claim. |
+| **MinIO** ≥ `RELEASE.2025-09-07` | Coordination features work. Enforcement is real, verified here rather than assumed — and, since #599, re-verified by CI on every PR against the source build named above — but it is an extension of the S3 API, not a contract, so the version is part of the claim. |
 | **Ceph RGW** ≤ 19.2.0 | Coordination features **refuse to start**, correctly. Conditional writes are partially implemented in a way that cannot be worked around from the client: no CAS (ETag rejected), and multipart writes unconditional. Use a coordination backend other than the object store. |
 | **RustFS** `1.0.0-beta.12` | Coordination features work. It matched AWS on every cell probed, including the two RGW fails. It is a pre-release, so re-run the suite against the build you deploy rather than trusting this row — the probe will refuse at mount time if a later beta regresses. |
 | **Wasabi** | Coordination features **refuse to start**, correctly. Conditional headers are accepted and never evaluated, so there is nothing to work around from the client. Use a coordination backend other than the object store. Everything else — reads, writes, multipart, tiering — is unaffected: this is a coordination limitation, not a storage one. |

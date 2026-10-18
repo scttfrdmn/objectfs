@@ -440,7 +440,7 @@ jobs:
     - name: Enforce per-package floors
       run: ./scripts/coverage-gate.sh coverage.out .coverage-floors
 
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: always()
       with:
         name: coverage
@@ -599,7 +599,7 @@ jobs:
       run: .github/scripts/fuzz-smoke.sh '${{ matrix.pkg }}' '${{ matrix.target }}' 60
 
       # A counterexample is the whole point of the job, so it has to leave the machine.
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: failure()
       with:
         name: fuzz-failure-${{ matrix.target }}
@@ -736,7 +736,7 @@ jobs:
       # Node 22, not 20: 20 went end-of-life in April 2026, so it stops receiving security fixes
       # while this job keeps installing it. sdks/javascript declares `node >=16`, so nothing here
       # constrains the upper end — the pin was just never revisited. 22 is the active LTS.
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: '22'
 
@@ -863,7 +863,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: '22'
 
@@ -990,6 +990,38 @@ jobs:
             "minSecretLen (32). An unquoted numeric-looking secret is coerced by YAML; quote it."
           exit 1
         fi
+
+      # Every external image the deploy files depend on must still exist. The steps above check the
+      # files parse; none asked a registry whether what they name is there. So docker-compose.yaml
+      # pinned minio/minio and minio/mc for months after both repositories were deleted from Docker
+      # Hub, and `up` worked only on machines that already had them (#600). Checked with `docker
+      # manifest inspect`, which reads the manifest without pulling. Locally built tags (`:local`) are
+      # skipped; they are not in any registry by design.
+      #
+      # Not found or denied fails the job: that is the defect. A Docker Hub 429 does not, because
+      # anonymous manifest requests are rate limited per runner IP and a shared runner is not
+      # evidence about an image; it is reported as a visible warning, never as a pass.
+    - name: Every image the deploy files name still exists in its registry
+      run: |
+        refs=$( { grep -rhE '^[[:space:]]*image:' deploy/ | sed -E 's/^[[:space:]]*image:[[:space:]]*//';
+                  grep -rhE '^FROM ' deploy/ | awk '{print $2}'; } | grep -v ':local$' | sort -u )
+        if [ -z "$refs" ]; then
+          echo "::error::found no image references under deploy/, so this step checked nothing."
+          exit 1
+        fi
+        failed=0
+        for ref in $refs; do
+          if out=$(docker manifest inspect "$ref" 2>&1 >/dev/null); then
+            echo "ok   $ref"
+          elif grep -qiE 'toomanyrequests|rate limit|429' <<<"$out"; then
+            echo "::warning::$ref could not be checked: the registry rate-limited this runner ($out)."
+          else
+            echo "::error::$ref does not resolve: $out"
+            failed=1
+          fi
+        done
+        exit $failed
+
 
   # ---------------------------------------------------------------------------------------------
   # systemd-unit — configs/systemd/objectfs@.service, which operators are told to install.
