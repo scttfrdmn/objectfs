@@ -469,7 +469,7 @@ func TestRequiredMatrixCellsAreProducedExactly(t *testing.T) {
 	}
 
 	// install-script (3), modulefiles (2) and tagged-suite (3) when this was written. A floor, so a
-	// parse that stops recognising templated names cannot pass by checking nothing.
+	// parse that stops recognizing templated names cannot pass by checking nothing.
 	if checked < 6 {
 		t.Fatalf("checked %d required contexts against templated job names, expected at least 6. The "+
 			"`name:` or matrix parse has stopped matching", checked)
