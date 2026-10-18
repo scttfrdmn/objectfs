@@ -30,17 +30,27 @@ name: objectfs-cluster
 
 services:
   # ---------------------------------------------------------------------------------------------
-  # The S3 endpoint. Pinned by digest, not by tag: `latest` moved under this project once already
-  # (the compat matrix records MinIO at RELEASE.2025-09-07T16-13-09Z with its commit, for exactly
-  # this reason), and a development environment that silently changes its backend between two
-  # `up` invocations is a debugging session nobody can reproduce.
+  # The S3 endpoint, built from pinned source by minio.Dockerfile.
+  #
+  # Built because there is nothing left to pull: `minio/minio` and `minio/mc` are both gone from
+  # Docker Hub, and MinIO's community edition is source-only. This used to say "Pinned by digest, not
+  # by tag" above a line that pinned a tag, `minio/minio:RELEASE.2025-09-07T16-13-09Z`, which `up`
+  # could fetch only on a machine that already had it (#600). The version minio.Dockerfile builds is
+  # the one CI's tagged-suite (s3compat) cell verifies conditional writes against, so the store this
+  # cluster coordinates over is the store CI checks. Change them together.
   # ---------------------------------------------------------------------------------------------
   minio:
-    image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address ":9001"
+    build:
+      context: .
+      dockerfile: minio.Dockerfile
+    image: objectfs-dev-minio:local
     environment:
       MINIO_ROOT_USER: objectfs
       MINIO_ROOT_PASSWORD: objectfs123
+      # The `local` alias the healthcheck's `mc ready local` names. The official image shipped it
+      # preconfigured; a source build does not, and without it the check fails forever and nothing
+      # that depends on a healthy endpoint ever starts.
+      MC_HOST_local: http://objectfs:objectfs123@localhost:9000
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -58,7 +68,9 @@ services:
   # wrapper on each node, because three nodes racing to create the same bucket is a race this file
   # would be teaching people to write.
   create-bucket:
-    image: docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    # The same built image, which carries mc alongside minio, rather than a second pinned pull of an
+    # image that no longer exists.
+    image: objectfs-dev-minio:local
     depends_on:
       minio:
         condition: service_healthy

@@ -25,12 +25,6 @@ import (
 // tracks running it. An entry is a debt with a name on it, not a permanent excuse: the test fails if an
 // exempt tag starts being executed (the entry is stale) or stops existing in the tree.
 var executedTagsExempt = map[string]string{
-	// Real AWS: the only live verification of conditional writes, which every CAS guarantee rests on.
-	// Needs an OIDC role and a scheduled job.
-	"integration": "#570",
-	// Real AWS plus OBJECTFS_TEST_BUCKET, and it skips without one, so its job must also assert that
-	// it ran.
-	"aws_s3": "#570",
 	// Not hermetic in the sense that matters: a timing result on a shared runner is noise, not signal.
 	"benchmark": "#568",
 }
