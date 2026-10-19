@@ -1220,11 +1220,13 @@ jobs:
           fi
         done
 
-        # Non-vacuity. Five tarballs is what `make package-linux`'s own comment promises; a glob that
-        # matched nothing would satisfy both loops above in silence.
+        # Non-vacuity. Four tarballs is what `make package-linux`'s own comment promises — linux and
+        # darwin, amd64 and arm64; it was five while linux/armv7 was built, and 32-bit Linux is
+        # unsupported as of v0.18.0. A glob that matched nothing would satisfy both loops above in
+        # silence.
         count="$(ls dist/*.tar.gz | wc -l | tr -d ' ')"
-        [ "$count" -eq 5 ] || {
-          echo "::error::found $count tarballs in dist/, expected 5. The loops above iterate over"\
+        [ "$count" -eq 4 ] || {
+          echo "::error::found $count tarballs in dist/, expected 4. The loops above iterate over"\
             "globs, so a naming change makes them pass on nothing." >&2
           exit 1
         }
