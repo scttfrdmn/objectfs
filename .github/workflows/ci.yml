@@ -993,9 +993,13 @@ jobs:
       # manifest inspect`, which reads the manifest without pulling. Locally built tags (`:local`) are
       # skipped; they are not in any registry by design.
       #
-      # Not found or denied fails the job: that is the defect. A Docker Hub 429 does not, because
-      # anonymous manifest requests are rate limited per runner IP and a shared runner is not
-      # evidence about an image; it is reported as a visible warning, never as a pass.
+      # Three outcomes, and only one is the defect. Not found / unknown / denied fails the job: that is
+      # an image the file names and nobody can pull. A transient registry answer — any 5xx, a 429, a
+      # timeout — is retried with backoff and then reported as a visible warning, because a registry
+      # outage or a rate limit on a shared runner IP says nothing about whether the image exists. That
+      # split was missing at first: Docker Hub returned a 502 for an image that exists, and the step
+      # failed an unrelated Dependabot PR (#622) with "does not resolve". Anything unrecognised still
+      # fails, so a new kind of error is read rather than waved through.
     - name: Every image the deploy files name still exists in its registry
       run: |
         refs=$( { grep -rhE '^[[:space:]]*image:' deploy/ | sed -E 's/^[[:space:]]*image:[[:space:]]*//';
@@ -1006,14 +1010,24 @@ jobs:
         fi
         failed=0
         for ref in $refs; do
-          if out=$(docker manifest inspect "$ref" 2>&1 >/dev/null); then
-            echo "ok   $ref"
-          elif grep -qiE 'toomanyrequests|rate limit|429' <<<"$out"; then
-            echo "::warning::$ref could not be checked: the registry rate-limited this runner ($out)."
-          else
-            echo "::error::$ref does not resolve: $out"
-            failed=1
-          fi
+          verdict=""
+          for attempt in 1 2 3; do
+            if out=$(docker manifest inspect "$ref" 2>&1 >/dev/null); then
+              verdict=ok; break
+            elif grep -qiE 'manifest unknown|not found|no such manifest|denied|unauthorized|404' <<<"$out"; then
+              verdict=missing; break
+            elif grep -qiE 'toomanyrequests|rate limit|429|50[0-9] |bad gateway|service unavailable|gateway timeout|timeout|timed out|connection reset|EOF' <<<"$out"; then
+              verdict=transient; sleep $((attempt * 10))
+            else
+              verdict=unknown; break
+            fi
+          done
+          case "$verdict" in
+            ok)        echo "ok   $ref" ;;
+            missing)   echo "::error::$ref does not resolve: $out"; failed=1 ;;
+            transient) echo "::warning::$ref could not be checked after 3 attempts; the registry answered: $out" ;;
+            *)         echo "::error::$ref gave an unrecognised registry error, read it: $out"; failed=1 ;;
+          esac
         done
         exit $failed
 
