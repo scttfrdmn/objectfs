@@ -1,0 +1,123 @@
+name: Live AWS
+
+# The build-tagged suites that need real AWS: `integration` and `aws_s3`.
+#
+# `integration` holds the only verification of conditional writes against the real service. Every
+# CAS guarantee rests on four behaviours an emulator can only imitate: If-None-Match: * on an existing
+# key is 412 and writes nothing, If-Match on an absent key is 404 rather than 412, a precondition on
+# CompleteMultipartUpload is evaluated at all, and S3 itself arbitrates a genuine race. The hermetic
+# suite asserts all four against substrate, and substrate agreeing is necessary and not sufficient.
+# Until this workflow, nothing ran it (#570).
+#
+# Not on pull_request, deliberately. This assumes an IAM role in a real AWS account, and a PR (a fork's
+# above all) must never be able to reach it. The role's trust policy enforces the same thing on the AWS
+# side: it accepts only tokens for `repo:scttfrdmn/objectfs:ref:refs/heads/main`, so a scheduled or
+# dispatched run on main can assume it and nothing else can. Its permissions reach S3 and only buckets
+# named objectfs-live-*, which both suites create per run and delete. Both policies are in
+# deploy/aws/ci-live-s3/, so the access this workflow has is a reviewed file rather than a console
+# setting.
+#
+# AWS_LIVE_ROLE_ARN is a secret, not a variable. The ARN is not a credential, but it carries the
+# account ID, and this repository's logs are public.
+
+on:
+  schedule:
+    # Daily, off the hour. A real-service regression shows up within a day, and the cost is a few
+    # dozen requests and two short-lived buckets.
+    - cron: "37 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION_FILE: go.mod
+
+concurrency:
+  group: live-aws
+  cancel-in-progress: false
+
+jobs:
+  live-suite:
+    name: live-suite (${{ matrix.tag }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [integration, aws_s3]
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ env.GO_VERSION_FILE }}
+        cache: true
+
+      # Fails closed. Without the role this job has no credentials, and the suites would skip — which
+      # reports success. A missing secret is a configuration failure and is reported as one.
+    - name: The live-AWS role is configured
+      env:
+        ROLE: ${{ secrets.AWS_LIVE_ROLE_ARN }}
+      run: |
+        if [ -z "$ROLE" ]; then
+          echo "::error::AWS_LIVE_ROLE_ARN is not set, so this job cannot assume the live-test role." \
+            "Create the role from deploy/aws/ci-live-s3/ and store its ARN in that secret."
+          exit 1
+        fi
+
+    - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: ${{ secrets.AWS_LIVE_ROLE_ARN }}
+        aws-region: us-west-2
+        role-session-name: objectfs-live-${{ matrix.tag }}-${{ github.run_id }}
+
+      # Same discovery as ci.yml's tagged-suite: the tests that exist only under the tag, found with
+      # `go test -list`, each required to report PASS, and no SKIP allowed. aws_s3 in particular used to
+      # skip without a pre-made bucket; it now creates its own, so a skip here means something has
+      # stopped providing what the suite needs, and a skip reports success.
+    - name: Every ${{ matrix.tag }} test runs against real AWS, and passes without skipping
+      env:
+        TAG: ${{ matrix.tag }}
+      run: |
+        set -o pipefail
+
+        # Forced to ./dir: BSD grep prints tests/x where GNU prints ./tests/x, and a bare `tests` is
+        # read by go as a standard-library import path. See ci.yml's tagged-suite.
+        pkgs=$(grep -rlE --include='*_test.go' "^//go:build .*\b${TAG}\b" . | xargs -n1 dirname | sed 's|^\./||; s|^|./|' | sort -u)
+        if [ -z "$pkgs" ]; then
+          echo "::error::no _test.go file names the ${TAG} build tag, so this cell has nothing to run."
+          exit 1
+        fi
+
+        : > live.txt
+        for p in $pkgs; do
+          go test -tags="$TAG" -list . "$p" | grep '^Test' | sort > tagged.txt
+          go test -list . "$p" | grep '^Test' | sort > untagged.txt
+          comm -23 tagged.txt untagged.txt >> live.txt
+        done
+        if [ ! -s live.txt ]; then
+          echo "::error::-tags=${TAG} selects no test the untagged build lacks, in: $pkgs."
+          exit 1
+        fi
+        echo "tag-only tests:"; sed 's/^/  /' live.txt
+
+        go test -race -v -timeout 15m -tags="$TAG" -run "^($(paste -sd'|' live.txt))\$" $pkgs 2>&1 | tee suite.log
+
+        failed=0
+        while read -r name; do
+          if ! grep -q -- "^--- PASS: $name " suite.log; then
+            echo "::error::$name did not report PASS against real AWS."
+            failed=1
+          fi
+        done < live.txt
+        if grep -q -- '--- SKIP' suite.log; then
+          grep -- '--- SKIP' suite.log
+          echo "::error::a ${TAG} test skipped. With the role assumed and buckets created per run, a skip" \
+            "means the suite has lost something it needs, and a skip reports success."
+          failed=1
+        fi
+        exit $failed

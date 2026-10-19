@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The development cluster in `deploy/docker/docker-compose.yaml` could not start on a clean machine.**
+  It pulled `minio/minio` and `minio/mc`, and both repositories are gone from Docker Hub: MinIO's
+  community edition is now source-only. `up` worked only where an old copy was already cached. MinIO
+  and `mc` are now built from pinned source by `deploy/docker/minio.Dockerfile`, at the version CI
+  verifies conditional writes against. CI now also checks that every image the deploy files name still
+  exists in its registry.
+
 - **`bucket` still accepted punctuation no bucket name has ever contained.** After the control-character
   fix, `ValidateBucketName` refused the URL characters it listed (`/\:@?#[]%&` and space) and accepted
   everything else, so a backtick, `"`, `<`, `>`, `^`, `{`, `|`, `}`, `!`, `$`, `'`, `(`, `)`, `*`, `+`,

@@ -991,6 +991,38 @@ jobs:
           exit 1
         fi
 
+      # Every external image the deploy files depend on must still exist. The steps above check the
+      # files parse; none asked a registry whether what they name is there. So docker-compose.yaml
+      # pinned minio/minio and minio/mc for months after both repositories were deleted from Docker
+      # Hub, and `up` worked only on machines that already had them (#600). Checked with `docker
+      # manifest inspect`, which reads the manifest without pulling. Locally built tags (`:local`) are
+      # skipped; they are not in any registry by design.
+      #
+      # Not found or denied fails the job: that is the defect. A Docker Hub 429 does not, because
+      # anonymous manifest requests are rate limited per runner IP and a shared runner is not
+      # evidence about an image; it is reported as a visible warning, never as a pass.
+    - name: Every image the deploy files name still exists in its registry
+      run: |
+        refs=$( { grep -rhE '^[[:space:]]*image:' deploy/ | sed -E 's/^[[:space:]]*image:[[:space:]]*//';
+                  grep -rhE '^FROM ' deploy/ | awk '{print $2}'; } | grep -v ':local$' | sort -u )
+        if [ -z "$refs" ]; then
+          echo "::error::found no image references under deploy/, so this step checked nothing."
+          exit 1
+        fi
+        failed=0
+        for ref in $refs; do
+          if out=$(docker manifest inspect "$ref" 2>&1 >/dev/null); then
+            echo "ok   $ref"
+          elif grep -qiE 'toomanyrequests|rate limit|429' <<<"$out"; then
+            echo "::warning::$ref could not be checked: the registry rate-limited this runner ($out)."
+          else
+            echo "::error::$ref does not resolve: $out"
+            failed=1
+          fi
+        done
+        exit $failed
+
+
   # ---------------------------------------------------------------------------------------------
   # systemd-unit — configs/systemd/objectfs@.service, which operators are told to install.
   #
