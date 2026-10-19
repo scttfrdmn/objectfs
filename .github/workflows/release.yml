@@ -194,11 +194,14 @@ jobs:
         #
         #   objectfs_0.14.0-1_amd64.deb   objectfs-0.14.0-1.x86_64.rpm
         #   objectfs_0.14.0-1_arm64.deb   objectfs-0.14.0-1.aarch64.rpm
-        #   objectfs_0.14.0-1_armhf.deb   objectfs-0.14.0-1.armv7hl.rpm
+        #
+        # 64-bit only: 32-bit Linux (armhf / armv7hl / linux-armv7) is unsupported as of v0.18.0, and
+        # these lists are the release's half of that. Leaving armv7 here would fail every release on a
+        # missing file; see .goreleaser.yml's builds.
         #
         # Spelled out rather than globbed, because a glob passes on a missing architecture and the
         # whole point of reading the version back is that a plausible-looking dist/ is not evidence.
-        for arch in amd64 arm64 armhf; do
+        for arch in amd64 arm64; do
           deb="dist/objectfs_${TAG}-1_${arch}.deb"
           test -f "$deb" || { echo "::error::expected $deb, and it is not there"; ls -l dist; exit 1; }
 
@@ -209,7 +212,7 @@ jobs:
           }
         done
 
-        for arch in x86_64 aarch64 armv7hl; do
+        for arch in x86_64 aarch64; do
           rpm="dist/objectfs-${TAG}-1.${arch}.rpm"
           test -f "$rpm" || { echo "::error::expected $rpm, and it is not there"; ls -l dist; exit 1; }
         done
@@ -217,7 +220,7 @@ jobs:
         # The tarballs, by the names scripts/install.sh fetches. install.sh builds this string itself
         # from `uname`, so a rename here breaks the documented one-liner on that platform and nothing
         # else in the repository would fail.
-        for platform in linux-amd64 linux-arm64 linux-armv7 darwin-amd64 darwin-arm64; do
+        for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
           tgz="dist/objectfs-$platform.tar.gz"
           test -f "$tgz" || { echo "::error::expected $tgz, and it is not there"; ls -l dist; exit 1; }
 
@@ -675,16 +678,17 @@ jobs:
           exit 1
         fi
 
-        # 11 today: 5 tarballs, 3 debs, 3 rpms. A floor, not an equality — adding a platform should
+        # 8 today: 4 tarballs, 2 debs, 2 rpms. A floor, not an equality — adding a platform should
         # not fail here — but zero and one are both signs that the download half broke, and the count
-        # is printed so the run records what was signed. It was 9 until armv7 started getting a .deb
-        # and an .rpm like the other two architectures; see .goreleaser.yml.
+        # is printed so the run records what was signed. It was 11 while armv7 was built (a tarball, a
+        # .deb and an .rpm); 32-bit Linux is unsupported as of v0.18.0, so the floor moved with it —
+        # left at 11 it would have failed the first release that did not build armv7.
         count=$(printf '%s\n' "$assets" | wc -l | tr -d ' ')
         echo "signing a checksum list over $count assets:"
         printf '  %s\n' $assets
 
-        if [ "$count" -lt 11 ]; then
-          echo "::error::expected at least 11 assets (5 tarballs, 3 debs, 3 rpms) and found $count." \
+        if [ "$count" -lt 8 ]; then
+          echo "::error::expected at least 8 assets (4 tarballs, 2 debs, 2 rpms) and found $count." \
             "A release that omits a platform's artifact looks complete on the page; the omission is" \
             "only visible to someone who knew to expect it."
           exit 1

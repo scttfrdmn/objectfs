@@ -30,7 +30,8 @@
 #     target here — Raspberry Pi collectors and edge instruments writing to S3 — so it now gets
 #     packages like the other two architectures. The hand-rolled loop built amd64 and arm64 only, and
 #     release.yml's comment called that asymmetry out as a Makefile limitation rather than a decision.
-#     A release now carries 6 packages and 5 tarballs instead of 4 and 5.
+#     A release now carries 6 packages and 5 tarballs instead of 4 and 5. (Superseded in v0.18.0: 32-bit
+#     Linux is unsupported, armv7 is no longer built, and a release carries 4 packages and 4 tarballs.)
 version: 2
 
 # `version` in cmd/objectfs/main.go is an untyped **constant**, so the linker cannot rewrite it and
@@ -71,22 +72,16 @@ builds:
   goos:
   - linux
   - darwin
+  # 64-bit only. 32-bit Linux (linux/arm v7, and linux/386, which was never published) is unsupported
+  # as of v0.18.0 — the maintainer's decision, 2026-10-19. v0.17.1 was the last release with an armv7
+  # tarball, .deb and .rpm. linux/armv7 had been restored once already (#198) after a 32-bit-only
+  # compile error dropped it; this time the removal is deliberate, so it is made in every place that
+  # promised the platform at once: these three builds, ci.yml's cross-build cells, install.sh's arch
+  # table, release.yml's artifact checks, and TestNoThirtyTwoBitLinuxIsBuiltOrShipped, which fails
+  # if any of them brings it back without the others.
   goarch:
   - amd64
   - arm64
-  - arm
-  # armv7 explicitly, not whatever the toolchain defaults to: armv6 and armv7 are not interchangeable
-  # binaries and the artifact is named for 7, so the flag has to say 7 rather than be trusted to keep
-  # meaning it. linux/armv7 is #198 — it was dropped once for a one-line compile error where
-  # `safeIntToUint32` bounded an `int` against `0xFFFFFFFF`, which does not fit a 32-bit `int`: the
-  # guard against overflow overflowed. ci.yml's cross-build matrix carries linux/arm and linux/386
-  # cells so a 32-bit break is a red pull request rather than a platform quietly leaving the matrix.
-  goarm:
-  - '7'
-  ignore:
-  # No 32-bit ARM macOS has ever existed.
-  - goos: darwin
-    goarch: arm
   flags:
   - -trimpath
   ldflags:
@@ -95,8 +90,8 @@ builds:
   - release
   - netgo
 
-# The package build. Linux only — there is no .deb or .rpm for macOS — so this is three more compiles
-# rather than five, and they take about six seconds together.
+# The package build. Linux only — there is no .deb or .rpm for macOS — so this is two more compiles
+# rather than four, and they take a few seconds together.
 - id: packages
   main: ./cmd/objectfs
   binary: objectfs
@@ -107,9 +102,6 @@ builds:
   goarch:
   - amd64
   - arm64
-  - arm
-  goarm:
-  - '7'
   flags:
   - -trimpath
   ldflags:
@@ -146,9 +138,6 @@ builds:
   goarch:
   - amd64
   - arm64
-  - arm
-  goarm:
-  - '7'
   flags:
   - -trimpath
   ldflags:
@@ -234,7 +223,6 @@ nfpms:
   #
   #     objectfs_0.14.0-1_amd64.deb        objectfs-0.14.0-1.x86_64.rpm
   #     objectfs_0.14.0-1_arm64.deb        objectfs-0.14.0-1.aarch64.rpm
-  #     objectfs_0.14.0-1_armhf.deb        objectfs-0.14.0-1.armv7hl.rpm
   #
   # goreleaser's default template is `{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}` for
   # both, which produced `objectfs_0.14.0_linux_amd64.rpm` — a Go-flavored name on an rpm, where

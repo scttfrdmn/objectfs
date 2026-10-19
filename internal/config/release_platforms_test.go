@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -21,9 +22,12 @@ import (
 // 32-bit break is one red cell on the PR that caused it, and removing a platform is a deliberate edit
 // to two files rather than the path of least resistance during a release.
 //
-// Note the direction. This asserts release ⊆ ci, not equality: ci.yml carries linux/386 as a second
-// 32-bit word-width canary and we do not publish a 386 binary. An extra CI cell costs a minute and
+// Note the direction. This asserts release ⊆ ci, not equality: an extra CI cell costs a minute and
 // catches things; an unbuilt release cell ships them.
+//
+// 32-bit Linux is unsupported as of v0.18.0 (the maintainer's decision, 2026-10-19). linux/armv7 was
+// #198's platform and was restored after it; this time it was removed deliberately, from every file
+// that promised it, and TestNoThirtyTwoBitLinuxIsBuiltOrShipped below holds that line.
 
 // TestEveryReleasePlatformIsCompiledInCI is the coupling itself.
 func TestEveryReleasePlatformIsCompiledInCI(t *testing.T) {
@@ -58,41 +62,59 @@ func TestEveryReleasePlatformIsCompiledInCI(t *testing.T) {
 	}
 }
 
-// TestThirtyTwoBitIsStillInTheCrossBuildMatrix guards the word width, not a specific platform.
+// thirtyTwoBitGoarch are the GOARCH values on which Go's `int` is 32 bits, among those this project
+// has ever targeted.
+var thirtyTwoBitGoarch = map[string]bool{"arm": true, "386": true}
+
+// TestNoThirtyTwoBitLinuxIsBuiltOrShipped asserts 32-bit Linux is absent everywhere it could be
+// promised: every goreleaser build, ci.yml's cross-build matrix, and install.sh's arch table.
 //
-// `int` is 32 bits on GOARCH=arm and GOARCH=386 and 64 bits everywhere else this project targets, and
-// every defect in #198's class — a constant that does not fit, a conversion that truncates — is
-// invisible unless something compiles for a 32-bit word. A matrix of six 64-bit cells looks thorough
-// and tests one word width.
-//
-// Stated as "at least one 32-bit cell" rather than by naming arm: if arm is ever genuinely dropped
-// while 386 stays, that is fine and this should keep passing. What must not happen silently is the
-// matrix going all-64-bit again.
-func TestThirtyTwoBitIsStillInTheCrossBuildMatrix(t *testing.T) {
+// This replaces TestThirtyTwoBitIsStillInTheCrossBuildMatrix, which required at least one 32-bit CI
+// cell as a word-width canary for #198's class of defect. That was right while a 32-bit binary
+// shipped. As of v0.18.0 none does, and the hazard runs the other way. A platform half-removed —
+// still built by goreleaser but not compiled by CI, or still offered by install.sh with no asset
+// behind it — is the state #198 was, and it fails here rather than on a release tag.
+func TestNoThirtyTwoBitLinuxIsBuiltOrShipped(t *testing.T) {
 	t.Parallel()
 
-	// GOARCHes on which Go's `int` is 32 bits. Not exhaustive over everything Go supports — mips,
-	// mipsle, riscv32 and others qualify too — but this project builds for linux and darwin, and
-	// listing architectures it does not target would let an unrelated cell satisfy the check.
-	thirtyTwoBit := map[string]bool{"arm": true, "386": true}
+	checked := 0
 
-	var found []string
+	for _, build := range []string{"archives", "packages", "mount-helper"} {
+		for _, target := range goreleaserTargets(t, build) {
+			checked++
 
-	for p := range crossBuildPlatforms(t, workflowSource(t, "ci.yml")) {
-		if arch := strings.SplitN(p, "/", 2); len(arch) == 2 && thirtyTwoBit[arch[1]] {
-			found = append(found, p)
+			if thirtyTwoBitGoarch[target.Goarch] {
+				t.Errorf(".goreleaser.yml's %q build produces %s. 32-bit Linux is unsupported as of "+
+					"v0.18.0; reinstating it means restoring the CI cells, install.sh's arch row and "+
+					"release.yml's artifact checks together, and this test with them.",
+					build, target.Platform())
+			}
 		}
 	}
 
-	if len(found) == 0 {
-		t.Error("ci.yml's cross-build matrix has no 32-bit cell (no GOARCH of arm or 386).\n" +
-			"\tEvery remaining cell has a 64-bit `int`, which makes the whole #198 class of defect " +
-			"invisible: `if i > 0xFFFFFFFF` compiles and behaves correctly on all of them and does " +
-			"not compile on any 32-bit target. Restore a linux/arm or linux/386 cell.")
+	if checked < 6 {
+		t.Fatalf("expanded %d goreleaser targets across three builds, expected at least 6. The build "+
+			"ids moved or the expansion broke, and the assertion above checked nothing", checked)
 	}
 
-	sort.Strings(found)
-	t.Logf("32-bit cells compiled by CI: %s", strings.Join(found, ", "))
+	compiled := crossBuildPlatforms(t, workflowSource(t, "ci.yml"))
+	if len(compiled) == 0 {
+		t.Fatal("read no platforms out of ci.yml's cross-build matrix")
+	}
+
+	for p := range compiled {
+		if _, arch, _ := strings.Cut(p, "/"); thirtyTwoBitGoarch[arch] {
+			t.Errorf("ci.yml's cross-build matrix compiles %s, a 32-bit target, though no release ships "+
+				"one. A cell for an unsupported platform is a required check guarding nothing.", p)
+		}
+	}
+
+	for p := range installScriptPlatforms(t, readFile(t, filepath.Join(repoRoot(t), "scripts", "install.sh"))) {
+		if strings.HasSuffix(p, "-armv7") || strings.HasSuffix(p, "-386") {
+			t.Errorf("scripts/install.sh resolves a machine to %s, which no release publishes. It should "+
+				"refuse 32-bit machines by name instead of building a URL that 404s.", p)
+		}
+	}
 }
 
 // releasePlatforms returns the goos/goarch pairs a release compiles and publishes.

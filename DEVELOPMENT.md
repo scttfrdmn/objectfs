@@ -451,10 +451,14 @@ overwriting it at link time.
 
 ### Cross-Platform Build
 
-These are the five platforms `.github/workflows/release.yml` publishes, and every one of them is
+These are the four platforms `.github/workflows/release.yml` publishes, and every one of them is
 compiled by `ci.yml`'s `cross-build` job on each PR — a coupling `TestEveryReleasePlatformIsCompiledInCI`
 enforces, because linux/armv7 was once shipped from a matrix nothing else built and left the matrix
 when it stopped compiling ([#198](https://github.com/scttfrdmn/objectfs/issues/198)).
+
+32-bit Linux (linux/arm, linux/386) is unsupported as of v0.18.0, and v0.17.1 was the last release built
+for armv7. `TestNoThirtyTwoBitLinuxIsBuiltOrShipped` fails if a release build, the CI matrix or
+`scripts/install.sh` brings it back.
 
 ```bash
 # Linux AMD64
@@ -462,10 +466,6 @@ GOOS=linux GOARCH=amd64 go build -o objectfs-linux-amd64 ./cmd/objectfs
 
 # Linux ARM64
 GOOS=linux GOARCH=arm64 go build -o objectfs-linux-arm64 ./cmd/objectfs
-
-# Linux ARMv7 — Raspberry Pi and other 32-bit ARM. Set GOARM explicitly: armv6 and armv7
-# binaries are not interchangeable.
-GOOS=linux GOARCH=arm GOARM=7 go build -o objectfs-linux-armv7 ./cmd/objectfs
 
 # macOS AMD64
 GOOS=darwin GOARCH=amd64 go build -o objectfs-darwin-amd64 ./cmd/objectfs

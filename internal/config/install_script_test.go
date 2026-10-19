@@ -20,7 +20,7 @@ import (
 // not publish is the same 404 from the other direction.
 //
 // The CI job that runs the script in three containers cannot see either of these. It runs on
-// x86_64, so it exercises exactly one row of the mapping — the armv7 and arm64 and darwin rows are
+// x86_64, so it exercises exactly one row of the mapping — the arm64 and darwin rows are
 // unreached there, and a mapping wrong for arm64 passes every container in that matrix.
 //
 // One mutation is worth recording because this project's own harness could not catch it. Reversing
@@ -419,13 +419,6 @@ func installScriptPlatforms(t *testing.T, script string) map[string]bool {
 
 	for _, os := range oses {
 		for _, arch := range arches {
-			// armv7 is published for Linux only, and the script refuses it on darwin by name. Encoding
-			// that here rather than taking the cross product blindly keeps this from demanding a
-			// darwin-armv7 asset that deliberately does not exist.
-			if arch == "armv7" && os != "linux" {
-				continue
-			}
-
 			platforms[os+"-"+arch] = true
 		}
 	}

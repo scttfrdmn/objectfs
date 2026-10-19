@@ -162,8 +162,8 @@ type goreleaserTarget struct {
 // Platform is the `goos/goarch` pair, which is how a ci.yml cross-build cell names the same thing.
 func (g goreleaserTarget) Platform() string { return g.Goos + "/" + g.Goarch }
 
-// Asset is the platform suffix in a published asset name: the `linux-armv7` of
-// `objectfs-linux-armv7.tar.gz`.
+// Asset is the platform suffix in a published asset name: the `linux-arm64` of
+// `objectfs-linux-arm64.tar.gz`.
 //
 // This reimplements archiveNameTemplate in Go, which is a real risk — the two could disagree — so
 // TestTheArchiveNameTemplateIsTheOneEverythingElseAssumes, in this file and therefore in every run

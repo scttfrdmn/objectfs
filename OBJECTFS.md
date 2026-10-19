@@ -488,7 +488,7 @@ graph LR
 |-------------|--------|-------------|-------|
 | **x86_64** | ✅ Supported | 100% | Primary architecture |
 | **ARM64** | ✅ Supported | 95% | AWS Graviton optimized |
-| **ARMv7** | ⚠️ Limited | 80% | Raspberry Pi support |
+| **ARMv7** (32-bit) | ❌ Unsupported | N/A | Dropped in v0.18.0; v0.17.1 was the last release built for it |
 | **s390x** | ❌ Unsupported | N/A | IBM Z series |
 
 #### AWS Deployment Platforms

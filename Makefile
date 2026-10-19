@@ -81,7 +81,7 @@ help:
 	@echo "  $(COLOR_GREEN)install$(COLOR_RESET)        Install binary to GOPATH/bin"
 	@echo "  $(COLOR_GREEN)docker$(COLOR_RESET)         Build Docker image"
 	@echo "  $(COLOR_GREEN)package$(COLOR_RESET)        Create distribution tarballs"
-	@echo "  $(COLOR_GREEN)package-linux$(COLOR_RESET)  Build every release artifact (goreleaser: 5 tarballs, 3 debs, 3 rpms)"
+	@echo "  $(COLOR_GREEN)package-linux$(COLOR_RESET)  Build every release artifact (goreleaser: 4 tarballs, 2 debs, 2 rpms)"
 	@echo "  $(COLOR_GREEN)version$(COLOR_RESET)        Show version information"
 	@echo ""
 	@echo "$(COLOR_BOLD)Development workflow (solo dev):$(COLOR_RESET)"
@@ -279,8 +279,9 @@ package: build-all | $(DIST_DIR)/.mkdir
 # `make package-linux` runs the same file the release runs, so a packaging change is testable here
 # before it is testable only by pushing a tag.
 #
-# **Eleven artifacts, and the version says `-next`.** Both are worth expecting rather than debugging.
-# The eleven are 5 tarballs + 3 debs + 3 rpms, armv7 now included; the suffix is because `--snapshot`
+# **Eight artifacts, and the version says `-next`.** Both are worth expecting rather than debugging.
+# The eight are 4 tarballs + 2 debs + 2 rpms (it was eleven while armv7 was built; 32-bit Linux is
+# unsupported as of v0.18.0); the suffix is because `--snapshot`
 # is what builds a version that is not a tag, and it labels the output for the *next* patch —
 # objectfs_0.14.1~next-1_amd64.deb from a tree whose constant says 0.14.0. That is honest rather than
 # awkward: a locally built package is not the release, and a tagged release build in CI derives its
