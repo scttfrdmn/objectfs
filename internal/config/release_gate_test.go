@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -264,16 +265,20 @@ var requiredCheckSuffix = regexp.MustCompile(` \(.*\)$`)
 // test pass on a tree whose local rename is exactly what it exists to catch, since the API returns
 // the configured name either way.
 //
-// One residual gap, stated because it is live rather than theoretical.
-// TestRequiredChecksStillHaveAJobToReportThem strips the ` (...)` suffix before matching, so it
-// checks that the *base job* still exists and cannot see a matrix **cell** being renamed. Three of
-// these names embed things that move: `install-script (opensuse/leap:15.6, tar, zypper -q -n
-// install tar gzip)` carries a container image tag *and* a package-manager command line, so
-// bumping Leap to 16 or editing those zypper flags silently orphans a required context while this
-// test stays green. `modulefiles` already solved this for itself — it sets an explicit `name:` so
-// its contexts do not carry an absolute interpreter path a distro can move — and `install-script`
-// should do the same. It is not done here because renaming a required check means changing branch
-// protection, which is a repository setting and not this repository's to change from code.
+// Matrix cells are checked exactly where they can be. TestRequiredChecksStillHaveAJobToReportThem
+// strips the ` (...)` suffix, so on its own it sees only the base job and not a renamed cell. That was
+// a live gap: `install-script`'s default names embedded an image tag and a zypper command line, so
+// bumping Leap would have orphaned a required context with this test green (#572). It now names its
+// cells by a stable `distro`, as `modulefiles` does by `system` and `tagged-suite` by `tag`, and
+// TestRequiredMatrixCellsAreProducedExactly computes every context such a job reports and requires
+// each required one to be among them.
+//
+// What that test cannot compute is a job left on GitHub's default name, which joins every matrix
+// value in definition order — fuzz-smoke, cross-build and build-tags. The parser does not keep key
+// order, so those stay base-job-only here. Their names carry nothing that moves on its own (a package
+// path and target, a GOOS/GOARCH pair, a build tag), and the things they name are walked by
+// TestFuzzSmokeCoversEveryFuzzTarget and TestEveryBuildTagIsGated. If one gains a value that can
+// move, give it an explicit `name:` instead.
 var requiredChecks = []string{
 	"test",
 	"lint",
@@ -326,9 +331,9 @@ var requiredChecks = []string{
 	"fuzz-smoke (./internal/awsname, FuzzValidateSSEMode)",
 	"fuzz-smoke (./internal/awsname, FuzzValidateKMSKeyID)",
 	"fuzz-smoke (./internal/awsname, FuzzValidateStorageClass)",
-	"install-script (opensuse/leap:15.6, tar, zypper -q -n install tar gzip)",
-	"install-script (rockylinux:9)",
-	"install-script (ubuntu:24.04, curl or wget, apt-get update -qq && apt-get install -y -qq wget)",
+	"install-script (opensuse)",
+	"install-script (rocky)",
+	"install-script (ubuntu)",
 	"Security Scan",
 }
 
@@ -373,6 +378,101 @@ func TestRequiredChecksStillHaveAJobToReportThem(t *testing.T) {
 			"protection in the same change — and if you nested the job inside a reusable workflow, "+
 			"note that it now reports as `<caller-job-id> / %s`, which is a different string.",
 			check, base, base)
+	}
+}
+
+// matrixRef matches a `${{ matrix.KEY }}` reference in a job's `name:`.
+var matrixRef = regexp.MustCompile(`\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}`)
+
+// cellContexts returns every status-check name a job with a matrix-templated `name:` reports, or nil
+// when the job's name is not templated or its matrix has a shape this cannot expand.
+//
+// Two shapes are expanded, because they are the two in use: `include:` rows, each one cell, and a
+// single `tag:` axis. A templated name over anything else returns nil rather than a guess, so the
+// caller reports it as unchecked instead of passing it.
+func cellContexts(job workflowJobDef) []string {
+	if !matrixRef.MatchString(job.Name) {
+		return nil
+	}
+
+	var cells []map[string]any
+
+	switch {
+	case len(job.Strategy.Matrix.Include) > 0:
+		cells = job.Strategy.Matrix.Include
+	case len(job.Strategy.Matrix.Tag) > 0:
+		for _, tag := range job.Strategy.Matrix.Tag {
+			cells = append(cells, map[string]any{"tag": tag})
+		}
+	default:
+		return nil
+	}
+
+	out := make([]string, 0, len(cells))
+
+	for _, cell := range cells {
+		name := matrixRef.ReplaceAllStringFunc(job.Name, func(ref string) string {
+			key := matrixRef.FindStringSubmatch(ref)[1]
+
+			return fmt.Sprintf("%v", cell[key])
+		})
+
+		out = append(out, name)
+	}
+
+	return out
+}
+
+// TestRequiredMatrixCellsAreProducedExactly asserts every required context belonging to a job with a
+// matrix-templated `name:` is one that job actually reports, character for character.
+//
+// This is the cell-level check the base-job test cannot make. Renaming a `distro`, dropping a `tag`
+// from an axis, or editing the template itself changes a context that branch protection pins, and
+// every PR then blocks on a check that never reports.
+func TestRequiredMatrixCellsAreProducedExactly(t *testing.T) {
+	t.Parallel()
+
+	produced := map[string]bool{}
+	templated := map[string]bool{}
+
+	for _, file := range []string{"ci.yml", "security.yml"} {
+		for _, job := range readWorkflow(t, file).Jobs {
+			cells := cellContexts(job)
+			if cells == nil {
+				continue
+			}
+
+			templated[requiredCheckSuffix.ReplaceAllString(job.Name, "")] = true
+
+			for _, c := range cells {
+				produced[c] = true
+			}
+		}
+	}
+
+	checked := 0
+
+	for _, check := range requiredChecks {
+		if !templated[requiredCheckSuffix.ReplaceAllString(check, "")] {
+			continue
+		}
+
+		checked++
+
+		if !produced[check] {
+			t.Errorf("%q is a required status check on main, but its job's templated `name:` no longer "+
+				"produces it. The cells it does produce are: %s.\n"+
+				"A required context nothing reports blocks every PR with no red check to read. Either "+
+				"restore the cell, or change branch protection in the same change (#572).",
+				check, strings.Join(sortedMapKeys(produced), ", "))
+		}
+	}
+
+	// install-script (3), modulefiles (2) and tagged-suite (3) when this was written. A floor, so a
+	// parse that stops recognizing templated names cannot pass by checking nothing.
+	if checked < 6 {
+		t.Fatalf("checked %d required contexts against templated job names, expected at least 6. The "+
+			"`name:` or matrix parse has stopped matching", checked)
 	}
 }
 

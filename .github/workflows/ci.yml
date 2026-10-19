@@ -2090,6 +2090,15 @@ jobs:
   # that resolves the latest release through the API on a machine without curl.
   # ---------------------------------------------------------------------------------------------
   install-script:
+    # Named by `distro`, not left to the default, and the reason is branch protection. The default
+    # name interpolates every matrix value, so the three required contexts were
+    # `install-script (opensuse/leap:15.6, tar, zypper -q -n install tar gzip)` and the like: an image
+    # tag and a package-manager command line pinned literally in a repository setting. Bumping Leap,
+    # moving Rocky to rockylinux/rockylinux, or adding a package to a zypper line renamed a required
+    # check, and a renamed required check never reports, so every PR would block with nothing red to
+    # point at (#572). `modulefiles` sets its name for the same reason. `distro` is the one value here
+    # that does not move when an image is bumped.
+    name: install-script (${{ matrix.distro }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -2097,16 +2106,19 @@ jobs:
       matrix:
         include:
         # ubuntu:24.04 ships neither downloader, so this row is the wget path *and* the refusal.
-        - image: ubuntu:24.04
+        - distro: ubuntu
+          image: ubuntu:24.04
           missing: curl or wget
           install: apt-get update -qq && apt-get install -y -qq wget
         # rockylinux:9 has curl, sha256sum, tar and gzip already, so it is the row where the script
         # works with nothing installed — the only row that would catch a preflight check that has
         # become wrong about what it needs.
-        - image: rockylinux:9
+        - distro: rocky
+          image: rockylinux:9
           missing: ''
           install: ''
-        - image: opensuse/leap:15.6
+        - distro: opensuse
+          image: opensuse/leap:15.6
           missing: tar
           install: zypper -q -n install tar gzip
     steps:
