@@ -228,7 +228,7 @@ func TestGateCallerGrantsWhatTheGateNeeds(t *testing.T) {
 }
 
 // requiredCheckSuffix matches the matrix suffix Actions appends to a check name, e.g. the
-// ` (linux, arm, 7)` in `cross-build (linux, arm, 7)`.
+// ` (linux, amd64)` in `cross-build (linux, amd64)`.
 var requiredCheckSuffix = regexp.MustCompile(` \(.*\)$`)
 
 // requiredChecks is the required-status-check list configured on main, verbatim, as returned by
@@ -295,8 +295,6 @@ var requiredChecks = []string{
 	"build-tags (integration)",
 	"build-tags (fuse_mount)",
 	"build-tags (s3compat)",
-	"cross-build (linux, 386)",
-	"cross-build (linux, arm, 7)",
 	"modulefiles (lmod)",
 	"modulefiles (tcl-modules)",
 	"packaging",

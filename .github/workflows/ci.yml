@@ -615,13 +615,13 @@ jobs:
   # internal/fuse carries a build constraint that makes any other GOOS fail with a message naming
   # the reason.
   #
-  # The 32-bit cells (linux/arm, linux/386) are here because a whole word width was missing from the
-  # matrix, and `int` is 32 bits wide on those targets. `safeIntToUint32` guarded its conversion with
-  # `i > 0xFFFFFFFF` — a constant that does not fit a 32-bit `int` — so `internal/fuse` did not
-  # compile for any of them. On this matrix as it stood, that was invisible: every cell was 64-bit,
-  # every cell was green, and no test on a 64-bit host can see the difference either, because the
-  # defect is a compile error rather than a wrong answer. linux/armv7 was dropped from the release
-  # matrix rather than fixed as a result (#198).
+  # 64-bit only. 32-bit Linux is unsupported as of v0.18.0 (the maintainer's decision, 2026-10-19), so
+  # the linux/arm and linux/386 cells are gone along with the armv7 release artifacts. They had been
+  # added for #198: `int` is 32 bits on those targets, `safeIntToUint32` once bounded an `int` against
+  # `0xFFFFFFFF`, and that compile error was invisible to an all-64-bit matrix. Dropping them gives up
+  # that word-width canary deliberately, and it is only a fair trade because no shipped binary has a
+  # 32-bit `int` any more. TestNoThirtyTwoBitLinuxIsBuiltOrShipped keeps this matrix and the release
+  # agreeing that it stays that way.
   #
   # The vet step is what covers _test.go files. `go build` does not compile them, so a width bug in a
   # test — `int(math.MaxUint32)` is the same error in the same shape — would still slip through a
@@ -637,8 +637,6 @@ jobs:
         include:
         - {goos: linux, goarch: amd64}
         - {goos: linux, goarch: arm64}
-        - {goos: linux, goarch: arm, goarm: '7'}
-        - {goos: linux, goarch: '386'}
         - {goos: darwin, goarch: amd64}
         - {goos: darwin, goarch: arm64}
     steps:
@@ -657,8 +655,6 @@ jobs:
         CGO_ENABLED: 0
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
-          # Empty for every non-arm cell, which the toolchain ignores.
-        GOARM: ${{ matrix.goarm }}
       run: go build ./cmd/objectfs
 
     - name: Type-check tests for ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -666,7 +662,6 @@ jobs:
         CGO_ENABLED: 0
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
-        GOARM: ${{ matrix.goarm }}
       run: go vet ./internal/... ./pkg/... ./cmd/...
 
   # ---------------------------------------------------------------------------------------------

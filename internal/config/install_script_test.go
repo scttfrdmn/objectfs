@@ -419,13 +419,6 @@ func installScriptPlatforms(t *testing.T, script string) map[string]bool {
 
 	for _, os := range oses {
 		for _, arch := range arches {
-			// armv7 is published for Linux only, and the script refuses it on darwin by name. Encoding
-			// that here rather than taking the cross product blindly keeps this from demanding a
-			// darwin-armv7 asset that deliberately does not exist.
-			if arch == "armv7" && os != "linux" {
-				continue
-			}
-
 			platforms[os+"-"+arch] = true
 		}
 	}

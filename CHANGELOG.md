@@ -7,16 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
+### Removed
 
-- **Built with Go 1.26.9 and `golang.org/x/net` v0.60.0**, up from go1.26.6 and v0.58.0, for eight
-  advisories `govulncheck` reports as reachable from ObjectFS's code: GO-2026-6617 (HTTP/2 HPACK encoder
-  race), GO-2026-6613 and GO-2026-6605 (HTTP/1 CONNECT desynchronization, server and client),
-  GO-2026-6612 and GO-2026-6611 (HTTP/2 flow-control refund and window-change CPU exhaustion),
-  GO-2026-6610 (HTTP/2 transport accepting malformed framing headers), GO-2026-6608 (MIME header memory
-  limit bypass in `net/textproto`) and GO-2026-6607 (malformed ECH extension references in `crypto/tls`).
-  ObjectFS is an S3 client and serves no HTTP/2 publicly, but its metrics and health endpoints use
-  `net/http`, and every request it makes goes through the client side of the same packages.
+- **32-bit Linux.** v0.17.1 was the last release built for it: there is no `objectfs-linux-armv7`
+  tarball, `armhf` .deb or `armv7hl` .rpm from v0.18.0 on, and CI no longer compiles `linux/arm` or
+  `linux/386`. `install.sh` now refuses a 32-bit machine by name, and points at v0.17.1's own installer
+  for anyone who needs that release:
+  `curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/v0.17.1/scripts/install.sh | bash -s -- --version 0.17.1`.
 
 ### Fixed
 
@@ -59,6 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fuzz-smoke` matrix; twelve of the repository's twenty-two targets are not, which is filed as #565.
   The counterexamples are committed, and a mutation check confirmed that reverting either fix fails a
   named test — for the KMS one, the new counterexample is the *only* test that catches it.
+
+### Security
+
+- **Built with Go 1.26.9 and `golang.org/x/net` v0.60.0**, up from go1.26.6 and v0.58.0, for eight
+  advisories `govulncheck` reports as reachable from ObjectFS's code: GO-2026-6617 (HTTP/2 HPACK encoder
+  race), GO-2026-6613 and GO-2026-6605 (HTTP/1 CONNECT desynchronization, server and client),
+  GO-2026-6612 and GO-2026-6611 (HTTP/2 flow-control refund and window-change CPU exhaustion),
+  GO-2026-6610 (HTTP/2 transport accepting malformed framing headers), GO-2026-6608 (MIME header memory
+  limit bypass in `net/textproto`) and GO-2026-6607 (malformed ECH extension references in `crypto/tls`).
+  ObjectFS is an S3 client and serves no HTTP/2 publicly, but its metrics and health endpoints use
+  `net/http`, and every request it makes goes through the client side of the same packages.
 
 ## [0.17.1] - 2026-09-20
 

@@ -196,14 +196,18 @@ detect_platform() {
     case "$arch" in
         x86_64 | amd64) arch="amd64" ;;
         aarch64 | arm64) arch="arm64" ;;
-        # armv7l is published for Linux only, and naming it here rather than letting the download
-        # 404 is the difference between "no arm build exists" and "no arm build exists for macOS".
-        armv7l | armv7)
-            [ "$os" = "linux" ] || die "armv7 is published for Linux only, and this is $os"
-            arch="armv7"
+        # 32-bit is unsupported as of v0.18.0, and refused by name rather than left to the generic
+        # arm below, because the useful thing to tell someone on a Raspberry Pi is that a build used
+        # to exist and which one. v0.17.1 was the last release with a linux-armv7 tarball; this
+        # script refuses before it would read --version, so the pointer is to v0.17.1's own copy,
+        # which still knows the platform.
+        armv7l | armv7 | armv6l | armhf | i386 | i486 | i586 | i686)
+            die "32-bit machines ($arch) are not supported as of objectfs v0.18.0. v0.17.1 was the last" \
+                "release built for 32-bit ARM; to install it, run that release's installer:" \
+                "curl -fsSL https://raw.githubusercontent.com/scttfrdmn/objectfs/v0.17.1/scripts/install.sh | bash -s -- --version 0.17.1"
             ;;
         *)
-            die "unsupported machine: $arch. Releases are built for amd64, arm64, and armv7 (Linux only)"
+            die "unsupported machine: $arch. Releases are built for amd64 and arm64"
             ;;
     esac
 
