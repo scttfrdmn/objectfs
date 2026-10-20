@@ -29,8 +29,10 @@ Two consequences for any capability you add:
    outcome the mechanism exists to prevent.
 
 `docs/design/conditional-write-compatibility.md` is the worked example: a probed matrix, per
-endpoint, where AWS is the only row verified against the real service and the only one CI keeps
-verified.
+endpoint, where AWS is the only row that matters and the only one verified against the real service.
+CI keeps it verified: `live-aws.yml` runs the conditional-write suite against real S3 daily. MinIO is
+also re-checked on every PR, because it costs nothing, but it is a best-effort row like the others —
+it informs a fallback and never constrains what ObjectFS does on AWS.
 
 - **Module**: `github.com/scttfrdmn/objectfs`
 - **Go version**: 1.26.0
