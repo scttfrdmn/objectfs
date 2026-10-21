@@ -59,8 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Built with Go 1.26.9 and `golang.org/x/net` v0.60.0**, up from go1.26.6 and v0.58.0, for eight
-  advisories `govulncheck` reports as reachable from ObjectFS's code: GO-2026-6617 (HTTP/2 HPACK encoder
+- **Built with Go 1.26.10 and `golang.org/x/net` v0.60.0**, up from go1.26.6 and v0.58.0, for nine
+  advisories `govulncheck` reports as reachable from ObjectFS's code. Most recent is GO-2026-6809:
+  `crypto/x509` did not distrust compromised intermediate certificates, which matters for a client
+  whose every S3 request is TLS. The other eight: GO-2026-6617 (HTTP/2 HPACK encoder
   race), GO-2026-6613 and GO-2026-6605 (HTTP/1 CONNECT desynchronization, server and client),
   GO-2026-6612 and GO-2026-6611 (HTTP/2 flow-control refund and window-change CPU exhaustion),
   GO-2026-6610 (HTTP/2 transport accepting malformed framing headers), GO-2026-6608 (MIME header memory

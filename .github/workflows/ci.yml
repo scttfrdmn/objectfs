@@ -1065,9 +1065,22 @@ jobs:
         fi
         failed=0
         for ref in $refs; do
+          # A pinned digest is checked by the digest alone. With `name:tag@sha256:…`, docker manifest
+          # inspect resolves the *tag* and then compares, so the moment upstream rebuilds the tag —
+          # debian:bookworm-slim did on 2026-10-21 — it reports "manifest verification failed" for an
+          # image that still exists and still builds. The build uses the digest and ignores the tag,
+          # so that is what this checks: `name@sha256:…`.
+          probe=$ref
+          case "$ref" in
+            *@sha256:*) name=${ref%@*}; digest=${ref#*@}; repo=$name
+                        # A tag exists only if the last path component has a colon; a colon earlier
+                        # is a registry port (localhost:5000/img), not a tag.
+                        case "${name##*/}" in *:*) repo=${name%:*} ;; esac
+                        probe="$repo@$digest" ;;
+          esac
           verdict=""
           for attempt in 1 2 3; do
-            if out=$(docker manifest inspect "$ref" 2>&1 >/dev/null); then
+            if out=$(docker manifest inspect "$probe" 2>&1 >/dev/null); then
               verdict=ok; break
             elif grep -qiE 'manifest unknown|not found|no such manifest|denied|unauthorized|404' <<<"$out"; then
               verdict=missing; break
