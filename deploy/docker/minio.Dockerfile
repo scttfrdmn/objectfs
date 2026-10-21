@@ -10,7 +10,7 @@
 # this development cluster coordinates over is the store CI checks conditional writes against. Change
 # them together. Base images are pinned by index digest, read from Docker Hub's API, not from a cache.
 
-FROM docker.io/library/golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
+FROM docker.io/library/golang:1.26.10-bookworm@sha256:fe3da92a5cb2881e4aa75e625cb0b7c50571632fb4cf340cbe53e6ccdcffdd51 AS build
 
 ARG MINIO_VERSION=v0.0.0-20260212201848-7aac2a2c5b7c
 ARG MC_VERSION=v0.0.0-20251106162529-77f82e18b540
