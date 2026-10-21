@@ -140,6 +140,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: Verify the tag is a semantic version matching the version the binary reports
       run: |
         TAG=${GITHUB_REF#refs/tags/}

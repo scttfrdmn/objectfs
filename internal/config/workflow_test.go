@@ -147,7 +147,7 @@ func triggerSection(wf workflowFile, event string) (map[any]any, bool) {
 	return cfg, true
 }
 
-// workflowStep is one step of a job, reduced to the three fields tests ask about.
+// workflowStep is one step of a job, reduced to the four fields tests ask about.
 //
 // A step is not given a struct on workflowJobDef itself, because `Steps any` is load-bearing there
 // for a presence check — see its comment. This is the accessor that knows the shape instead, in the
@@ -155,6 +155,7 @@ func triggerSection(wf workflowFile, event string) (map[any]any, bool) {
 // hand-rolled walk in the test that happens to need it.
 type workflowStep struct {
 	Name string
+	Uses string
 	Run  string
 	Env  map[string]string
 }
@@ -183,6 +184,10 @@ func jobSteps(job workflowJobDef) []workflowStep {
 
 		if name, ok := fields["name"].(string); ok {
 			step.Name = name
+		}
+
+		if uses, ok := fields["uses"].(string); ok {
+			step.Uses = uses
 		}
 
 		if run, ok := fields["run"].(string); ok {

@@ -144,6 +144,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: Build
       run: go build ./...
 
@@ -179,6 +184,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
       # Reported, not assumed. The suite fails rather than skips without the device, so this is
       # here to put the answer at the top of the log instead of four screens into a mount error.
@@ -262,6 +272,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
       # s3compat runs against a real S3-compatible store, not an emulator: the suite exists because the
       # compatibility matrix in docs/design/conditional-write-compatibility.md cannot be kept by reading,
       # and two of its rows were wrong in a direction that mattered when they were documentation reads.
@@ -279,7 +294,7 @@ jobs:
       env:
         MINIO_VERSION: v0.0.0-20260212201848-7aac2a2c5b7c
       run: |
-        GOBIN="$RUNNER_TEMP/minio-bin" go install "github.com/minio/minio@${MINIO_VERSION}"
+        GOBIN="$RUNNER_TEMP/minio-bin" .github/scripts/go-retry.sh install "github.com/minio/minio@${MINIO_VERSION}"
         mkdir -p "$RUNNER_TEMP/minio-data"
         MINIO_ROOT_USER=objectfs MINIO_ROOT_PASSWORD=objectfs123 \
           nohup "$RUNNER_TEMP/minio-bin/minio" server "$RUNNER_TEMP/minio-data" \
@@ -394,6 +409,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: Compile the ${{ matrix.tag }} tag
       run: go vet -tags=${{ matrix.tag }} ./...
 
@@ -418,6 +438,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
       # CGO_ENABLED is stated rather than inherited (#361). It was neither set nor unset here, so the
       # job took the runner's default of cgo *on*, and sdks/c — the one package whose coverage depends
@@ -468,6 +493,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
       # --new-from-merge-base resolves origin/<base> with git, so the ref has to exist locally.
       # fetch-depth: 0 above fetches all branches for a push, but a pull_request checkout fetches
@@ -595,6 +625,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: Fuzz ${{ matrix.target }}
       run: .github/scripts/fuzz-smoke.sh '${{ matrix.pkg }}' '${{ matrix.target }}' 60
 
@@ -649,6 +684,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
     - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
       env:
@@ -813,6 +853,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: C SDK build and test
       working-directory: sdks/c
       run: make test
@@ -900,6 +945,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: Load and validate every shipped and documented config
       run: |
         go test ./internal/config/ -v \
@@ -945,6 +995,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
     - name: The manifests name env vars the binary reads and flags it parses
       run: go test ./internal/config/ -v -run 'TestDeploy'
@@ -1063,6 +1118,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: The unit calls the binary the binary actually is
       run: go test ./internal/config/ -v -run 'TestSystemdUnit'
 
@@ -1123,6 +1183,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
     # The whole package, not a `-run` list. It used to be
     #
@@ -1375,7 +1440,7 @@ jobs:
         # only one version to move.
         SUBSTRATE_VERSION=$(go list -m -f '{{ .Version }}' github.com/scttfrdmn/substrate)
         echo "substrate $SUBSTRATE_VERSION"
-        go install github.com/scttfrdmn/substrate/cmd/substrate@"$SUBSTRATE_VERSION"
+        .github/scripts/go-retry.sh install github.com/scttfrdmn/substrate/cmd/substrate@"$SUBSTRATE_VERSION"
 
         "$(go env GOPATH)/bin/substrate" server --address 127.0.0.1:4566 >/tmp/substrate.log 2>&1 &
 
@@ -1966,6 +2031,11 @@ jobs:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
 
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
+
     - name: Install ${{ matrix.package }}
       run: |
         sudo apt-get update
@@ -2036,6 +2106,11 @@ jobs:
       with:
         go-version-file: ${{ env.GO_VERSION_FILE }}
         cache: true
+
+      # Modules first, through the retry, so nothing after this fetches one itself: Go does not
+      # retry a module download, and a transient proxy.golang.org error is otherwise a red job (#633).
+    - name: Download modules, retrying transient module-server errors
+      run: .github/scripts/go-retry.sh mod download
 
       # The API half of the gate skips when gh cannot reach the API, which is right for a laptop and
       # wrong here: a skipped gate reports success. So the output is checked for the skip, because
